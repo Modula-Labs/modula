@@ -1,0 +1,9 @@
+/target
+**/node_modules
+/web/dist
+.env
+.env.*
+!.env.example
+*.key
+# Railway reference screenshots are never committed (closed-source UI, reference only)
+/docs/ui-ref/
