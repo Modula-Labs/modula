@@ -14,6 +14,8 @@ pub enum AppError {
     InvalidCredentials,
     #[error("forbidden")]
     Forbidden,
+    #[error("re-authentication required")]
+    SudoRequired,
     #[error("not found")]
     NotFound,
     #[error("{0}")]
@@ -37,6 +39,7 @@ impl AppError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::InvalidCredentials => (StatusCode::UNAUTHORIZED, "invalid_credentials"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            Self::SudoRequired => (StatusCode::FORBIDDEN, "sudo_required"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             Self::TooManyRequests { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),

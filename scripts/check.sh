@@ -9,6 +9,7 @@ cd "$(dirname "$0")/.."
 export DATABASE_URL MODULA_TEST_REDIS_URL
 
 scripts/no-shell.sh
+(cd web && pnpm install --frozen-lockfile >/dev/null && pnpm typecheck && pnpm test && pnpm build >/dev/null)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

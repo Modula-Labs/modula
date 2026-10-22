@@ -19,6 +19,7 @@ clap.workspace = true
 futures.workspace = true
 http.workspace = true
 redis.workspace = true
+rust-embed.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -37,5 +38,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+data-encoding.workspace = true
 tower = { workspace = true }
 tokio-util.workspace = true

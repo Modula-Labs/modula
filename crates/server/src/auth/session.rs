@@ -17,6 +17,8 @@ use crate::http::meta::RequestMeta;
 pub const ABSOLUTE_TTL: Duration = Duration::days(30);
 pub const IDLE_TTL: Duration = Duration::days(7);
 pub const MFA_PENDING_TTL: Duration = Duration::minutes(10);
+/// How long a fresh (re-)authentication unlocks sensitive actions.
+pub const SUDO_TTL: Duration = Duration::minutes(15);
 /// Don't write `last_seen_at` on every request.
 const TOUCH_INTERVAL: Duration = Duration::minutes(5);
 
@@ -64,6 +66,33 @@ pub struct Actor {
     pub sudo_until: Option<OffsetDateTime>,
 }
 
+impl Actor {
+    pub fn sudo_active(&self) -> bool {
+        self.sudo_until
+            .is_some_and(|t| t > OffsetDateTime::now_utc())
+    }
+}
+
+/// A user who passed the password step and must still present a second factor.
+#[derive(Debug, Clone)]
+pub struct PendingActor(pub Actor);
+
+impl<S: Send + Sync> FromRequestParts<S> for PendingActor {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<PendingActor>()
+            .cloned()
+            .ok_or_else(|| {
+                AppError::Internal(anyhow::anyhow!(
+                    "PendingActor used outside an MfaPending route"
+                ))
+            })
+    }
+}
+
 impl<S: Send + Sync> FromRequestParts<S> for Actor {
     type Rejection = AppError;
 
@@ -81,6 +110,8 @@ pub struct NewSession {
     pub expires_at: OffsetDateTime,
 }
 
+/// New session. A full session issued right after a successful login (or
+/// re-authentication) starts in sudo mode.
 pub async fn create(
     db: &PgPool,
     user_id: Uuid,
@@ -89,10 +120,12 @@ pub async fn create(
 ) -> AppResult<NewSession> {
     let t = token::generate(kind.prefix())?;
     let id = Uuid::now_v7();
-    let expires_at = OffsetDateTime::now_utc() + kind.ttl();
+    let now = OffsetDateTime::now_utc();
+    let expires_at = now + kind.ttl();
+    let sudo_until = (kind == SessionKind::Full).then_some(now + SUDO_TTL);
     sqlx::query(
-        "INSERT INTO sessions (id, user_id, token_hash, kind, ip, user_agent, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO sessions (id, user_id, token_hash, kind, ip, user_agent, expires_at, sudo_until)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(id)
     .bind(user_id)
@@ -101,6 +134,7 @@ pub async fn create(
     .bind(meta.ip_string())
     .bind(&meta.user_agent)
     .bind(expires_at)
+    .bind(sudo_until)
     .execute(db)
     .await?;
     Ok(NewSession {
@@ -151,6 +185,23 @@ pub async fn resolve(db: &PgPool, presented: &str, kind: SessionKind) -> AppResu
         is_instance_admin: row.is_instance_admin,
         sudo_until: row.sudo_until,
     }))
+}
+
+/// Replace a session with a fresh token (rotation on privilege change).
+pub async fn rotate(db: &PgPool, old: &Actor, meta: &RequestMeta) -> AppResult<NewSession> {
+    let new = create(db, old.user_id, SessionKind::Full, meta).await?;
+    revoke(db, old.session_id).await?;
+    Ok(new)
+}
+
+/// Revoke every full session of a user except `keep` (e.g. after a password change).
+pub async fn revoke_others(db: &PgPool, user_id: Uuid, keep: Uuid) -> AppResult<u64> {
+    let res = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
+        .bind(user_id)
+        .bind(keep)
+        .execute(db)
+        .await?;
+    Ok(res.rows_affected())
 }
 
 pub async fn revoke(db: &PgPool, session_id: Uuid) -> AppResult<()> {

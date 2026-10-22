@@ -10,7 +10,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::audit::Entry;
-use crate::auth::session::{self, Actor, SessionKind};
+use crate::auth::mfa;
+use crate::auth::session::{self, Actor, PendingActor, SessionKind};
 use crate::authz::Role;
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
@@ -243,10 +244,30 @@ pub async fn login(
     if let Some(old) = session::read_cookie(&headers, SessionKind::Full.cookie_name(&state.cfg)) {
         session::revoke_presented(&state.db, &old).await?;
     }
+    if mfa::totp_enabled(&state.db, user_id).await? {
+        let pending = session::create(&state.db, user_id, SessionKind::MfaPending, &meta).await?;
+        Entry::new("auth.mfa_challenge", &meta)
+            .user(user_id)
+            .record(&state.db)
+            .await?;
+        let jar = jar.add(session::set_cookie(
+            &state.cfg,
+            SessionKind::MfaPending,
+            &pending,
+        ));
+        return Ok((
+            jar,
+            Json(LoginResponse {
+                mfa_required: true,
+                me: None,
+            }),
+        ));
+    }
     let s = session::create(&state.db, user_id, SessionKind::Full, &meta).await?;
     Entry::new("auth.login", &meta)
         .user(user_id)
         .target("session", s.id)
+        .metadata(json!({ "method": "password" }))
         .record(&state.db)
         .await?;
     let jar = jar.add(session::set_cookie(&state.cfg, SessionKind::Full, &s));
@@ -256,6 +277,161 @@ pub async fn login(
         Json(LoginResponse {
             mfa_required: false,
             me: Some(me),
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SecondFactor {
+    pub totp_code: Option<String>,
+    pub backup_code: Option<String>,
+}
+
+/// Returns the method name used ("totp" / "backup_code"), or None if invalid.
+async fn check_second_factor(
+    state: &AppState,
+    user_id: Uuid,
+    f: &SecondFactor,
+) -> AppResult<Option<&'static str>> {
+    Ok(match (&f.totp_code, &f.backup_code) {
+        (Some(c), None) => mfa::verify_totp(state, user_id, c).await?.then_some("totp"),
+        (None, Some(c)) => mfa::consume_backup_code(state, user_id, c)
+            .await?
+            .then_some("backup_code"),
+        _ => {
+            return Err(AppError::bad_request(
+                "provide exactly one of totpCode or backupCode",
+            ));
+        }
+    })
+}
+
+const MFA_PER_PENDING: Limit = Limit::per(5, std::time::Duration::from_secs(10 * 60));
+const MFA_PER_USER: Limit = Limit::per(10, std::time::Duration::from_secs(15 * 60));
+
+/// Second step of login: exchange the pending session + a second factor for a full session.
+pub async fn mfa_verify(
+    State(state): State<AppState>,
+    PendingActor(pending): PendingActor,
+    meta: RequestMeta,
+    jar: CookieJar,
+    Json(req): Json<SecondFactor>,
+) -> AppResult<(CookieJar, Json<Me>)> {
+    let limited = async {
+        state
+            .limiter
+            .check(
+                "mfa-session",
+                &pending.session_id.to_string(),
+                MFA_PER_PENDING,
+            )
+            .await?;
+        state
+            .limiter
+            .check("mfa-user", &pending.user_id.to_string(), MFA_PER_USER)
+            .await
+    }
+    .await;
+    if let Err(e) = limited {
+        // Too many guesses: burn the pending session so the password step must be redone.
+        session::revoke(&state.db, pending.session_id).await?;
+        return Err(e);
+    }
+    let Some(method) = check_second_factor(&state, pending.user_id, &req).await? else {
+        Entry::new("auth.mfa_failed", &meta)
+            .user(pending.user_id)
+            .record(&state.db)
+            .await?;
+        return Err(AppError::InvalidCredentials);
+    };
+    session::revoke(&state.db, pending.session_id).await?;
+    let s = session::create(&state.db, pending.user_id, SessionKind::Full, &meta).await?;
+    Entry::new("auth.login", &meta)
+        .user(pending.user_id)
+        .target("session", s.id)
+        .metadata(json!({ "method": method }))
+        .record(&state.db)
+        .await?;
+    let jar = jar
+        .add(session::clear_cookie(&state.cfg, SessionKind::MfaPending))
+        .add(session::set_cookie(&state.cfg, SessionKind::Full, &s));
+    Ok((jar, Json(load_me(&state.db, pending.user_id).await?)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SudoRequest {
+    pub password: Option<String>,
+    pub totp_code: Option<String>,
+    pub backup_code: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SudoResponse {
+    #[serde(with = "time::serde::rfc3339")]
+    pub sudo_until: OffsetDateTime,
+}
+
+const SUDO_PER_USER: Limit = Limit::per(10, std::time::Duration::from_secs(15 * 60));
+
+/// Re-authenticate to unlock sensitive actions. Users with 2FA must use a second
+/// factor (a password alone is the weaker credential); others use their password.
+/// The session is rotated.
+pub async fn sudo(
+    State(state): State<AppState>,
+    actor: Actor,
+    meta: RequestMeta,
+    jar: CookieJar,
+    Json(req): Json<SudoRequest>,
+) -> AppResult<(CookieJar, Json<SudoResponse>)> {
+    state
+        .limiter
+        .check("sudo", &actor.user_id.to_string(), SUDO_PER_USER)
+        .await?;
+    let method = if mfa::totp_enabled(&state.db, actor.user_id).await? {
+        let f = SecondFactor {
+            totp_code: req.totp_code,
+            backup_code: req.backup_code,
+        };
+        check_second_factor(&state, actor.user_id, &f).await?
+    } else {
+        let pw = req
+            .password
+            .ok_or_else(|| AppError::bad_request("password is required"))?;
+        let hash: Option<String> =
+            sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+                .bind(actor.user_id)
+                .fetch_one(&state.db)
+                .await?;
+        let ok = match hash {
+            Some(h) => tokio::task::spawn_blocking(move || password::verify(&pw, &h))
+                .await
+                .map_err(|e| AppError::Internal(e.into()))?,
+            None => false,
+        };
+        ok.then_some("password")
+    };
+    let Some(method) = method else {
+        Entry::new("auth.sudo_failed", &meta)
+            .actor(&actor)
+            .record(&state.db)
+            .await?;
+        return Err(AppError::InvalidCredentials);
+    };
+    let s = session::rotate(&state.db, &actor, &meta).await?;
+    Entry::new("auth.sudo", &meta)
+        .actor(&actor)
+        .target("session", s.id)
+        .metadata(json!({ "method": method }))
+        .record(&state.db)
+        .await?;
+    let jar = jar.add(session::set_cookie(&state.cfg, SessionKind::Full, &s));
+    Ok((
+        jar,
+        Json(SudoResponse {
+            sudo_until: OffsetDateTime::now_utc() + session::SUDO_TTL,
         }),
     ))
 }

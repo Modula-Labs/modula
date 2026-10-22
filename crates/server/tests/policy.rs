@@ -31,9 +31,16 @@ fn fill(path: &str, id: Uuid) -> String {
 }
 
 /// A resource of `kind` owned by `workspace`.
-async fn fixture(_app: &TestApp, kind: ResourceKind, workspace: Uuid) -> Uuid {
+async fn fixture(app: &TestApp, kind: ResourceKind, workspace: Uuid, victim: Uuid) -> Uuid {
     match kind {
         ResourceKind::Workspace => workspace,
+        ResourceKind::Session => {
+            sqlx::query_scalar("SELECT id FROM sessions WHERE user_id = $1 LIMIT 1")
+                .bind(victim)
+                .fetch_one(app.db())
+                .await
+                .unwrap()
+        }
     }
 }
 
@@ -91,6 +98,10 @@ async fn resource_routes_hide_other_workspaces(pool: PgPool) {
     let app = TestApp::new(pool);
     let admin = app.setup_admin().await;
     let victim_ws = app.create_workspace(&admin, "victim").await;
+    let victim: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email = 'admin@example.com'")
+        .fetch_one(app.db())
+        .await
+        .unwrap();
     let (_, attacker) = app.user("attacker@example.com").await;
 
     let specs = route_specs(app.state.clone());
@@ -102,7 +113,7 @@ async fn resource_routes_hide_other_workspaces(pool: PgPool) {
     for spec in resource_routes {
         let param = modula_server::http::router::path_params(spec.path)[0];
         let kind = ResourceKind::from_param(param).unwrap();
-        let id = fixture(&app, kind, victim_ws).await;
+        let id = fixture(&app, kind, victim_ws, victim).await;
         // Body is valid-shaped but irrelevant: authz must run before extraction.
         let r = app
             .call(
@@ -129,13 +140,52 @@ async fn resource_routes_hide_other_workspaces(pool: PgPool) {
         assert_eq!(r.status, StatusCode::NOT_FOUND);
     }
 
-    // Nothing was changed by the attacker.
+    // Nothing was changed by the attacker, and the victim is still signed in.
+    assert_eq!(
+        app.call(Method::GET, "/api/auth/me", Some(&admin), None)
+            .await
+            .status,
+        StatusCode::OK
+    );
     let name: String = sqlx::query_scalar("SELECT name FROM workspaces WHERE id = $1")
         .bind(victim_ws)
         .fetch_one(app.db())
         .await
         .unwrap();
     assert_eq!(name, "victim");
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn sudo_routes_require_recent_reauthentication(pool: PgPool) {
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    app.drop_sudo().await;
+    let specs = route_specs(app.state.clone());
+    let sudo_routes: Vec<_> = specs.iter().filter(|s| s.access.requires_sudo()).collect();
+    assert!(
+        sudo_routes.len() >= 6,
+        "expected sudo-gated routes, got {}",
+        sudo_routes.len()
+    );
+    for spec in sudo_routes {
+        let r = app
+            .call(
+                spec.method.clone(),
+                &fill(spec.path, ws),
+                Some(&admin),
+                Some(serde_json::json!({})),
+            )
+            .await;
+        assert_eq!(
+            r.status,
+            StatusCode::FORBIDDEN,
+            "{} {}",
+            spec.method,
+            spec.path
+        );
+        assert_eq!(r.code(), "sudo_required", "{} {}", spec.method, spec.path);
+    }
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]

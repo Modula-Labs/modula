@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 pub const ORIGIN: &str = "https://cloud.test";
 pub const COOKIE: &str = "__Host-modula_session";
+pub const MFA_COOKIE: &str = "__Host-modula_mfa";
 pub const PASSWORD: &str = "correct horse battery staple";
 
 pub fn config() -> Config {
@@ -165,6 +166,32 @@ impl TestApp {
         r.json["id"].as_str().unwrap().parse().unwrap()
     }
 
+    /// Expire sudo mode on every session (sessions start in sudo after login).
+    pub async fn drop_sudo(&self) {
+        sqlx::query("UPDATE sessions SET sudo_until = NULL")
+            .execute(self.db())
+            .await
+            .unwrap();
+    }
+
+    /// Request with an arbitrary cookie header.
+    pub async fn call_with_cookie_header(
+        &self,
+        method: Method,
+        path: &str,
+        cookie_header: &str,
+        body: Option<Value>,
+    ) -> Resp {
+        let mut b = Request::builder()
+            .method(method.clone())
+            .uri(path)
+            .header(header::COOKIE, cookie_header);
+        if method != Method::GET {
+            b = b.header(header::ORIGIN, ORIGIN);
+        }
+        self.send(b, None, body).await
+    }
+
     pub async fn add_member(&self, workspace: Uuid, user: Uuid, role: &str) {
         sqlx::query(
             "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)",
@@ -192,6 +219,18 @@ impl Resp {
             .iter()
             .filter_map(|v| v.to_str().ok())
             .find(|v| v.starts_with(&format!("{COOKIE}=")))
+            .and_then(|v| v.split(';').next())
+            .and_then(|kv| kv.split_once('='))
+            .map(|(_, v)| v.to_owned())
+            .filter(|v| !v.is_empty())
+    }
+
+    pub fn cookie(&self, name: &str) -> Option<String> {
+        self.headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find(|v| v.starts_with(&format!("{name}=")))
             .and_then(|v| v.split(';').next())
             .and_then(|kv| kv.split_once('='))
             .map(|(_, v)| v.to_owned())

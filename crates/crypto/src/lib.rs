@@ -8,6 +8,7 @@
 pub mod envelope;
 pub mod password;
 pub mod token;
+pub mod totp;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

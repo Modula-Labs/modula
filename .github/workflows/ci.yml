@@ -27,6 +27,17 @@ jobs:
       MODULA_TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: web
+        working-directory: web
+        run: pnpm install --frozen-lockfile && pnpm typecheck && pnpm test && pnpm build
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

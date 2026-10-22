@@ -20,11 +20,26 @@ use crate::state::AppState;
 pub enum Access {
     /// No authentication. Must not carry path parameters.
     Public,
+    /// Only a half-logged-in user completing a second factor (mfa cookie).
+    MfaPending,
     /// Any fully authenticated user. Must not carry path parameters (no resource
     /// to authorize against — use `Resource` for those).
     Authenticated,
-    /// Authenticated + `authorize(action, <the single {x_id} param>)`.
+    /// Authenticated with a recent re-authentication ("sudo mode").
+    Sudo,
+    /// Authenticated + `authorize(action, <the single {x_id} param>)`, plus sudo
+    /// when `action.requires_sudo()`.
     Resource(Action),
+}
+
+impl Access {
+    pub fn requires_sudo(self) -> bool {
+        match self {
+            Self::Sudo => true,
+            Self::Resource(a) => a.requires_sudo(),
+            Self::Public | Self::MfaPending | Self::Authenticated => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -126,13 +141,20 @@ fn validate(path: &str, access: Access) -> Result<(), String> {
         }
     }
     match access {
-        Access::Public | Access::Authenticated if !params.is_empty() => {
-            Err("routes with resource params must use Access::Resource".into())
+        Access::Resource(action) => {
+            // Exactly one id per path: nested ids would need a cross-check that the
+            // child belongs to the parent, which is how IDORs happen. Use flat routes.
+            let [param] = params[..] else {
+                return Err("Access::Resource routes need exactly one {x_id} param".into());
+            };
+            let kind = ResourceKind::from_param(param).expect("checked above");
+            if kind.owner() != action.owner() {
+                return Err(format!("{action:?} does not apply to {kind:?}"));
+            }
+            Ok(())
         }
-        // Exactly one id per path: nested ids would need a cross-check that the
-        // child belongs to the parent, which is how IDORs happen. Use flat routes.
-        Access::Resource(_) if params.len() != 1 => {
-            Err("Access::Resource routes need exactly one {x_id} param".into())
+        _ if !params.is_empty() => {
+            Err("routes with resource params must use Access::Resource".into())
         }
         _ => Ok(()),
     }
@@ -155,6 +177,20 @@ async fn authorize_request(
     access: Access,
     req: Request,
 ) -> Result<Request, AppError> {
+    if access == Access::MfaPending {
+        let presented = session::read_cookie(
+            req.headers(),
+            SessionKind::MfaPending.cookie_name(&state.cfg),
+        )
+        .ok_or(AppError::Unauthorized)?;
+        let actor = session::resolve(&state.db, &presented, SessionKind::MfaPending)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let (mut parts, body) = req.into_parts();
+        parts.extensions.insert(session::PendingActor(actor));
+        return Ok(Request::from_parts(parts, body));
+    }
+
     let presented = session::read_cookie(req.headers(), SessionKind::Full.cookie_name(&state.cfg))
         .ok_or(AppError::Unauthorized)?;
     let actor = session::resolve(&state.db, &presented, SessionKind::Full)
@@ -172,6 +208,10 @@ async fn authorize_request(
         let id = Uuid::parse_str(value).map_err(|_| AppError::NotFound)?;
         let grant = authz::authorize(&state.db, &actor, action, Resource { kind, id }).await?;
         parts.extensions.insert(grant);
+    }
+    // After authorization, so a non-member learns nothing (404) before sudo (403).
+    if access.requires_sudo() && !actor.sudo_active() {
+        return Err(AppError::SudoRequired);
     }
     parts.extensions.insert(actor);
     Ok(Request::from_parts(parts, body))
@@ -211,5 +251,22 @@ mod tests {
         assert!(validate("/api/workspaces/{id}", a).is_err());
         assert!(validate("/api/workspaces", a).is_err());
         assert!(validate("/api/workspaces/{workspace_id}/x/{workspace_id}", a).is_err());
+        // An account action on a workspace resource (and vice versa) is rejected.
+        assert!(
+            validate(
+                "/api/workspaces/{workspace_id}",
+                Access::Resource(Action::SessionRevoke)
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                "/api/account/sessions/{session_id}",
+                Access::Resource(Action::SessionRevoke)
+            )
+            .is_ok()
+        );
+        assert!(validate("/api/x/{session_id}", Access::Sudo).is_err());
+        assert!(validate("/api/x/{session_id}", Access::MfaPending).is_err());
     }
 }

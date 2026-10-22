@@ -66,7 +66,8 @@ async fn fetch(state: &AppState, id: Uuid) -> AppResult<Workspace> {
 }
 
 pub async fn get(State(state): State<AppState>, grant: Grant) -> AppResult<Json<Workspace>> {
-    fetch(&state, grant.workspace_id).await.map(Json)
+    let ws = grant.workspace_id()?;
+    fetch(&state, ws).await.map(Json)
 }
 
 #[derive(Deserialize)]
@@ -82,22 +83,23 @@ pub async fn update(
     meta: RequestMeta,
     Json(req): Json<UpdateWorkspace>,
 ) -> AppResult<Json<Workspace>> {
+    let ws = grant.workspace_id()?;
     let name = validate::display_name(&req.name, "workspace name")?;
     let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE workspaces SET name = $2, updated_at = now() WHERE id = $1")
-        .bind(grant.workspace_id)
+        .bind(ws)
         .bind(&name)
         .execute(&mut *tx)
         .await?;
     Entry::new("workspace.update", &meta)
         .actor(&actor)
-        .workspace(grant.workspace_id)
-        .target("workspace", grant.workspace_id)
+        .workspace(ws)
+        .target("workspace", ws)
         .metadata(json!({ "name": name }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
-    fetch(&state, grant.workspace_id).await.map(Json)
+    fetch(&state, ws).await.map(Json)
 }
 
 pub async fn delete(
@@ -106,22 +108,23 @@ pub async fn delete(
     grant: Grant,
     meta: RequestMeta,
 ) -> AppResult<Json<serde_json::Value>> {
+    let ws = grant.workspace_id()?;
     let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM workspaces WHERE id = $1")
-        .bind(grant.workspace_id)
+        .bind(ws)
         .execute(&mut *tx)
         .await?;
     sqlx::query("DELETE FROM data_keys WHERE scope = $1")
-        .bind(grant.workspace_id)
+        .bind(ws)
         .execute(&mut *tx)
         .await?;
     Entry::new("workspace.delete", &meta)
         .actor(&actor)
-        .workspace(grant.workspace_id)
-        .target("workspace", grant.workspace_id)
+        .workspace(ws)
+        .target("workspace", ws)
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
-    state.keys.forget(grant.workspace_id);
+    state.keys.forget(ws);
     Ok(Json(json!({ "ok": true })))
 }

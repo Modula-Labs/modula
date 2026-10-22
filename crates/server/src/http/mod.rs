@@ -1,16 +1,15 @@
 pub mod meta;
 pub mod middleware;
 pub mod router;
+pub mod spa;
 
 use std::time::Duration;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::response::IntoResponse;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::error::AppError;
 use crate::state::AppState;
 
 pub use router::{Access, ApiRouter, RouteSpec};
@@ -19,7 +18,7 @@ const MAX_BODY: usize = 1024 * 1024;
 
 pub fn app(state: AppState) -> Router {
     let (api, _) = crate::api::routes(state.clone()).finish();
-    api.fallback(|| async { AppError::NotFound.into_response() })
+    api.fallback(spa::serve)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::require_same_origin,
