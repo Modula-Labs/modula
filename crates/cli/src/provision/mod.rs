@@ -179,7 +179,7 @@ pub fn missing_inputs(args: &ServerCreateArgs, env: &EnvSecrets, yes: bool) -> V
 
 /// Formats that can be checked without the network.
 pub fn check_values(args: &ServerCreateArgs, env: &EnvSecrets) -> anyhow::Result<()> {
-    if let Some(d) = &args.domain {
+    if let Some(d) = args.domain.as_deref().filter(|d| !is_auto(d)) {
         valid_domain(d).map_err(|e| usage(format!("--domain: {e}")))?;
     }
     if let Some(e) = &args.email {
@@ -202,6 +202,11 @@ pub fn check_values(args: &ServerCreateArgs, env: &EnvSecrets) -> anyhow::Result
         }
     }
     Ok(())
+}
+
+/// `--domain auto`: no domain of their own, an instant `<ip>.sslip.io`.
+pub fn is_auto(domain: &str) -> bool {
+    domain.trim().eq_ignore_ascii_case("auto")
 }
 
 /// A hostname like deploy.example.com (what install.sh accepts).
@@ -443,8 +448,18 @@ async fn plan_from_flags(
     } else {
         SshChoice::None
     };
-    let domain = valid_domain(args.domain.as_deref().unwrap_or_default()).map_err(usage)?;
-    let dns = if args.cloudflare_dns {
+    let auto = args.domain.as_deref().is_some_and(is_auto);
+    if auto && args.cloudflare_dns {
+        return Err(usage("--domain auto needs no DNS; drop --cloudflare-dns"));
+    }
+    let domain = if auto {
+        String::new()
+    } else {
+        valid_domain(args.domain.as_deref().unwrap_or_default()).map_err(usage)?
+    };
+    let dns = if auto {
+        DnsPlan::Instant
+    } else if args.cloudflare_dns {
         let token = env.cloudflare.clone().context("no Cloudflare token")?;
         let cf = cloudflare::Client::new(settings.cloudflare_api.clone(), token)?;
         let (zone, records) = cloudflare_lookup(&cf, &domain).await?;
@@ -495,7 +510,7 @@ pub async fn create_with(
         }
     }
 
-    let (plan, secrets) = if prompt {
+    let (mut plan, secrets) = if prompt {
         match wizard::run(ctx, &args, &mut env, &settings).await? {
             Some(answers) => answers,
             None => {
@@ -518,7 +533,11 @@ pub async fn create_with(
         location: plan.location.name.clone(),
         server_type: plan.server_type.name.clone(),
         name: plan.name.clone(),
-        domain: plan.domain.clone(),
+        domain: if matches!(plan.dns, DnsPlan::Instant) {
+            "<ip>.sslip.io".into()
+        } else {
+            plan.domain.clone()
+        },
         monthly_cents: plan.server_type.monthly_cents,
         monthly: plan.server_type.monthly.clone(),
     });
@@ -529,7 +548,7 @@ pub async fn create_with(
     let mut created = Created::default();
 
     let provisioned = tokio::select! {
-        r = flow::provision(&plan, &secrets, &settings, &setup_token, &mut progress, &mut created) => r,
+        r = flow::provision(&mut plan, &secrets, &settings, &setup_token, &mut progress, &mut created) => r,
         _ = tokio::signal::ctrl_c() => Err(Failure {
             error: anyhow::anyhow!("interrupted"),
             hint: None,

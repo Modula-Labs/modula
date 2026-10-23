@@ -57,6 +57,10 @@ pub enum SshChoice {
 pub enum DnsPlan {
     /// The user adds the A record; we wait for it.
     Manual,
+    /// No domain of their own: `<ip>.sslip.io` for the dashboard and
+    /// `<service>.<ip>.sslip.io` for apps, which resolve by themselves.
+    /// `Plan::domain` is empty until the server has its IP.
+    Instant,
     /// We create it, replacing these records first.
     Cloudflare { zone: Zone, replace: Vec<DnsRecord> },
 }
@@ -180,10 +184,17 @@ fn labels(plan: &Plan) -> BTreeMap<String, String> {
     ])
 }
 
+/// The dashboard's hostname for [`DnsPlan::Instant`]: `1-2-3-4.sslip.io`
+/// (the same name the bootstrap script derives on the server).
+pub fn instant_domain(ip: Ipv4Addr) -> String {
+    format!("{}.sslip.io", ip.to_string().replace('.', "-"))
+}
+
 /// Create the server and wait until its dashboard answers over HTTPS.
-/// Returns the IP; `created` says what exists, also on failure.
+/// Returns the IP; `created` says what exists, also on failure. With
+/// [`DnsPlan::Instant`] it fills in `plan.domain` once the IP is known.
 pub async fn provision(
-    plan: &Plan,
+    plan: &mut Plan,
     secrets: &Secrets,
     settings: &Settings,
     setup_token: &SecretString,
@@ -249,7 +260,7 @@ pub async fn provision(
     let progress_token = install_progress::new_token()?;
     let user_data = MainBootstrap {
         install_url: &plan.install_url,
-        domain: &plan.domain,
+        domain: (!matches!(plan.dns, DnsPlan::Instant)).then_some(plan.domain.as_str()),
         email: &plan.email,
         name: &plan.name,
         setup_token: setup_token.expose_secret(),
@@ -288,6 +299,9 @@ pub async fn provision(
             anyhow::anyhow!("Hetzner created the server without a public IPv4 address")
         })?;
     created.ip = Some(ip);
+    if matches!(plan.dns, DnsPlan::Instant) {
+        plan.domain = instant_domain(ip);
+    }
     progress.done(&format!(
         "Server created: {} · {} · {ip}",
         plan.name, plan.server_type.name
@@ -318,6 +332,12 @@ pub async fn provision(
                 ip: ip.to_string(),
                 zone: zone.name.clone(),
             });
+        }
+        DnsPlan::Instant => {
+            progress.aside(&format!(
+                "Instant address: https://{} (apps get <name>.{0})",
+                plan.domain
+            ));
         }
         DnsPlan::Manual => {
             let answer = settings.dns.ipv4(&plan.domain).await.unwrap_or_default();

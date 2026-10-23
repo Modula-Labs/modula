@@ -14,7 +14,7 @@ use super::catalog::{self, LocationOption, format_eur};
 use super::flow::{self, Created, DnsPlan, Plan, Secrets, Settings, SshChoice};
 use super::{
     DEFAULT_ADMIN_NAME, DEFAULT_NAME, EnvSecrets, cloud_init, cloudflare, cloudflare_lookup,
-    describe_records, key_body, load_catalog, local_public_keys, read_public_key,
+    describe_records, is_auto, key_body, load_catalog, local_public_keys, read_public_key,
     ssh_choice_for_file, valid_admin_name, valid_domain, valid_email, valid_password,
     valid_server_name,
 };
@@ -153,7 +153,12 @@ pub async fn run(
         ..Default::default()
     };
     if let Some(dom) = &args.domain {
-        d.domain = Some(valid_domain(dom).map_err(crate::output::usage)?);
+        if is_auto(dom) {
+            d.domain = Some(String::new());
+            d.dns = Some(DnsPlan::Instant);
+        } else {
+            d.domain = Some(valid_domain(dom).map_err(crate::output::usage)?);
+        }
     }
     // Steps answered on the command line are never asked (each step
     // takes the flag's value itself), so Back skips over them.
@@ -186,7 +191,11 @@ pub async fn run(
         };
         match nav {
             Nav::Next => i += 1,
-            Nav::Back => match (0..i).rev().find(|&j| asked(STEPS[j])) {
+            Nav::Back => match (0..i).rev().find(|&j| {
+                // An instant address has no DNS question to go back to.
+                let skipped = STEPS[j] == Step::Dns && matches!(d.dns, Some(DnsPlan::Instant));
+                asked(STEPS[j]) && !skipped
+            }) {
                 Some(j) => {
                     if STEPS[j] == Step::Token {
                         d.hetzner = None;
@@ -425,16 +434,27 @@ fn domain_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
     }
     let mut t = Text::new("Dashboard domain")
         .with_help_message(
-            "e.g. deploy.example.com · you point it at the server's IP once it exists · Esc: back",
+            "e.g. deploy.example.com, pointed at the server once it exists · empty: an instant <ip>.sslip.io, no DNS · Esc: back",
         )
-        .with_validator(validator(valid_domain));
+        .with_validator(validator(|v: &str| {
+            if v.trim().is_empty() || is_auto(v) {
+                Ok(String::new())
+            } else {
+                valid_domain(v)
+            }
+        }));
     if let Some(dom) = &d.domain {
         t = t.with_initial_value(dom);
     }
     match answer(t.prompt())? {
+        Some(dom) if dom.trim().is_empty() || is_auto(&dom) => {
+            d.domain = Some(String::new());
+            d.dns = Some(DnsPlan::Instant);
+            Ok(Nav::Next)
+        }
         Some(dom) => {
             let dom = valid_domain(&dom).map_err(anyhow::Error::msg)?;
-            if d.domain.as_deref() != Some(&dom) {
+            if d.domain.as_deref() != Some(&dom) || matches!(d.dns, Some(DnsPlan::Instant)) {
                 d.dns = None;
             }
             d.domain = Some(dom);
@@ -451,6 +471,9 @@ async fn dns_step(
     args: &ServerCreateArgs,
 ) -> anyhow::Result<Nav> {
     let domain = d.domain.clone().expect("domain first");
+    if matches!(d.dns, Some(DnsPlan::Instant)) {
+        return Ok(Nav::Next);
+    }
     loop {
         let use_cf = if args.cloudflare_dns {
             true
@@ -648,7 +671,14 @@ fn confirm_step(out: &Output, d: &Draft) -> anyhow::Result<Nav> {
     );
     row("Where", loc.label());
     row("Server", t.summary());
-    row("Dashboard", out.accent(&format!("https://{domain}")));
+    if matches!(d.dns, Some(DnsPlan::Instant)) {
+        row(
+            "Dashboard",
+            out.accent("https://<server-ip>.sslip.io (instant, no DNS needed)"),
+        );
+    } else {
+        row("Dashboard", out.accent(&format!("https://{domain}")));
+    }
     row(
         "DNS",
         match &d.dns {
@@ -662,6 +692,7 @@ fn confirm_step(out: &Output, d: &Draft) -> anyhow::Result<Nav> {
             Some(DnsPlan::Cloudflare { zone, .. }) => {
                 format!("Cloudflare creates the A record in {}", zone.name)
             }
+            Some(DnsPlan::Instant) => "nothing to set up: sslip.io resolves to the server".into(),
             _ => "you add an A record → the server's IP (shown then)".into(),
         },
     );
