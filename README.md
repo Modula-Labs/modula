@@ -18,9 +18,13 @@ On a fresh Ubuntu 22.04+/Debian 12+ server with DNS for the dashboard (and,
 optionally, a wildcard for generated app domains) pointing at it:
 
 ```bash
-curl -fsSL https://usemodula.org/install.sh \
-  | sudo bash -s -- --domain deploy.example.com --email you@example.com --apps-domain apps.example.com
+curl -fsSL https://usemodula.org/install.sh | bash
 ```
+
+It asks for the dashboard domain, an email for TLS certificates and a server
+name, and uses `sudo` when not run as root. For automation, pass
+`--domain`, `--email` (and optionally `--name`, `--apps-domain`) to
+`… | sudo bash -s --` and it asks nothing.
 
 It installs Postgres, Redis and Docker from the distribution (Docker only if
 missing), downloads prebuilt binaries checked against Ed25519-signed SHA-256

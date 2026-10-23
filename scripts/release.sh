@@ -6,7 +6,7 @@
 #
 # Output (the layout install.sh downloads):
 #   modula-server-linux-<arch>  modula-node-linux-<arch>  caddy-linux-<arch>
-#   modula-linux-<arch> (the CLI; not installed on servers; install-cli.sh)
+#   modula-linux-<arch>, modula-darwin-<arch> (the CLI; not installed on servers; install-cli.sh)
 #   SHA256SUMS  SHA256SUMS.sig  (Ed25519 over SHA256SUMS)
 #
 # The signing key never enters a container or the repo. Default location:
@@ -72,7 +72,17 @@ for arch in $ARCHES; do
   scripts/fetch-build-tools.sh "$arch" "$OUT"
 done
 
-(cd "$OUT" && sha256sum modula-*-linux-* modula-linux-* caddy-linux-* buildctl-linux-* railpack-linux-* >SHA256SUMS)
+# The CLI for macOS, built natively (needs a Mac; skipped elsewhere).
+if [[ $(uname -s) == Darwin && -z ${SKIP_DARWIN:-} ]]; then
+  for t in aarch64-apple-darwin:arm64 x86_64-apple-darwin:amd64; do
+    echo "darwin ${t#*:}: compiling the modula CLI"
+    rustup target add "${t%%:*}" >/dev/null
+    cargo build -q --release --locked -p modula-cli --target "${t%%:*}"
+    cp "target/${t%%:*}/release/modula" "$OUT/modula-darwin-${t#*:}"
+  done
+fi
+
+(cd "$OUT" && sha256sum modula-*-linux-* modula-linux-* $(ls modula-darwin-* 2>/dev/null) caddy-linux-* buildctl-linux-* railpack-linux-* >SHA256SUMS)
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$OUT/SHA256SUMS" -out "$OUT/SHA256SUMS.sig"
 openssl pkeyutl -verify -pubin -inkey deploy/release.pub.pem -rawin \
   -in "$OUT/SHA256SUMS" -sigfile "$OUT/SHA256SUMS.sig" >/dev/null

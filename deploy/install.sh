@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Modula Deploy installer for Ubuntu 22.04+/Debian 12+ (amd64, arm64).
 #
-#   Main server (dashboard + the first server for apps):
-#     curl -fsSL https://usemodula.org/install.sh | sudo bash -s -- --domain deploy.example.com --email you@example.com
+#   Main server (dashboard + the first server for apps); asks for a domain,
+#   an email and a server name, and for sudo when not run as root:
+#     curl -fsSL https://usemodula.org/install.sh | bash
+#
+#   The same without questions (automation, cloud-init):
+#     curl -fsSL https://usemodula.org/install.sh | sudo bash -s -- --domain deploy.example.com --email you@example.com [--name NAME]
 #
 #   Another server, joining an instance (the dashboard prints this line):
 #     curl -fsSL https://deploy.example.com/api/install.sh | sudo bash -s -- join --server … --token … --ca …
@@ -14,7 +18,11 @@
 # checked against SHA-256 sums signed with the release key below. Postgres,
 # Redis and (if missing) Docker come from the distribution's own packages.
 # Every step is idempotent; re-running resumes where a failed run stopped.
+#
+# MODULA_INSTALL_DRY_RUN=1 stops after the questions and root check, before
+# anything is changed (for testing the installer itself).
 set -euo pipefail
+ORIG_ARGS=("$@")
 
 # Filled in when an instance serves this script, so joining servers install
 # the instance's own version and fetch binaries from it first.
@@ -102,11 +110,12 @@ on_exit() {
 trap on_exit EXIT
 
 usage() {
-  sed -n '2,15p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
+  sed -n '2,19p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
   cat <<'EOF'
-Options (main server):
+Options (main server; asked for interactively when missing):
   --domain HOST        dashboard hostname, e.g. deploy.example.com (DNS must point here)
   --email ADDRESS      contact for Let's Encrypt
+  --name NAME          this server's name on the Servers page (default: short hostname)
   --apps-domain HOST   parent for generated app domains, e.g. apps.example.com
                        (needs a wildcard DNS record *.apps.example.com → this server)
   --version X.Y.Z      install this version instead of the latest
@@ -139,27 +148,77 @@ done
 [[ $VERSION == __* ]] && VERSION=latest
 [[ $SERVER_RELEASES == __* ]] && SERVER_RELEASES=""
 
-host_re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
+valid_host() { [[ ${1,,} =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; }
+valid_email() { [[ $1 =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; }
+valid_name() { [[ $1 =~ ^[A-Za-z0-9._-]{1,63}$ ]]; }
+
+# Answers to the main install's questions come from the terminal: when piped
+# into bash, stdin is this script. PROMPT is set when they need asking.
+PROMPT=0 PROMPT_FD=""
 case $MODE in
   main)
-    [[ -n $DOMAIN && -n $EMAIL ]] || { usage >&2; die "--domain and --email are required" "For example: … | sudo bash -s -- --domain deploy.example.com --email you@example.com"; }
     DOMAIN=${DOMAIN,,}; APPS_DOMAIN=${APPS_DOMAIN,,}
-    [[ $DOMAIN =~ $host_re ]] || die "--domain must be a hostname like deploy.example.com" "Just the name, without https:// or a path."
-    [[ -z $APPS_DOMAIN || $APPS_DOMAIN =~ $host_re ]] || die "--apps-domain must be a hostname like apps.example.com" "Just the name, without https:// or a path."
-    [[ $EMAIL =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] || die "--email is not an email address" "Let's Encrypt uses it to tell you about expiring certificates."
+    [[ -z $DOMAIN ]] || valid_host "$DOMAIN" || die "--domain must be a hostname like deploy.example.com" "Just the name, without https:// or a path."
+    [[ -z $APPS_DOMAIN ]] || valid_host "$APPS_DOMAIN" || die "--apps-domain must be a hostname like apps.example.com" "Just the name, without https:// or a path."
+    [[ -z $EMAIL ]] || valid_email "$EMAIL" || die "--email is not an email address" "Let's Encrypt uses it to tell you about expiring certificates."
+    [[ -z $NODE_NAME ]] || valid_name "$NODE_NAME" || die "--name may use letters, digits, . _ -" "Up to 63 characters, e.g. --name web-1."
+    if [[ -z $DOMAIN || -z $EMAIL ]]; then
+      if { exec 5</dev/tty; } 2>/dev/null; then
+        PROMPT=1 PROMPT_FD=5
+      else
+        die "no terminal to ask for the domain and email" "Pass them as flags instead: … | sudo bash -s -- --domain deploy.example.com --email you@example.com [--name web-1]"
+      fi
+    fi
     ;;
   join)
     [[ $JOIN_SERVER =~ ^https://[^[:space:]]+$ ]] || die "--server must be an https:// URL" "Copy the whole join command from the dashboard (Servers → Add server)."
     [[ $JOIN_TOKEN =~ ^mcj_[A-Za-z0-9_-]+$ ]] || die "--token must be a join token (mcj_…)" "Copy the whole join command from the dashboard (Servers → Add server)."
     [[ $JOIN_CA =~ ^sha256:[0-9a-f]{64}$ ]] || die "--ca must be sha256:<64 hex>" "Copy the whole join command from the dashboard (Servers → Add server)."
-    [[ -z $NODE_NAME || $NODE_NAME =~ ^[A-Za-z0-9._-]{1,63}$ ]] || die "--name may use letters, digits, . _ -" "Up to 63 characters, e.g. --name web-1."
+    [[ -z $NODE_NAME ]] || valid_name "$NODE_NAME" || die "--name may use letters, digits, . _ -" "Up to 63 characters, e.g. --name web-1."
     ;;
 esac
+
+# ---------------------------------------------------------------- root
+# The one-liner runs as a regular user, so ask sudo to run this again as root.
+# A piped script has no file to hand over: fetch it again from where it is
+# served (an instance serves its own copy; the root of its release URL says where).
+if [[ -n ${MODULA_INSTALL_URL:-} ]]; then
+  INSTALL_URL=$MODULA_INSTALL_URL
+elif [[ -n $SERVER_RELEASES ]]; then
+  INSTALL_URL="${SERVER_RELEASES%"/api/releases?file="}/api/install.sh"
+else
+  INSTALL_URL=https://usemodula.org/install.sh
+fi
+
+elevate() {
+  [[ $EUID -eq 0 ]] && return 0
+  command -v sudo >/dev/null || die "this needs root, and sudo isn't installed" "Run it again as root (su -, then the same command)."
+  printf '\n  %s◆%s Modula needs root to install system services — asking sudo…\n' "$A" "$N"
+  local self="" tmp="" v rc=0 keep=()
+  if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]]; then
+    self=${BASH_SOURCE[0]}
+  else
+    tmp=$(mktemp "${TMPDIR:-/tmp}/modula-install.XXXXXX")
+    curl -fsSL --retry 2 -o "$tmp" "$INSTALL_URL" \
+      || { rm -f "$tmp"; die "couldn't fetch the installer again from $INSTALL_URL" "Run it as root instead: curl -fsSL $INSTALL_URL | sudo bash${ORIG_ARGS[*]:+ -s -- …}"; }
+    self=$tmp
+  fi
+  # sudo starts with a clean environment; carry over what this run was given.
+  for v in MODULA_RELEASE_URL MODULA_RELEASE_PUBKEY MODULA_INSTALL_DRY_RUN NO_COLOR COLORTERM TERM; do
+    [[ -n ${!v:-} ]] && keep+=("$v=${!v}")
+  done
+  keep+=("MODULA_INSTALL_URL=$INSTALL_URL")
+  [[ $VERSION != latest ]] && keep+=("MODULA_VERSION=$VERSION")
+  sudo env "${keep[@]}" bash "$self" "${ORIG_ARGS[@]}" || rc=$?
+  [[ -n $tmp ]] && rm -f "$tmp"
+  exit "$rc"
+}
+elevate
 
 # ---------------------------------------------------------------- checks
 
 preflight() {
-  [[ $EUID -eq 0 ]] || die "this needs to run as root" "Try again with sudo: curl -fsSL … | sudo bash -s -- …"
+  [[ $EUID -eq 0 ]] || die "this needs to run as root" "Try again with sudo: curl -fsSL … | sudo bash"
   [[ -d /run/systemd/system ]] || die "systemd is required" "Modula runs its services with systemd; use a regular VM or server rather than a container."
   command -v apt-get >/dev/null || die "only Debian and Ubuntu are supported for now" "Ubuntu 22.04+ or Debian 12+ will do nicely."
   case $(uname -m) in
@@ -463,7 +522,7 @@ join_local() {
   ca=$(sed -E 's/.*--ca ([^ ]+).*/\1/' <<<"$cmd")
   # This server dials itself over loopback; the certificate covers 127.0.0.1.
   "$PREFIX/current/modula-node" --data-dir "$NODE_STATE" join \
-    --server "https://127.0.0.1:${server##*:}" --token "$token" --ca "$ca" --name "$(hostname -s)"
+    --server "https://127.0.0.1:${server##*:}" --token "$token" --ca "$ca" --name "${NODE_NAME:-$(hostname -s)}"
 }
 
 join_remote() {
@@ -506,9 +565,107 @@ recovery_kit() {
 # ---------------------------------------------------------------- modes
 
 this_host() { hostname 2>/dev/null || uname -n; }
+short_host() { local h; h=$(hostname -s 2>/dev/null || uname -n); printf '%s' "${h%%.*}"; }
+
+# ask VAR "question" "default" check "hint" — reads one answer from PROMPT_FD
+# until check accepts it. VAR is always a literal name from this script.
+ask() {
+  local ans
+  while :; do
+    printf '  %s?%s %s%s%s ' "$A" "$N" "$B" "$2" "$N"
+    [[ -n $3 ]] && printf '%s[%s]%s ' "$D" "$3" "$N"
+    IFS= read -r -u "$PROMPT_FD" ans || { printf '\n'; die "no answer, so nothing was installed" "Run it again when you're ready."; }
+    ans=${ans#"${ans%%[![:space:]]*}"}; ans=${ans%"${ans##*[![:space:]]}"}
+    [[ -z $ans ]] && ans=$3
+    [[ -z $ans && $4 == valid_yes_no ]] && ans=y
+    if [[ -n $ans ]] && "$4" "$ans"; then
+      printf -v "$1" '%s' "$ans"
+      return 0
+    fi
+    printf '    %s%s%s\n' "$R" "$5" "$N"
+  done
+}
+
+# This server's public IPv4 address, or nothing.
+public_ip() {
+  local ip
+  ip=$(curl -fsS --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' || true)
+  [[ $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && printf '%s' "$ip"
+  return 0
+}
+
+# Warns (never fails) when the domain doesn't point at this server yet.
+check_dns() {
+  local ip=$1 addrs
+  [[ -n $ip ]] || return 0
+  addrs=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || true)
+  addrs=${addrs% }
+  if [[ -z $addrs ]]; then
+    printf '    %s! %s doesn'"'"'t resolve yet. Fine if you just added the record; the%s\n' "$D" "$DOMAIN" "$N"
+    printf '    %s  certificate is issued once it points at %s.%s\n' "$D" "$ip" "$N"
+  elif [[ " $addrs " != *" $ip "* ]]; then
+    printf '    %s! %s points at %s, not this server (%s).%s\n' "$D" "$DOMAIN" "$addrs" "$ip" "$N"
+    printf '    %s  Fine if you just changed it; the certificate waits for DNS.%s\n' "$D" "$N"
+  else
+    printf '    %s✓ %s points here.%s\n' "$D" "$DOMAIN" "$N"
+  fi
+}
+
+questions() {
+  local ip; ip=$(public_ip)
+  if [[ -z $DOMAIN ]]; then
+    note "First, a domain for your dashboard, like deploy.example.com."
+    if [[ -n $ip ]]; then
+      note "Point an A record for it at ${ip} first."
+    else
+      note "Point an A record for it at this server's public IP first."
+    fi
+    ask DOMAIN "Dashboard domain" "" valid_host "That doesn't look like a hostname. Just the name, e.g. deploy.example.com."
+    DOMAIN=${DOMAIN,,}
+    check_dns "$ip"
+    printf '\n'
+  fi
+  if [[ -z $EMAIL ]]; then
+    note "An email for TLS certificates (Let's Encrypt) and your admin account."
+    ask EMAIL "Email" "" valid_email "That doesn't look like an email address, e.g. you@example.com."
+    printf '\n'
+  fi
+  if [[ -z $NODE_NAME ]]; then
+    local def; def=$(short_host)
+    valid_name "$def" || def=main
+    note "A name for this server on the dashboard's Servers page."
+    ask NODE_NAME "Server name" "$def" valid_name "Letters, digits, . _ - only, up to 63 characters, e.g. web-1."
+    printf '\n'
+  fi
+  local yes
+  ask yes "Install Modula Deploy on $(this_host) as $NODE_NAME for $DOMAIN? ${D}[Y/n]${N}" "" valid_yes_no "Please answer y or n."
+  if [[ ${yes,,} != y* ]]; then
+    note "Okay, nothing was installed. Run it again whenever you like."
+    printf '\n'
+    exit 0
+  fi
+  printf '\n'
+}
+# Enter alone means yes.
+valid_yes_no() { [[ ${1,,} =~ ^(y|yes|n|no)$ ]]; }
 
 install_main() {
   header "Hey! Let's get Modula running on $(this_host). This takes a few minutes."
+  if [[ $PROMPT == 1 ]]; then
+    questions
+    exec 5<&- # the terminal isn't needed past this point
+  fi
+  if [[ -n ${MODULA_INSTALL_DRY_RUN:-} ]]; then
+    card_top "Dry run: nothing was changed"
+    card_kv "Running as" "$(id -un)"
+    card_kv "Domain" "$DOMAIN"
+    card_kv "Email" "$EMAIL"
+    card_kv "Server name" "${NODE_NAME:-$(short_host)}"
+    card_kv "Apps domain" "${APPS_DOMAIN:-none}"
+    card_kv "Version" "$VERSION"
+    card_end "Bye!"
+    exit 0
+  fi
   step "Checking this server" preflight
   step "Installing packages" packages
   step "Downloading release ($VERSION)" fetch_release
@@ -534,6 +691,7 @@ install_main() {
   card_kv "" "${R}copy it somewhere safe, then delete it from this server${N}"
   card ""
   card "${B}Next:${N} open ${A}https://$DOMAIN/setup${N}${setup:+ and paste the setup token}."
+  card "${D}Create your admin account there, e.g. as $EMAIL.${N}"
   card "${D}Point DNS for $DOMAIN${APPS_DOMAIN:+ and *.$APPS_DOMAIN} at this server, and open${N}"
   card "${D}ports 80 and 443 (plus 7101 for servers joining later).${N}"
   card ""
@@ -560,7 +718,7 @@ install_join() {
 }
 
 upgrade() {
-  [[ -L $PREFIX/current ]] || die "Modula Deploy is not installed here" "Install it first: … | sudo bash -s -- --domain … --email …"
+  [[ -L $PREFIX/current ]] || die "Modula Deploy is not installed here" "Install it first: curl -fsSL https://usemodula.org/install.sh | bash"
   if [[ -f $CONF/server.env ]]; then
     MODE=main
     SERVER_RELEASES="" # it would only hand back its own, current version

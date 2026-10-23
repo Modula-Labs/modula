@@ -7,7 +7,7 @@ Caddy). More servers can [join](servers.md) later.
 ## Requirements
 
 - A fresh **Ubuntu 22.04+** or **Debian 12+** server with systemd, `amd64` or
-  `arm64`, and root access.
+  `arm64`, and root or `sudo` access.
 - A hostname for the dashboard, e.g. `deploy.example.com`, with an `A` record
   pointing at the server.
 - Optional, for generated app domains: a parent domain such as
@@ -33,14 +33,33 @@ The API itself listens on `127.0.0.1:7100` behind Caddy.
 ## Install the main server
 
 ```bash
+curl -fsSL https://usemodula.org/install.sh | bash
+```
+
+It asks for:
+
+- the **dashboard domain**, e.g. `deploy.example.com` (it shows this server's
+  public IP for the `A` record and warns if the domain doesn't point here yet),
+- an **email** for TLS certificates (Let's Encrypt),
+- a **server name** for the Servers page (default: the short hostname),
+
+then confirms before changing anything. Not running as root? It asks `sudo`
+to run itself again as root (fetching the script once more from
+`https://usemodula.org/install.sh`, since a piped script has no file).
+
+For automation (cloud-init, CI) pass the answers as flags; with `--domain` and
+`--email` it asks nothing:
+
+```bash
 curl -fsSL https://usemodula.org/install.sh \
   | sudo bash -s -- --domain deploy.example.com --email you@example.com --apps-domain apps.example.com
 ```
 
 | Option | Description |
 |---|---|
-| `--domain HOST` | Dashboard hostname (required). DNS must point here. |
-| `--email ADDRESS` | Contact for Let's Encrypt (required). |
+| `--domain HOST` | Dashboard hostname (asked when missing). DNS must point here. |
+| `--email ADDRESS` | Contact for Let's Encrypt (asked when missing). |
+| `--name NAME` | This server's name on the Servers page: letters, digits, `.` `_` `-` (default: short hostname). |
 | `--apps-domain HOST` | Parent for generated app domains. Needs `*.HOST` pointing here. Without it, only custom domains work. |
 | `--version X.Y.Z` | Install this version instead of the latest. |
 
