@@ -6,7 +6,8 @@
 //! decided before anything is built, from the dashboard's watch paths.
 //!
 //! The first file found in that order wins (files are not merged), and its
-//! values override the dashboard's. The file is repository content, so it is
+//! values override the dashboard's. A `modula.toml` that describes a whole
+//! project (`modula-deploy config`) is not a build config and is skipped. The file is repository content, so it is
 //! untrusted: only the keys above are read, unknown keys are ignored, and an
 //! invalid value is reported as a warning and falls back to the dashboard.
 
@@ -141,10 +142,24 @@ pub fn load(dir: &Path) -> (Option<RepoConfig>, Vec<String>) {
         if let Err(e) = read {
             return (None, vec![format!("cannot read {file}: {e}")]);
         }
+        if file == "modula.toml" && is_project_file(&text) {
+            continue;
+        }
         let (cfg, warnings) = parse(file, &text);
         return (cfg, warnings);
     }
     (None, vec![])
+}
+
+/// A `modula.toml` describing a whole project (`modula-deploy config`:
+/// `project`/`services`, no `[build]` or `[deploy]`) isn't a build config,
+/// so a `railway.toml`/`railway.json` next to it still applies.
+fn is_project_file(text: &str) -> bool {
+    toml::from_str::<Map<String, Value>>(text).is_ok_and(|root| {
+        !root.contains_key("build")
+            && !root.contains_key("deploy")
+            && (root.contains_key("services") || root.contains_key("project"))
+    })
 }
 
 /// Parse one file's contents (`file` picks TOML or JSON by extension).
@@ -634,6 +649,17 @@ mod tests {
         assert_eq!(
             (cfg.file, cfg.start_command.as_deref()),
             ("modula.toml", Some("modula"))
+        );
+        // A project file (modula-deploy config) is skipped.
+        std::fs::write(
+            dir.join("modula.toml"),
+            "project = \"shop\"\n[services.api]\nport = 80\n",
+        )
+        .unwrap();
+        let cfg = load(&dir).0.unwrap();
+        assert_eq!(
+            (cfg.file, cfg.start_command.as_deref()),
+            ("railway.toml", Some("railway"))
         );
         std::fs::write(dir.join("modula.toml"), "#".repeat(65 * 1024)).unwrap();
         let (cfg, warnings) = load(&dir);

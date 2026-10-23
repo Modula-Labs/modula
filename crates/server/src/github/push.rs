@@ -243,6 +243,7 @@ pub async fn handle_push(
             trigger: Trigger::Push,
             created_by: None,
             commit: Some(commit.clone()),
+            local_git: None,
             prebuilt: None,
             source_deployment: None,
         };

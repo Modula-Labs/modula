@@ -5,6 +5,7 @@ pub mod backups;
 pub mod database;
 pub mod deployments;
 pub mod domains;
+pub mod env_config;
 pub mod github;
 pub mod install;
 pub mod instance;
@@ -13,6 +14,7 @@ pub mod projects;
 pub mod services;
 pub mod storage;
 pub mod tokens;
+pub mod uploads;
 pub mod variables;
 pub mod workspaces;
 
@@ -70,6 +72,8 @@ pub fn routes(state: AppState) -> ApiRouter {
         .delete("/api/environments/{environment_id}", Resource(Action::EnvironmentDelete), projects::delete_environment)
         .post("/api/environments/{environment_id}/sync", Resource(Action::EnvironmentSync), projects::sync_environment)
         .get("/api/projects/{project_id}/activity", Resource(Action::ProjectRead), activity::list)
+        // Config as code: the whole environment, with non-sealed values (audited).
+        .get("/api/environments/{environment_id}/config", Resource(Action::EnvironmentConfigRead), env_config::get)
         .get("/api/environments/{environment_id}/pending", Resource(Action::SharedVariablesRead), activity::pending)
         .post("/api/environments/{environment_id}/deploy", Resource(Action::EnvironmentDeploy), activity::deploy)
         // Services, per-environment config, variables
@@ -92,6 +96,12 @@ pub fn routes(state: AppState) -> ApiRouter {
         .post("/api/deployments/{deployment_id}/redeploy", Resource(Action::DeploymentRollout), deployments::redeploy)
         .post("/api/deployments/{deployment_id}/rollback", Resource(Action::DeploymentRollout), deployments::rollback)
         .post("/api/deployments/{deployment_id}/restart", Resource(Action::DeploymentRollout), deployments::restart)
+        // Source uploads (`modula-deploy up`): gzipped tarball in, deployed with
+        // POST …/deployments {source: {upload}}. Never downloadable by clients.
+        .post("/api/service-instances/{instance_id}/uploads", Resource(Action::DeploymentCreate), uploads::create)
+        // Nodes fetch an upload they are building; authorized by a signed,
+        // deployment-bound token from their desired state (see deploy::upload).
+        .get(crate::deploy::upload::DOWNLOAD_PATH, Public, uploads::download)
         // Domains
         .get("/api/service-instances/{instance_id}/domains", Resource(Action::InstanceRead), domains::list)
         .post("/api/service-instances/{instance_id}/domains", Resource(Action::DomainCreate), domains::generate)

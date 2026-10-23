@@ -24,6 +24,9 @@ const PUBLIC_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/auth/login"),
     // Authenticated by an HMAC signature under the GitHub App's webhook secret.
     ("POST", "/api/github/webhook"),
+    // Nodes downloading an upload they build: a signed token bound to a
+    // deployment that must still be building it (deploy::upload).
+    ("GET", "/api/build-source"),
 ];
 
 fn fill(path: &str, id: Id) -> String {

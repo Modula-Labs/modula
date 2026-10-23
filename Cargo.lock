@@ -827,6 +827,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-deque"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-epoch"
 version = "0.9.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1970,6 +1980,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ignore"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b69833ed729dc5aa7d19541d96d6cf8e9137194207a04916d658e43168402f"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2372,13 +2398,18 @@ dependencies = [
  "bytes",
  "clap",
  "clap_complete",
+ "flate2",
  "futures",
+ "hex",
  "http",
+ "ignore",
  "reqwest",
  "rustls",
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
+ "tar",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
@@ -2475,6 +2506,7 @@ dependencies = [
  "bytes",
  "clap",
  "data-encoding",
+ "flate2",
  "futures",
  "globset",
  "hex",

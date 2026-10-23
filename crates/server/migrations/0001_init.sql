@@ -337,6 +337,24 @@ CREATE INDEX domains_instance_idx ON domains (service_instance_id);
 
 -- Immutable record of one rollout. config/env are snapshots taken at creation,
 -- so a redeploy reproduces exactly what ran.
+-- Source archives uploaded with `modula-deploy up` (gzipped tarballs). The
+-- bytes live in a file under MODULA_UPLOADS_DIR named after the id; the row
+-- outlives the file (purged_at) so deployments keep their history. Only
+-- nodes building a deployment of it can download one (signed, short-lived).
+CREATE TABLE source_uploads (
+    id                  id PRIMARY KEY,
+    workspace_id        id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    service_instance_id id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    sha256              text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+    size_bytes          bigint NOT NULL CHECK (size_bytes > 0),
+    created_by          id REFERENCES users (id) ON DELETE SET NULL,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    -- Set when the file was deleted by the retention job.
+    purged_at           timestamptz
+);
+CREATE INDEX source_uploads_instance_idx ON source_uploads (service_instance_id, created_at DESC);
+CREATE INDEX source_uploads_kept_idx ON source_uploads (created_at) WHERE purged_at IS NULL;
+
 CREATE TABLE deployments (
     id                  id PRIMARY KEY,
     service_instance_id id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
@@ -350,7 +368,7 @@ CREATE TABLE deployments (
     -- (AAD: deployments/env/<id>).
     env_sealed          bytea,
     trigger             text NOT NULL DEFAULT 'manual'
-                        CHECK (trigger IN ('manual', 'push', 'redeploy', 'rollback')),
+                        CHECK (trigger IN ('manual', 'push', 'redeploy', 'rollback', 'upload')),
     -- The deployment this one redeploys or rolls back to.
     source_deployment_id id REFERENCES deployments (id) ON DELETE SET NULL,
     created_by          id REFERENCES users (id) ON DELETE SET NULL,
@@ -361,6 +379,11 @@ CREATE TABLE deployments (
     commit_author       text,
     -- GitHub login of the commit author, for the avatar.
     commit_author_login text,
+    -- Uploaded sources (`modula-deploy up`): the archive, and the local Git
+    -- state it was packed from as the CLI reported it (display only).
+    upload_id           id REFERENCES source_uploads (id) ON DELETE SET NULL,
+    source_branch       text,
+    source_dirty        boolean,
     -- The built image's id on the node (sha256:…), recorded after the build.
     image_digest        text,
     build_started_at    timestamptz,

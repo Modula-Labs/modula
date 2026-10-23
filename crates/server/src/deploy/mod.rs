@@ -9,6 +9,7 @@ pub mod placement;
 pub mod refs;
 pub mod start;
 pub mod state;
+pub mod upload;
 
 use modula_id::Id;
 use sqlx::PgExecutor;

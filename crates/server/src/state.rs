@@ -33,6 +33,8 @@ pub struct Inner {
     pub github: github::Client,
     /// DNS lookups for custom domain verification (swapped out in tests).
     pub dns: std::sync::RwLock<Arc<dyn crate::domains::dns::Resolver>>,
+    /// Source uploads in progress per workspace (see `deploy::upload::Slot`).
+    pub uploads_in_flight: std::sync::Mutex<std::collections::HashMap<modula_id::Id, u32>>,
     pki: tokio::sync::OnceCell<Pki>,
 }
 
@@ -50,6 +52,7 @@ impl AppState {
             shutdown: CancellationToken::new(),
             github,
             dns: std::sync::RwLock::new(Arc::new(crate::domains::dns::PublicDns)),
+            uploads_in_flight: Default::default(),
             pki: tokio::sync::OnceCell::new(),
         }))
     }

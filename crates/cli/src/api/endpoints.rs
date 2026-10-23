@@ -102,6 +102,41 @@ impl Api {
             .await
     }
 
+    /// Upload a gzipped tarball of source files (`up`); `sha256` is checked
+    /// by the server.
+    pub async fn upload_source(
+        &self,
+        instance: &str,
+        size: u64,
+        sha256: &str,
+        body: reqwest::Body,
+    ) -> anyhow::Result<SourceUpload> {
+        use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue};
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/gzip"));
+        headers.insert(CONTENT_LENGTH, HeaderValue::from(size));
+        headers.insert("x-content-sha256", HeaderValue::from_str(sha256)?);
+        self.post_body(
+            &format!("/api/service-instances/{instance}/uploads"),
+            headers,
+            body,
+        )
+        .await
+    }
+
+    /// Build and deploy an upload (the service's own source is unchanged).
+    pub async fn deploy_upload(
+        &self,
+        instance: &str,
+        req: &UploadDeployment,
+    ) -> anyhow::Result<Deployment> {
+        self.post(
+            &format!("/api/service-instances/{instance}/deployments"),
+            req,
+        )
+        .await
+    }
+
     /// Newest first, at most 50.
     pub async fn deployments(&self, instance: &str) -> anyhow::Result<Vec<Deployment>> {
         self.get(&format!("/api/service-instances/{instance}/deployments"))

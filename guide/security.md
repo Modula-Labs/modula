@@ -81,6 +81,12 @@ control-plane backup. Being an instance admin grants no access to workspaces.
   by the instance's master key (`/var/lib/modula/master.key`). Keep the
   [recovery kit](install.md#recovery-kit) offline.
 - Values are write-only over the API. Revealing one needs sudo and is audited.
+  The exception is config as code: `GET /api/environments/{id}/config`
+  (Member, so API tokens can run `modula-deploy config plan/pull`) returns
+  the values of non-sealed variables of one environment, and each call is
+  audited (`environment.config_read`) with the names it returned. Sealed
+  values are never returned. Database credentials are likewise readable by
+  Members.
 - **Sealed variables** can never be revealed by anyone and are never copied to
   other environments. See [variables](variables.md#sealed-variables).
 - Deploy logs mask variable values (and their base64 and URL-encoded forms).

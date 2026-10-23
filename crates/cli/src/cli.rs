@@ -46,6 +46,24 @@ pub struct Global {
     pub yes: bool,
 }
 
+/// `up`: deploy local files without GitHub (honors .gitignore and .modulaignore).
+#[derive(Debug, Clone, clap::Args)]
+pub struct UpArgs {
+    /// Directory to upload (default: the current one).
+    #[arg(long, value_name = "DIR")]
+    pub path: Option<std::path::PathBuf>,
+    /// Don't wait for the deployment to finish.
+    #[arg(short, long)]
+    pub detach: bool,
+    /// A description for the deployment (default: the last commit's subject).
+    #[arg(short, long)]
+    pub message: Option<String>,
+    /// For CI: stream the build logs, never prompt, exit non-zero unless the
+    /// deployment goes live (with the runtime logs of a crash).
+    #[arg(long, conflicts_with = "detach")]
+    pub ci: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Log in with an API token (create one in the dashboard).
@@ -56,8 +74,12 @@ pub enum Command {
         /// The token (mdt_…); prompted for when omitted.
         #[arg(long, env = "MODULA_TOKEN", hide_env_values = true)]
         token: Option<String>,
+        /// Save it for this directory only (.modula/token, mode 0600, kept
+        /// out of git) instead of your user config.
+        #[arg(long)]
+        local: bool,
     },
-    /// Forget the saved token.
+    /// Forget the saved token (this directory's .modula/token if any).
     Logout,
     /// Show who you are logged in as.
     Whoami,
@@ -73,7 +95,11 @@ pub enum Command {
         workspace: Option<String>,
     },
     /// Link the current directory to a project (writes .modula/project.toml).
-    Link,
+    Link {
+        /// Also save this API token for the directory (like `login --local`).
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
     /// Remove the current directory's project link.
     Unlink,
     /// Show the project, environment and each service's latest deployment.
@@ -87,12 +113,8 @@ pub enum Command {
     },
     /// Create a service from a database template, an image or a repository.
     Add(AddArgs),
-    /// Deploy the service's current source and wait for it (no upload: see docs).
-    Up {
-        /// Don't wait for the deployment to finish.
-        #[arg(short, long)]
-        detach: bool,
-    },
+    /// Upload the current directory, build it and deploy it to the service.
+    Up(UpArgs),
     /// Deploy pending changes: the selected service, or every changed service.
     Deploy {
         /// Every service with pending changes, even with a service linked.
@@ -173,6 +195,68 @@ pub enum Command {
     },
     /// Print the full command reference (Markdown).
     Docs,
+    /// Config as code: plan and apply modula.toml (see `config --help`).
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+/// Where `config plan`/`apply`/`validate` read from.
+#[derive(Debug, Clone, Default, Args)]
+pub struct ConfigFileArgs {
+    /// The config file (default: modula.toml or modula.json here or above).
+    #[arg(long, value_name = "PATH")]
+    pub file: Option<std::path::PathBuf>,
+}
+
+/// What `config plan` and `config apply` compare.
+#[derive(Debug, Clone, Default, Args)]
+pub struct ConfigPlanArgs {
+    #[command(flatten)]
+    pub file: ConfigFileArgs,
+    /// Every environment (the project's and the file's), not just -e or the
+    /// linked one.
+    #[arg(long, conflicts_with = "environment")]
+    pub all_envs: bool,
+    /// Secret values (dotenv) instead of .modula/secrets.<environment>.env.
+    #[arg(long, value_name = "PATH")]
+    pub secrets_file: Option<std::path::PathBuf>,
+    /// Take secret values from environment variables of the same name.
+    #[arg(long)]
+    pub from_env: bool,
+    /// Overwrite sealed variables with the local secret value (sealed values
+    /// can't be compared, so they are otherwise only set when missing).
+    #[arg(long)]
+    pub update_sealed: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Write modula.toml from the project: every environment, never secret
+    /// values (sealed and credential-like variables become { secret = true }).
+    #[command(visible_alias = "pull")]
+    Init {
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+        /// Where to write (default: modula.toml here).
+        #[arg(long, value_name = "PATH")]
+        file: Option<std::path::PathBuf>,
+    },
+    /// Show what `config apply` would change (values of secrets masked).
+    Plan(ConfigPlanArgs),
+    /// Make the project match the file: services, settings, volumes,
+    /// variables, domains. Asks first unless --yes.
+    Apply {
+        #[command(flatten)]
+        plan: ConfigPlanArgs,
+        /// Deploy the changed services afterwards.
+        #[arg(long)]
+        deploy: bool,
+    },
+    /// Check the file (every environment) without contacting the server.
+    Validate(ConfigFileArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

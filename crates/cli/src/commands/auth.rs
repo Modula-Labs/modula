@@ -33,13 +33,16 @@ fn prompt_secret(label: &str) -> anyhow::Result<String> {
     Ok(line.trim().to_owned())
 }
 
+/// Check `token` against the instance and save it: globally, or with
+/// `local` in `<dir>/.modula/token` for this directory only.
 pub async fn login(
     ctx: &mut Ctx,
     url: Option<String>,
     token: Option<String>,
+    local: bool,
 ) -> anyhow::Result<()> {
     let url = url
-        .or_else(|| ctx.cfg.url.clone())
+        .or_else(|| ctx.saved_login().url)
         .ok_or_else(|| usage("pass --url https://your-instance"))?;
     let url = config::parse_url(&url)?;
     let token = match token {
@@ -57,6 +60,18 @@ pub async fn login(
         token: token.clone(),
     })?;
     let me = api.me().await?;
+    if local {
+        let dir = ctx.modula_root();
+        let file = save_local(ctx, &url, token)?;
+        return ctx.out.either(&me, |o| {
+            o.line(format!(
+                "Logged in to {url} as {} for {}",
+                me.user.email,
+                dir.display()
+            ));
+            o.note(format!("Wrote {} (readable by you only)", file.display()));
+        });
+    }
     ctx.cfg.url = Some(url.to_string());
     ctx.cfg.token = Some(token);
     config::save(&ctx.session.config_path, &ctx.cfg)?;
@@ -65,7 +80,58 @@ pub async fn login(
     })
 }
 
+/// Save a checked login in `<modula_root>/.modula/token` and use it from now on.
+fn save_local(ctx: &mut Ctx, url: &url::Url, token: String) -> anyhow::Result<std::path::PathBuf> {
+    let dir = ctx.modula_root();
+    let saved = config::Config {
+        url: Some(url.to_string()),
+        token: Some(token),
+    };
+    let file = config::save_local_login(&dir, &saved)?;
+    ctx.local_login = Some((file.clone(), saved));
+    ctx.ignore_modula_dir(&dir);
+    Ok(file)
+}
+
+/// `link --token`: check the token and save it for this directory, quietly
+/// (the link prints the result).
+pub async fn save_local_token(ctx: &mut Ctx, token: String) -> anyhow::Result<()> {
+    let url = ctx
+        .session
+        .env_url
+        .clone()
+        .or_else(|| ctx.saved_login().url)
+        .ok_or_else(|| usage("set MODULA_URL or run `modula-deploy login --local --url …`"))?;
+    let url = config::parse_url(&url)?;
+    Api::new(Login {
+        url: url.clone(),
+        token: token.clone(),
+    })?
+    .me()
+    .await?;
+    let file = save_local(ctx, &url, token)?;
+    ctx.out.note(format!(
+        "Saved the token in {} (readable by you only)",
+        file.display()
+    ));
+    Ok(())
+}
+
+/// Forget the token in effect: this directory's `.modula/token` if there is
+/// one, else the global one.
 pub fn logout(ctx: &mut Ctx) -> anyhow::Result<()> {
+    if let Some((file, _)) = ctx.local_login.take() {
+        std::fs::remove_file(&file).with_context(|| format!("cannot remove {}", file.display()))?;
+        return ctx.out.either(
+            &serde_json::json!({ "loggedOut": true, "file": file }),
+            |o| {
+                o.line(format!(
+                    "Removed {}. The token itself stays valid until you delete it in the dashboard.",
+                    file.display()
+                ));
+            },
+        );
+    }
     let had = ctx.cfg.token.take().is_some();
     if had {
         config::save(&ctx.session.config_path, &ctx.cfg)?;

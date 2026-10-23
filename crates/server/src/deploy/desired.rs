@@ -22,6 +22,8 @@ struct Row {
     status: String,
     image: String,
     commit_sha: Option<String>,
+    created_at: time::OffsetDateTime,
+    upload_sha256: Option<String>,
     workspace_id: Id,
     config: serde_json::Value,
     env_sealed: Option<Vec<u8>>,
@@ -52,7 +54,8 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
         .fetch_one(&state.db)
         .await?;
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT d.id, d.status, d.image, d.commit_sha, p.workspace_id,
+        "SELECT d.id, d.status, d.image, d.commit_sha, d.created_at, u.sha256 AS upload_sha256,
+                p.workspace_id,
                 d.config, d.env_sealed, i.environment_id, e.name AS environment_name,
                 s.id AS service_id, s.name AS service_name, s.project_id,
                 (SELECT hostname FROM domains WHERE service_instance_id = i.id AND status = 'verified'
@@ -62,6 +65,7 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
          FROM deployments d
          JOIN service_instances i ON i.id = d.service_instance_id
          JOIN nodes n ON n.id = d.node_id
+         LEFT JOIN source_uploads u ON u.id = d.upload_id AND u.purged_at IS NULL
          LEFT JOIN volumes v ON v.service_instance_id = i.id
          LEFT JOIN tcp_proxies t ON t.service_instance_id = i.id
          JOIN environments e ON e.id = i.environment_id
@@ -126,16 +130,40 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
         }));
         // Built images run their baked start command (Railpack wraps it in a
         // shell); everything else takes the configured argv.
-        let railpack = cfg.repo().is_some() && cfg.builder == Builder::Railpack;
+        let railpack = cfg.builds_from_source() && cfg.builder == Builder::Railpack;
         let command = match (&cfg.start_command, railpack) {
             (Some(argv), false) => argv.clone(),
             _ => Vec::new(),
         };
-        let build = match (r.status.as_str(), cfg.repo(), &r.commit_sha) {
-            ("building", Some((repo, _, root_dir)), Some(sha)) => Some(pb::Build {
-                source_url: state.github.tarball_url(repo, sha),
-                source_auth: crate::github::app::source_auth(state, r.workspace_id, repo).await?,
-                root_dir: root_dir.unwrap_or_default().trim_matches('/').to_owned(),
+        // Where the source comes from: GitHub at the commit, or this server
+        // for an upload (a signed download bound to this deployment).
+        let source = match (r.status.as_str(), cfg.repo(), cfg.upload(), &r.commit_sha) {
+            ("building", Some((repo, _, _)), _, Some(sha)) => Some((
+                state.github.tarball_url(repo, sha),
+                crate::github::app::source_auth(state, r.workspace_id, repo).await?,
+                String::new(),
+            )),
+            ("building", None, Some(upload), _) => Some((
+                upload_url(state),
+                format!(
+                    "Bearer {}",
+                    super::upload::token(&state.keys, r.id, upload, r.created_at)
+                ),
+                // A purged upload has no hash: the download then fails cleanly.
+                r.upload_sha256.clone().unwrap_or_else(|| "0".repeat(64)),
+            )),
+            _ => None,
+        };
+        let build = match source {
+            Some((source_url, source_auth, source_sha256)) => Some(pb::Build {
+                source_url,
+                source_auth,
+                source_sha256,
+                root_dir: cfg
+                    .root_dir()
+                    .unwrap_or_default()
+                    .trim_matches('/')
+                    .to_owned(),
                 builder: match cfg.builder {
                     Builder::Railpack => pb::Builder::Railpack,
                     Builder::Dockerfile => pb::Builder::Dockerfile,
@@ -149,7 +177,7 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
                 cache_key: r.workspace_id.to_string(),
                 secrets_hash: secrets_hash(state, r.environment_id, &vars).await?,
             }),
-            _ => None,
+            None => None,
         };
         if !networks.contains(&r.environment_id) {
             networks.push(r.environment_id);
@@ -295,6 +323,12 @@ async fn secrets_hash(state: &AppState, environment: Id, vars: &env::EnvMap) -> 
         mac.update(b"\0");
     }
     Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// The URL nodes download uploaded sources from.
+fn upload_url(state: &AppState) -> String {
+    let base = state.cfg.internal_base().as_str().trim_end_matches('/');
+    format!("{base}{}", super::upload::DOWNLOAD_PATH)
 }
 
 /// argv → one POSIX shell string, quoting where needed. Only used for a start

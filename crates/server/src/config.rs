@@ -39,7 +39,19 @@ pub struct Config {
     pub cloudflare_api: Url,
     /// Hetzner Cloud's API, ending in `/v1` (a mock in tests).
     pub hetzner_api: Url,
+    /// Where source archives from `modula-deploy up` are kept (one file per
+    /// upload, deleted by the retention job). Default: `uploads/` next to the
+    /// master key.
+    pub uploads_dir: PathBuf,
+    /// Largest accepted upload (compressed bytes).
+    pub upload_max_bytes: u64,
+    /// The URL nodes use to reach this server's HTTP API (to download uploaded
+    /// sources). None = `public_url`.
+    pub internal_url: Option<Url>,
 }
+
+/// Default for `MODULA_UPLOAD_MAX_MB`.
+pub const DEFAULT_UPLOAD_MAX_MB: u64 = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeTls {
@@ -114,8 +126,33 @@ impl Config {
                 .unwrap_or_else(|_| "https://api.hetzner.cloud/v1".into())
                 .parse()
                 .context("invalid MODULA_HETZNER_API_URL")?,
+            uploads_dir: PathBuf::new(),
+            upload_max_bytes: std::env::var("MODULA_UPLOAD_MAX_MB")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| v.trim().parse::<u64>())
+                .transpose()
+                .context("invalid MODULA_UPLOAD_MAX_MB")?
+                .unwrap_or(DEFAULT_UPLOAD_MAX_MB)
+                .max(1)
+                * 1024
+                * 1024,
+            internal_url: std::env::var("MODULA_INTERNAL_URL")
+                .ok()
+                .filter(|u| !u.trim().is_empty())
+                .map(|u| u.trim().parse())
+                .transpose()
+                .context("invalid MODULA_INTERNAL_URL")?,
         };
         let mut cfg = cfg;
+        cfg.uploads_dir = match std::env::var("MODULA_UPLOADS_DIR") {
+            Ok(d) if !d.trim().is_empty() => d.trim().into(),
+            _ => cfg
+                .master_key_file
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("uploads"),
+        };
         cfg.node_url = match std::env::var("MODULA_NODE_URL") {
             Ok(u) => u.parse().context("invalid MODULA_NODE_URL")?,
             Err(_) => default_node_url(&cfg.public_url, cfg.node_listen.port())?,
@@ -167,6 +204,11 @@ impl Config {
     /// `__Host-` cookies need Secure, which needs https.
     pub fn secure_cookies(&self) -> bool {
         self.public_url.scheme() == "https"
+    }
+
+    /// The HTTP API's base URL as nodes reach it.
+    pub fn internal_base(&self) -> &Url {
+        self.internal_url.as_ref().unwrap_or(&self.public_url)
     }
 
     /// Exact `Origin` header value browsers send for the dashboard.
@@ -278,6 +320,9 @@ impl Config {
             github_api: "https://api.github.com".parse().unwrap(),
             cloudflare_api: "https://api.cloudflare.com/client/v4".parse().unwrap(),
             hetzner_api: "https://api.hetzner.cloud/v1".parse().unwrap(),
+            uploads_dir: std::env::temp_dir().join("modula-uploads-unit"),
+            upload_max_bytes: DEFAULT_UPLOAD_MAX_MB * 1024 * 1024,
+            internal_url: None,
         }
     }
 }

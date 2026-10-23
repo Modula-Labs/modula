@@ -1,6 +1,7 @@
 //! One module per command group; [`run`] dispatches a parsed command line.
 
 pub mod auth;
+pub mod config;
 pub mod db;
 pub mod deploy;
 pub mod domain;
@@ -10,6 +11,7 @@ pub mod meta;
 pub mod project;
 pub mod service;
 pub mod storage;
+pub mod up;
 pub mod variables;
 
 use crate::cli::{Cli, Command};
@@ -21,20 +23,27 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
     let mut ctx = Ctx::new(session, cli.global, out)?;
     let ctx = &mut ctx;
     match cli.command {
-        Command::Login { url, token } => auth::login(ctx, url, token).await?,
+        Command::Login { url, token, local } => auth::login(ctx, url, token, local).await?,
         Command::Logout => auth::logout(ctx)?,
         Command::Whoami => auth::whoami(ctx).await?,
         Command::List => project::list(ctx).await?,
         Command::Init { name, workspace } => {
             project::init(ctx, &name, workspace.as_deref()).await?
         }
-        Command::Link => project::link(ctx).await?,
+        Command::Link { token } => {
+            if let Some(token) = token {
+                // Here, where the link goes.
+                ctx.link = None;
+                auth::save_local_token(ctx, token).await?;
+            }
+            project::link(ctx).await?
+        }
         Command::Unlink => project::unlink(ctx)?,
         Command::Status => project::status(ctx).await?,
         Command::Open => project::open(ctx).await?,
         Command::Service { name } => project::service(ctx, name.as_deref()).await?,
         Command::Add(args) => service::add(ctx, args).await?,
-        Command::Up { detach } => return deploy::up(ctx, detach).await,
+        Command::Up(args) => return up::run(ctx, args).await,
         Command::Deploy { all, wait } => return deploy::deploy(ctx, all, wait).await,
         Command::Redeploy { wait } => return deploy::rollout(ctx, "redeploy", wait).await,
         Command::Restart => return deploy::rollout(ctx, "restart", false).await,
@@ -58,6 +67,7 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
         } => return db::connect(ctx, service, tunnel_only, show_password, port).await,
         Command::Completion { shell } => meta::completion(ctx, shell),
         Command::Docs => meta::docs(ctx),
+        Command::Config { command } => return config::run(ctx, command).await,
     }
     Ok(0)
 }

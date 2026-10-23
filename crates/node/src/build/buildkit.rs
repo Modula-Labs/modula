@@ -177,23 +177,17 @@ impl BuildkitBuilder {
         self.ensure_daemon(log).await?;
 
         log.line(false, "Downloading source");
-        let archive = dir.join("source.tar.gz");
-        let size = self
-            .fetcher
-            .download(&spec.source_url, &spec.source_auth, &archive)
-            .await?;
-        let src = dir.join("src");
-        let files = {
-            let (a, s) = (archive.clone(), src.clone());
-            tokio::task::spawn_blocking(move || source::unpack(&a, &s)).await??
-        };
-        let _ = tokio::fs::remove_file(&archive).await;
+        let fetched = source::fetch(&self.fetcher, spec, dir).await?;
         log.line(
             false,
-            &format!("Unpacked {files} files ({} KB)", size / 1024),
+            &format!(
+                "Unpacked {} files ({} KB)",
+                fetched.files,
+                fetched.size / 1024
+            ),
         );
 
-        let context = resolve_dir(&src, &spec.root_dir)?;
+        let context = resolve_dir(&fetched.dir, &spec.root_dir)?;
         // Config as code overrides the dashboard; bad values only warn.
         let (config, warnings) = repo_config::load(&context);
         let stack = super::stack::detect(&context);

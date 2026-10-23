@@ -84,7 +84,11 @@ found in that order wins; files are not merged. Only these keys are read:
 | `deploy` | `preDeployCommand` | string or list of strings; a list runs as `a && b && …` in `/bin/sh -c` |
 
 Unknown keys (including `watchPatterns` and `environments`) are ignored: set
-watch paths in the dashboard. An invalid value is reported as a build-log
+watch paths in the dashboard. A `modula.toml` that describes the whole
+project for `modula-deploy config` (it has `project` or `services` and no
+`[build]`/`[deploy]`) is not read here, so a `railway.toml` next to it still
+applies; see [config as code](config-as-code.md) to manage every service's
+settings from one file. An invalid value is reported as a build-log
 warning and the dashboard setting is used instead. The build log says which
 file was used and what it set.
 

@@ -26,6 +26,7 @@ services and databases on your own servers.
 | [Backups](backups.md) | Encrypted scheduled backups to S3, R2, B2 or MinIO, and restores |
 | [Domains](domains.md) | Generated and custom domains, DNS records, Cloudflare |
 | [Integrations](integrations.md) | GitHub, Cloudflare and Hetzner |
+| [Config as code](config-as-code.md) | `modula.toml`: the whole project in git, `config plan` / `config apply` |
 | [CLI](cli.md) | Every `modula-deploy` command and flag |
 | [API](api.md) | Tokens, errors, roles and every route |
 | [Security](security.md) | 2FA, sudo mode, API tokens, roles, secrets, audit log |

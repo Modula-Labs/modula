@@ -45,6 +45,8 @@ pub struct Ctx {
     pub cfg: Config,
     /// The nearest `.modula/project.toml` and its path.
     pub link: Option<(PathBuf, Link)>,
+    /// The nearest `.modula/token` (`login --local`) and its login.
+    pub local_login: Option<(PathBuf, Config)>,
     api: OnceLock<Api>,
 }
 
@@ -70,23 +72,38 @@ impl Ctx {
     pub fn new(session: Session, global: Global, out: Output) -> anyhow::Result<Self> {
         let cfg = config::load(&session.config_path)?;
         let link = config::find_link(&session.cwd)?;
+        let local_login = config::find_local_login(&session.cwd)?;
         Ok(Self {
             session,
             global,
             out,
             cfg,
             link,
+            local_login,
             api: OnceLock::new(),
         })
     }
 
-    /// The API client; fails when not logged in.
+    /// The saved login in effect: this directory's `.modula/token` (its URL
+    /// falling back to the global one), else the global config.
+    pub fn saved_login(&self) -> Config {
+        match &self.local_login {
+            Some((_, local)) if local.token.is_some() => Config {
+                url: local.url.clone().or_else(|| self.cfg.url.clone()),
+                token: local.token.clone(),
+            },
+            _ => self.cfg.clone(),
+        }
+    }
+
+    /// The API client; fails when not logged in. The token comes from
+    /// `MODULA_TOKEN`, else `.modula/token`, else the global config.
     pub fn api(&self) -> anyhow::Result<&Api> {
         if let Some(api) = self.api.get() {
             return Ok(api);
         }
         let login = config::login(
-            &self.cfg,
+            &self.saved_login(),
             self.session.env_url.clone(),
             self.session.env_token.clone(),
         )?;
@@ -183,7 +200,33 @@ impl Ctx {
         };
         let file = config::write_link(&dir, &link)?;
         self.link = Some((file.clone(), link));
+        self.ignore_modula_dir(&dir);
         Ok(file)
+    }
+
+    /// The directory a `.modula/` written now belongs in: the linked one,
+    /// else the current one.
+    pub fn modula_root(&self) -> PathBuf {
+        self.link
+            .as_ref()
+            .and_then(|(file, _)| file.parent().and_then(|d| d.parent()))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.session.cwd.clone())
+    }
+
+    /// After writing into `<dir>/.modula/`: keep it out of git (best effort;
+    /// says what changed on stderr).
+    pub fn ignore_modula_dir(&self, dir: &std::path::Path) {
+        match config::ensure_gitignore(dir) {
+            Ok(g) => {
+                if let Some(line) = g.describe() {
+                    self.out.note(line);
+                }
+            }
+            Err(e) => self
+                .out
+                .note(format!("Warning: add .modula/ to your .gitignore ({e:#})")),
+        }
     }
 
     /// Ask before something destructive. `--yes` skips the question; without
@@ -207,5 +250,62 @@ impl Ctx {
         } else {
             anyhow::bail!("cancelled")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir() -> PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("modula-ctx-test-{n}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn token(dir: &std::path::Path, env_token: Option<&str>) -> String {
+        let session = Session {
+            config_path: dir.join("global.toml"),
+            cwd: dir.join("app/src"),
+            env_url: None,
+            env_token: env_token.map(Into::into),
+            interactive: false,
+        };
+        let ctx = Ctx::new(session, Global::default(), Output::capture(false).0).unwrap();
+        ctx.api().unwrap().login.token.clone()
+    }
+
+    #[test]
+    fn tokens_resolve_env_then_directory_then_global() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(dir.join("app/src")).unwrap();
+        config::save(
+            &dir.join("global.toml"),
+            &Config {
+                url: Some("https://global.example.com".into()),
+                token: Some("mdt_global".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(token(&dir, None), "mdt_global");
+
+        // A directory token wins over the global one (found from below);
+        // without a URL of its own it uses the global URL.
+        config::save_local_login(
+            &dir.join("app"),
+            &Config {
+                url: None,
+                token: Some("mdt_local".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(token(&dir, None), "mdt_local");
+        // MODULA_TOKEN wins over both.
+        assert_eq!(token(&dir, Some("mdt_env")), "mdt_env");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

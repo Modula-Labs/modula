@@ -22,30 +22,40 @@ export function Modal({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60 backdrop-blur-[2px]" />
-        <Dialog.Content
-          style={{ width }}
-          className="anim-modal fixed top-[18%] left-1/2 z-50 max-w-[calc(100vw-32px)] -translate-x-1/2 rounded-xl bg-popover p-6 text-popover-foreground shadow-modal"
-        >
-          <div className="mb-4 flex items-start justify-between gap-4">
-            <div>
-              <Dialog.Title className="text-lg font-semibold">{title}</Dialog.Title>
-              {description ? (
-                <Dialog.Description className="mt-1 text-sm text-muted-foreground">{description}</Dialog.Description>
-              ) : (
-                <Dialog.Description className="sr-only">{title}</Dialog.Description>
-              )}
+        {/* The overlay scrolls, so a dialog taller than the window stays reachable. */}
+        <Dialog.Overlay className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-black/60 px-4 pt-[min(18vh,10rem)] pb-8 backdrop-blur-[2px]">
+          <Dialog.Content
+            style={{ width }}
+            className="anim-modal relative z-50 max-w-full rounded-xl bg-popover p-6 text-popover-foreground shadow-modal"
+          >
+            <div className="mb-4 flex items-start justify-between gap-4">
+              <div>
+                <Dialog.Title className="text-lg font-semibold">
+                  {title}
+                </Dialog.Title>
+                {description ? (
+                  <Dialog.Description className="mt-1 text-sm text-muted-foreground">
+                    {description}
+                  </Dialog.Description>
+                ) : (
+                  <Dialog.Description className="sr-only">
+                    {title}
+                  </Dialog.Description>
+                )}
+              </div>
+              <Dialog.Close
+                className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+                aria-label="Close"
+              >
+                <IconX className="size-4" stroke={1.8} />
+              </Dialog.Close>
             </div>
-            <Dialog.Close
-              className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-              aria-label="Close"
-            >
-              <IconX className="size-4" stroke={1.8} />
-            </Dialog.Close>
-          </div>
-          {children}
-          {footer ? <div className="mt-6 flex justify-end gap-2">{footer}</div> : null}
-        </Dialog.Content>
+            {children}
+            {footer ? (
+              <div className="mt-6 flex justify-end gap-2">{footer}</div>
+            ) : null}
+          </Dialog.Content>
+        </Dialog.Overlay>
       </Dialog.Portal>
     </Dialog.Root>
   );

@@ -61,11 +61,27 @@ modula-deploy whoami
 The login is saved to `$XDG_CONFIG_HOME/modula-deploy/config.toml` (or
 `~/.config/modula-deploy/config.toml`), readable only by you (mode 0600).
 
+**A token for one directory.** `login --local` (or `link --token`) saves the
+login in `.modula/token` in the linked directory (else the current one)
+instead: same format (`url`, `token`), mode 0600, found from any
+subdirectory, and kept out of git (see [the project link](#the-project-link)).
+Useful for a token scoped to one workspace, or one per repository. The token
+used is the first of:
+
+1. `MODULA_TOKEN` (with `MODULA_URL`, or the saved URL),
+2. the nearest `.modula/token` (its URL, else the global one),
+3. the global config file.
+
+`logout` removes the token in effect: `.modula/token` if there is one, else
+the global one.
+
 **What a token can't do.** Tokens never have sudo (a recent
 re-authentication), so these always fail with "this needs a recently
 re-authenticated dashboard session" and must be done in the dashboard:
-revealing variable values, deleting volumes (`volume delete`), deleting
-services, environments or projects, and rotating database passwords.
+revealing variable values (`config plan`/`pull` do read non-sealed values
+through an audited Member route; see [config as code](config-as-code.md)),
+deleting volumes (`volume delete`), deleting services, environments or
+projects, and rotating database passwords.
 
 ## Global flags
 
@@ -81,7 +97,7 @@ Every command accepts these, before or after the command name:
 
 Commands that confirm: `down`, `rollback`, `variables delete`,
 `variables set --sealed`, `domain delete`, `volume delete`,
-`tcp-proxy disable`, `db query --write`.
+`tcp-proxy disable`, `db query --write`, `config apply`.
 
 ## Exit codes
 
@@ -108,18 +124,31 @@ Commands look for the nearest `.modula/project.toml` in the current directory
 or any parent. `-p/-e/-s` override it for one command; a `-p` naming another
 project ignores the linked environment and service.
 
+**`.modula/` stays out of git.** It holds the link, an optional local token
+(`.modula/token`) and [config-as-code](config-as-code.md) secrets files
+(`.modula/secrets.<env>.env`). Whenever the CLI writes into `.modula/`, it
+makes sure the `.gitignore` at the repository root ignores it: it appends an
+annotated `.modula/` block (creating `.gitignore` if the directory is in a git
+repository and has none) and prints what it changed on stderr. A
+`.gitignore` that already ignores `.modula/`, or names both `.modula/token`
+and `.modula/secrets.*` (to commit `project.toml` on purpose), is left alone.
+Outside a git repository only an existing `.gitignore` is updated. Commit
+`modula.toml` at the repository root; it lives outside `.modula/`.
+
 ## Setup
 
-### `login [--url <URL>] [--token <TOKEN>]`
+### `login [--url <URL>] [--token <TOKEN>] [--local]`
 
 Checks the token against `/api/auth/me`, saves it, prints
 `Logged in to <url> as <email>`. A bare host gets `https://`. The token is
 prompted for (without echo) when omitted; prefer that over `--token` so it
-doesn't land in shell history.
+doesn't land in shell history. `--local` saves it in `.modula/token` for this
+directory only (see [authentication](#authentication)).
 
 ### `logout`
 
-Removes the saved token. **The token stays valid** until you delete it
+Removes the saved token: this directory's `.modula/token` if there is one,
+else the global one. **The token stays valid** until you delete it
 (`DELETE /api/account/tokens/{token_id}`).
 
 ### `whoami`
@@ -135,11 +164,13 @@ Every project you can see: workspace, name, id; the linked one is marked.
 Creates a project (with a `production` environment) and links the current
 directory to it. `--workspace` takes an id or name; default: your only one.
 
-### `link`
+### `link [--token <TOKEN>]`
 
 Links the current directory to `-p` (default: your only project), `-e`
-(default `production`) and, with `-s`, a default service. Hints when
-`.modula/` isn't in your `.gitignore`.
+(default `production`) and, with `-s`, a default service. `--token` also
+checks that token and saves it in `.modula/token` (like `login --local`;
+the URL comes from `MODULA_URL` or the saved login). Keeps `.modula/` out of
+git (see [the project link](#the-project-link)).
 
 ### `unlink`
 
@@ -209,7 +240,8 @@ default service.
 
 Lists variable names with `sealed`, references and last update. **Values are
 write-only over the API**: listings show `********`, and `--kv` prints
-`NAME=********` lines. Reveal values in the dashboard. `--shared` acts on the
+`NAME=********` lines. Reveal values in the dashboard (`config pull` writes
+non-sealed ones into `modula.toml`, except credential-like names). `--shared` acts on the
 environment's shared variables (`${{shared.NAME}}`) instead of the service's.
 
 ### `variables set KEY=VALUE… [--stdin] [--sealed] [--deploy] [--shared]`
@@ -282,18 +314,53 @@ first).
 
 ## Deploying
 
-There is no source-upload API yet, so unlike Railway's `railway up`, **no
-command uploads the current directory**. Every deploy builds the service's
-configured source: its image, or its repository branch's latest commit
-(push first).
+`up` uploads the files in the current directory and deploys them, like
+Railway's `railway up`: no GitHub needed. The other commands deploy the
+service's configured source: its image, or its repository branch's latest
+commit (push first).
 
-### `up [-d, --detach]`
+### `up [--path DIR] [-d, --detach] [-m, --message TEXT] [--ci]`
 
-Deploys the selected service's current source, then waits: it prints status
-changes, streams the build logs while building, and exits `0` once the
-deployment is `active` (`1` if it fails or crashes). With `--json` it skips
-the build logs and prints only the final deployment. `--detach` returns right
-after starting it.
+Packs the directory (default: the current one) into a gzipped tarball,
+uploads it to the selected service (`-s`, `-e`, or the link) and deploys it:
+the service builds it exactly like a repository checkout, with its builder
+(Railpack or Dockerfile), root directory, build and start commands, and the
+config file in the files (`railway.toml`, `railway.json`, `modula.toml`). The
+service's configured source isn't changed: the deployment shows as
+**Uploaded via CLI**, and the next `deploy` deploys the configured source
+again.
+
+What is uploaded:
+
+- Everything in the directory except what `.gitignore` (in any directory,
+  plus `.git/info/exclude` and your global Git excludes) or `.modulaignore`
+  (same syntax, for files Git keeps but the build doesn't need) leave out.
+  This works without a Git repository too.
+- Never `.git/`, `.modula/`, or the CLI's own config file. Symlinks pointing
+  outside the directory are skipped.
+- Up to 200 MB compressed by default (the server's `MODULA_UPLOAD_MAX_MB`) and
+  200,000 files.
+
+When the directory is a Git checkout, the deployment records the branch, the
+commit and whether uncommitted changes were included (display only); the
+deployment's message is `-m` or else the commit's subject.
+
+Then `up` waits: it prints status changes, streams the build logs, and exits
+`0` once the deployment is `active` (`1` if it fails or crashes). With
+`--json` it skips the build logs and prints only the final deployment.
+`--detach` returns right after starting it. `--ci` is for pipelines: never
+prompts, streams the build logs, exits non-zero unless the deployment goes
+live, and prints the last runtime logs of a crash.
+
+```bash
+modula-deploy up                         # the selected service, from here
+modula-deploy up --path apps/web -s web -m "Hotfix"
+MODULA_TOKEN=... modula-deploy up --ci -p shop -e staging -s api
+```
+
+Uploads are kept for 24 hours, and as long as one of the service's 5 newest
+deployments (or a running one) uses them, so `redeploy` and `rollback` can
+rebuild them; after that, run `up` again.
 
 ### `deploy [--all] [-w, --wait]`
 
@@ -306,8 +373,9 @@ exits `1` if one fails.
 
 ### `redeploy [-w, --wait]`
 
-Deploys the service's newest deployment again: the same image, or the same
-commit rebuilt, with the current variables.
+Deploys the service's newest deployment again: the same image, the same
+commit rebuilt, or the same upload rebuilt (while it is kept), with the current
+variables.
 
 ### `restart`
 
@@ -321,9 +389,36 @@ service stays; deploy again to bring it back.
 
 ### `rollback <DEPLOYMENT> [-w, --wait]`
 
-Rebuilds and deploys an earlier deployment's Git commit (asks first). Only
-deployments built from a repository can be rolled back to; pick one from
-`deployment list`.
+Rebuilds and deploys an earlier deployment's Git commit or upload (asks
+first). Only deployments built from a repository, or from an upload that is
+still kept, can be rolled back to; pick one from `deployment list`.
+
+## Config as code
+
+The whole project in `modula.toml` at the repository root: services,
+settings, variables (secrets stay out of the file), domains, volumes, TCP
+proxies, with per-environment overrides. Full reference:
+[config as code](config-as-code.md).
+
+### `config init [--force] [--file <PATH>]` (alias `config pull`)
+
+Writes `modula.toml` from the project (`-p` or the linked one), every
+environment, without secret values.
+
+### `config plan [-e <ENV> | --all-envs] [--file <PATH>] [--secrets-file <PATH>] [--from-env] [--update-sealed]`
+
+Prints what `apply` would change (secret values masked; `--json` for the
+structured plan). Exits 1 when the plan has errors.
+
+### `config apply [same flags] [--yes] [--deploy]`
+
+Applies the plan after confirming: environments, services, settings,
+volumes and TCP proxies, variables, domains. `--deploy` deploys the changed
+services afterwards. Deleting services or volumes stays manual (dashboard).
+
+### `config validate [--file <PATH>]`
+
+Checks the file and every environment's overrides offline.
 
 ## Databases
 
@@ -405,7 +500,7 @@ modula-deploy init shop
 modula-deploy add --database postgres
 modula-deploy add --repo acme/api --port 3000
 modula-deploy variables set 'DATABASE_URL=${{postgres.DATABASE_URL}}'
-modula-deploy up                      # deploys api (the selected service) and waits
+modula-deploy up                      # uploads this directory to api and waits
 modula-deploy deploy -s postgres
 modula-deploy domain                  # https://api-x1y2.apps.example.com
 modula-deploy status
@@ -414,8 +509,8 @@ modula-deploy logs -f
 
 ## Not in the CLI yet
 
-Uploading local source (`up` deploys the configured source instead), service
-settings (start command, health check, builder, resources: use the dashboard
-or `PATCH /api/service-instances/{id}`), deleting services, environments and
+Editing one service setting directly (start command, health check, builder,
+resources: use [`config apply`](config-as-code.md), the dashboard or
+`PATCH /api/service-instances/{id}`), deleting services, environments and
 projects, backups, cron, metrics, `run`/`shell`/`ssh`, scaling, and server
 management. Use the dashboard or the [HTTP API](api.md) with the same token.

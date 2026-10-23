@@ -17,8 +17,8 @@ use time::OffsetDateTime;
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
-use crate::deploy::config::ServiceConfig;
-use crate::deploy::start::{NewDeployment, Trigger, start};
+use crate::deploy::config::{ServiceConfig, Source};
+use crate::deploy::start::{LocalGit, NewDeployment, Trigger, start};
 use crate::deploy::{self, LiveFilter, env};
 use crate::error::{AppError, AppResult};
 use crate::github::Commit;
@@ -39,10 +39,16 @@ pub struct Deployment {
     pub commit_message: Option<String>,
     pub commit_author: Option<String>,
     pub commit_author_avatar: Option<String>,
-    /// `owner/repo@branch` or the image, from the config snapshot.
+    /// `owner/repo@branch`, the image, or `Uploaded via CLI`, from the config snapshot.
     pub source: String,
-    /// `github` or `image` (`upload` once uploads exist).
+    /// `github`, `image` or `upload`.
     pub source_kind: String,
+    /// Uploads: the local branch and whether uncommitted changes were included
+    /// (as the CLI reported them), and whether the files are still kept (so
+    /// the deployment can be redeployed or rolled back to).
+    pub source_branch: Option<String>,
+    pub source_dirty: Option<bool>,
+    pub upload_available: Option<bool>,
     /// The deployment a redeploy or rollback repeated.
     pub source_deployment_id: Option<Id>,
     pub error: Option<String>,
@@ -79,24 +85,29 @@ pub struct DeploymentDetail {
 macro_rules! select_deployments {
     ($rest:literal) => {
         concat!(
-            "SELECT id, service_instance_id, node_id, status, image, image_digest, trigger,
-                    commit_sha, commit_message, commit_author,
-                    'https://avatars.githubusercontent.com/' || commit_author_login || '?s=64' AS commit_author_avatar,
-                    CASE WHEN config->'source'->>'type' = 'repo'
-                         THEN (config->'source'->>'repo') || '@' || (config->'source'->>'branch')
-                         ELSE config->'source'->>'image' END AS source,
-                    CASE WHEN config->'source'->>'type' = 'repo' THEN 'github' ELSE 'image' END AS source_kind,
-                    source_deployment_id,
-                    error, created_by, created_at, updated_at, finished_at,
-                    build_started_at, build_finished_at
-             FROM deployments ",
+            "SELECT d.id, d.service_instance_id, d.node_id, d.status, d.image, d.image_digest, d.trigger,
+                    d.commit_sha, d.commit_message, d.commit_author,
+                    'https://avatars.githubusercontent.com/' || d.commit_author_login || '?s=64' AS commit_author_avatar,
+                    CASE d.config->'source'->>'type'
+                         WHEN 'repo' THEN (d.config->'source'->>'repo') || '@' || (d.config->'source'->>'branch')
+                         WHEN 'upload' THEN 'Uploaded via CLI'
+                         ELSE d.config->'source'->>'image' END AS source,
+                    CASE d.config->'source'->>'type' WHEN 'repo' THEN 'github' WHEN 'upload' THEN 'upload'
+                         ELSE 'image' END AS source_kind,
+                    d.source_branch, d.source_dirty,
+                    CASE WHEN d.config->'source'->>'type' = 'upload'
+                         THEN u.id IS NOT NULL AND u.purged_at IS NULL END AS upload_available,
+                    d.source_deployment_id,
+                    d.error, d.created_by, d.created_at, d.updated_at, d.finished_at,
+                    d.build_started_at, d.build_finished_at
+             FROM deployments d LEFT JOIN source_uploads u ON u.id = d.upload_id ",
             $rest
         )
     };
 }
 
 async fn load(state: &AppState, id: Id) -> AppResult<DeploymentDetail> {
-    let deployment: Deployment = sqlx::query_as(select_deployments!("WHERE id = $1"))
+    let deployment: Deployment = sqlx::query_as(select_deployments!("WHERE d.id = $1"))
         .bind(id)
         .fetch_optional(&state.db)
         .await?
@@ -110,14 +121,157 @@ async fn load(state: &AppState, id: Id) -> AppResult<DeploymentDetail> {
     Ok(DeploymentDetail { deployment, events })
 }
 
+/// Optional body of `POST /api/service-instances/{id}/deployments`. Without
+/// a `source`, the instance's configured source is deployed.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateDeployment {
+    pub source: Option<DeploySource>,
+    /// Uploads: a description (`modula-deploy up -m`).
+    pub message: Option<String>,
+    /// Uploads: the local Git state the files were packed from (display only).
+    pub git: Option<LocalGitInfo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeploySource {
+    /// A `source_uploads` id of this instance (`POST …/uploads`).
+    pub upload: Id,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalGitInfo {
+    pub commit: Option<String>,
+    pub branch: Option<String>,
+    /// The commit's subject, used when there is no message.
+    pub subject: Option<String>,
+    pub dirty: Option<bool>,
+}
+
 pub async fn create(
     State(state): State<AppState>,
     actor: Actor,
     grant: Grant,
     meta: RequestMeta,
+    body: Option<Json<CreateDeployment>>,
 ) -> AppResult<Json<DeploymentDetail>> {
-    let id = deploy_instance(&state, &actor, grant.workspace_id()?, &meta, grant.id()).await?;
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let workspace = grant.workspace_id()?;
+    let id = match req.source {
+        Some(DeploySource { upload }) => {
+            let git = local_git(req.message, req.git.unwrap_or_default())?;
+            deploy_upload(&state, &actor, workspace, &meta, grant.id(), upload, git).await?
+        }
+        None if req.message.is_some() || req.git.is_some() => {
+            return Err(AppError::bad_request(
+                "message and git only apply to uploaded sources",
+            ));
+        }
+        None => deploy_instance(&state, &actor, workspace, &meta, grant.id()).await?,
+    };
     load(&state, id).await.map(Json)
+}
+
+/// Checks what the CLI reported about the local checkout.
+fn local_git(message: Option<String>, git: LocalGitInfo) -> AppResult<LocalGit> {
+    if let Some(c) = &git.commit
+        && !(c.len() == 40
+            && c.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+    {
+        return Err(AppError::bad_request(
+            "git.commit must be a full lowercase hex sha",
+        ));
+    }
+    if let Some(b) = &git.branch {
+        crate::deploy::config::validate_branch(b)?;
+    }
+    let clean = |s: String| -> Option<String> {
+        let s: String = s.trim().chars().filter(|c| *c != '\0').take(1000).collect();
+        (!s.is_empty()).then_some(s)
+    };
+    Ok(LocalGit {
+        commit: git.commit,
+        message: message.and_then(clean).or(git.subject.and_then(clean)),
+        branch: git.branch,
+        dirty: git.dirty,
+    })
+}
+
+/// Build and deploy an upload: the instance's current config (builder,
+/// commands, root directory…) with the upload as its source. The instance's
+/// own source setting is not changed.
+pub async fn deploy_upload(
+    state: &AppState,
+    actor: &Actor,
+    workspace: Id,
+    meta: &RequestMeta,
+    instance: Id,
+    upload: Id,
+    git: LocalGit,
+) -> AppResult<Id> {
+    let found: Option<(Id, bool, String)> = sqlx::query_as(
+        "SELECT service_instance_id, purged_at IS NULL, sha256 FROM source_uploads WHERE id = $1",
+    )
+    .bind(upload)
+    .fetch_optional(&state.db)
+    .await?;
+    let sha256 = match found {
+        Some((owner, true, sha)) if owner == instance => sha,
+        Some((owner, false, _)) if owner == instance => {
+            return Err(AppError::Conflict(
+                "this upload is no longer kept; run `modula-deploy up` again".into(),
+            ));
+        }
+        _ => return Err(AppError::bad_request("unknown upload for this service")),
+    };
+    let (env_id, config): (Id, serde_json::Value) =
+        sqlx::query_as("SELECT environment_id, config FROM service_instances WHERE id = $1")
+            .bind(instance)
+            .fetch_one(&state.db)
+            .await?;
+    let mut cfg: ServiceConfig = serde_json::from_value(config).map_err(anyhow::Error::from)?;
+    cfg.source = Source::Upload {
+        upload,
+        root_dir: cfg.root_dir().map(str::to_owned),
+    };
+    let mut tx = state.db.begin().await?;
+    let started = start(
+        state,
+        &mut tx,
+        env_id,
+        NewDeployment {
+            instance,
+            config: cfg,
+            trigger: Trigger::Upload,
+            created_by: Some(actor.user_id),
+            commit: None,
+            local_git: Some(git.clone()),
+            prebuilt: None,
+            source_deployment: None,
+        },
+    )
+    .await?;
+    Entry::new("deployment.create", meta)
+        .actor(actor)
+        .workspace(workspace)
+        .target("deployment", started.id)
+        .metadata(json!({
+            "serviceInstance": instance,
+            "source": "upload",
+            "upload": upload,
+            "sha256": sha256,
+            "commit": git.commit,
+            "dirty": git.dirty,
+            "node": started.node,
+        }))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    state.hub.kick_all(&started.kick);
+    Ok(started.id)
 }
 
 /// Deploy an instance's current config and variables (a manual deploy).
@@ -153,6 +307,7 @@ pub async fn deploy_instance(
             trigger: Trigger::Manual,
             created_by: Some(actor.user_id),
             commit: commit.clone(),
+            local_git: None,
             prebuilt: None,
             source_deployment: None,
         },
@@ -175,9 +330,10 @@ pub async fn deploy_instance(
     Ok(started.id)
 }
 
-/// Deploy the same source again: the same image, or the same commit rebuilt
-/// (source code is never stored, so a commit is always built afresh). Config
-/// comes from the deployment's snapshot; variables are the current ones.
+/// Deploy the same source again: the same image, the same commit rebuilt
+/// (repository code is never stored, so a commit is always built afresh), or
+/// the same upload rebuilt while it is kept (see `deploy::upload::purge`).
+/// Config comes from the deployment's snapshot; variables are the current ones.
 pub async fn redeploy(
     State(state): State<AppState>,
     actor: Actor,
@@ -187,7 +343,7 @@ pub async fn redeploy(
     rerun(state, actor, grant, meta, Trigger::Redeploy).await
 }
 
-/// Rebuild and redeploy an earlier deployment's commit (repository sources only).
+/// Rebuild and redeploy an earlier deployment's commit or kept upload.
 pub async fn rollback(
     State(state): State<AppState>,
     actor: Actor,
@@ -205,38 +361,51 @@ async fn rerun(
     trigger: Trigger,
 ) -> AppResult<Json<DeploymentDetail>> {
     let source_id = grant.id();
-    #[allow(clippy::type_complexity)]
-    let (instance, env_id, config, sha, message, author, login): (
-        Id,
-        Id,
-        serde_json::Value,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = sqlx::query_as(
+    let r: RerunRow = sqlx::query_as(
         "SELECT d.service_instance_id, i.environment_id, d.config, d.commit_sha, d.commit_message,
-                d.commit_author, d.commit_author_login
-         FROM deployments d JOIN service_instances i ON i.id = d.service_instance_id WHERE d.id = $1",
+                d.commit_author, d.commit_author_login, d.source_branch, d.source_dirty,
+                u.id IS NOT NULL AND u.purged_at IS NULL AS upload_kept
+         FROM deployments d JOIN service_instances i ON i.id = d.service_instance_id
+         LEFT JOIN source_uploads u ON u.id = d.upload_id
+         WHERE d.id = $1",
     )
     .bind(source_id)
     .fetch_one(&state.db)
     .await?;
-    let cfg: ServiceConfig = serde_json::from_value(config).map_err(anyhow::Error::from)?;
-    let commit = sha.map(|sha| Commit {
-        sha,
-        message: message.unwrap_or_default(),
-        author: author.unwrap_or_default(),
-        author_login: login,
-    });
+    let (instance, env_id) = (r.service_instance_id, r.environment_id);
+    let cfg: ServiceConfig = serde_json::from_value(r.config).map_err(anyhow::Error::from)?;
+    // Uploads keep their local Git details for display; they never drive a build.
+    let (commit, local_git) = if cfg.upload().is_some() {
+        if !r.upload_kept {
+            return Err(AppError::Conflict(
+                "the files uploaded for this deployment are no longer kept; run `modula-deploy up` again"
+                    .into(),
+            ));
+        }
+        let git = LocalGit {
+            commit: r.commit_sha,
+            message: r.commit_message,
+            branch: r.source_branch,
+            dirty: r.source_dirty,
+        };
+        (None, Some(git))
+    } else {
+        let commit = r.commit_sha.map(|sha| Commit {
+            sha,
+            message: r.commit_message.unwrap_or_default(),
+            author: r.commit_author.unwrap_or_default(),
+            author_login: r.commit_author_login,
+        });
+        (commit, None)
+    };
     if cfg.repo().is_some() != commit.is_some() {
         return Err(AppError::Conflict(
             "this deployment's source can't be deployed again".into(),
         ));
     }
-    if trigger == Trigger::Rollback && commit.is_none() {
+    if trigger == Trigger::Rollback && commit.is_none() && local_git.is_none() {
         return Err(AppError::Conflict(
-            "only deployments built from a Git commit can be rolled back to".into(),
+            "only deployments built from a Git commit or an upload can be rolled back to".into(),
         ));
     }
     let mut tx = state.db.begin().await?;
@@ -250,6 +419,7 @@ async fn rerun(
             trigger,
             created_by: Some(actor.user_id),
             commit: commit.clone(),
+            local_git,
             prebuilt: None,
             source_deployment: Some(source_id),
         },
@@ -271,6 +441,20 @@ async fn rerun(
     tx.commit().await?;
     state.hub.kick_all(&started.kick);
     load(&state, started.id).await.map(Json)
+}
+
+#[derive(sqlx::FromRow)]
+struct RerunRow {
+    service_instance_id: Id,
+    environment_id: Id,
+    config: serde_json::Value,
+    commit_sha: Option<String>,
+    commit_message: Option<String>,
+    commit_author: Option<String>,
+    commit_author_login: Option<String>,
+    source_branch: Option<String>,
+    source_dirty: Option<bool>,
+    upload_kept: bool,
 }
 
 /// Restart the running container in place (same deployment, same image).
@@ -315,7 +499,7 @@ pub async fn restart(
 pub async fn list(State(state): State<AppState>, grant: Grant) -> AppResult<Json<Vec<Deployment>>> {
     Ok(Json(
         sqlx::query_as(select_deployments!(
-            "WHERE service_instance_id = $1 ORDER BY created_at DESC LIMIT 50"
+            "WHERE d.service_instance_id = $1 ORDER BY d.created_at DESC LIMIT 50"
         ))
         .bind(grant.id())
         .fetch_all(&state.db)

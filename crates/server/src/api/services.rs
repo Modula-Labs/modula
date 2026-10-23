@@ -149,7 +149,7 @@ pub async fn create(
         (None, Some(t)) => t.config(),
         (None, None) => return Err(AppError::bad_request("config or template is required")),
     };
-    cfg.validate()?;
+    cfg.validate_for_instance()?;
     let config = serde_json::to_value(&cfg).map_err(anyhow::Error::from)?;
     let id = Id::new();
 
@@ -282,7 +282,7 @@ pub async fn update_instance(
     Json(req): Json<UpdateInstance>,
 ) -> AppResult<Json<Instance>> {
     let id = grant.id();
-    req.config.validate()?;
+    req.config.validate_for_instance()?;
     let config = serde_json::to_value(&req.config).map_err(anyhow::Error::from)?;
     let mut tx = state.db.begin().await?;
     let (env, service, old): (Id, Id, serde_json::Value) = sqlx::query_as(

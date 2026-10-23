@@ -68,6 +68,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 let n = auth::session::delete_expired(&s.db).await?;
                 tracing::info!(deleted = n, "expired sessions removed");
                 api::github::prune(&s.db).await?;
+                let purged = deploy::upload::purge(&s).await?;
+                tracing::info!(purged, "expired source uploads removed");
                 Ok(())
             })
             .on(github::app::STATUS_JOB, github::app::status_job)

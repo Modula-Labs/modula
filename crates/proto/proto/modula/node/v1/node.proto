@@ -283,7 +283,8 @@ message TcpProxy {
 // builds it in its sandboxed BuildKit and tags the result as Workload.image.
 // User variables reach the build only as BuildKit secrets (Workload.env).
 message Build {
-  // A gzipped tarball of the source at one commit (GitHub's tarball endpoint).
+  // A gzipped tarball of the source: one commit (GitHub's tarball endpoint)
+  // or files uploaded with `modula-deploy up` (served by the server).
   string source_url = 1;
   // Authorization header value for source_url; empty for public sources.
   string source_auth = 2;
@@ -300,6 +301,9 @@ message Build {
   string cache_key = 8;
   // Changes when variable values change, so cached layers that used them rebuild.
   string secrets_hash = 9;
+  // Hex SHA-256 the downloaded archive must match (uploaded sources); empty =
+  // not checked (GitHub tarballs come over TLS from GitHub itself).
+  string source_sha256 = 55;
 }
 
 enum Builder {

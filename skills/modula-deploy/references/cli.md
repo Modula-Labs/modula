@@ -15,7 +15,9 @@ trust it over this file if they differ.
 | `NO_COLOR` | No colors (also off when stdout isn't a terminal). |
 | `XDG_CONFIG_HOME` | Config dir (default `~/.config`). Login saved to `modula-deploy/config.toml`, mode 0600. |
 
-With `MODULA_URL` and `MODULA_TOKEN` set, no `login` is needed.
+With `MODULA_URL` and `MODULA_TOKEN` set, no `login` is needed. Token order:
+`MODULA_TOKEN` → nearest `.modula/token` (`login --local`, same TOML format,
+mode 0600; its URL, else the global one) → the global config.
 
 ## Global flags (any position)
 
@@ -35,17 +37,20 @@ deployment fails/crashes. `connect` returns the client's exit code.
 
 Link file `.modula/project.toml` (nearest in cwd or a parent): `project`,
 `project_name`, `environment`, `service`, `service_name`. A `-p` for another
-project ignores the linked environment/service.
+project ignores the linked environment/service. Whenever the CLI writes into
+`.modula/` (link, token, secrets) it ensures the repo-root `.gitignore`
+ignores `.modula/` (appends an annotated block, creates the file in a git
+repo; leaves alone a file naming `.modula/token` and `.modula/secrets.*`).
 
 ## Commands
 
 Setup:
-- `login [--url URL] [--token T]`: verifies via `GET /api/auth/me`, saves. Token prompted (no echo) if omitted and stdin is a TTY.
-- `logout`: forgets the saved token (it stays valid server-side).
+- `login [--url URL] [--token T] [--local]`: verifies via `GET /api/auth/me`, saves (globally, or `--local` in `.modula/token`). Token prompted (no echo) if omitted and stdin is a TTY.
+- `logout`: forgets the token in effect (`.modula/token` if any, else global; it stays valid server-side).
 - `whoami`: user, instance, workspaces with roles.
 - `list` / `ls`: projects (workspace, name, id, linked).
 - `init NAME [-w WORKSPACE]`: create project (+ `production`) and link it.
-- `link`: link cwd to `-p`/`-e` (and `-s` as default service).
+- `link [--token T]`: link cwd to `-p`/`-e` (and `-s` as default service); `--token` also saves it in `.modula/token`.
 - `unlink`: remove the nearest link.
 - `service [NAME]`: set the default service; no name = list services.
 - `open`: print the dashboard URL (`/projects/{id}?env=…&service=…`); opens a browser on a TTY.
@@ -68,13 +73,20 @@ Services:
 - `volume` / `volume add PATH` (attached on next deploy) / `volume delete` (**always fails with a token**: sudo).
 - `tcp-proxy` / `tcp-proxy enable [--port P]` (public port 20000–29999, internet-reachable) / `tcp-proxy disable`.
 
-Deploying (no source upload exists: every deploy builds the configured image or the branch's latest commit):
-- `up [-d|--detach]`: deploy the selected service; waits, streams build logs (not with `--json`: then only the final deployment), exits 0 on `active`, 1 on failure.
+Deploying (`up` uploads local files; the others deploy the configured image or the branch's latest commit):
+- `up [--path DIR] [-d|--detach] [-m TEXT] [--ci]`: pack DIR (default cwd; honors `.gitignore`, `.modulaignore`; never `.git/`, `.modula/`; ≤200 MB compressed by default), upload, build like a checkout (service builder/root dir/commands, `railway.toml` in the files) and deploy to the selected service without changing its configured source. Waits, streams build logs (not with `--json`: then only the final deployment), exits 0 on `active`, 1 on failure. `--ci`: no prompts, build logs, runtime logs of a crash. `-m`: message (default: last commit subject). Deployment shows `sourceKind: "upload"`, `source: "Uploaded via CLI"`.
 - `deploy [--all] [-w|--wait]`: selected service (`-s`/link) = deploy it; none or `--all` = every service with pending changes in the environment. Prints per-service errors.
-- `redeploy [-w]`: the newest deployment again (same image/commit, current variables).
+- `redeploy [-w]`: the newest deployment again (same image/commit/upload, current variables). Uploads are kept 24 h, or while among the service's 5 newest deployments; else `409`: run `up` again.
 - `restart`: restart the newest `active`/`crashed` deployment's container.
 - `down`: remove the newest live deployment.
-- `rollback DEPLOYMENT_ID [-w]`: rebuild that deployment's commit (Git-built only).
+- `rollback DEPLOYMENT_ID [-w]`: rebuild that deployment's commit or kept upload.
+
+Config as code (`modula.toml` at the repo root; `modula.json` accepted; `--file PATH`):
+- `config init [--force] [--file PATH]` (`config pull`): write the file from the project, all environments (base from production, differences in `[environments.<env>]`). No secret values: sealed → `{ secret = true, sealed = true }`, credential-like names → `{ secret = true }` (`--json` lists them in `guessedSecrets`), template variables omitted.
+- `config plan [-e ENV | --all-envs] [--secrets-file PATH] [--from-env] [--update-sealed]`: diff vs the server. `--json` → `{project, changes, environments:[{environment, createEnvironment, services:[{service, action: create|update|unchanged, settings:[{key,from,to}], variables:[{name, op: add|update|delete, secret, sealed, from?, to?}], domains:[{op,host,…}], volume?, tcpProxy}], shared, manual, warnings, errors}]}`. Exit 1 if `errors`.
+- `config apply [same] [--yes] [--deploy]`: confirm, then create environments/services, PATCH settings, volumes, TCP proxies, variables, domains; `--deploy` deploys changed services. Manual (sudo): deleting services/volumes, moving volumes. Refuses if any error (e.g. secret without a value).
+- `config validate [--file PATH]`: offline check of the file and every overlay.
+- File rules: settings keys = API `config` keys (camelCase; unknown rejected); omitted settings = defaults (template's for templates); `source = { repo, branch, rootDir? } | { image } | { local = "." }`; `domains` = custom only (generated never deleted; `generateDomain = true`); `volume = "/path"`; `tcpProxy = PORT`; variables: string/number/bool/`{ secret = true[, sealed = true] }`; unlisted variables deleted unless in `preserve` or created by the template. Secrets from `.modula/secrets.<env>.env` (dotenv, flat names), `--secrets-file`, or `--from-env`.
 
 Databases:
 - `db query "SQL" [--write]`: Postgres via the API. Default `readOnly`: exactly one read-only statement, rolled back. `--write`: writes/DDL/multiple statements (Member role, confirmation). Table + `N rows (SELECT, X ms)`; `--json` = `{columns, rows, rowCount, command, durationMs, truncated}`. ≤1000 rows, 30 s timeout, audited. Service: `-s`, else the linked service if it is a database, else the only database.
@@ -108,7 +120,7 @@ kill $TUNNEL; rm -f /tmp/tunnel.log
 
 ## Not in the CLI
 
-Service settings (start command, health check, builder, resources, replicas),
-deleting services/environments/projects, backups, cron, metrics,
+Editing a single service setting directly (use `config apply` or the HTTP
+API), deleting services/environments/projects, backups, cron, metrics,
 `run`/`shell`/`ssh`, scaling, servers: use the HTTP API ([api.md](api.md))
 with the same token, or the dashboard.

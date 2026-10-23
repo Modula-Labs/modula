@@ -50,11 +50,49 @@ used: `build.builder` (RAILPACK/NIXPACKS → Railpack, DOCKERFILE),
 `deploy.restartPolicyType`, `deploy.restartPolicyMaxRetries`,
 `deploy.preDeployCommand`. Ignored: `build.watchPatterns` (set `watchPaths`
 in the service config instead), `deploy.numReplicas`, `deploy.cronSchedule`,
-`deploy.sleepApplication`, `environments.*` overrides (apply them per
-environment in the service config by hand). `.railway/*.ts` IaC is not read:
-translate it to API calls.
+`deploy.sleepApplication`, `environments.*` overrides.
+
+**Prefer one project file:** write `modula.toml` at the repo root (guide:
+`guide/config-as-code.md`) and apply it with `modula-deploy config plan` /
+`config apply`. It covers every service, settings, variables, domains,
+volumes and per-environment overrides, which Railway spreads over
+`railway.toml` (one service's build/deploy), `.railway/railway.ts` (IaC) and
+the dashboard. Mapping into `[services.<name>]`:
+
+| Railway | `modula.toml` |
+|---|---|
+| `build.builder` `DOCKERFILE` / `RAILPACK` / `NIXPACKS` | `builder = "dockerfile"` / `"railpack"` / `"railpack"` |
+| `build.buildCommand`, `build.dockerfilePath` | `buildCommand`, `dockerfilePath` |
+| `build.watchPatterns` | `watchPaths` |
+| `deploy.startCommand` (shell string) | `startCommand = ["sh", "-c", "<cmd>"]` (or a plain argv list) |
+| `deploy.preDeployCommand` | `preDeployCommand = [...]` (argv) |
+| `deploy.healthcheckPath` / `healthcheckTimeout` | `healthcheckPath` / `healthcheckTimeoutSecs` |
+| `deploy.restartPolicyType` `ON_FAILURE` / `ALWAYS` / `NEVER` | `restartPolicy = "on_failure"` / `"always"` / `"never"` |
+| `deploy.restartPolicyMaxRetries` | `restartPolicyMaxRetries` (1–1000; omit for unlimited) |
+| `deploy.numReplicas` | `replicas` (only 1 today) |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `drainingSeconds` |
+| `environments.<env>.<section>.<key>` | `[environments.<env>]` then `services.<name>.<key> = …` |
+| `railway.ts` services / variables / domains / volumes | `[services.<name>]` `source`, `variables`, `domains`, `volume` |
+| Railway database services | `template = "postgres"` (its passwords/URLs are created for you) |
+| Secrets | `NAME = { secret = true }`; values in `.modula/secrets.<env>.env` (gitignored) or `--from-env` |
+| `railway config plan` / `apply` | `modula-deploy config plan` / `config apply` (unlisted variables are deleted unless in `preserve`) |
+
+Rules that bite: settings left out reset to defaults; keys are camelCase
+(`healthcheck_path` is rejected with a hint); service names lowercase. Once
+the build/deploy keys live in `modula.toml`, delete them from `railway.toml`
+so there's one source of truth (a project `modula.toml` doesn't stop the
+builder from reading `railway.toml`, and `railway.toml` settings override the
+service's at build time). Run `modula-deploy config validate`, then `plan`
+until it shows exactly the intended changes.
 
 ## 3. Recreate
+
+With `modula.toml` (preferred): `modula-deploy init <project>`, write the
+file, put secret values in `.modula/secrets.<env>.env` (names only in chat),
+`modula-deploy config plan --all-envs`, review with the user, then
+`config apply --all-envs --yes` and deploy (`--deploy`, or step 6). Apply
+creates missing environments (e.g. `staging`) and template services with
+their volumes. By hand (API/CLI):
 
 1. Project in the right workspace (Member).
 2. Databases first: `{"name":"postgres","template":"postgres"}`; deploy them.
@@ -112,6 +150,7 @@ kill $TUNNEL; rm -f /tmp/tunnel.log /tmp/railway.dump
 
 - Services created and their status per environment.
 - Variables that still need values from the user (names only).
+- The `modula.toml` you wrote, and `config plan` output showing no changes.
 - Railway features without an equivalent and what you did instead.
 - Data migration row-count check results.
 - DNS records the user must create.

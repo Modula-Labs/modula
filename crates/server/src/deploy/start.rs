@@ -17,6 +17,8 @@ pub enum Trigger {
     Push,
     Redeploy,
     Rollback,
+    /// `modula-deploy up`: files uploaded from a developer's machine.
+    Upload,
 }
 
 impl Trigger {
@@ -26,6 +28,7 @@ impl Trigger {
             Self::Push => "push",
             Self::Redeploy => "redeploy",
             Self::Rollback => "rollback",
+            Self::Upload => "upload",
         }
     }
 }
@@ -37,10 +40,25 @@ pub struct NewDeployment {
     pub created_by: Option<Id>,
     /// The commit to build (repository sources).
     pub commit: Option<Commit>,
+    /// Uploaded sources: the local Git state the CLI reported.
+    pub local_git: Option<LocalGit>,
     /// Run this exact, already-built image instead of building.
     pub prebuilt: Option<Prebuilt>,
     /// The deployment a redeploy or rollback repeats.
     pub source_deployment: Option<Id>,
+}
+
+/// Where an uploaded source came from, as the CLI saw it (display only;
+/// stored in the commit columns, which never drive a build for uploads).
+#[derive(Debug, Clone, Default)]
+pub struct LocalGit {
+    /// Full lowercase hex sha of the local HEAD.
+    pub commit: Option<String>,
+    /// `up -m`, else the local commit's subject.
+    pub message: Option<String>,
+    pub branch: Option<String>,
+    /// Uncommitted changes were included.
+    pub dirty: Option<bool>,
 }
 
 pub struct Prebuilt {
@@ -86,10 +104,10 @@ pub async fn start(
             .await?;
 
     // What runs: an image as configured, a rebuilt-before image, or a build.
-    let (status, image, digest) = match (&d.prebuilt, d.config.repo()) {
+    let (status, image, digest) = match (&d.prebuilt, d.config.builds_from_source()) {
         (Some(p), _) => ("deploying", p.image.clone(), p.digest.clone()),
-        (None, Some(_)) => ("building", build_tag(service_id, id), None),
-        (None, None) => ("deploying", d.config.source_label(), None),
+        (None, true) => ("building", build_tag(service_id, id), None),
+        (None, false) => ("deploying", d.config.source_label(), None),
     };
     let node = placement::choose(&mut *tx, d.instance).await?;
     // A newer deployment supersedes any still in progress (the running one
@@ -110,11 +128,13 @@ pub async fn start(
         Vec::new()
     };
     let commit = d.commit.as_ref();
+    let local = d.local_git.as_ref();
     sqlx::query(
         "INSERT INTO deployments (id, service_instance_id, node_id, status, image, image_digest, config,
                                   env_sealed, trigger, created_by, commit_sha, commit_message, commit_author,
-                                  commit_author_login, source_deployment_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                                  commit_author_login, source_deployment_id, upload_id, source_branch,
+                                  source_dirty)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
     )
     .bind(id)
     .bind(d.instance)
@@ -126,16 +146,20 @@ pub async fn start(
     .bind(&env_sealed)
     .bind(d.trigger.as_str())
     .bind(d.created_by)
-    .bind(commit.map(|c| &c.sha))
-    .bind(commit.map(|c| &c.message))
+    .bind(commit.map(|c| &c.sha).or(local.and_then(|g| g.commit.as_ref())))
+    .bind(commit.map(|c| &c.message).or(local.and_then(|g| g.message.as_ref())))
     .bind(commit.map(|c| &c.author))
     .bind(commit.and_then(|c| c.author_login.as_ref()))
     .bind(d.source_deployment)
+    .bind(d.config.upload())
+    .bind(local.and_then(|g| g.branch.as_ref()))
+    .bind(local.and_then(|g| g.dirty))
     .execute(&mut *tx)
     .await?;
-    let what = match commit {
-        Some(c) => format!("Building {} at {}", d.config.source_label(), &c.sha[..7]),
-        None => format!("Deploying {image}"),
+    let what = match (commit, d.config.upload()) {
+        (_, Some(_)) if d.prebuilt.is_none() => "Building uploaded files".to_owned(),
+        (Some(c), None) => format!("Building {} at {}", d.config.source_label(), &c.sha[..7]),
+        _ => format!("Deploying {image}"),
     };
     sqlx::query(
         "INSERT INTO deployment_events (deployment_id, phase, message) VALUES ($1, 'queued', $2)",

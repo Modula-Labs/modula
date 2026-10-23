@@ -1,9 +1,5 @@
-//! Deploying: `up`, `deploy`, `redeploy`, `restart`, `down`, `rollback` and
-//! `deployment list`.
-//!
-//! There is no source upload API yet: `up` deploys the service's configured
-//! source (its image, or its repository branch's latest commit), not the
-//! files in the current directory.
+//! Deploying: `deploy`, `redeploy`, `restart`, `down`, `rollback` and
+//! `deployment list` (`up`, which uploads local files, is in [`super::up`]).
 
 use std::time::{Duration, Instant};
 
@@ -66,7 +62,7 @@ pub async fn wait(ctx: &Ctx, id: &str, build_logs: bool) -> anyhow::Result<Deplo
 }
 
 /// Exit code for a settled deployment, after saying how it went.
-fn outcome(ctx: &Ctx, d: &Deployment) -> i32 {
+pub fn outcome(ctx: &Ctx, d: &Deployment) -> i32 {
     if d.status == "active" {
         ctx.out.note(format!("Deployment {} is live.", d.id));
         return 0;
@@ -81,28 +77,6 @@ fn outcome(ctx: &Ctx, d: &Deployment) -> i32 {
             .unwrap_or_default()
     ));
     1
-}
-
-/// `up`: deploy the service's current source, then follow it.
-pub async fn up(ctx: &Ctx, detach: bool) -> anyhow::Result<i32> {
-    let t = ctx.target().await?;
-    let api = ctx.api()?;
-    ctx.out.note(format!(
-        "Deploying {} from its configured source (local files are not uploaded)…",
-        t.label()
-    ));
-    let d = api.deploy_instance(&t.instance).await?;
-    if detach {
-        ctx.out
-            .either(&d, |o| o.line(format!("Started deployment {}", d.id)))?;
-        return Ok(0);
-    }
-    // Build logs are for people; with --json only the final deployment prints.
-    let d = wait(ctx, &d.id, !ctx.out.json).await?;
-    let code = outcome(ctx, &d);
-    ctx.out
-        .either(&d, |o| o.line(format!("{} {}", d.id, o.status(&d.status))))?;
-    Ok(code)
 }
 
 /// Deploy `services` (or every service with pending changes) in `env`.

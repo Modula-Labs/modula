@@ -11,6 +11,7 @@ pub mod commands;
 pub mod config;
 pub mod connect;
 pub mod context;
+pub mod iac;
 pub mod output;
 pub mod resolve;
 pub mod tunnel;

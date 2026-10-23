@@ -150,6 +150,17 @@ impl Api {
             .await
     }
 
+    /// POST a streamed body (source uploads), without an overall timeout.
+    pub async fn post_body<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        headers: reqwest::header::HeaderMap,
+        body: reqwest::Body,
+    ) -> anyhow::Result<T> {
+        let req = self.streaming.post(self.url(path)?).headers(headers);
+        self.send(req.body(body), path).await
+    }
+
     pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<T> {
         self.send(self.http.delete(self.url(path)?), path).await
     }

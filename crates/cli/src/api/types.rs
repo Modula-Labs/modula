@@ -319,3 +319,42 @@ pub struct VariableChanges {
     pub sealed: Vec<String>,
     pub delete: Vec<String>,
 }
+
+/// `POST /api/service-instances/{id}/uploads`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceUpload {
+    pub id: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+/// A deployment of an upload (`up`).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadDeployment {
+    pub source: UploadRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git: Option<LocalGit>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UploadRef {
+    pub upload: String,
+}
+
+/// The checkout an upload was packed from (shown with the deployment).
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalGit {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dirty: Option<bool>,
+}

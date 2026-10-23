@@ -89,9 +89,6 @@ pub async fn link(ctx: &mut Ctx) -> anyhow::Result<()> {
             env.name
         ));
         o.note(format!("Wrote {}", file.display()));
-        if crate::config::gitignore_lacks_link(cwd) {
-            o.note("Hint: add .modula/ to your .gitignore");
-        }
     })
 }
 

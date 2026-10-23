@@ -25,6 +25,13 @@ pub enum Source {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root_dir: Option<String>,
     },
+    /// Files uploaded with `modula-deploy up` (a `source_uploads` row). Only
+    /// ever in a deployment's snapshot: an instance can't be configured with it.
+    Upload {
+        upload: modula_id::Id,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root_dir: Option<String>,
+    },
 }
 
 /// How a repository source is turned into an image.
@@ -127,6 +134,7 @@ impl ServiceConfig {
         match &self.source {
             Source::Image { image } => image.clone(),
             Source::Repo { repo, branch, .. } => format!("{repo}@{branch}"),
+            Source::Upload { .. } => "Uploaded via CLI".into(),
         }
     }
 
@@ -137,13 +145,50 @@ impl ServiceConfig {
                 branch,
                 root_dir,
             } => Some((repo, branch, root_dir.as_deref())),
+            Source::Image { .. } | Source::Upload { .. } => None,
+        }
+    }
+
+    /// The upload a deployment builds, for uploaded sources.
+    pub fn upload(&self) -> Option<modula_id::Id> {
+        match &self.source {
+            Source::Upload { upload, .. } => Some(*upload),
+            _ => None,
+        }
+    }
+
+    /// Whether deployments build an image on the node (repository or upload).
+    pub fn builds_from_source(&self) -> bool {
+        !matches!(self.source, Source::Image { .. })
+    }
+
+    /// The directory to build from, for sources that are built.
+    pub fn root_dir(&self) -> Option<&str> {
+        match &self.source {
+            Source::Repo { root_dir, .. } | Source::Upload { root_dir, .. } => root_dir.as_deref(),
             Source::Image { .. } => None,
         }
+    }
+
+    /// For instance configs (what the dashboard and API set): everything
+    /// [`validate`](Self::validate) checks, and no snapshot-only source.
+    pub fn validate_for_instance(&self) -> AppResult<()> {
+        if matches!(self.source, Source::Upload { .. }) {
+            return Err(AppError::bad_request(
+                "a service's source must be an image or a repository; upload files with `modula-deploy up`",
+            ));
+        }
+        self.validate()
     }
 
     pub fn validate(&self) -> AppResult<()> {
         match &self.source {
             Source::Image { image } => validate_image_ref(image)?,
+            Source::Upload { root_dir, .. } => {
+                if let Some(d) = root_dir {
+                    validate_rel_path(d, "root directory")?;
+                }
+            }
             Source::Repo {
                 repo,
                 branch,

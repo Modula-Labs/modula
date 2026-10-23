@@ -1,8 +1,9 @@
 # Variables
 
 Variables become environment variables in your service's container. They are
-encrypted at rest with a key per environment, write-only over the API, and
-masked in deploy logs.
+encrypted at rest with a key per environment, write-only over the API (except
+the audited environment read behind [config as code](config-as-code.md),
+which never returns sealed values), and masked in deploy logs.
 
 ## Service and shared variables
 

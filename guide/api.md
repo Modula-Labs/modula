@@ -122,9 +122,17 @@ re-authentication is also required.
 | DELETE | `/api/environments/{environment_id}` | Admin + sudo |
 | POST | `/api/environments/{environment_id}/sync` | Member |
 | GET | `/api/projects/{project_id}/activity` | Viewer |
+| GET | `/api/environments/{environment_id}/config` | Member (audited) |
 | GET | `/api/environments/{environment_id}/pending` | Viewer |
 | POST | `/api/environments/{environment_id}/deploy` | Deployer |
 
+- `GET /api/environments/{id}/config` returns the whole environment for
+  [config as code](config-as-code.md): each service's `config`, `template`
+  (with `templateConfig` and `templateVariables`), `volume`, `tcpProxy`,
+  `domains` and `variables` (`name`, `sealed`, and `value` for non-sealed
+  ones), plus `shared` variables. It is the one route that returns variable
+  values without sudo (never sealed ones); every call is audited as
+  `environment.config_read` with the names returned.
 - `GET /api/projects/{id}` returns `project`, `environments`, `services` and
   `instances` (one per service per environment, with `latestDeploymentStatus`,
   `domain`, `dependsOn`…). Use it to find a service instance id.

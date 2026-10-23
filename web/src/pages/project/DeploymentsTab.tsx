@@ -238,9 +238,10 @@ function DeploymentRow({
   const serving = isServing(d);
   const live = isLive(d.status);
   const title = deploymentTitle(d);
-  const imageOnly = !d.commitMessage && !d.commitSha;
-  const canRollback = d.sourceKind === "github" && !!d.commitSha && d.id !== actions.servingId && d.status !== "queued" && !live;
-  const canRedeploy = (d.sourceKind === "github" || d.sourceKind === "image" || !d.sourceKind) && !live;
+  const imageOnly = !d.commitMessage && !d.commitSha && d.sourceKind !== "upload";
+  const rebuildable = (d.sourceKind === "github" && !!d.commitSha) || (d.sourceKind === "upload" && !!d.uploadAvailable);
+  const canRollback = rebuildable && d.id !== actions.servingId && d.status !== "queued" && !live;
+  const canRedeploy = (d.sourceKind === "github" || d.sourceKind === "image" || !d.sourceKind || rebuildable) && !live;
   return (
     <div
       className={clsx(

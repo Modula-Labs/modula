@@ -324,12 +324,17 @@ export interface Deployment {
   commitSha: string | null;
   commitMessage: string | null;
   commitAuthor: string | null;
-  /** What was deployed: `owner/name@branch` or the image. */
+  /** What was deployed: `owner/name@branch`, the image, or "Uploaded via CLI". */
   source: string;
   buildStartedAt: string | null;
   buildFinishedAt: string | null;
   sourceKind?: "github" | "image" | "upload";
-  /** manual | push | rollback | redeploy | restart */
+  /** Uploads (`modula-deploy up`): the local branch, whether uncommitted changes were included,
+   * and whether the files are still kept (so it can be redeployed or rolled back to). */
+  sourceBranch?: string | null;
+  sourceDirty?: boolean | null;
+  uploadAvailable?: boolean | null;
+  /** manual | push | rollback | redeploy | restart | upload */
   trigger: string;
   commitAuthorAvatar?: string | null;
   error: string | null;

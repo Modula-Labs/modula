@@ -1,7 +1,8 @@
 //! Source archives: download a gzipped tarball and unpack it safely.
 //!
 //! GitHub tarballs hold a single top-level directory (`owner-repo-sha/`),
-//! which is stripped. Only regular files, directories and symlinks that stay
+//! which is stripped; `modula-deploy up` packs uploads the same way (`app/`).
+//! Uploaded archives carry a SHA-256 that is checked before unpacking. Only regular files, directories and symlinks that stay
 //! inside the tree are unpacked; anything else (hard links, devices, paths
 //! with `..`) is skipped. Sizes and entry counts are capped.
 
@@ -10,6 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use futures::StreamExt;
+use modula_proto::node::v1 as pb;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 const MAX_ARCHIVE: u64 = 1024 * 1024 * 1024;
@@ -69,6 +72,58 @@ impl Fetcher {
         file.flush().await?;
         Ok(size)
     }
+}
+
+/// A source fetched and unpacked into a build directory.
+pub struct Fetched {
+    /// The unpacked tree (before `root_dir`).
+    pub dir: PathBuf,
+    pub files: usize,
+    /// Compressed size.
+    pub size: u64,
+}
+
+/// Download `spec`'s source into `dir`, check its hash (when the spec has
+/// one) and unpack it into `dir/src`. The archive is deleted afterwards.
+pub async fn fetch(fetcher: &Fetcher, spec: &pb::Build, dir: &Path) -> anyhow::Result<Fetched> {
+    let archive = dir.join("source.tar.gz");
+    let size = fetcher
+        .download(&spec.source_url, &spec.source_auth, &archive)
+        .await?;
+    if !spec.source_sha256.is_empty() {
+        let (a, want) = (archive.clone(), spec.source_sha256.clone());
+        tokio::task::spawn_blocking(move || verify_sha256(&a, &want)).await??;
+    }
+    let src = dir.join("src");
+    let files = {
+        let (a, s) = (archive.clone(), src.clone());
+        tokio::task::spawn_blocking(move || unpack(&a, &s)).await??
+    };
+    let _ = tokio::fs::remove_file(&archive).await;
+    Ok(Fetched {
+        dir: src,
+        files,
+        size,
+    })
+}
+
+/// Fails unless `path` hashes to `want` (lowercase hex SHA-256).
+pub fn verify_sha256(path: &Path, want: &str) -> anyhow::Result<()> {
+    let mut hasher = Sha256::new();
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut f, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let got = hex::encode(hasher.finalize());
+    if !got.eq_ignore_ascii_case(want) {
+        bail!("the downloaded source does not match its checksum (expected {want}, got {got})");
+    }
+    Ok(())
 }
 
 /// Unpack `archive` (tar.gz) into `dest`, stripping the top-level directory.
@@ -269,6 +324,19 @@ mod tests {
         );
         b.into_inner().unwrap().finish().unwrap();
         path
+    }
+
+    #[test]
+    fn checksum_mismatch_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("modula-sum-{}", modula_id::Id::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a");
+        std::fs::write(&f, b"hello").unwrap();
+        let good = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        verify_sha256(&f, good).unwrap();
+        let e = verify_sha256(&f, &"0".repeat(64)).unwrap_err();
+        assert!(e.to_string().contains("checksum"), "{e}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

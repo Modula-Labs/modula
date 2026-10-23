@@ -1002,7 +1002,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("modula-reconcile-{}", Id::new()));
         let caps = Capabilities {
             build: Some(BuildSupport {
-                builder: Arc::new(crate::build::FakeBuilder { overrides }),
+                builder: Arc::new(crate::build::FakeBuilder {
+                    overrides,
+                    ..Default::default()
+                }),
                 logs: crate::build::BuildLogs::new(&dir).unwrap(),
             }),
             ..Default::default()

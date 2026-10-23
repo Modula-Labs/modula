@@ -79,6 +79,10 @@ pub enum Action {
     /// references can point at.
     SharedVariablesRead,
     SharedVariablesWrite,
+    /// The whole environment as config as code (`modula-deploy config`):
+    /// every service's settings, domains, volume and variables, with the
+    /// values of non-sealed variables. Audited.
+    EnvironmentConfigRead,
     /// Deploy the services with pending changes in an environment.
     EnvironmentDeploy,
     DeploymentCreate,
@@ -173,6 +177,7 @@ impl Action {
             | Self::EnvironmentSync
             | Self::SharedVariablesRead
             | Self::SharedVariablesWrite
+            | Self::EnvironmentConfigRead
             | Self::EnvironmentDeploy => K::Environment,
             Self::ServiceDelete => K::Service,
             Self::InstanceRead | Self::InstanceUpdate => K::ServiceInstance,
@@ -242,6 +247,7 @@ impl Action {
             | Self::ServiceDelete
             | Self::InstanceUpdate
             | Self::VariableReveal
+            | Self::EnvironmentConfigRead
             | Self::DomainCreate
             | Self::DomainUpdate
             | Self::DomainDelete
@@ -316,6 +322,9 @@ impl Action {
             | Self::VariablesWrite
             | Self::SharedVariablesRead
             | Self::SharedVariablesWrite
+            // Members can already read database credentials; API tokens
+            // (never sudo) must be able to pull and plan.
+            | Self::EnvironmentConfigRead
             | Self::EnvironmentDeploy
             | Self::DeploymentCreate
             | Self::DeploymentRead

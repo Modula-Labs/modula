@@ -53,10 +53,12 @@ pub trait Builder: Send + Sync + 'static {
 
 /// Pretends to build (tests): logs a line and returns a fixed image id, or
 /// fails when the source URL contains "fail". `overrides` stand in for a
-/// repository config file.
+/// repository config file. With `fetch`, the source really is downloaded,
+/// checked and unpacked first, and every unpacked path is logged.
 #[derive(Default)]
 pub struct FakeBuilder {
     pub overrides: RuntimeOverrides,
+    pub fetch: bool,
 }
 
 #[async_trait]
@@ -71,6 +73,21 @@ impl Builder for FakeBuilder {
             false,
             &format!("building {} from {}", w.image, spec.source_url),
         );
+        if self.fetch {
+            let dir = std::env::temp_dir().join(format!("modula-fake-build-{}", w.deployment_id));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
+            let fetcher = source::Fetcher::new()?;
+            let fetched = source::fetch(&fetcher, spec, &dir).await;
+            if let Ok(f) = &fetched {
+                log.line(false, &format!("Unpacked {} files", f.files));
+                for path in list_files(&f.dir, &f.dir) {
+                    log.line(false, &format!("file {path}"));
+                }
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            fetched?;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         if spec.source_url.contains("fail") {
             anyhow::bail!("the build failed");
@@ -81,4 +98,23 @@ impl Builder for FakeBuilder {
             stack: String::new(),
         })
     }
+}
+
+/// Relative paths of the regular files under `dir`, sorted (FakeBuilder logs).
+fn list_files(root: &std::path::Path, dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => out.extend(list_files(root, &p)),
+            Ok(t) if t.is_file() => {
+                if let Ok(rel) = p.strip_prefix(root) {
+                    out.push(rel.to_string_lossy().into_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out
 }

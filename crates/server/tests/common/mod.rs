@@ -42,6 +42,9 @@ pub fn config() -> Config {
         github_api: "http://127.0.0.1:9".parse().unwrap(),
         cloudflare_api: "http://127.0.0.1:9".parse().unwrap(),
         hetzner_api: "http://127.0.0.1:9/v1".parse().unwrap(),
+        uploads_dir: std::env::temp_dir().join(format!("modula-uploads-{}", Id::new())),
+        upload_max_bytes: 200 * 1024 * 1024,
+        internal_url: None,
     }
 }
 

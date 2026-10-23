@@ -64,6 +64,12 @@ Not read: `build.watchPatterns` (set **watch paths** in service settings),
 `deploy.numReplicas`, `deploy.cronSchedule`, `deploy.sleepApplication`,
 `deploy.region`, and per-environment overrides (`environments.*`).
 
+To manage the whole project as code (Railway's `.railway/railway.ts` with
+`railway config plan/apply`), write a `modula.toml` and use
+`modula-deploy config plan` / `config apply`: services, settings, variables,
+domains, volumes and per-environment overrides in one file. The key mapping
+from `railway.toml` is in [config as code → from Railway](config-as-code.md#from-railway).
+
 ## Service names
 
 References use the service's name exactly, and names here are lowercase
@@ -207,4 +213,5 @@ the Railway project read-only for a few days before deleting it.
 | `railway logout` / `whoami` | `modula-deploy logout` / `whoami` |
 | `railway link` / `unlink` | `modula-deploy link [--project P] [-e ENV]` / `unlink` |
 | `railway connect [service]` | `modula-deploy connect [service] [-e ENV]` |
-| `railway up`, `logs`, `variables`, `domain`, `redeploy` | Not in the CLI yet: dashboard or [API](api.md) |
+| `railway up [-d] [--ci]` | `modula-deploy up [-d] [--ci]`: uploads the directory (honors `.gitignore` and `.modulaignore`) and deploys it |
+| `railway logs`, `variables`, `domain`, `redeploy` | The same commands in `modula-deploy` (see [CLI](cli.md)) |

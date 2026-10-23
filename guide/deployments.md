@@ -9,7 +9,8 @@ queued → building → deploying → active ──▶ crashed ──▶ active
             failed     failed     removed (replaced by a newer deployment)
 ```
 
-Image deployments start at `deploying`; repository deployments at `building`.
+Image deployments start at `deploying`; repository and upload deployments at
+`building`.
 
 ## What triggers a deployment
 
@@ -20,6 +21,47 @@ Image deployments start at `deploying`; repository deployments at `building`.
   the current settings and variables, and the branch's latest commit.
 - **Deploy changes** in the pending-changes bar (below).
 - **Redeploy** and **Rollback** on a past deployment.
+- **`modula-deploy up`**: files uploaded from your machine (below).
+
+## Uploaded sources (`modula-deploy up`)
+
+`up` deploys local files without GitHub. The CLI packs the directory
+(honoring `.gitignore` and `.modulaignore`; never `.git/` or `.modula/`),
+uploads it, and deploys it. The deployment builds those files exactly like a
+repository checkout: the service's builder, root directory, build and start
+commands, and any `railway.toml` / `railway.json` / `modula.toml` in them.
+The service's configured source is not changed; the deployment is listed as
+**Uploaded via CLI**, with the local branch, commit and "uncommitted changes"
+when the CLI found a Git checkout.
+
+The API, for other clients:
+
+1. `POST /api/service-instances/{id}/uploads` with the gzipped tarball as the
+   body (`Content-Type: application/gzip`; optional `x-content-sha256` with
+   its hex SHA-256, rejected on mismatch). The archive must hold one
+   top-level directory (it is stripped, like GitHub tarballs). Returns
+   `{ id, sha256, sizeBytes }`. Needs the Deployer role (like deploying); 60 uploads per user per
+   hour, 2 at a time per workspace, `413` over the size limit
+   (`MODULA_UPLOAD_MAX_MB`, default 200).
+2. `POST /api/service-instances/{id}/deployments` with
+   `{ "source": { "upload": "<id>" }, "message": "…", "git": { "commit", "branch", "subject", "dirty" } }`
+   (`message` and `git` optional, display only). The deployment's `trigger`
+   is `upload` and its `sourceKind` `upload`.
+
+Uploads are never downloadable by clients. The server that builds the
+deployment downloads the archive from the server with a short-lived token
+bound to that deployment (valid only while it is building, for at most 6
+hours), verifies its
+SHA-256 and unpacks it safely (no absolute paths, `..`, links leaving the
+tree, devices or hard links; size and file-count limits).
+
+**Retention.** Archives are stored on the server's disk
+(`MODULA_UPLOADS_DIR`, default `uploads/` next to the master key; with several
+server replicas, use a shared volume). An upload is deleted 24 hours after it
+was made unless a running deployment or one of the service's 5 newest
+deployments uses it; until then **Redeploy** and **Rollback** rebuild it
+(`uploadAvailable` on the deployment). After that, upload again. Nodes reach
+the server at `MODULA_INTERNAL_URL` (default `MODULA_PUBLIC_URL`) to download.
 
 ## Pending changes
 
@@ -38,8 +80,9 @@ that references it).
 
 For each new deployment the server it runs on:
 
-1. **Builds** (repository sources): fetches the commit and builds with Railpack
-   or your Dockerfile. Build output is in the build log.
+1. **Builds** (repository and upload sources): fetches the commit (or the
+   uploaded files) and builds with Railpack or your Dockerfile. Build output is
+   in the build log.
 2. **Pulls** the image (image sources).
 3. Runs the **pre-deploy command**, if set (below).
 4. **Starts** the new container next to the old one.
@@ -92,8 +135,8 @@ container recovers.
 
 | Action | What it does | Works on |
 |---|---|---|
-| **Redeploy** | Deploys the same source again: the same image, or the same commit rebuilt. Settings come from that deployment's snapshot; variables are the current ones. | Any deployment |
-| **Rollback** | Rebuilds and redeploys that deployment's commit. Source code is never stored, so a rollback is always a fresh build of the commit. | Deployments built from a Git commit only (use Redeploy for images) |
+| **Redeploy** | Deploys the same source again: the same image, the same commit rebuilt, or the same upload rebuilt. Settings come from that deployment's snapshot; variables are the current ones. | Any deployment (uploads: while kept) |
+| **Rollback** | Rebuilds and redeploys that deployment's commit or upload. Repository code is never stored, so a rollback is always a fresh build of the commit. | Deployments built from a Git commit, or from an upload that is still kept (use Redeploy for images) |
 | **Restart** | Restarts the running container in place (same deployment, same image). | `active` or `crashed` deployments |
 | **Remove** | Stops the deployment and removes its container. | Running deployments (`queued` … `crashed`) |
 

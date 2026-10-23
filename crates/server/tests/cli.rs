@@ -57,9 +57,15 @@ where
     panic!("timed out waiting for {what}");
 }
 
-/// HTTP + node servers, one node (fake runtime, fake database), a token.
+/// HTTP + node servers, one node (fake runtime, fake database, a fake
+/// builder that really downloads and unpacks sources), a token.
 async fn setup(pool: PgPool) -> Setup {
-    let app = TestApp::new(pool);
+    // Nodes download uploaded sources from the real HTTP listener.
+    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}/", http.local_addr().unwrap());
+    let mut cfg = config();
+    cfg.internal_url = Some(api_url.parse().unwrap());
+    let app = TestApp::with_config(pool, cfg);
     let admin = app.setup_admin().await;
     let stop = CancellationToken::new();
 
@@ -70,8 +76,6 @@ async fn setup(pool: PgPool) -> Setup {
         grpc,
         stop.clone(),
     ));
-    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let api_url = format!("http://{}/", http.local_addr().unwrap());
     let router = app.router.clone();
     tokio::spawn(async move {
         axum::serve(
@@ -98,6 +102,13 @@ async fn setup(pool: PgPool) -> Setup {
     let db = Arc::new(FakeDb::default());
     let caps = modula_node::reconcile::Capabilities {
         db: Some(db.clone()),
+        build: Some(modula_node::build::BuildSupport {
+            builder: Arc::new(modula_node::build::FakeBuilder {
+                fetch: true,
+                ..Default::default()
+            }),
+            logs: modula_node::build::BuildLogs::new(node_dir.join("build-logs")).unwrap(),
+        }),
         ..Default::default()
     };
     tokio::spawn(modula_node::session::run(
@@ -356,4 +367,112 @@ async fn add_database_set_variables_deploy_status_and_query(pool: PgPool) {
     let (r, _) = s.run(&["volume", "delete", "--yes"]).await;
     let e = format!("{:#}", r.unwrap_err());
     assert!(e.contains("dashboard"), "{e}");
+}
+
+/// `up`: the directory is packed (ignore files honored), uploaded, built by
+/// the node from a signed download, and deployed; then redeployed from the
+/// kept upload.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn up_uploads_local_files_and_deploys_them(pool: PgPool) {
+    let s = setup(pool).await;
+    s.app.create_workspace(&s.admin, "team").await;
+    s.json(&["init", "web", "--workspace", "team"]).await;
+    // An image service: `up` builds the upload anyway, and leaves its source alone.
+    s.json(&["add", "--image", "nginx:alpine", "--name", "site"])
+        .await;
+
+    // The app lives in a subdirectory (the project dir also holds the CLI's
+    // config file, which must never be uploaded anyway).
+    let app = s.dir.join("site");
+    let write = |rel: &str, body: &[u8]| {
+        let p = app.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write("package.json", b"{}");
+    write("src/server.js", b"require('http')");
+    write(".gitignore", b"*.log\nnode_modules/\n");
+    write("debug.log", b"noise");
+    write("node_modules/dep/index.js", b"x");
+    write(".modulaignore", b"secret.txt\n");
+    write("secret.txt", b"hunter2");
+    // Over 1 MB of incompressible bytes: the global body limit doesn't apply.
+    let mut big = Vec::with_capacity(1_500_000);
+    let mut x: u32 = 1;
+    for _ in 0..1_500_000 {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        big.push(x as u8);
+    }
+    write("assets/blob.bin", &big);
+
+    let d = s
+        .json(&["up", "--path", "site", "--ci", "-m", "First upload"])
+        .await;
+    assert_eq!(d["status"], "active", "{d}");
+    assert_eq!(d["sourceKind"], "upload", "{d}");
+    assert_eq!(d["source"], "Uploaded via CLI");
+    assert_eq!(d["trigger"], "upload");
+    assert_eq!(d["commitMessage"], "First upload");
+    assert_eq!(d["uploadAvailable"], true);
+    let id = d["id"].as_str().unwrap().to_owned();
+
+    // The node built exactly the packed files.
+    let logs = s.ok(&["logs", "--deployment", &id, "--build"]).await;
+    for want in [
+        "file package.json",
+        "file src/server.js",
+        "file .gitignore",
+        "file assets/blob.bin",
+    ] {
+        assert!(logs.contains(want), "{want} missing:\n{logs}");
+    }
+    for gone in ["debug.log", "node_modules", "secret.txt", "config.toml"] {
+        assert!(!logs.contains(gone), "{gone} was uploaded:\n{logs}");
+    }
+
+    // The service's own source is unchanged.
+    let config: Value = sqlx::query_scalar(
+        "SELECT i.config FROM service_instances i JOIN services s ON s.id = i.service_id WHERE s.name = 'site'",
+    )
+    .fetch_one(s.app.db())
+    .await
+    .unwrap();
+    assert_eq!(config["source"]["type"], "image", "{config}");
+
+    // A day later the upload is still kept: its deployment is live (and
+    // among the service's newest), so a redeploy can rebuild it.
+    sqlx::query("UPDATE source_uploads SET created_at = now() - interval '25 hours'")
+        .execute(s.app.db())
+        .await
+        .unwrap();
+    let purged = modula_server::deploy::upload::purge(&s.app.state)
+        .await
+        .unwrap();
+    assert_eq!(purged, 0);
+    let listed = s.json(&["deployment", "list"]).await;
+    assert_eq!(listed[0]["uploadAvailable"], true, "{listed}");
+
+    // The upload is kept: a redeploy rebuilds it.
+    let again = s.json(&["redeploy", "--wait"]).await;
+    assert_eq!(again["status"], "active", "{again}");
+    assert_eq!(again["sourceKind"], "upload");
+
+    // Once purged, it can't be rebuilt.
+    sqlx::query("UPDATE source_uploads SET purged_at = now()")
+        .execute(s.app.db())
+        .await
+        .unwrap();
+    let (r, _) = s.run(&["redeploy"]).await;
+    let e = format!("{:#}", r.unwrap_err());
+    assert!(e.contains("no longer kept"), "{e}");
+
+    // The audit log has the upload.
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'deployment.upload'")
+            .fetch_one(s.app.db())
+            .await
+            .unwrap();
+    assert_eq!(n, 1);
 }

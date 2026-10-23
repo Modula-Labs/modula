@@ -8,16 +8,19 @@ description: Use when deploying, inspecting or managing apps on a Modula Deploy 
 Modula Deploy runs projects → environments → services → deployments on the
 user's own servers. You operate it with an API token through the
 `modula-deploy` CLI (projects, services, variables, deploys, logs, domains,
-databases; always pass `--json` when you parse output) and, for what the CLI
-lacks (service settings), the HTTP API. References:
+databases; always pass `--json` when you parse output), `modula.toml` config
+as code (`config plan`/`config apply`) for settings across services and
+environments, and the HTTP API for the rest. References:
 [cli](references/cli.md), [api](references/api.md),
 [variables](references/variables.md).
 
 ## Auth
 
 - Expect `MODULA_URL` (e.g. `https://deploy.example.com`) and `MODULA_TOKEN`
-  (`mdt_…`) in the environment, or a saved login
-  (`~/.config/modula-deploy/config.toml`). Check with `modula-deploy whoami`.
+  (`mdt_…`) in the environment, or a saved login: this directory's
+  `.modula/token` (from `login --local`) or `~/.config/modula-deploy/config.toml`,
+  in that order after `MODULA_TOKEN`. Check with `modula-deploy whoami`.
+  Never commit `.modula/` (the CLI adds it to `.gitignore` itself).
 - If there's no token, ask the user to create one (it needs their dashboard
   session with re-authentication; you cannot mint one) and to export it
   themselves. Suggest a workspace-scoped token with an expiry.
@@ -38,7 +41,8 @@ the user in the dashboard; don't retry or look for workarounds:
 - deleting a workspace, project, environment, service or volume
   (`modula-deploy volume delete` always fails with a token)
 - revealing a variable value (values are write-only over the API; the CLI
-  shows `********`)
+  shows `********`). Exception: `config plan`/`config pull` read non-sealed
+  values through an audited Member route; never print them.
 - restoring or deleting a backup, deleting a backup target
 - rotating a database password, creating join tokens or tokens
 - connecting Cloudflare/Hetzner, creating or deleting Hetzner servers (these
@@ -70,7 +74,17 @@ environment). The CLI resolves it from `-p/-e/-s` or `.modula/project.toml`
 GitHub App). Names: lowercase letters, digits, `-`. The service exists in
 every environment; nothing is deployed yet.
 
-**Change settings** (Member, API only): `GET /api/service-instances/{id}` →
+**Config as code** (Member): if the repo has `modula.toml` (or the user wants
+one), change settings, variables, domains and volumes there, not by hand:
+`modula-deploy config validate`, `config plan --json` (show the user the
+plan; secrets are masked), then `config apply --yes [--deploy]` after they
+agree. `config pull` writes the file from the server (no secret values).
+Secrets are `NAME = { secret = true }` with values in
+`.modula/secrets.<env>.env` or `--from-env`; settings left out reset to
+defaults; unlisted variables are deleted unless in `preserve`. Deleting
+services/volumes stays manual (plan lists it). Guide: `guide/config-as-code.md`.
+
+**Change settings** (Member) without a file: `GET /api/service-instances/{id}` →
 edit `.config` → `PATCH` with `{"config": …}` (send the whole object; unknown
 fields are rejected). Field reference: [api → settings](references/api.md#service-settings-config).
 
@@ -85,9 +99,12 @@ shows names only. See [variables](references/variables.md).
 **Deploy** (Deployer): settings and variable edits stay pending
 (`status --json` → `pendingChanges`). `modula-deploy deploy -s api --wait`
 deploys one service and exits 1 if it fails; `deploy --all --wait` deploys
-every service with pending changes. `up` = deploy the selected service and
-follow its build. **Nothing uploads local files**: deploys build the
-configured image or the branch's latest commit, so push first.
+every service with pending changes; they build the configured image or the
+branch's latest commit, so push first. `up --ci` = upload the current
+directory (`--path DIR`; honors `.gitignore`/`.modulaignore`) to the selected
+service, build and deploy it without GitHub, stream the build, exit 1 unless
+it goes live. It doesn't change the service's configured source (the next
+`deploy` deploys that again).
 
 **Status and logs**: `status --json`, `deployment list --json` (newest
 first, with `error` on failures), and bounded logs:
@@ -95,8 +112,8 @@ first, with `error` on failures), and bounded logs:
 Never use `logs -f` in automation; use `deploy --wait` to wait.
 
 **Rollback / redeploy / restart / down** (Deployer):
-`modula-deploy rollback <deploymentId> --yes --wait` (Git-built only; rebuilds
-that commit), `redeploy --wait` (same source, current variables), `restart`
+`modula-deploy rollback <deploymentId> --yes --wait` (Git-built, or uploads
+still kept 24 h / among the 5 newest; rebuilds that source), `redeploy --wait` (same source, current variables), `restart`
 (active/crashed only), `down --yes` (removes the live deployment). Pick the
 target from `deployment list` and confirm with the user first.
 
@@ -153,6 +170,8 @@ serving HTTPS, then proxied with SSL mode Full (strict).
 | "Pre-deploy command exited with code N" | Migration failed; the error has the output tail; old deployment still serves. |
 | Variable empty at runtime | Reference to a missing variable/service resolves to `""`; service names in references are lowercase. |
 | Change has no effect | It's pending: `modula-deploy deploy` (or `--all`). |
+| `config apply`: "is a secret that doesn't exist yet" | Ask the user to put the value in `.modula/secrets.<env>.env` (or export it and pass `--from-env`); never ask for it in chat. |
+| `config plan` keeps showing a change | A sealed variable written as a plain value (write `{ secret = true, sealed = true }`), or a setting the server normalizes: check `--json` `from`/`to`. |
 | Generated domain fails "set MODULA_APPS_DOMAIN" | Instance has no apps domain; use a custom domain or ask the admin. |
 | Custom domain stuck `pending` | TXT record missing at `_modula-challenge.<host>`; DNS can take minutes. |
 | `connect` keeps only a tunnel | Not Postgres, or no client installed: connect a client to the printed port. |

@@ -36,6 +36,8 @@ hex = "0.4"
 http = "1"
 getrandom = "0.4"
 globset = "0.4"
+# `modula-deploy up`: walks a directory honoring .gitignore / .modulaignore.
+ignore = "0.4"
 redis = { version = "1", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
 regex = "1"
 prost = "0.14"
