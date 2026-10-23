@@ -39,7 +39,7 @@ pub struct Config {
     pub cloudflare_api: Url,
     /// Hetzner Cloud's API, ending in `/v1` (a mock in tests).
     pub hetzner_api: Url,
-    /// Where source archives from `modula-deploy up` are kept (one file per
+    /// Where source archives from `modula up` are kept (one file per
     /// upload, deleted by the retention job). Default: `uploads/` next to the
     /// master key.
     pub uploads_dir: PathBuf,

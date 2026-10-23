@@ -1,4 +1,4 @@
-//! The node's end of private TCP tunnels (`modula-deploy connect`).
+//! The node's end of private TCP tunnels (`modula connect`).
 //!
 //! The control plane asks for a tunnel to one deployment's container; the node
 //! dials that container on its environment network (its own address from the

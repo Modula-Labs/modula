@@ -1,6 +1,6 @@
-# CLI: `modula-deploy`
+# CLI: `modula`
 
-`modula-deploy` drives Modula Deploy from a terminal, a CI job or an AI agent:
+`modula` drives Modula Deploy from a terminal, a CI job or an AI agent:
 projects, services, variables, deploys, logs, domains, volumes, TCP proxies
 and databases. It mirrors the Railway CLI where the platforms line up.
 
@@ -13,8 +13,8 @@ Databases    db query  db tables  connect
 Shell        completion  docs
 ```
 
-`modula-deploy --help`, `modula-deploy <command> --help`, `--version`, and
-`modula-deploy docs` (the full reference as Markdown, generated from the
+`modula --help`, `modula <command> --help`, `--version`, and
+`modula docs` (the full reference as Markdown, generated from the
 binary itself) work everywhere.
 
 ## Install
@@ -23,13 +23,13 @@ Prebuilt CLI binaries aren't published yet. Build it from the repository
 (Rust toolchain required):
 
 ```bash
-cargo install --path crates/cli      # installs the `modula-deploy` binary
+cargo install --path crates/cli      # installs the `modula` binary
 ```
 
 Shell completion:
 
 ```bash
-modula-deploy completion zsh > "${fpath[1]}/_modula-deploy"   # bash, zsh, fish, elvish, powershell
+modula completion zsh > "${fpath[1]}/_modula"   # bash, zsh, fish, elvish, powershell
 ```
 
 ## Authentication
@@ -38,7 +38,7 @@ Create an API token (it starts with `mdt_`); see
 [security → API tokens](security.md#api-tokens). Then either log in once:
 
 ```bash
-modula-deploy login --url https://deploy.example.com
+modula login --url https://deploy.example.com
 # API token (mdt_…): ********   (prompted without echo)
 ```
 
@@ -47,7 +47,7 @@ or, for CI and agents, set environment variables and skip `login` entirely:
 ```bash
 export MODULA_URL=https://deploy.example.com
 export MODULA_TOKEN=mdt_...
-modula-deploy whoami
+modula whoami
 ```
 
 | Variable | Effect |
@@ -58,8 +58,8 @@ modula-deploy whoami
 | `NO_COLOR` | No colors (they're also off when stdout isn't a terminal). |
 | `XDG_CONFIG_HOME` | Where the config lives (default `~/.config`). |
 
-The login is saved to `$XDG_CONFIG_HOME/modula-deploy/config.toml` (or
-`~/.config/modula-deploy/config.toml`), readable only by you (mode 0600).
+The login is saved to `$XDG_CONFIG_HOME/modula/config.toml` (or
+`~/.config/modula/config.toml`), readable only by you (mode 0600).
 
 **A token for one directory.** `login --local` (or `link --token`) saves the
 login in `.modula/token` in the linked directory (else the current one)
@@ -112,7 +112,7 @@ client's exit code.
 `link`, `init`, `service` and `environment` write `.modula/project.toml`:
 
 ```toml
-# Linked by modula-deploy; safe to commit, but usually gitignored.
+# Linked by modula; safe to commit, but usually gitignored.
 project = "k3x9…"
 project_name = "shop"
 environment = "production"
@@ -197,7 +197,7 @@ deployment** (`queued`, `building`, `deploying`, `active`, `failed`,
 its source (image, repository or database template) and the deployment id.
 
 ```bash
-modula-deploy status --json | jq '.services[] | {name, status, url}'
+modula status --json | jq '.services[] | {name, status, url}'
 ```
 
 ### `deployment list [-l, --limit <N>]` (alias `deployments ls`)
@@ -218,7 +218,7 @@ so they fail with "the server running this deployment is offline" when it is.
 ### `add`
 
 ```
-modula-deploy add (--database <ENGINE> | --image <REF> | --repo <OWNER/NAME> [--branch <BRANCH>])
+modula add (--database <ENGINE> | --image <REF> | --repo <OWNER/NAME> [--branch <BRANCH>])
                   [--name <NAME>] [--port <PORT>] [-v, --variables KEY=VALUE]…
 ```
 
@@ -353,9 +353,9 @@ prompts, streams the build logs, exits non-zero unless the deployment goes
 live, and prints the last runtime logs of a crash.
 
 ```bash
-modula-deploy up                         # the selected service, from here
-modula-deploy up --path apps/web -s web -m "Hotfix"
-MODULA_TOKEN=... modula-deploy up --ci -p shop -e staging -s api
+modula up                         # the selected service, from here
+modula up --path apps/web -s web -m "Hotfix"
+MODULA_TOKEN=... modula up --ci -p shop -e staging -s api
 ```
 
 Uploads are kept for 24 hours, and as long as one of the service's 5 newest
@@ -437,8 +437,8 @@ The service defaults to `-s`, else the linked service if it is a database,
 else the project's only database.
 
 ```bash
-modula-deploy db query "select id, email from users order by id desc limit 5"
-modula-deploy db query "update users set plan = 'pro' where id = 42" --write --yes
+modula db query "select id, email from users order by id desc limit 5"
+modula db query "update users set plan = 'pro' where id = 42" --write --yes
 ```
 
 ### `db tables`
@@ -474,9 +474,9 @@ keeps the tunnel open and you connect with the service's credentials yourself
 (copy them from the service's Variables tab).
 
 ```bash
-modula-deploy connect                       # psql into the only database
-modula-deploy connect postgres -e staging   # a specific service and environment
-modula-deploy connect --tunnel-only -P 5433 # for TablePlus, DBeaver, pgAdmin…
+modula connect                       # psql into the only database
+modula connect postgres -e staging   # a specific service and environment
+modula connect --tunnel-only -P 5433 # for TablePlus, DBeaver, pgAdmin…
 ```
 
 Limits: a tunnel closes after 30 minutes without traffic; at most 16 open
@@ -496,15 +496,15 @@ Prints every command and flag as Markdown, generated from the binary.
 ## A typical session
 
 ```bash
-modula-deploy init shop
-modula-deploy add --database postgres
-modula-deploy add --repo acme/api --port 3000
-modula-deploy variables set 'DATABASE_URL=${{postgres.DATABASE_URL}}'
-modula-deploy up                      # uploads this directory to api and waits
-modula-deploy deploy -s postgres
-modula-deploy domain                  # https://api-x1y2.apps.example.com
-modula-deploy status
-modula-deploy logs -f
+modula init shop
+modula add --database postgres
+modula add --repo acme/api --port 3000
+modula variables set 'DATABASE_URL=${{postgres.DATABASE_URL}}'
+modula up                      # uploads this directory to api and waits
+modula deploy -s postgres
+modula domain                  # https://api-x1y2.apps.example.com
+modula status
+modula logs -f
 ```
 
 ## Not in the CLI yet

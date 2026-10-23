@@ -19,7 +19,7 @@ pub mod prefix {
     pub const MFA_PENDING: &str = "mcm";
     pub const SETUP: &str = "mcsetup";
     pub const API: &str = "mcp";
-    /// Personal API tokens for the `modula-deploy` CLI and automation.
+    /// Personal API tokens for the `modula` CLI and automation.
     pub const API_TOKEN: &str = "mdt";
     pub const NODE_JOIN: &str = "mcj";
 }

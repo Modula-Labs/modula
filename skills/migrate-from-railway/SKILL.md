@@ -1,11 +1,11 @@
 ---
 name: migrate-from-railway
-description: Use when porting a Railway project to Modula Deploy - reading railway.json / railway.toml / .railway config, mapping Railway services, settings and RAILWAY_* variables, recreating variables with ${{service.VAR}} references, and moving Postgres data with pg_dump/pg_restore through a modula-deploy tunnel. Pair with the modula-deploy skill for the API and CLI details.
+description: Use when porting a Railway project to Modula Deploy - reading railway.json / railway.toml / .railway config, mapping Railway services, settings and RAILWAY_* variables, recreating variables with ${{service.VAR}} references, and moving Postgres data with pg_dump/pg_restore through a modula tunnel. Pair with the modula skill for the API and CLI details.
 ---
 
 # Migrate a Railway project to Modula Deploy
 
-Use the `modula-deploy` skill for auth, ids and API calls. This skill is the
+Use the `modula` skill for auth, ids and API calls. This skill is the
 migration plan. Work service by service, staging before production, and
 confirm each step that changes the target or touches data.
 
@@ -53,7 +53,7 @@ in the service config instead), `deploy.numReplicas`, `deploy.cronSchedule`,
 `deploy.sleepApplication`, `environments.*` overrides.
 
 **Prefer one project file:** write `modula.toml` at the repo root (guide:
-`guide/config-as-code.md`) and apply it with `modula-deploy config plan` /
+`guide/config-as-code.md`) and apply it with `modula config plan` /
 `config apply`. It covers every service, settings, variables, domains,
 volumes and per-environment overrides, which Railway spreads over
 `railway.toml` (one service's build/deploy), `.railway/railway.ts` (IaC) and
@@ -75,21 +75,21 @@ the dashboard. Mapping into `[services.<name>]`:
 | `railway.ts` services / variables / domains / volumes | `[services.<name>]` `source`, `variables`, `domains`, `volume` |
 | Railway database services | `template = "postgres"` (its passwords/URLs are created for you) |
 | Secrets | `NAME = { secret = true }`; values in `.modula/secrets.<env>.env` (gitignored) or `--from-env` |
-| `railway config plan` / `apply` | `modula-deploy config plan` / `config apply` (unlisted variables are deleted unless in `preserve`) |
+| `railway config plan` / `apply` | `modula config plan` / `config apply` (unlisted variables are deleted unless in `preserve`) |
 
 Rules that bite: settings left out reset to defaults; keys are camelCase
 (`healthcheck_path` is rejected with a hint); service names lowercase. Once
 the build/deploy keys live in `modula.toml`, delete them from `railway.toml`
 so there's one source of truth (a project `modula.toml` doesn't stop the
 builder from reading `railway.toml`, and `railway.toml` settings override the
-service's at build time). Run `modula-deploy config validate`, then `plan`
+service's at build time). Run `modula config validate`, then `plan`
 until it shows exactly the intended changes.
 
 ## 3. Recreate
 
-With `modula.toml` (preferred): `modula-deploy init <project>`, write the
+With `modula.toml` (preferred): `modula init <project>`, write the
 file, put secret values in `.modula/secrets.<env>.env` (names only in chat),
-`modula-deploy config plan --all-envs`, review with the user, then
+`modula config plan --all-envs`, review with the user, then
 `config apply --all-envs --yes` and deploy (`--deploy`, or step 6). Apply
 creates missing environments (e.g. `staging`) and template services with
 their volumes. By hand (API/CLI):
@@ -120,7 +120,7 @@ data written after the dump is lost).
 pg_dump --format=custom --no-owner --no-acl "$RAILWAY_DB_URL" -f /tmp/railway.dump
 
 # Target: private tunnel, no public port
-modula-deploy connect postgres -e production --tunnel-only -P 54329 > /tmp/tunnel.log 2>&1 &
+modula connect postgres -e production --tunnel-only -P 54329 > /tmp/tunnel.log 2>&1 &
 TUNNEL=$!; sleep 2
 TARGET=$(sed -n 's/^Connection string: //p' /tmp/tunnel.log)   # has the password; never print
 pg_restore --no-owner --no-acl --exit-on-error --dbname "$TARGET" /tmp/railway.dump

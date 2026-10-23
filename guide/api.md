@@ -1,7 +1,7 @@
 # HTTP API
 
 Everything the dashboard does goes through a JSON API under `/api` on your
-instance. The `modula-deploy` CLI uses the same API, and so can your scripts.
+instance. The `modula` CLI uses the same API, and so can your scripts.
 
 ## Authenticate with an API token
 

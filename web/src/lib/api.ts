@@ -329,7 +329,7 @@ export interface Deployment {
   buildStartedAt: string | null;
   buildFinishedAt: string | null;
   sourceKind?: "github" | "image" | "upload";
-  /** Uploads (`modula-deploy up`): the local branch, whether uncommitted changes were included,
+  /** Uploads (`modula up`): the local branch, whether uncommitted changes were included,
    * and whether the files are still kept (so it can be redeployed or rolled back to). */
   sourceBranch?: string | null;
   sourceDirty?: boolean | null;

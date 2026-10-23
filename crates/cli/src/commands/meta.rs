@@ -8,7 +8,7 @@ use crate::context::Ctx;
 
 pub fn completion(ctx: &Ctx, shell: clap_complete::Shell) {
     let mut buf = Vec::new();
-    clap_complete::generate(shell, &mut Cli::command(), "modula-deploy", &mut buf);
+    clap_complete::generate(shell, &mut Cli::command(), "modula", &mut buf);
     ctx.out.line(String::from_utf8_lossy(&buf).trim_end());
 }
 
@@ -107,7 +107,7 @@ fn document(cmd: &Command, path: &str, out: &mut String, depth: usize) {
 pub fn reference() -> String {
     let cmd = Cli::command();
     let mut out = format!(
-        "# modula-deploy {}\n\n{}\n\n## Global flags\n\n",
+        "# modula {}\n\n{}\n\n## Global flags\n\n",
         cmd.get_version().unwrap_or_default(),
         cmd.get_about().map(|a| a.to_string()).unwrap_or_default()
     );
@@ -118,7 +118,7 @@ pub fn reference() -> String {
         out.push_str(&format!("- `{}`: {}\n", flag(a), help(a).trim()));
     }
     out.push_str("\n## Commands\n");
-    document(&cmd, "modula-deploy", &mut out, 0);
+    document(&cmd, "modula", &mut out, 0);
     out
 }
 
@@ -132,9 +132,9 @@ mod tests {
     fn the_reference_covers_every_command() {
         let text = super::reference();
         for needle in [
-            "### `modula-deploy variables set`",
-            "### `modula-deploy environment new`",
-            "### `modula-deploy db query`",
+            "### `modula variables set`",
+            "### `modula environment new`",
+            "### `modula db query`",
             "- `--json`:",
             "- `-s, --service <SERVICE>`:",
             "Env: MODULA_SERVICE.",

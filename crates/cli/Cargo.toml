@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "modula-deploy: the Modula Deploy command line"
+description = "modula: the Modula Deploy command line"
 
 [[bin]]
-name = "modula-deploy"
+name = "modula"
 path = "src/main.rs"
 
 [dependencies]

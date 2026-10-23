@@ -210,7 +210,7 @@ pub fn generate(project: &str, envs: &[RemoteEnv]) -> anyhow::Result<Pulled> {
     };
 
     let mut text = String::from(
-        "# Modula Deploy config as code: `modula-deploy config plan` shows what\n\
+        "# Modula Deploy config as code: `modula config plan` shows what\n\
          # `config apply` would change. Secret values are never written here: put\n\
          # them in .modula/secrets.<environment>.env (gitignored) or pass --from-env.\n\n",
     );

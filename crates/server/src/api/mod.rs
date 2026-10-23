@@ -96,7 +96,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .post("/api/deployments/{deployment_id}/redeploy", Resource(Action::DeploymentRollout), deployments::redeploy)
         .post("/api/deployments/{deployment_id}/rollback", Resource(Action::DeploymentRollout), deployments::rollback)
         .post("/api/deployments/{deployment_id}/restart", Resource(Action::DeploymentRollout), deployments::restart)
-        // Source uploads (`modula-deploy up`): gzipped tarball in, deployed with
+        // Source uploads (`modula up`): gzipped tarball in, deployed with
         // POST …/deployments {source: {upload}}. Never downloadable by clients.
         .post("/api/service-instances/{instance_id}/uploads", Resource(Action::DeploymentCreate), uploads::create)
         // Nodes fetch an upload they are building; authorized by a signed,
@@ -115,7 +115,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .delete("/api/volumes/{volume_id}", Resource(Action::VolumeDelete), storage::delete_volume)
         .post("/api/service-instances/{instance_id}/tcp-proxy", Resource(Action::TcpProxyCreate), storage::create_tcp_proxy)
         .delete("/api/tcp-proxies/{tcp_proxy_id}", Resource(Action::TcpProxyDelete), storage::delete_tcp_proxy)
-        // Private TCP tunnel to the running container (WebSocket; `modula-deploy connect`)
+        // Private TCP tunnel to the running container (WebSocket; `modula connect`)
         .get("/api/service-instances/{instance_id}/tunnel", Resource(Action::TunnelOpen), crate::tunnel::open)
         // Backups: storage targets per workspace, schedules and backups per database
         .get("/api/workspaces/{workspace_id}/backup-targets", Resource(Action::BackupTargetList), backups::list_targets)

@@ -1,4 +1,4 @@
-//! `modula-deploy`, the Modula Deploy command line: everything the dashboard
+//! `modula`, the Modula Deploy command line: everything the dashboard
 //! does with an API token, from a terminal or an AI agent.
 //!
 //! [`cli`] defines the command line, [`commands`] runs it (one module per

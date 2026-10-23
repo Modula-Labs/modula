@@ -3,16 +3,16 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 const AFTER_HELP: &str = "\
-Most commands act on the linked project (`modula-deploy link`), its environment
+Most commands act on the linked project (`modula link`), its environment
 and its service; -p/-e/-s override them. Read commands take --json for
-machine-readable output. Run `modula-deploy docs` for the full reference.
+machine-readable output. Run `modula docs` for the full reference.
 
 Exit codes: 0 ok, 1 error, 2 usage (including a missing --yes when stdin
 isn't a terminal).";
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "modula-deploy",
+    name = "modula",
     version,
     about = "Modula Deploy from the command line",
     after_help = AFTER_HELP,
@@ -487,7 +487,7 @@ mod tests {
     use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(std::iter::once("modula-deploy").chain(args.iter().copied()))
+        Cli::try_parse_from(std::iter::once("modula").chain(args.iter().copied()))
     }
 
     #[test]

@@ -33,7 +33,7 @@ impl std::fmt::Display for ApiError {
         match (self.status, self.code.as_str()) {
             (401, _) => write!(
                 f,
-                "the API token was rejected (expired or revoked?); run `modula-deploy login`"
+                "the API token was rejected (expired or revoked?); run `modula login`"
             ),
             (_, "sudo_required") => write!(
                 f,

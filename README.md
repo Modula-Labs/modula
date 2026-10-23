@@ -2,7 +2,7 @@
 
 Self-hostable PaaS with a Railway-style workflow: project canvas, environments,
 staged changes, GitHub auto-deploys, variables, domains, database backups, and
-the `modula-deploy` CLI. Rust control plane + `modula-node` on each server; Docker runtime,
+the `modula` CLI. Rust control plane + `modula-node` on each server; Docker runtime,
 Caddy edge, Railpack builds.
 
 Status: **C1b — edge and canvas (in progress).** On top of C0 (auth, 2FA, sudo

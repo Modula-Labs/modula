@@ -6,7 +6,7 @@
 #
 # Output (the layout install.sh downloads):
 #   modula-server-linux-<arch>  modula-node-linux-<arch>  caddy-linux-<arch>
-#   modula-deploy-linux-<arch> (the CLI; not installed on servers; install-cli.sh)
+#   modula-linux-<arch> (the CLI; not installed on servers; install-cli.sh)
 #   SHA256SUMS  SHA256SUMS.sig  (Ed25519 over SHA256SUMS)
 #
 # The signing key never enters a container or the repo. Default location:
@@ -39,7 +39,7 @@ echo "web: building the dashboard (embedded into modula-server)"
 (cd web && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
 
 for arch in $ARCHES; do
-  echo "$arch: compiling modula-server, modula-node and the modula-deploy CLI"
+  echo "$arch: compiling modula-server, modula-node and the modula CLI"
   docker run --rm --platform "linux/$arch" \
     -v "$PWD":/src:ro \
     -v modula-cargo-registry:/usr/local/cargo/registry \
@@ -52,7 +52,7 @@ for arch in $ARCHES; do
       cargo build -q --release --locked -p modula-server -p modula-node -p modula-cli
       cp /target/release/modula-server /out/modula-server-linux-$arch
       cp /target/release/modula-node /out/modula-node-linux-$arch
-      cp /target/release/modula-deploy /out/modula-deploy-linux-$arch
+      cp /target/release/modula /out/modula-linux-$arch
     "
 
   echo "$arch: building Caddy $CADDY_VERSION with ${CADDY_PLUGINS[*]}"

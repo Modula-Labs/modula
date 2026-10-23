@@ -1,4 +1,4 @@
-//! Where the CLI keeps state: the login (`~/.config/modula-deploy/config.toml`,
+//! Where the CLI keeps state: the login (`~/.config/modula/config.toml`,
 //! mode 0600), per-directory project links (`.modula/project.toml`) and an
 //! optional per-directory login (`.modula/token`, mode 0600). `.modula/` is
 //! kept out of git: see [`ensure_gitignore`].
@@ -31,7 +31,7 @@ pub struct Login {
     pub token: String,
 }
 
-/// `$XDG_CONFIG_HOME/modula-deploy/config.toml`, else `~/.config/…`.
+/// `$XDG_CONFIG_HOME/modula/config.toml`, else `~/.config/…`.
 pub fn config_path() -> anyhow::Result<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
@@ -42,7 +42,7 @@ pub fn config_path() -> anyhow::Result<PathBuf> {
             PathBuf::from(home).join(".config")
         }
     };
-    Ok(base.join("modula-deploy").join("config.toml"))
+    Ok(base.join("modula").join("config.toml"))
 }
 
 pub fn load(path: &Path) -> anyhow::Result<Config> {
@@ -111,11 +111,11 @@ pub fn login(
     let url = env_url
         .filter(|v| !v.is_empty())
         .or_else(|| cfg.url.clone())
-        .context("not logged in: run `modula-deploy login --url https://your-instance`")?;
+        .context("not logged in: run `modula login --url https://your-instance`")?;
     let token = env_token
         .filter(|v| !v.is_empty())
         .or_else(|| cfg.token.clone())
-        .context("not logged in: run `modula-deploy login` (or set MODULA_TOKEN)")?;
+        .context("not logged in: run `modula login` (or set MODULA_TOKEN)")?;
     Ok(Login {
         url: parse_url(&url)?,
         token,
@@ -132,7 +132,7 @@ pub struct Link {
     pub project_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
-    /// Default service id (`modula-deploy service <name>`).
+    /// Default service id (`modula service <name>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,7 +175,7 @@ pub fn write_link(dir: &Path, link: &Link) -> anyhow::Result<PathBuf> {
         .with_context(|| format!("cannot create {}", link_dir.display()))?;
     let path = link_dir.join(LINK_FILE);
     let text = format!(
-        "# Linked by modula-deploy; safe to commit, but usually gitignored.\n{}",
+        "# Linked by modula; safe to commit, but usually gitignored.\n{}",
         toml::to_string_pretty(link)?
     );
     std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?;
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn config_round_trips_privately() {
         let dir = temp_dir();
-        let path = dir.join("modula-deploy/config.toml");
+        let path = dir.join("modula/config.toml");
         assert_eq!(load(&path).unwrap(), Config::default());
         let cfg = Config {
             url: Some("https://cloud.example.com/".into()),

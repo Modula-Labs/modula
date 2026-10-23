@@ -302,7 +302,7 @@ export function AccountSecurityPage() {
 
         <Section
           title="API tokens"
-          description="For the modula-deploy CLI and automation. A token acts as you, optionally in one workspace only, and never with re-authentication."
+          description="For the modula CLI and automation. A token acts as you, optionally in one workspace only, and never with re-authentication."
         >
           <ApiTokens />
         </Section>

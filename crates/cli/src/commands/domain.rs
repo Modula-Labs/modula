@@ -34,7 +34,7 @@ fn print_custom(o: &Output, d: &Domain) {
         o.line("Create these DNS records:");
         o.table(&records_table(d));
         o.note(format!(
-            "Then run `modula-deploy domain check {}` until it is verified.",
+            "Then run `modula domain check {}` until it is verified.",
             d.hostname
         ));
     }

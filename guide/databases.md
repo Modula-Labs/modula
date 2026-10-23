@@ -44,9 +44,9 @@ The safe default: no public port, just a tunnel through your instance's HTTPS
 endpoint, authenticated with your API token.
 
 ```bash
-modula-deploy link                         # once per directory
-modula-deploy connect                      # Postgres: opens psql
-modula-deploy connect --tunnel-only -P 5433   # keep a local port open for a GUI client
+modula link                         # once per directory
+modula connect                      # Postgres: opens psql
+modula connect --tunnel-only -P 5433   # keep a local port open for a GUI client
 ```
 
 For Postgres, `connect` fetches the credentials and starts `psql` (or prints a
@@ -68,7 +68,7 @@ server's public address at a port from 20000–29999.
   server's firewall.
 - Services that reference the public URL (`${{postgres.DATABASE_PUBLIC_URL}}`)
   show a pending change: deploy them to pick up the proxy's host and port.
-- Anyone who can reach the port can try passwords. Prefer `modula-deploy
+- Anyone who can reach the port can try passwords. Prefer `modula
   connect`, and remove the proxy when you're done.
 
 ```bash
@@ -134,7 +134,7 @@ Query notes:
 - The SQL runs as the database's superuser with a 30-second statement
   timeout. The result is the last statement that returned rows (at most 1000
   rows; `truncated` tells you).
-- Send `"readOnly": true` (the default for `modula-deploy db query`) to run a
+- Send `"readOnly": true` (the default for `modula db query`) to run a
   single read statement (`SELECT`, `WITH`, `VALUES`, `TABLE`, `EXPLAIN`,
   `SHOW`) inside a read-only transaction that is always rolled back. Without
   it the SQL runs as a writable script and needs the write permission.

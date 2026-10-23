@@ -40,7 +40,7 @@ fn load_file(ctx: &Ctx, args: &ConfigFileArgs) -> anyhow::Result<ConfigFile> {
         Some(p) => ctx.session.cwd.join(p),
         None => ConfigFile::find(&ctx.session.cwd).ok_or_else(|| {
             usage(format!(
-                "no {} here or above; write one with `modula-deploy config init`",
+                "no {} here or above; write one with `modula config init`",
                 FILES.join(" or ")
             ))
         })?,
@@ -134,7 +134,7 @@ async fn pull_file(ctx: &mut Ctx, force: bool, file: Option<PathBuf>) -> anyhow:
                 pulled.guessed_secrets.join(", ")
             ));
         }
-        o.note("Review it, commit it, and check it with `modula-deploy config plan`.");
+        o.note("Review it, commit it, and check it with `modula config plan`.");
     })
 }
 
@@ -565,7 +565,7 @@ async fn apply(ctx: &Ctx, args: &ConfigPlanArgs, deploy: bool) -> anyhow::Result
                 } else if plan.services.iter().any(ServicePlan::needs_deploy)
                     || !plan.shared.is_empty()
                 {
-                    o.line("  Changes take effect on the next deploy (`modula-deploy deploy --all`, or apply --deploy).");
+                    o.line("  Changes take effect on the next deploy (`modula deploy --all`, or apply --deploy).");
                 }
                 for m in &plan.manual {
                     o.line(format!("  ! still manual: {m}"));

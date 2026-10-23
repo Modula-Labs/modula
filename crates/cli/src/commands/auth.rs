@@ -101,7 +101,7 @@ pub async fn save_local_token(ctx: &mut Ctx, token: String) -> anyhow::Result<()
         .env_url
         .clone()
         .or_else(|| ctx.saved_login().url)
-        .ok_or_else(|| usage("set MODULA_URL or run `modula-deploy login --local --url …`"))?;
+        .ok_or_else(|| usage("set MODULA_URL or run `modula login --local --url …`"))?;
     let url = config::parse_url(&url)?;
     Api::new(Login {
         url: url.clone(),

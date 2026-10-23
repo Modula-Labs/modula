@@ -27,12 +27,12 @@ services and databases on your own servers.
 | [Domains](domains.md) | Generated and custom domains, DNS records, Cloudflare |
 | [Integrations](integrations.md) | GitHub, Cloudflare and Hetzner |
 | [Config as code](config-as-code.md) | `modula.toml`: the whole project in git, `config plan` / `config apply` |
-| [CLI](cli.md) | Every `modula-deploy` command and flag |
+| [CLI](cli.md) | Every `modula` command and flag |
 | [API](api.md) | Tokens, errors, roles and every route |
 | [Security](security.md) | 2FA, sudo mode, API tokens, roles, secrets, audit log |
 | [Migrating from Railway](migrating-from-railway.md) | Concept and variable mapping, a full worked migration |
 
 ## For AI agents
 
-Agent skills live in [`skills/`](../skills): `modula-deploy` (operate apps
+Agent skills live in [`skills/`](../skills): `modula` (operate apps
 through the CLI and API) and `migrate-from-railway` (port a Railway project).

@@ -21,7 +21,7 @@ services, variables with `${{…}}` references, staged changes, Railpack builds,
 | Volumes | Volumes (one per service instance) |
 | Generated `*.up.railway.app` | Generated `*.<your apps domain>` |
 | Custom domains | Custom domains with a TXT ownership record |
-| `railway login` / `link` / `connect` | `modula-deploy login` / `link` / `connect` |
+| `railway login` / `link` / `connect` | `modula login` / `link` / `connect` |
 | Project/account tokens (`RAILWAY_TOKEN`) | API tokens (`MODULA_TOKEN`) |
 | Sealed variables | Sealed variables |
 | Replicas, cron services, PR environments | Not yet |
@@ -66,7 +66,7 @@ Not read: `build.watchPatterns` (set **watch paths** in service settings),
 
 To manage the whole project as code (Railway's `.railway/railway.ts` with
 `railway config plan/apply`), write a `modula.toml` and use
-`modula-deploy config plan` / `config apply`: services, settings, variables,
+`modula config plan` / `config apply`: services, settings, variables,
 domains, volumes and per-environment overrides in one file. The key mapping
 from `railway.toml` is in [config as code → from Railway](config-as-code.md#from-railway).
 
@@ -157,13 +157,13 @@ servers (the template runs Postgres 17).
 pg_dump --format=custom --no-owner --no-acl "$RAILWAY_DATABASE_PUBLIC_URL" -f shop.dump
 
 # Open a tunnel to the new database (prints a connection string with the password)
-modula-deploy link --project shop -e production
-modula-deploy connect postgres --tunnel-only -P 5433
+modula link --project shop -e production
+modula connect postgres --tunnel-only -P 5433
 # in another terminal:
 pg_restore --no-owner --no-acl --dbname "postgresql://postgres:<password>@127.0.0.1:5433/app" shop.dump
 ```
 
-Then check it: `modula-deploy connect postgres` opens `psql`.
+Then check it: `modula connect postgres` opens `psql`.
 
 ### 6. Deploy
 
@@ -209,9 +209,9 @@ the Railway project read-only for a few days before deleting it.
 
 | Railway | Modula Deploy |
 |---|---|
-| `railway login` | `modula-deploy login --url https://deploy.example.com` (or `MODULA_URL` + `MODULA_TOKEN`) |
-| `railway logout` / `whoami` | `modula-deploy logout` / `whoami` |
-| `railway link` / `unlink` | `modula-deploy link [--project P] [-e ENV]` / `unlink` |
-| `railway connect [service]` | `modula-deploy connect [service] [-e ENV]` |
-| `railway up [-d] [--ci]` | `modula-deploy up [-d] [--ci]`: uploads the directory (honors `.gitignore` and `.modulaignore`) and deploys it |
-| `railway logs`, `variables`, `domain`, `redeploy` | The same commands in `modula-deploy` (see [CLI](cli.md)) |
+| `railway login` | `modula login --url https://deploy.example.com` (or `MODULA_URL` + `MODULA_TOKEN`) |
+| `railway logout` / `whoami` | `modula logout` / `whoami` |
+| `railway link` / `unlink` | `modula link [--project P] [-e ENV]` / `unlink` |
+| `railway connect [service]` | `modula connect [service] [-e ENV]` |
+| `railway up [-d] [--ci]` | `modula up [-d] [--ci]`: uploads the directory (honors `.gitignore` and `.modulaignore`) and deploys it |
+| `railway logs`, `variables`, `domain`, `redeploy` | The same commands in `modula` (see [CLI](cli.md)) |

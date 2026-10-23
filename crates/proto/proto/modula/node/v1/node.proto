@@ -284,7 +284,7 @@ message TcpProxy {
 // User variables reach the build only as BuildKit secrets (Workload.env).
 message Build {
   // A gzipped tarball of the source: one commit (GitHub's tarball endpoint)
-  // or files uploaded with `modula-deploy up` (served by the server).
+  // or files uploaded with `modula up` (served by the server).
   string source_url = 1;
   // Authorization header value for source_url; empty for public sources.
   string source_auth = 2;
@@ -413,7 +413,7 @@ message BackupResult {
 
 // ---------------------------------------------------------------- tunnels
 //
-// Private TCP tunnels (`modula-deploy connect`): a user's WebSocket on the
+// Private TCP tunnels (`modula connect`): a user's WebSocket on the
 // control plane is relayed over this stream to the node, which dials the
 // container of one deployment it runs (its address on the environment network,
 // never an arbitrary host) and pipes raw bytes both ways.

@@ -1,4 +1,4 @@
-//! Personal API tokens (`mdt_…`) for the `modula-deploy` CLI and automation.
+//! Personal API tokens (`mdt_…`) for the `modula` CLI and automation.
 //!
 //! A token authenticates as its user through `Authorization: Bearer`. It never
 //! carries sudo (so it can't mint tokens, reveal secrets or delete things that

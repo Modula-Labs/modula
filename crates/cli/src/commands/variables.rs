@@ -201,7 +201,7 @@ pub async fn run(ctx: &Ctx, args: VariablesArgs) -> anyhow::Result<i32> {
 async fn after_change(ctx: &Ctx, place: &Place, deploy_now: bool) -> anyhow::Result<i32> {
     if !deploy_now {
         ctx.out
-            .note("Pending until deployed: run `modula-deploy deploy` (or pass --deploy).");
+            .note("Pending until deployed: run `modula deploy` (or pass --deploy).");
         return Ok(0);
     }
     // A shared variable's change deploys every service it affects.

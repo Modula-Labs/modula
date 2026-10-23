@@ -33,7 +33,7 @@ pub async fn list(ctx: &Ctx) -> anyhow::Result<()> {
         .collect();
     ctx.out.either(&rows, |o| {
         if rows.is_empty() {
-            o.line("No projects yet; create one with `modula-deploy init <name>`.");
+            o.line("No projects yet; create one with `modula init <name>`.");
             return;
         }
         let mut t = Table::new(&["workspace", "project", "id", ""]);
@@ -205,12 +205,12 @@ pub async fn status(ctx: &Ctx) -> anyhow::Result<()> {
         }
         if let Some(n) = status.pending_changes.filter(|n| *n > 0) {
             o.line(format!(
-                "Pending      {n} change{} (deploy with `modula-deploy deploy`)",
+                "Pending      {n} change{} (deploy with `modula deploy`)",
                 if n == 1 { "" } else { "s" }
             ));
         }
         if status.services.is_empty() {
-            o.line("\nNo services yet; add one with `modula-deploy add`.");
+            o.line("\nNo services yet; add one with `modula add`.");
             return;
         }
         o.line("");

@@ -17,7 +17,7 @@ pub enum Trigger {
     Push,
     Redeploy,
     Rollback,
-    /// `modula-deploy up`: files uploaded from a developer's machine.
+    /// `modula up`: files uploaded from a developer's machine.
     Upload,
 }
 

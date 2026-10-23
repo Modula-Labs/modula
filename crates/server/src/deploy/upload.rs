@@ -1,4 +1,4 @@
-//! Source archives uploaded with `modula-deploy up`: where they are kept, the
+//! Source archives uploaded with `modula up`: where they are kept, the
 //! signed download a node gets while building one, and retention.
 //!
 //! An upload is a gzipped tarball in `uploads_dir/<id>.tar.gz` plus a

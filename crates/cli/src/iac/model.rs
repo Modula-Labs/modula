@@ -169,7 +169,7 @@ pub struct ImageSource {
     pub image: String,
 }
 
-/// A directory deployed with `modula-deploy up` (which builds an upload
+/// A directory deployed with `modula up` (which builds an upload
 /// with the service's settings); config never touches the service's
 /// configured source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

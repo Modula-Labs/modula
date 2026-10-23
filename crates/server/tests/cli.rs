@@ -1,4 +1,4 @@
-//! The `modula-deploy` CLI end to end: its command functions (parsed from
+//! The `modula` CLI end to end: its command functions (parsed from
 //! real arguments) against the real HTTP server with an API token, and a node
 //! on a fake runtime with a fake database executor.
 
@@ -148,10 +148,10 @@ async fn setup(pool: PgPool) -> Setup {
 }
 
 impl Setup {
-    /// Run `modula-deploy <args>` in the project directory; returns the exit
+    /// Run `modula <args>` in the project directory; returns the exit
     /// code (or error) and what it printed.
     async fn run(&self, args: &[&str]) -> (anyhow::Result<i32>, String) {
-        let cli = Cli::try_parse_from(std::iter::once("modula-deploy").chain(args.iter().copied()))
+        let cli = Cli::try_parse_from(std::iter::once("modula").chain(args.iter().copied()))
             .expect("valid arguments");
         let (out, buf) = Output::capture(cli.global.json);
         let session = Session {

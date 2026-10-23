@@ -1,4 +1,4 @@
-//! Private TCP tunnels to a service's running container (`modula-deploy
+//! Private TCP tunnels to a service's running container (`modula
 //! connect`), so databases are reachable from a laptop without a public port.
 //!
 //! The client opens a WebSocket on `GET /api/service-instances/{id}/tunnel`;

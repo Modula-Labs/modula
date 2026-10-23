@@ -21,9 +21,9 @@ Image deployments start at `deploying`; repository and upload deployments at
   the current settings and variables, and the branch's latest commit.
 - **Deploy changes** in the pending-changes bar (below).
 - **Redeploy** and **Rollback** on a past deployment.
-- **`modula-deploy up`**: files uploaded from your machine (below).
+- **`modula up`**: files uploaded from your machine (below).
 
-## Uploaded sources (`modula-deploy up`)
+## Uploaded sources (`modula up`)
 
 `up` deploys local files without GitHub. The CLI packs the directory
 (honoring `.gitignore` and `.modulaignore`; never `.git/` or `.modula/`),

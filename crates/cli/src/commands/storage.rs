@@ -24,7 +24,7 @@ pub async fn volume(ctx: &Ctx, command: Option<VolumeCommand>) -> anyhow::Result
             let i = api.create_volume(&t.instance, &path).await?;
             ctx.out.either(&i.volume, |o| {
                 o.line(format!("Added a volume at {path} to {}", t.label()));
-                o.note("It is attached on the next deploy: run `modula-deploy deploy`.");
+                o.note("It is attached on the next deploy: run `modula deploy`.");
             })
         }
         Some(VolumeCommand::Delete) => {
@@ -72,9 +72,7 @@ pub async fn tcp_proxy(ctx: &Ctx, command: Option<TcpProxyCommand>) -> anyhow::R
                         p.host, p.public_port, p.target_port
                     ));
                 }
-                o.note(
-                    "This is reachable from the internet; `modula-deploy connect` needs no proxy.",
-                );
+                o.note("This is reachable from the internet; `modula connect` needs no proxy.");
             })
         }
         Some(TcpProxyCommand::Disable) => {

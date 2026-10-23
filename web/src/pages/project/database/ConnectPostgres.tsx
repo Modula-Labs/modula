@@ -52,7 +52,7 @@ export function ConnectPostgres({
       void qc.invalidateQueries({ queryKey: ["variables", instance.id] });
     },
   });
-  const connect = `modula-deploy connect ${name} -e ${instance.environmentName}`;
+  const connect = `modula connect ${name} -e ${instance.environmentName}`;
 
   return (
     <Modal open={open} onOpenChange={onOpenChange} width={600} title={`Connect to ${name}`}>
@@ -122,7 +122,7 @@ export function ConnectPostgres({
                   <button type="button" className="self-start text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground" onClick={() => setCliHelp((s) => !s)}>
                     Install the CLI
                   </button>
-                  {cliHelp ? <p className="text-xs text-muted-foreground">Install modula-deploy on your machine, then run `modula-deploy login` once.</p> : null}
+                  {cliHelp ? <p className="text-xs text-muted-foreground">Install modula on your machine, then run `modula login` once.</p> : null}
                 </div>
                 <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
                   <div className="text-sm font-medium">External GUI client</div>

@@ -36,7 +36,7 @@ hex = "0.4"
 http = "1"
 getrandom = "0.4"
 globset = "0.4"
-# `modula-deploy up`: walks a directory honoring .gitignore / .modulaignore.
+# `modula up`: walks a directory honoring .gitignore / .modulaignore.
 ignore = "0.4"
 redis = { version = "1", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
 regex = "1"
@@ -49,7 +49,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # The CLI verifies TLS with the OS trust store (as reqwest already does).
 rustls-platform-verifier = "0.7"
-# WebSocket client for `modula-deploy connect`; TLS is ours (tokio-rustls, ring).
+# WebSocket client for `modula connect`; TLS is ours (tokio-rustls, ring).
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 x509-parser = "0.18"
 bollard = "0.21"

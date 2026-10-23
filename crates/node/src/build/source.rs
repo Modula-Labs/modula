@@ -1,7 +1,7 @@
 //! Source archives: download a gzipped tarball and unpack it safely.
 //!
 //! GitHub tarballs hold a single top-level directory (`owner-repo-sha/`),
-//! which is stripped; `modula-deploy up` packs uploads the same way (`app/`).
+//! which is stripped; `modula up` packs uploads the same way (`app/`).
 //! Uploaded archives carry a SHA-256 that is checked before unpacking. Only regular files, directories and symlinks that stay
 //! inside the tree are unpacked; anything else (hard links, devices, paths
 //! with `..`) is skipped. Sizes and entry counts are capped.

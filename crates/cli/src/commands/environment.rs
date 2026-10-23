@@ -56,7 +56,7 @@ pub async fn run(ctx: &mut Ctx, args: EnvironmentArgs) -> anyhow::Result<()> {
             relink(ctx, &p.id, &p.name, &env.name)?;
             ctx.out.either(&env, |o| {
                 o.line(format!("Created {} in {} and linked it", env.name, p.name));
-                o.note("Its services aren't deployed yet: run `modula-deploy deploy` there.");
+                o.note("Its services aren't deployed yet: run `modula deploy` there.");
             })
         }
         (None, Some(name)) => {

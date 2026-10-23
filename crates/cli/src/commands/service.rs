@@ -128,7 +128,7 @@ pub async fn add(ctx: &mut Ctx, args: AddArgs) -> anyhow::Result<()> {
                 req.name
             ));
         }
-        o.note("Deploy it with `modula-deploy deploy -s <name>` (or `up`).");
+        o.note("Deploy it with `modula deploy -s <name>` (or `up`).");
     })
 }
 
@@ -139,12 +139,8 @@ mod tests {
     use clap::Parser;
 
     fn add_args(args: &[&str]) -> AddArgs {
-        let cli = Cli::try_parse_from(
-            ["modula-deploy", "add"]
-                .into_iter()
-                .chain(args.iter().copied()),
-        )
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["modula", "add"].into_iter().chain(args.iter().copied())).unwrap();
         match cli.command {
             Command::Add(a) => a,
             _ => unreachable!(),

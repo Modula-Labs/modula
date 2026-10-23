@@ -1,4 +1,4 @@
-//! One environment as config as code (`modula-deploy config pull/plan`):
+//! One environment as config as code (`modula config pull/plan`):
 //! every service's settings, domains, volume, TCP proxy and variables in one
 //! read. Values of non-sealed variables are included (a Member can read them
 //! this way without sudo, like database credentials), so every read is

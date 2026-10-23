@@ -1,8 +1,8 @@
-# `modula-deploy` CLI reference
+# `modula` CLI reference
 
-Binary `modula-deploy` (crate `crates/cli`; install with
+Binary `modula` (crate `crates/cli`; install with
 `cargo install --path crates/cli`; no prebuilt release yet).
-`modula-deploy docs` prints this reference generated from the binary itself;
+`modula docs` prints this reference generated from the binary itself;
 trust it over this file if they differ.
 
 ## Environment
@@ -13,7 +13,7 @@ trust it over this file if they differ.
 | `MODULA_TOKEN` | API token `mdt_…`; overrides the saved login; default for `login --token`. |
 | `MODULA_PROJECT` / `MODULA_ENVIRONMENT` / `MODULA_SERVICE` | Defaults for `-p` / `-e` / `-s`. |
 | `NO_COLOR` | No colors (also off when stdout isn't a terminal). |
-| `XDG_CONFIG_HOME` | Config dir (default `~/.config`). Login saved to `modula-deploy/config.toml`, mode 0600. |
+| `XDG_CONFIG_HOME` | Config dir (default `~/.config`). Login saved to `modula/config.toml`, mode 0600. |
 
 With `MODULA_URL` and `MODULA_TOKEN` set, no `login` is needed. Token order:
 `MODULA_TOKEN` → nearest `.modula/token` (`login --local`, same TOML format,
@@ -100,17 +100,17 @@ Shell:
 ## Agent patterns
 
 ```bash
-modula-deploy status --json | jq '.services[] | {name, status, url}'
-printf 'API_KEY=%s\n' "$API_KEY" | modula-deploy variables set --stdin -s api   # secret off the argv
-modula-deploy deploy -s api --wait --json        # exit 1 if it fails
-modula-deploy logs -s api --build -n 300         # bounded; never -f in automation
-modula-deploy db query "select count(*) from users" --json
+modula status --json | jq '.services[] | {name, status, url}'
+printf 'API_KEY=%s\n' "$API_KEY" | modula variables set --stdin -s api   # secret off the argv
+modula deploy -s api --wait --json        # exit 1 if it fails
+modula logs -s api --build -n 300         # bounded; never -f in automation
+modula db query "select count(*) from users" --json
 ```
 
 Tunnel for tools that need a real connection (not interactive):
 
 ```bash
-modula-deploy connect postgres -e staging --tunnel-only -P 54329 --show-password > /tmp/tunnel.log 2>&1 &
+modula connect postgres -e staging --tunnel-only -P 54329 --show-password > /tmp/tunnel.log 2>&1 &
 TUNNEL=$!
 sleep 2
 PGURL=$(sed -n 's/^Connection string: //p' /tmp/tunnel.log)   # contains the password; don't print it

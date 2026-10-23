@@ -4,9 +4,9 @@ Describe a whole project in one file at the root of your repository, review
 changes in pull requests, and apply them with the CLI:
 
 ```bash
-modula-deploy config init      # write modula.toml from the linked project (alias: config pull)
-modula-deploy config plan      # what would change (like terraform plan)
-modula-deploy config apply     # make it so (asks first; --yes for CI)
+modula config init      # write modula.toml from the linked project (alias: config pull)
+modula config plan      # what would change (like terraform plan)
+modula config apply     # make it so (asks first; --yes for CI)
 ```
 
 The file describes services, their settings, variables, domains, volumes and
@@ -70,7 +70,7 @@ Each `[services.<name>]` is one service (names: lowercase letters, digits,
 |---|---|
 | `{ repo = "owner/name", branch = "main", rootDir = "apps/api" }` | GitHub repository (`branch` defaults to `main`; `rootDir` optional). |
 | `{ image = "ghcr.io/acme/api:1.2" }` | Prebuilt image. |
-| `{ local = "." }` | A directory you deploy with `modula-deploy up`. Config never touches the service's configured source, and can't create such a service: create it once (`modula-deploy add` or the dashboard), then config manages its settings. |
+| `{ local = "." }` | A directory you deploy with `modula up`. Config never touches the service's configured source, and can't create such a service: create it once (`modula add` or the dashboard), then config manages its settings. |
 
 The settings keys are exactly the service settings of the API
 (`ServiceConfig`, camelCase): `startCommand`, `port`, `healthcheckPath`,
@@ -216,13 +216,13 @@ server: unknown keys, bad names, invalid sources, secrets without
   and every call is in the audit log (`environment.config_read`) with the
   names it returned.
 - Tokens for CI: `MODULA_URL` + `MODULA_TOKEN`, or a per-directory login
-  with `modula-deploy login --local` (see [CLI → authentication](cli.md#authentication)).
+  with `modula login --local` (see [CLI → authentication](cli.md#authentication)).
 
 ## CI example
 
 ```yaml
-- run: modula-deploy config plan --all-envs
-- run: modula-deploy config apply -e production --yes --deploy --from-env
+- run: modula config plan --all-envs
+- run: modula config apply -e production --yes --deploy --from-env
   env:
     MODULA_URL: https://deploy.example.com
     MODULA_TOKEN: ${{ secrets.MODULA_TOKEN }}
@@ -249,5 +249,5 @@ project, move their keys into the service's table here:
 | `environments.<env>.…` | `[environments.<env>] services.<name>.…` |
 
 Railway's `.railway/railway.ts` maps to the whole file; `railway config
-plan/apply` to `modula-deploy config plan/apply` (unlisted variables are
+plan/apply` to `modula config plan/apply` (unlisted variables are
 deleted unless in `preserve`, as there).

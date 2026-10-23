@@ -79,7 +79,7 @@ pub enum Action {
     /// references can point at.
     SharedVariablesRead,
     SharedVariablesWrite,
-    /// The whole environment as config as code (`modula-deploy config`):
+    /// The whole environment as config as code (`modula config`):
     /// every service's settings, domains, volume and variables, with the
     /// values of non-sealed variables. Audited.
     EnvironmentConfigRead,

@@ -591,7 +591,7 @@ pub fn plan(
         let have = r.service(name);
         if have.is_none() && s.is_local() {
             manual.push(format!(
-                "{name}: a local source can't create a service; create it first (`modula-deploy add` or the dashboard), then apply again and deploy the directory with `modula-deploy up`"
+                "{name}: a local source can't create a service; create it first (`modula add` or the dashboard), then apply again and deploy the directory with `modula up`"
             ));
             continue;
         }

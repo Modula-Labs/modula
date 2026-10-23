@@ -1,4 +1,4 @@
-//! `modula-deploy config` end to end: apply a modula.toml against the real
+//! `modula config` end to end: apply a modula.toml against the real
 //! HTTP server with an API token, check that the plan is then empty, that
 //! edits show the expected diff, and that `config pull` round-trips.
 
@@ -71,7 +71,7 @@ async fn setup(pool: PgPool) -> Setup {
 
 impl Setup {
     async fn run(&self, args: &[&str]) -> (anyhow::Result<i32>, String) {
-        let cli = Cli::try_parse_from(std::iter::once("modula-deploy").chain(args.iter().copied()))
+        let cli = Cli::try_parse_from(std::iter::once("modula").chain(args.iter().copied()))
             .expect("valid arguments");
         let (out, buf) = Output::capture(cli.global.json);
         let session = Session {

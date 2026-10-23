@@ -7,7 +7,7 @@
 //!
 //! The first file found in that order wins (files are not merged), and its
 //! values override the dashboard's. A `modula.toml` that describes a whole
-//! project (`modula-deploy config`) is not a build config and is skipped. The file is repository content, so it is
+//! project (`modula config`) is not a build config and is skipped. The file is repository content, so it is
 //! untrusted: only the keys above are read, unknown keys are ignored, and an
 //! invalid value is reported as a warning and falls back to the dashboard.
 
@@ -151,7 +151,7 @@ pub fn load(dir: &Path) -> (Option<RepoConfig>, Vec<String>) {
     (None, vec![])
 }
 
-/// A `modula.toml` describing a whole project (`modula-deploy config`:
+/// A `modula.toml` describing a whole project (`modula config`:
 /// `project`/`services`, no `[build]` or `[deploy]`) isn't a build config,
 /// so a `railway.toml`/`railway.json` next to it still applies.
 fn is_project_file(text: &str) -> bool {
@@ -650,7 +650,7 @@ mod tests {
             (cfg.file, cfg.start_command.as_deref()),
             ("modula.toml", Some("modula"))
         );
-        // A project file (modula-deploy config) is skipped.
+        // A project file (modula config) is skipped.
         std::fs::write(
             dir.join("modula.toml"),
             "project = \"shop\"\n[services.api]\nport = 80\n",

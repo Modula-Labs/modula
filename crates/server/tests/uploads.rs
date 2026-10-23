@@ -1,4 +1,4 @@
-//! Source uploads (`modula-deploy up`) over the HTTP API: checksums, size
+//! Source uploads (`modula up`) over the HTTP API: checksums, size
 //! limits, the node-only download and retention. The full CLI → node build
 //! path is in tests/cli.rs.
 

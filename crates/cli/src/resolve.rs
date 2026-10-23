@@ -48,10 +48,7 @@ pub fn pick_project<'a>(
         None => match projects {
             [(_, p)] => Ok(p),
             [] => bail!("you have no projects yet"),
-            _ => bail!(
-                "pass --project or run `modula-deploy link` (projects: {})",
-                all()
-            ),
+            _ => bail!("pass --project or run `modula link` (projects: {})", all()),
         },
     }
 }
@@ -123,9 +120,9 @@ pub fn default_service<'a>(
     }
     match services {
         [only] => Ok(only),
-        [] => bail!("this project has no services yet; add one with `modula-deploy add`"),
+        [] => bail!("this project has no services yet; add one with `modula add`"),
         _ => bail!(
-            "pass --service or run `modula-deploy service <name>` (services: {})",
+            "pass --service or run `modula service <name>` (services: {})",
             names(services.iter().map(|s| s.name.as_str()))
         ),
     }

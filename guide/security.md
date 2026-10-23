@@ -82,7 +82,7 @@ control-plane backup. Being an instance admin grants no access to workspaces.
   [recovery kit](install.md#recovery-kit) offline.
 - Values are write-only over the API. Revealing one needs sudo and is audited.
   The exception is config as code: `GET /api/environments/{id}/config`
-  (Member, so API tokens can run `modula-deploy config plan/pull`) returns
+  (Member, so API tokens can run `modula config plan/pull`) returns
   the values of non-sealed variables of one environment, and each call is
   audited (`environment.config_read`) with the names it returned. Sealed
   values are never returned. Database credentials are likewise readable by

@@ -1,4 +1,4 @@
-//! `modula-deploy connect`: a private tunnel to a database, then its native
+//! `modula connect`: a private tunnel to a database, then its native
 //! client (`psql`, `mysql`, `redis-cli`, `mongosh`), or just the tunnel.
 
 use anyhow::Context;

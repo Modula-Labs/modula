@@ -25,7 +25,7 @@ pub enum Source {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root_dir: Option<String>,
     },
-    /// Files uploaded with `modula-deploy up` (a `source_uploads` row). Only
+    /// Files uploaded with `modula up` (a `source_uploads` row). Only
     /// ever in a deployment's snapshot: an instance can't be configured with it.
     Upload {
         upload: modula_id::Id,
@@ -175,7 +175,7 @@ impl ServiceConfig {
     pub fn validate_for_instance(&self) -> AppResult<()> {
         if matches!(self.source, Source::Upload { .. }) {
             return Err(AppError::bad_request(
-                "a service's source must be an image or a repository; upload files with `modula-deploy up`",
+                "a service's source must be an image or a repository; upload files with `modula up`",
             ));
         }
         self.validate()

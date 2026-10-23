@@ -337,7 +337,7 @@ CREATE INDEX domains_instance_idx ON domains (service_instance_id);
 
 -- Immutable record of one rollout. config/env are snapshots taken at creation,
 -- so a redeploy reproduces exactly what ran.
--- Source archives uploaded with `modula-deploy up` (gzipped tarballs). The
+-- Source archives uploaded with `modula up` (gzipped tarballs). The
 -- bytes live in a file under MODULA_UPLOADS_DIR named after the id; the row
 -- outlives the file (purged_at) so deployments keep their history. Only
 -- nodes building a deployment of it can download one (signed, short-lived).
@@ -379,7 +379,7 @@ CREATE TABLE deployments (
     commit_author       text,
     -- GitHub login of the commit author, for the avatar.
     commit_author_login text,
-    -- Uploaded sources (`modula-deploy up`): the archive, and the local Git
+    -- Uploaded sources (`modula up`): the archive, and the local Git
     -- state it was packed from as the CLI reported it (display only).
     upload_id           id REFERENCES source_uploads (id) ON DELETE SET NULL,
     source_branch       text,
@@ -596,7 +596,7 @@ CREATE TABLE instance_backup (
 INSERT INTO instance_backup (id) VALUES (true);
 
 ---------------------------------------------------------------------------
--- API tokens (the modula-deploy CLI, automation)
+-- API tokens (the modula CLI, automation)
 ---------------------------------------------------------------------------
 
 -- Personal bearer tokens (mdt_…); only SHA-256 hashes are stored. A token acts

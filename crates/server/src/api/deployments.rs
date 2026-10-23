@@ -127,7 +127,7 @@ async fn load(state: &AppState, id: Id) -> AppResult<DeploymentDetail> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateDeployment {
     pub source: Option<DeploySource>,
-    /// Uploads: a description (`modula-deploy up -m`).
+    /// Uploads: a description (`modula up -m`).
     pub message: Option<String>,
     /// Uploads: the local Git state the files were packed from (display only).
     pub git: Option<LocalGitInfo>,
@@ -222,7 +222,7 @@ pub async fn deploy_upload(
         Some((owner, true, sha)) if owner == instance => sha,
         Some((owner, false, _)) if owner == instance => {
             return Err(AppError::Conflict(
-                "this upload is no longer kept; run `modula-deploy up` again".into(),
+                "this upload is no longer kept; run `modula up` again".into(),
             ));
         }
         _ => return Err(AppError::bad_request("unknown upload for this service")),
@@ -378,7 +378,7 @@ async fn rerun(
     let (commit, local_git) = if cfg.upload().is_some() {
         if !r.upload_kept {
             return Err(AppError::Conflict(
-                "the files uploaded for this deployment are no longer kept; run `modula-deploy up` again"
+                "the files uploaded for this deployment are no longer kept; run `modula up` again"
                     .into(),
             ));
         }

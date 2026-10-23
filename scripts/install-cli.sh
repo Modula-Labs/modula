@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the modula-deploy CLI (Linux amd64/arm64) on a workstation or CI.
+# Install the modula CLI (Linux amd64/arm64) on a workstation or CI.
 #
 #   curl -fsSL <release url>/install-cli.sh | bash
 #   curl -fsSL <release url>/install-cli.sh | bash -s -- --version 0.1.0 --dir /usr/local/bin
@@ -34,7 +34,7 @@ case $(uname -m) in
 esac
 for c in curl openssl sha256sum; do command -v "$c" >/dev/null || die "$c is required"; done
 
-name="modula-deploy-linux-$ARCH"
+name="modula-linux-$ARCH"
 if [[ $VERSION == latest ]]; then base="$RELEASE_URL/latest/download"; else base="$RELEASE_URL/download/v$VERSION"; fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -51,10 +51,10 @@ grep -q "  $name\$" "$tmp/SHA256SUMS" || die "$name is not in SHA256SUMS"
   || die "checksum mismatch; refusing to install"
 
 mkdir -p "$DIR"
-install -m 0755 "$tmp/$name" "$DIR/modula-deploy"
-echo "installed $("$DIR/modula-deploy" --version) to $DIR/modula-deploy"
+install -m 0755 "$tmp/$name" "$DIR/modula"
+echo "installed $("$DIR/modula" --version) to $DIR/modula"
 case ":$PATH:" in
   *":$DIR:"*) ;;
   *) echo "note: $DIR is not on your PATH" ;;
 esac
-echo "next: modula-deploy login --url https://your-instance"
+echo "next: modula login --url https://your-instance"

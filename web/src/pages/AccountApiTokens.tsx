@@ -76,7 +76,7 @@ function CreateDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
           <div className="text-sm text-muted-foreground">
             Use it with the CLI:
             <code className="mt-1 block rounded-md bg-accent p-2 font-mono text-[13px]">
-              modula-deploy login --url {window.location.origin}
+              modula login --url {window.location.origin}
             </code>
           </div>
           <div className="flex justify-end">

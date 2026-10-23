@@ -1,4 +1,4 @@
-//! Source uploads for `modula-deploy up`: the CLI streams a gzipped tarball
+//! Source uploads for `modula up`: the CLI streams a gzipped tarball
 //! here, then creates a deployment from it (see `deployments::create`).
 //! Nodes download it through the signed [`download`] endpoint; clients never can.
 
@@ -182,7 +182,7 @@ async fn receive(body: Body, path: &std::path::Path, max: u64) -> AppResult<Opti
     }
     if head != [0x1f, 0x8b] {
         return Err(AppError::bad_request(
-            "the upload is not gzip data; pack it with `modula-deploy up`",
+            "the upload is not gzip data; pack it with `modula up`",
         ));
     }
     file.flush().await.map_err(anyhow::Error::from)?;
