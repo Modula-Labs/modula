@@ -18,7 +18,7 @@ On a fresh Ubuntu 22.04+/Debian 12+ server with DNS for the dashboard (and,
 optionally, a wildcard for generated app domains) pointing at it:
 
 ```bash
-curl -fsSL https://github.com/modula-deploy/modula-deploy/releases/latest/download/install.sh \
+curl -fsSL https://usemodula.org/install.sh \
   | sudo bash -s -- --domain deploy.example.com --email you@example.com --apps-domain apps.example.com
 ```
 

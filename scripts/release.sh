@@ -72,7 +72,7 @@ for arch in $ARCHES; do
   scripts/fetch-build-tools.sh "$arch" "$OUT"
 done
 
-(cd "$OUT" && sha256sum modula-*-linux-* caddy-linux-* buildctl-linux-* railpack-linux-* >SHA256SUMS)
+(cd "$OUT" && sha256sum modula-*-linux-* modula-linux-* caddy-linux-* buildctl-linux-* railpack-linux-* >SHA256SUMS)
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$OUT/SHA256SUMS" -out "$OUT/SHA256SUMS.sig"
 openssl pkeyutl -verify -pubin -inkey deploy/release.pub.pem -rawin \
   -in "$OUT/SHA256SUMS" -sigfile "$OUT/SHA256SUMS.sig" >/dev/null

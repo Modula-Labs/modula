@@ -34,6 +34,8 @@ enum Sink {
 pub struct Output {
     pub json: bool,
     color: bool,
+    /// The terminal takes 24-bit colors (`COLORTERM=truecolor`).
+    truecolor: bool,
     sink: Sink,
 }
 
@@ -43,9 +45,14 @@ impl Output {
         let color = !json
             && std::io::stdout().is_terminal()
             && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+        let truecolor = matches!(
+            std::env::var("COLORTERM").as_deref(),
+            Ok("truecolor" | "24bit")
+        );
         Self {
             json,
             color,
+            truecolor,
             sink: Sink::Stdout,
         }
     }
@@ -56,6 +63,7 @@ impl Output {
         let out = Self {
             json,
             color: false,
+            truecolor: false,
             sink: Sink::Buffer(buf.clone()),
         };
         (out, buf)
@@ -114,6 +122,24 @@ impl Output {
     pub fn note(&self, text: impl AsRef<str>) {
         if !self.is_captured() {
             eprintln!("{}", text.as_ref());
+        }
+    }
+
+    /// `text` in Modula's teal when colors are on.
+    pub fn accent(&self, text: &str) -> String {
+        match (self.color, self.truecolor) {
+            (false, _) => text.to_owned(),
+            (true, true) => format!("\x1b[38;2;45;212;191m{text}\x1b[0m"),
+            (true, false) => format!("\x1b[38;5;43m{text}\x1b[0m"),
+        }
+    }
+
+    /// `text` dimmed when colors are on.
+    pub fn dim(&self, text: &str) -> String {
+        if self.color {
+            format!("\x1b[2m{text}\x1b[0m")
+        } else {
+            text.to_owned()
         }
     }
 

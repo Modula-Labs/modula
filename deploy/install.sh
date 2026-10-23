@@ -2,13 +2,13 @@
 # Modula Deploy installer for Ubuntu 22.04+/Debian 12+ (amd64, arm64).
 #
 #   Main server (dashboard + the first server for apps):
-#     curl -fsSL <url>/install.sh | sudo bash -s -- --domain deploy.example.com --email you@example.com
+#     curl -fsSL https://usemodula.org/install.sh | sudo bash -s -- --domain deploy.example.com --email you@example.com
 #
 #   Another server, joining an instance (the dashboard prints this line):
 #     curl -fsSL https://deploy.example.com/api/install.sh | sudo bash -s -- join --server … --token … --ca …
 #
 #   Upgrade whatever is installed here:
-#     curl -fsSL <url>/install.sh | sudo bash -s -- upgrade [--version X.Y.Z]
+#     curl -fsSL https://usemodula.org/install.sh | sudo bash -s -- upgrade [--version X.Y.Z]
 #
 # Nothing is compiled and nothing comes from npm: prebuilt static binaries,
 # checked against SHA-256 sums signed with the release key below. Postgres,
@@ -20,7 +20,7 @@ set -euo pipefail
 # the instance's own version and fetch binaries from it first.
 VERSION="${MODULA_VERSION:-__MODULA_VERSION__}"
 SERVER_RELEASES="__MODULA_SERVER_RELEASES__"
-RELEASE_URL="${MODULA_RELEASE_URL:-https://github.com/modula-deploy/modula-deploy/releases}"
+RELEASE_URL="${MODULA_RELEASE_URL:-https://downloads.usemodula.org/releases}"
 # Ed25519 key that signs SHA256SUMS (deploy/release.pub.pem).
 RELEASE_PUBKEY="${MODULA_RELEASE_PUBKEY:-MCowBQYDK2VwAyEAEofOHNvogrpURvg/JDfOV83WE6+yAoXsdXvjJlOp/xI=}"
 
@@ -33,34 +33,70 @@ CADDY_SOCKET=/run/modula-caddy/admin.sock
 KEEP_RELEASES=3
 
 # ---------------------------------------------------------------- output
+# Teal on terminals (24-bit when the terminal says so, else 256 colors); plain
+# lines with no cursor tricks when piped or logged (cloud-init), or NO_COLOR.
 
-if [[ -t 1 ]]; then B=$'\e[1m' D=$'\e[2m' G=$'\e[32m' R=$'\e[31m' N=$'\e[0m'; else B="" D="" G="" R="" N=""; fi
+A="" B="" D="" R="" N="" TTY=0 STEP_LOG="" STEP_LABEL=""
+if [[ -t 1 && ${TERM:-} != dumb ]]; then
+  TTY=1
+  if [[ -z ${NO_COLOR:-} ]]; then
+    case ${COLORTERM:-} in
+      truecolor | 24bit) A=$'\e[38;2;45;212;191m' ;;
+      *) A=$'\e[38;5;43m' ;;
+    esac
+    B=$'\e[1m' D=$'\e[2m' R=$'\e[31m' N=$'\e[0m'
+  fi
+fi
 T0=$(date +%s%N)
 ms_since() { echo $(( ($(date +%s%N) - $1) / 1000000 )); }
 fmt_ms() { printf "%d.%ds" $(( $1 / 1000 )) $(( $1 % 1000 / 100 )); }
-die() { echo "${R}error:${N} $*" >&2; exit 1; }
-note() { echo "  ${D}$*${N}"; }
+# die "what went wrong" ["what to do about it"]
+# Inside a step, the step's own ✗ line heads the message.
+die() {
+  if [[ -n $STEP_LOG ]]; then
+    printf '%s%s%s\n' "$R" "$1" "$N" >&2
+    [[ -n ${2:-} ]] && printf '%s\n' "$2" >&2
+  else
+    printf '  %s✗ %s%s\n' "$R" "$1" "$N" >&2
+    [[ -n ${2:-} ]] && printf '    %s\n' "$2" >&2
+  fi
+  exit 1
+}
+note() { printf '  %s%s%s\n' "$D" "$*" "$N"; }
+header() { # header "greeting"
+  printf '\n  %s%s◆ modula%s  %sdeploy · your own little cloud%s\n' "$A" "$B" "$N" "$D" "$N"
+  printf '  %s\n\n' "$1"
+}
+card_top() { printf '\n  %s╭─%s %s%s%s\n' "$A" "$N" "$B" "$1" "$N"; }
+card() { if [[ -n $* ]]; then printf '  %s│%s  %s\n' "$A" "$N" "$*"; else printf '  %s│%s\n' "$A" "$N"; fi; }
+card_kv() { printf '  %s│%s  %-14s%s\n' "$A" "$N" "$1" "$2"; }
+card_end() { printf '  %s╰─%s %s\n\n' "$A" "$N" "$1"; }
 
 # step "label" fn args… — runs one step and prints how long it took. Steps run
 # in this shell (so they can set variables) with errexit on; if one fails, the
-# EXIT trap prints its output.
-STEP_LOG="" STEP_LABEL=""
+# EXIT trap prints its output. A step that exits (die) does so with its output
+# still redirected, so the trap writes to copies of the original stdout and
+# stderr (fds 3 and 4).
+exec 3>&1 4>&2
 step() {
   STEP_LABEL=$1; shift
   local t; t=$(date +%s%N)
-  [[ -t 1 ]] && printf "  %s… " "$STEP_LABEL"
+  [[ $TTY == 1 ]] && printf '  %s→%s %s…' "$D" "$N" "$STEP_LABEL"
   STEP_LOG=$(mktemp)
   "$@" >"$STEP_LOG" 2>&1
-  printf "\r  ${G}✓${N} %-40s ${D}%s${N}\n" "$STEP_LABEL" "$(fmt_ms "$(ms_since "$t")")"
+  [[ $TTY == 1 ]] && printf '\r\e[K'
+  printf '  %s✓%s %-40s %s%s%s\n' "$A" "$N" "$STEP_LABEL" "$D" "$(fmt_ms "$(ms_since "$t")")" "$N"
   rm -f "$STEP_LOG"
   STEP_LOG=""
 }
 on_exit() {
   local rc=$?
   if [[ $rc -ne 0 && -n $STEP_LOG ]]; then
-    printf "\r  ${R}✗${N} %-40s\n" "$STEP_LABEL"
-    sed 's/^/    /' "$STEP_LOG" >&2
+    [[ $TTY == 1 ]] && printf '\r\e[K' >&3
+    printf '  %s✗ %s%s\n' "$R" "$STEP_LABEL" "$N" >&3
+    sed 's/^/    /' "$STEP_LOG" >&4
     rm -f "$STEP_LOG"
+    printf '\n  %s\n\n' "Once that's sorted, run the same command again; finished steps are skipped." >&4
   fi
 }
 trap on_exit EXIT
@@ -97,7 +133,7 @@ while [[ $# -gt 0 ]]; do
     --ca) JOIN_CA=${2:?}; shift 2 ;;
     --name) NODE_NAME=${2:?}; shift 2 ;;
     -h | --help) usage; exit 0 ;;
-    *) usage >&2; die "unknown option $1" ;;
+    *) usage >&2; die "unknown option $1" "The options are listed above; --help shows them again." ;;
   esac
 done
 [[ $VERSION == __* ]] && VERSION=latest
@@ -106,36 +142,36 @@ done
 host_re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
 case $MODE in
   main)
-    [[ -n $DOMAIN && -n $EMAIL ]] || { usage >&2; die "--domain and --email are required"; }
+    [[ -n $DOMAIN && -n $EMAIL ]] || { usage >&2; die "--domain and --email are required" "For example: … | sudo bash -s -- --domain deploy.example.com --email you@example.com"; }
     DOMAIN=${DOMAIN,,}; APPS_DOMAIN=${APPS_DOMAIN,,}
-    [[ $DOMAIN =~ $host_re ]] || die "--domain must be a hostname like deploy.example.com"
-    [[ -z $APPS_DOMAIN || $APPS_DOMAIN =~ $host_re ]] || die "--apps-domain must be a hostname like apps.example.com"
-    [[ $EMAIL =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] || die "--email is not an email address"
+    [[ $DOMAIN =~ $host_re ]] || die "--domain must be a hostname like deploy.example.com" "Just the name, without https:// or a path."
+    [[ -z $APPS_DOMAIN || $APPS_DOMAIN =~ $host_re ]] || die "--apps-domain must be a hostname like apps.example.com" "Just the name, without https:// or a path."
+    [[ $EMAIL =~ ^[^@[:space:]]+@[^@[:space:]]+$ ]] || die "--email is not an email address" "Let's Encrypt uses it to tell you about expiring certificates."
     ;;
   join)
-    [[ $JOIN_SERVER =~ ^https://[^[:space:]]+$ ]] || die "--server must be an https:// URL"
-    [[ $JOIN_TOKEN =~ ^mcj_[A-Za-z0-9_-]+$ ]] || die "--token must be a join token (mcj_…)"
-    [[ $JOIN_CA =~ ^sha256:[0-9a-f]{64}$ ]] || die "--ca must be sha256:<64 hex>"
-    [[ -z $NODE_NAME || $NODE_NAME =~ ^[A-Za-z0-9._-]{1,63}$ ]] || die "--name may use letters, digits, . _ -"
+    [[ $JOIN_SERVER =~ ^https://[^[:space:]]+$ ]] || die "--server must be an https:// URL" "Copy the whole join command from the dashboard (Servers → Add server)."
+    [[ $JOIN_TOKEN =~ ^mcj_[A-Za-z0-9_-]+$ ]] || die "--token must be a join token (mcj_…)" "Copy the whole join command from the dashboard (Servers → Add server)."
+    [[ $JOIN_CA =~ ^sha256:[0-9a-f]{64}$ ]] || die "--ca must be sha256:<64 hex>" "Copy the whole join command from the dashboard (Servers → Add server)."
+    [[ -z $NODE_NAME || $NODE_NAME =~ ^[A-Za-z0-9._-]{1,63}$ ]] || die "--name may use letters, digits, . _ -" "Up to 63 characters, e.g. --name web-1."
     ;;
 esac
 
 # ---------------------------------------------------------------- checks
 
 preflight() {
-  [[ $EUID -eq 0 ]] || die "run as root (sudo)"
-  [[ -d /run/systemd/system ]] || die "systemd is required"
-  command -v apt-get >/dev/null || die "only Debian and Ubuntu are supported for now"
+  [[ $EUID -eq 0 ]] || die "this needs to run as root" "Try again with sudo: curl -fsSL … | sudo bash -s -- …"
+  [[ -d /run/systemd/system ]] || die "systemd is required" "Modula runs its services with systemd; use a regular VM or server rather than a container."
+  command -v apt-get >/dev/null || die "only Debian and Ubuntu are supported for now" "Ubuntu 22.04+ or Debian 12+ will do nicely."
   case $(uname -m) in
     x86_64) ARCH=amd64 ;;
     aarch64 | arm64) ARCH=arm64 ;;
-    *) die "unsupported CPU architecture $(uname -m)" ;;
+    *) die "unsupported CPU architecture $(uname -m)" "Modula runs on amd64 (x86_64) and arm64 servers." ;;
   esac
   if [[ $MODE == main && -f $CONF/node.env && ! -f $CONF/server.env ]]; then
-    die "this server already joined another instance"
+    die "this server already joined another instance" "To make it a main server, start from a fresh machine instead."
   fi
   if [[ $MODE == join && -f $CONF/server.env ]]; then
-    die "this is a main server; it already runs modula-node"
+    die "this is a main server; it already runs modula-node" "It already runs apps for its own instance; no need to join it."
   fi
 }
 
@@ -195,7 +231,7 @@ download() {
   for n in "${names[@]}"; do
     (cd "$tmp" && grep -q "  $n\$" SHA256SUMS) || { rm -rf "$tmp"; echo "$n is not in SHA256SUMS" >&2; return 1; }
     chmod 755 "$tmp/$n"
-    ln -s "$n" "$tmp/${n%-linux-$ARCH}"
+    ln -s "$n" "$tmp/${n%-linux-"$ARCH"}"
   done
   rm -f "$tmp/release.pub.pem"
 
@@ -217,6 +253,7 @@ activate() {
 
 prune_releases() {
   local current; current=$(readlink -f "$PREFIX/current")
+  # shellcheck disable=SC2012 # newest first; release names are version strings
   ls -1dt "$PREFIX"/releases/*/ 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | while read -r d; do
     [[ $(readlink -f "$d") == "$current" ]] || rm -rf "$d"
   done
@@ -413,6 +450,7 @@ start_main() {
 
 # Runs a modula-server subcommand with the installed configuration.
 server_cli() {
+  # shellcheck source=/dev/null
   (set -a; . "$CONF/server.env"; set +a; runuser -u modula -- "$PREFIX/current/modula-server" "$@")
 }
 
@@ -467,8 +505,10 @@ recovery_kit() {
 
 # ---------------------------------------------------------------- modes
 
+this_host() { hostname 2>/dev/null || uname -n; }
+
 install_main() {
-  echo "${B}Installing Modula Deploy${N} ${D}(main server, $DOMAIN)${N}"
+  header "Hey! Let's get Modula running on $(this_host). This takes a few minutes."
   step "Checking this server" preflight
   step "Installing packages" packages
   step "Downloading release ($VERSION)" fetch_release
@@ -483,18 +523,25 @@ install_main() {
   step "Starting the node and edge" start_node
   step "Writing the recovery kit" recovery_kit
   local setup; setup=$(server_cli setup-token 2>/dev/null || true)
-  echo
-  echo "${G}Done${N} in $(fmt_ms "$(ms_since "$T0")")."
-  echo
-  echo "  Dashboard:     ${B}https://$DOMAIN${N}"
-  [[ -n $setup ]] && echo "  Setup token:   ${B}$setup${N}  (single use; create the first admin with it)"
-  echo "  Recovery kit:  /root/modula-recovery-kit.txt  ${R}copy it off this server, then delete it${N}"
-  echo
-  note "Point DNS for $DOMAIN${APPS_DOMAIN:+ and *.$APPS_DOMAIN} at this server. Open ports 80, 443 and 7101 (servers joining)."
+  card_top "All set! Modula is up and running  ${D}($(fmt_ms "$(ms_since "$T0")"))${N}"
+  card ""
+  card_kv "Dashboard" "${A}https://$DOMAIN${N}"
+  if [[ -n $setup ]]; then
+    card_kv "Setup token" "${B}$setup${N}"
+    card_kv "" "${D}single use; create the first admin with it${N}"
+  fi
+  card_kv "Recovery kit" "/root/modula-recovery-kit.txt"
+  card_kv "" "${R}copy it somewhere safe, then delete it from this server${N}"
+  card ""
+  card "${B}Next:${N} open ${A}https://$DOMAIN/setup${N}${setup:+ and paste the setup token}."
+  card "${D}Point DNS for $DOMAIN${APPS_DOMAIN:+ and *.$APPS_DOMAIN} at this server, and open${N}"
+  card "${D}ports 80 and 443 (plus 7101 for servers joining later).${N}"
+  card ""
+  card_end "Have fun shipping things!"
 }
 
 install_join() {
-  echo "${B}Joining Modula Deploy${N} ${D}($JOIN_SERVER)${N}"
+  header "Joining $JOIN_SERVER as a new node…"
   step "Checking this server" preflight
   step "Installing packages" packages
   step "Downloading release ($VERSION)" fetch_release
@@ -502,23 +549,28 @@ install_join() {
   step "Writing services" units
   step "Joining" join_remote
   step "Starting the node and edge" start_node
-  echo
-  echo "${G}Done${N} in $(fmt_ms "$(ms_since "$T0")"). This server now shows up in the dashboard under Servers."
-  note "Open ports 80 and 443 for apps; no inbound port is needed for the dashboard."
+  card_top "Welcome aboard!  ${D}($(fmt_ms "$(ms_since "$T0")"))${N}"
+  card ""
+  card "$(this_host) is now part of ${A}$JOIN_SERVER${N}."
+  card "It'll show up on the Servers page in a moment, ready for apps."
+  card ""
+  card "${D}Open ports 80 and 443 for apps; the dashboard needs no inbound port.${N}"
+  card ""
+  card_end "Happy shipping!"
 }
 
 upgrade() {
-  [[ -L $PREFIX/current ]] || die "Modula Deploy is not installed here"
+  [[ -L $PREFIX/current ]] || die "Modula Deploy is not installed here" "Install it first: … | sudo bash -s -- --domain … --email …"
   if [[ -f $CONF/server.env ]]; then
     MODE=main
     SERVER_RELEASES="" # it would only hand back its own, current version
   fi
   local previous; previous=$(readlink -f "$PREFIX/current")
-  echo "${B}Upgrading Modula Deploy${N} ${D}(from $(basename "$previous"))${N}"
+  header "Upgrading Modula on $(this_host) ${D}(currently $(basename "$previous"))${N}"
   step "Checking this server" preflight
   step "Downloading release ($VERSION)" download
   if [[ $(readlink -f "$RELEASE") == "$previous" ]]; then
-    echo "Already on $(basename "$previous")."
+    printf '\n  %s✓%s Already on %s%s%s; nothing to do. Enjoy!\n\n' "$A" "$N" "$B" "$(basename "$previous")" "$N"
     return 0
   fi
   step "Switching to $(basename "$RELEASE")" activate
@@ -526,17 +578,18 @@ upgrade() {
   if [[ $MODE == main ]]; then
     systemctl restart modula-server
     if ! wait_healthy; then
-      echo "${R}The new version did not start; rolling back to $(basename "$previous").${N}" >&2
+      printf '  %s✗ The new version did not start; rolling back to %s.%s\n' "$R" "$(basename "$previous")" "$N" >&2
       RELEASE=$previous activate
       systemctl restart modula-server
       wait_healthy || true
+      printf '    %s\n' "Your apps keep running. The log lines above should say what went wrong." >&2
       exit 1
     fi
   fi
   # The node reloads Caddy's config within seconds after Caddy restarts.
   step "Restarting the node and edge" systemctl restart modula-node modula-caddy
   prune_releases
-  echo "${G}Upgraded${N} to $(basename "$RELEASE") in $(fmt_ms "$(ms_since "$T0")")."
+  printf '\n  %s✓%s Upgraded to %s%s%s in %s. Fresh and ready!\n\n' "$A" "$N" "$B" "$(basename "$RELEASE")" "$N" "$(fmt_ms "$(ms_since "$T0")")"
 }
 
 case $MODE in

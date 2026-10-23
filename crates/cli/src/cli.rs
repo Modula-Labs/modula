@@ -14,7 +14,10 @@ isn't a terminal).";
 #[command(
     name = "modula",
     version,
-    about = "Modula Deploy from the command line",
+    about = "Ship your apps to your own servers with Modula Deploy.",
+    long_about = "Ship your apps to your own servers with Modula Deploy.\n\n\
+New here? Start with `modula login --url https://your-instance`, then\n\
+`modula init <name>` and `modula up` to deploy the current directory.",
     after_help = AFTER_HELP,
     propagate_version = true
 )]

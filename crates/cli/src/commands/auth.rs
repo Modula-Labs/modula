@@ -70,6 +70,7 @@ pub async fn login(
                 dir.display()
             ));
             o.note(format!("Wrote {} (readable by you only)", file.display()));
+            welcome(o);
         });
     }
     ctx.cfg.url = Some(url.to_string());
@@ -77,7 +78,36 @@ pub async fn login(
     config::save(&ctx.session.config_path, &ctx.cfg)?;
     ctx.out.either(&me, |o| {
         o.line(format!("Logged in to {url} as {}", me.user.email));
+        welcome(o);
     })
+}
+
+/// A friendly nudge after a fresh login: what to try first (on stderr, like
+/// every hint, so the result line stays the only stdout).
+fn welcome(o: &crate::output::Output) {
+    let next = [
+        ("modula list", "see your projects"),
+        (
+            "modula init <name>",
+            "start a project here (or `modula link`)",
+        ),
+        ("modula up", "deploy this directory"),
+        ("modula docs", "the full reference"),
+    ];
+    o.note("");
+    o.note(format!(
+        "  {} You're in. Here's what to try next:",
+        o.accent("◆")
+    ));
+    o.note("");
+    for (cmd, what) in next {
+        o.note(format!(
+            "    {}  {}",
+            o.accent(&format!("{cmd:<20}")),
+            o.dim(what)
+        ));
+    }
+    o.note("");
 }
 
 /// Save a checked login in `<modula_root>/.modula/token` and use it from now on.

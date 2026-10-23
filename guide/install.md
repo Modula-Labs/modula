@@ -33,7 +33,7 @@ The API itself listens on `127.0.0.1:7100` behind Caddy.
 ## Install the main server
 
 ```bash
-curl -fsSL https://github.com/modula-deploy/modula-deploy/releases/latest/download/install.sh \
+curl -fsSL https://usemodula.org/install.sh \
   | sudo bash -s -- --domain deploy.example.com --email you@example.com --apps-domain apps.example.com
 ```
 
@@ -106,7 +106,7 @@ Set in `/etc/modula/server.env`; restart `modula-server` after a change.
 Upgrade the main server first, from the release:
 
 ```bash
-curl -fsSL https://github.com/modula-deploy/modula-deploy/releases/latest/download/install.sh \
+curl -fsSL https://usemodula.org/install.sh \
   | sudo bash -s -- upgrade [--version X.Y.Z]
 ```
 
