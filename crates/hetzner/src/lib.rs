@@ -81,8 +81,9 @@ pub struct ServerType {
     pub deprecation: Option<Value>,
     #[serde(default)]
     pub prices: Vec<Price>,
-    /// Per-location availability (newer API versions); a location with a
-    /// deprecation can no longer get new servers of this type.
+    /// Per-location availability: `available: false` is sold out there, a
+    /// deprecation means retired there. (Replaces `GET /datacenters`, gone
+    /// since 2026-10-01.)
     #[serde(default)]
     pub locations: Vec<TypeLocation>,
 }
@@ -99,12 +100,11 @@ impl ServerType {
             return false;
         }
         let priced = self.prices.iter().any(|p| p.location == location);
-        let retired = self
-            .locations
-            .iter()
-            .any(|l| l.name == location && l.deprecation.as_ref().is_some_and(|d| !d.is_null()));
-        let listed = self.locations.is_empty() || self.locations.iter().any(|l| l.name == location);
-        priced && listed && !retired
+        let here = self.locations.iter().find(|l| l.name == location);
+        let retired = here.is_some_and(|l| l.deprecation.as_ref().is_some_and(|d| !d.is_null()));
+        let sold_out = here.is_some_and(|l| l.available == Some(false));
+        let listed = self.locations.is_empty() || here.is_some();
+        priced && listed && !retired && !sold_out
     }
 }
 
@@ -123,6 +123,11 @@ pub struct TypeLocation {
     pub name: String,
     #[serde(default)]
     pub deprecation: Option<Value>,
+    /// False while sold out in this location.
+    #[serde(default)]
+    pub available: Option<bool>,
+    #[serde(default)]
+    pub recommended: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,22 +151,6 @@ pub struct SshKey {
     /// OpenSSH format, e.g. `ssh-ed25519 AAAA… comment`.
     #[serde(default)]
     pub public_key: String,
-}
-
-/// A datacenter in a location, with the server types it can create now.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Datacenter {
-    pub name: String,
-    pub location: Location,
-    #[serde(default)]
-    pub server_types: DatacenterTypes,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct DatacenterTypes {
-    /// Ids of the types that can be created here right now (not sold out).
-    #[serde(default)]
-    pub available: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -372,11 +361,6 @@ impl Client {
         self.list("/ssh_keys", "ssh_keys", &[]).await
     }
 
-    /// Every datacenter, with the server types each can create right now.
-    pub async fn datacenters(&self) -> Result<Vec<Datacenter>, ProviderError> {
-        self.list("/datacenters", "datacenters", &[]).await
-    }
-
     /// Upload a public key (OpenSSH format) under `name`.
     pub async fn create_ssh_key(
         &self,
@@ -578,12 +562,13 @@ mod tests {
             "name": "cx22", "cores": 2, "memory": 4.0, "disk": 40,
             "architecture": "x86", "deprecation": null,
             "prices": [{ "location": "fsn1", "price_monthly": { "net": "3.79", "gross": "4.51" } }],
-            "locations": [{ "name": "fsn1", "deprecation": null }, { "name": "nbg1", "deprecation": { "announced": "2025-01-01T00:00:00Z" } }]
+            "locations": [{ "name": "fsn1", "deprecation": null }, { "name": "nbg1", "deprecation": { "announced": "2025-01-01T00:00:00Z" } }, { "name": "hel1", "available": false }]
         }))
         .unwrap();
         assert!(t.orderable_in("fsn1"));
         assert!(!t.orderable_in("nbg1"), "retired in that location");
         assert!(!t.orderable_in("hel1"), "no price there");
+        assert!(!t.orderable_in("ash"), "not listed there");
         let old: ServerType = serde_json::from_value(json!({
             "name": "cx11", "cores": 1, "memory": 2.0, "disk": 20, "deprecated": true,
             "prices": [{ "location": "fsn1", "price_monthly": { "net": "3", "gross": "3" } }]

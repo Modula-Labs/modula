@@ -1,9 +1,9 @@
-//! What can be ordered where: Hetzner's locations, datacenters and server
+//! What can be ordered where: Hetzner's locations and server
 //! types boiled down to "these locations, each with these types at these
 //! prices", plus the pick we recommend for a main server. Pure functions, so
 //! the wizard, `server options` and the tests share them.
 
-use modula_hetzner::{Datacenter, Location, ServerType, price_cents};
+use modula_hetzner::{Location, ServerType, price_cents};
 use serde::Serialize;
 
 /// Smaller than this can't run the dashboard, Postgres and Redis.
@@ -143,27 +143,15 @@ fn suitable(t: &ServerType) -> bool {
 /// Locations that can create at least one suitable type right now, each
 /// with those types (cheapest first) and our recommendation.
 ///
-/// A type is offered in a location when it is priced and not retired there
-/// and at least one of the location's datacenters lists it as available
-/// (Hetzner's `server_types.available`: not sold out). With no datacenter
-/// data at all, availability falls back to price and retirement only.
-pub fn build(
-    locations: &[Location],
-    types: &[ServerType],
-    datacenters: &[Datacenter],
-) -> Vec<LocationOption> {
+/// A type is offered in a location when it is priced there and neither
+/// retired nor sold out (`server_types[].locations[].available`).
+pub fn build(locations: &[Location], types: &[ServerType]) -> Vec<LocationOption> {
     let mut out: Vec<LocationOption> = locations
         .iter()
         .filter_map(|loc| {
-            let available_here: Vec<i64> = datacenters
-                .iter()
-                .filter(|dc| dc.location.name == loc.name)
-                .flat_map(|dc| dc.server_types.available.iter().copied())
-                .collect();
             let mut offered: Vec<TypeOption> = types
                 .iter()
                 .filter(|t| suitable(t) && t.orderable_in(&loc.name))
-                .filter(|t| datacenters.is_empty() || available_here.contains(&t.id))
                 .filter_map(|t| {
                     let cents = price_cents(&t.monthly_price_in(&loc.name)?.gross)?;
                     Some(TypeOption {
@@ -235,15 +223,20 @@ mod tests {
     use serde_json::json;
 
     fn types() -> Vec<ServerType> {
+        let at = |loc: &str, available: bool| json!({"name": loc, "available": available});
         let price = |loc: &str, gross: &str| {
             json!({"location": loc, "price_hourly": {"net": "0", "gross": "0"},
                    "price_monthly": {"net": "1", "gross": gross}})
         };
         serde_json::from_value(json!([
             {"id": 1, "name": "cx23", "cores": 2, "memory": 4.0, "disk": 40, "cpu_type": "shared", "architecture": "x86",
-             "prices": [price("fsn1", "4.5101"), price("hel1", "4.5101"), price("ash", "5.99")]},
+             "prices": [price("fsn1", "4.5101"), price("hel1", "4.5101"), price("ash", "5.99")],
+             // Sold out in fsn1; not listed in ash.
+             "locations": [at("fsn1", false), at("hel1", true), at("sin", true)]},
             {"id": 2, "name": "cx33", "cores": 4, "memory": 8.0, "disk": 80, "cpu_type": "shared", "architecture": "x86",
-             "prices": [price("fsn1", "7.4900"), price("hel1", "7.4900")]},
+             "prices": [price("fsn1", "7.4900"), price("hel1", "7.4900")],
+             // Sold out in hel1.
+             "locations": [at("fsn1", true), at("hel1", false), at("sin", true)]},
             {"id": 3, "name": "cax21", "cores": 4, "memory": 8.0, "disk": 80, "cpu_type": "shared", "architecture": "arm",
              "prices": [price("fsn1", "7.2500")]},
             {"id": 4, "name": "ccx13", "cores": 2, "memory": 8.0, "disk": 80, "cpu_type": "dedicated", "architecture": "x86",
@@ -268,25 +261,9 @@ mod tests {
         .unwrap()
     }
 
-    fn datacenters() -> Vec<Datacenter> {
-        let dc = |name: &str, loc: &str, available: &[i64]| json!({"name": name, "location": {"name": loc}, "server_types": {"available": available}});
-        serde_json::from_value(json!([
-            // fsn1: everything but cx23 is in stock (two datacenters).
-            dc("fsn1-dc14", "fsn1", &[2, 4, 5, 6]),
-            dc("fsn1-dc15", "fsn1", &[3]),
-            // hel1: cx33 is sold out.
-            dc("hel1-dc2", "hel1", &[1]),
-            // ash: only cpx11 (2 GB).
-            dc("ash-dc1", "ash", &[7]),
-            // sin: nothing suitable is priced there.
-            dc("sin-dc1", "sin", &[1, 2])
-        ]))
-        .unwrap()
-    }
-
     #[test]
     fn only_available_suitable_types_per_location() {
-        let c = build(&locations(), &types(), &datacenters());
+        let c = build(&locations(), &types());
         let names: Vec<&str> = c.iter().map(|l| l.name.as_str()).collect();
         // No suitable type is sold in sin; sorted by network zone, then name.
         assert_eq!(names, ["fsn1", "hel1", "ash"]);
@@ -314,8 +291,10 @@ mod tests {
     }
 
     #[test]
-    fn without_datacenter_data_prices_decide() {
-        let c = build(&locations(), &types(), &[]);
+    fn without_location_data_prices_decide() {
+        let mut t = types();
+        t.iter_mut().for_each(|t| t.locations.clear());
+        let c = build(&locations(), &t);
         let fsn1 = c.iter().find(|l| l.name == "fsn1").unwrap();
         assert!(fsn1.find_type("CX23").is_some());
         assert_eq!(fsn1.recommended.as_deref(), Some("cax21"));
@@ -353,7 +332,7 @@ mod tests {
         assert_eq!(flag("FI"), "🇫🇮");
         assert_eq!(flag("??"), "🌐");
         assert_eq!(flag(""), "🌐");
-        let c = build(&locations(), &types(), &datacenters());
+        let c = build(&locations(), &types());
         let label = c[0].types[1].label();
         assert!(
             label.starts_with("cx33     4 vCPU ·   8 GB RAM ·   80 GB disk · x86"),

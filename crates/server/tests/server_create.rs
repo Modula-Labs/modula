@@ -83,8 +83,8 @@ async fn mock_cloud(db: PgPool) -> (String, Shared) {
     }));
     let price = |loc: &str, gross: &str| json!({"location": loc, "price_hourly": {"net": "0", "gross": "0"}, "price_monthly": {"net": "1", "gross": gross}});
     let types = json!([
-        {"id": 1, "name": "cx23", "cores": 2, "memory": 4.0, "disk": 40, "cpu_type": "shared", "architecture": "x86", "prices": [price("fsn1", "4.5101")]},
-        {"id": 2, "name": "cx33", "cores": 4, "memory": 8.0, "disk": 80, "cpu_type": "shared", "architecture": "x86", "prices": [price("fsn1", "8.2100")]}
+        {"id": 1, "name": "cx23", "cores": 2, "memory": 4.0, "disk": 40, "cpu_type": "shared", "architecture": "x86", "prices": [price("fsn1", "4.5101")], "locations": [{"name": "fsn1", "available": true, "recommended": true}]},
+        {"id": 2, "name": "cx33", "cores": 4, "memory": 8.0, "disk": 80, "cpu_type": "shared", "architecture": "x86", "prices": [price("fsn1", "8.2100")], "locations": [{"name": "fsn1", "available": true}]}
     ]);
     let app = Router::new()
         // Hetzner
@@ -101,13 +101,6 @@ async fn mock_cloud(db: PgPool) -> (String, Shared) {
                 hetzner!(m, h, "GET /server_types");
                 (StatusCode::OK, Json(page("server_types", types)))
             }
-        }))
-        .route("/hetzner/v1/datacenters", get(|State(m): State<Shared>, h: HeaderMap| async move {
-            hetzner!(m, h, "GET /datacenters");
-            (StatusCode::OK, Json(page("datacenters", json!([
-                {"name": "fsn1-dc14", "location": {"name": "fsn1"}, "server_types": {"available": [1, 2]}},
-                {"name": "hel1-dc2", "location": {"name": "hel1"}, "server_types": {"available": [2]}}
-            ]))))
         }))
         .route("/hetzner/v1/ssh_keys", get(|State(m): State<Shared>, h: HeaderMap| async move {
             hetzner!(m, h, "GET /ssh_keys");

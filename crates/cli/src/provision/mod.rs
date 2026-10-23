@@ -277,12 +277,11 @@ pub fn valid_password(p: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Locations, types and datacenters, boiled down ([`catalog::build`]).
+/// Locations and types, boiled down ([`catalog::build`]).
 pub async fn load_catalog(hz: &Client) -> anyhow::Result<Vec<LocationOption>> {
-    let (locations, types, datacenters) =
-        futures::try_join!(hz.locations(), hz.server_types(), hz.datacenters())
-            .map_err(flow::hetzner_error)?;
-    Ok(catalog::build(&locations, &types, &datacenters))
+    let (locations, types) =
+        futures::try_join!(hz.locations(), hz.server_types()).map_err(flow::hetzner_error)?;
+    Ok(catalog::build(&locations, &types))
 }
 
 /// `ssh-ed25519 AAAA…` without the comment, for comparing keys.
