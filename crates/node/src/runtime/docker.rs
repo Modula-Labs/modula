@@ -15,20 +15,20 @@ use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::{
     ContainerCreateBody, ContainerSummaryStateEnum, EndpointSettings, HostConfig,
-    HostConfigLogConfig, NetworkCreateRequest, NetworkingConfig, RestartPolicy as DockerRestart,
-    RestartPolicyNameEnum,
+    HostConfigLogConfig, Mount, MountType, NetworkCreateRequest, NetworkingConfig,
+    RestartPolicy as DockerRestart, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     ListNetworksOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
+    RemoveVolumeOptionsBuilder,
 };
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use modula_proto::node::v1::{RestartPolicy, Workload};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::{Container, LogLine, Runtime, labels};
+use super::{Container, LogLine, OutputSink, Runtime, labels};
 
 /// Docker's default set minus NET_RAW, MKNOD, AUDIT_WRITE and SYS_CHROOT.
 const CAPABILITIES: &[&str] = &[
@@ -42,7 +42,11 @@ const CAPABILITIES: &[&str] = &[
     "SETPCAP",
     "NET_BIND_SERVICE",
 ];
-const STOP_GRACE_SECS: i32 = 10;
+/// Requests that wait on a stopping container (draining is at most 300s)
+/// outlive bollard's two-minute default.
+const STOP_REQUEST_TIMEOUT: Duration = Duration::from_secs(360);
+/// Marks a one-off container (`run_once`); never listed as a workload.
+const ONCE_LABEL: &str = "modula.once";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct DockerRuntime {
@@ -176,6 +180,7 @@ impl Runtime for DockerRuntime {
             };
             out.push(Container {
                 deployment_id: labels.get(labels::DEPLOYMENT).cloned().unwrap_or_default(),
+                service_id: labels.get(labels::SERVICE).cloned().unwrap_or_default(),
                 environment_id: labels.get(labels::ENVIRONMENT).cloned().unwrap_or_default(),
                 id,
                 running,
@@ -201,7 +206,6 @@ impl Runtime for DockerRuntime {
 
     async fn create(&self, w: &Workload) -> anyhow::Result<String> {
         let net = network_name(&w.environment_id);
-        let limits = w.limits.unwrap_or_default();
         let restart = match RestartPolicy::try_from(w.restart).unwrap_or(RestartPolicy::OnFailure) {
             RestartPolicy::Always => RestartPolicyNameEnum::ALWAYS,
             RestartPolicy::Never => RestartPolicyNameEnum::NO,
@@ -209,29 +213,30 @@ impl Runtime for DockerRuntime {
                 RestartPolicyNameEnum::ON_FAILURE
             }
         };
+        // Docker only accepts a retry limit with on-failure.
+        let max_retries = (restart == RestartPolicyNameEnum::ON_FAILURE
+            && w.restart_max_retries > 0)
+            .then_some(i64::from(w.restart_max_retries));
         let host = HostConfig {
-            memory: (limits.memory_bytes > 0).then_some(limits.memory_bytes as i64),
-            nano_cpus: (limits.nano_cpus > 0).then_some(limits.nano_cpus as i64),
-            pids_limit: (limits.pids > 0).then_some(limits.pids),
             restart_policy: Some(DockerRestart {
                 name: Some(restart),
-                maximum_retry_count: None,
+                maximum_retry_count: max_retries,
             }),
-            cap_drop: Some(vec!["ALL".into()]),
-            cap_add: Some(CAPABILITIES.iter().map(|c| (*c).to_owned()).collect()),
-            security_opt: Some(vec!["no-new-privileges:true".into()]),
-            init: Some(true),
-            log_config: Some(HostConfigLogConfig {
-                typ: Some("json-file".into()),
-                config: Some(HashMap::from([
-                    ("max-size".to_owned(), "10m".to_owned()),
-                    ("max-file".to_owned(), "3".to_owned()),
-                ])),
+            // A named volume: Docker creates it on first use, empty, and it
+            // outlives containers until the server asks for its removal.
+            mounts: w.volume.as_ref().map(|v| {
+                vec![Mount {
+                    typ: Some(MountType::VOLUME),
+                    source: Some(v.name.clone()),
+                    target: Some(v.mount_path.clone()),
+                    ..Default::default()
+                }]
             }),
-            network_mode: Some(net.clone()),
-            ..Default::default()
+            ..host_config(w)
         };
         let body = ContainerCreateBody {
+            // Every later stop (retire, restart) waits this long after SIGTERM.
+            stop_timeout: (w.draining_seconds > 0).then_some(i64::from(w.draining_seconds)),
             image: Some(w.image.clone()),
             cmd: (!w.command.is_empty()).then(|| w.command.clone()),
             env: Some(
@@ -271,27 +276,127 @@ impl Runtime for DockerRuntime {
         Ok(())
     }
 
+    async fn run_once(
+        &self,
+        w: &Workload,
+        command: &[String],
+        timeout: Duration,
+        output: OutputSink,
+    ) -> anyhow::Result<i64> {
+        let name = format!("modula-once-{}", w.deployment_id);
+        // A run cut short by a node restart may have left its container.
+        let _ = self
+            .docker
+            .remove_container(&name, Some(force_remove()))
+            .await;
+        let body = ContainerCreateBody {
+            image: Some(w.image.clone()),
+            cmd: Some(command.to_vec()),
+            env: Some(
+                w.env
+                    .iter()
+                    .map(|e| format!("{}={}", e.name, e.value))
+                    .collect(),
+            ),
+            labels: Some(HashMap::from([(
+                ONCE_LABEL.to_owned(),
+                w.deployment_id.clone(),
+            )])),
+            // On the environment network (databases resolve) but without the
+            // service's aliases: nothing routes to it.
+            host_config: Some(HostConfig {
+                restart_policy: Some(DockerRestart {
+                    name: Some(RestartPolicyNameEnum::NO),
+                    maximum_retry_count: None,
+                }),
+                ..host_config(w)
+            }),
+            ..Default::default()
+        };
+        let opts = CreateContainerOptionsBuilder::new().name(&name).build();
+        let id = self.docker.create_container(Some(opts), body).await?.id;
+        let _cleanup = RemoveOnDrop {
+            docker: self.docker.clone(),
+            id: id.clone(),
+        };
+        let docker = self
+            .docker
+            .clone()
+            .with_timeout(timeout + Duration::from_secs(30));
+        let run = async {
+            docker.start_container(&id, None).await?;
+            let logs = LogsOptionsBuilder::new()
+                .stdout(true)
+                .stderr(true)
+                .timestamps(true)
+                .follow(true)
+                .build();
+            let pump = docker.logs(&id, Some(logs)).for_each(|item| {
+                let lines = match item {
+                    Ok(LogOutput::StdOut { message } | LogOutput::Console { message }) => {
+                        parse_lines(&message, false)
+                    }
+                    Ok(LogOutput::StdErr { message }) => parse_lines(&message, true),
+                    _ => vec![],
+                };
+                for line in lines.into_iter().flatten() {
+                    output(line);
+                }
+                futures::future::ready(())
+            });
+            let wait = async {
+                match docker.wait_container(&id, None).next().await {
+                    Some(Ok(r)) => Ok(r.status_code),
+                    Some(Err(bollard::errors::Error::DockerContainerWaitError {
+                        code, ..
+                    })) => Ok(code),
+                    Some(Err(e)) => Err(anyhow::Error::from(e)),
+                    None => anyhow::bail!("lost track of the command"),
+                }
+            };
+            let ((), code) = tokio::join!(pump, wait);
+            code
+        };
+        match tokio::time::timeout(timeout, run).await {
+            Ok(code) => code,
+            Err(_) => anyhow::bail!("timed out after {}s", timeout.as_secs()),
+        }
+    }
+
     async fn restart(&self, container_id: &str) -> anyhow::Result<()> {
-        let opts = RestartContainerOptionsBuilder::new()
-            .t(STOP_GRACE_SECS)
-            .build();
+        // No `t`: Docker waits the container's own stop timeout (draining).
         self.docker
-            .restart_container(container_id, Some(opts))
+            .clone()
+            .with_timeout(STOP_REQUEST_TIMEOUT)
+            .restart_container(container_id, None)
             .await?;
         Ok(())
     }
 
+    async fn remove_volume(&self, name: &str) -> anyhow::Result<()> {
+        let opts = RemoveVolumeOptionsBuilder::new().force(false).build();
+        match self.docker.remove_volume(name, Some(opts)).await {
+            Ok(()) => Ok(()),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     async fn remove(&self, container_id: &str) -> anyhow::Result<()> {
-        let stop = StopContainerOptionsBuilder::new()
-            .t(STOP_GRACE_SECS)
-            .build();
+        // SIGTERM, then SIGKILL after the container's stop timeout (its
+        // draining time, set at create; Docker's 10s when unset).
         // Already-stopped containers make stop fail; removal is what matters.
-        let _ = self.docker.stop_container(container_id, Some(stop)).await;
-        let rm = RemoveContainerOptionsBuilder::new()
-            .force(true)
-            .v(true)
-            .build();
-        self.docker.remove_container(container_id, Some(rm)).await?;
+        let _ = self
+            .docker
+            .clone()
+            .with_timeout(STOP_REQUEST_TIMEOUT)
+            .stop_container(container_id, None)
+            .await;
+        self.docker
+            .remove_container(container_id, Some(force_remove()))
+            .await?;
         Ok(())
     }
 
@@ -370,6 +475,76 @@ impl Runtime for DockerRuntime {
             futures::stream::iter(lines)
         });
         Ok(stream.boxed())
+    }
+
+    async fn container_env(&self, container_id: &str) -> anyhow::Result<Vec<(String, String)>> {
+        super::docker_exec::container_env(&self.docker, container_id).await
+    }
+
+    async fn exec_output(
+        &self,
+        container_id: &str,
+        exec: super::Exec,
+    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<bytes::Bytes>>> {
+        super::docker_exec::exec_output(&self.docker, container_id, exec).await
+    }
+
+    async fn exec_input(
+        &self,
+        container_id: &str,
+        exec: super::Exec,
+        stdin: BoxStream<'static, anyhow::Result<bytes::Bytes>>,
+    ) -> anyhow::Result<()> {
+        super::docker_exec::exec_input(&self.docker, container_id, exec, stdin).await
+    }
+}
+
+/// What every container gets: limits, dropped capabilities, no new
+/// privileges, an init, rotated logs, and only its environment's network.
+fn host_config(w: &Workload) -> HostConfig {
+    let limits = w.limits.unwrap_or_default();
+    HostConfig {
+        memory: (limits.memory_bytes > 0).then_some(limits.memory_bytes as i64),
+        nano_cpus: (limits.nano_cpus > 0).then_some(limits.nano_cpus as i64),
+        pids_limit: (limits.pids > 0).then_some(limits.pids),
+        cap_drop: Some(vec!["ALL".into()]),
+        cap_add: Some(CAPABILITIES.iter().map(|c| (*c).to_owned()).collect()),
+        security_opt: Some(vec!["no-new-privileges:true".into()]),
+        init: Some(true),
+        log_config: Some(HostConfigLogConfig {
+            typ: Some("json-file".into()),
+            config: Some(HashMap::from([
+                ("max-size".to_owned(), "10m".to_owned()),
+                ("max-file".to_owned(), "3".to_owned()),
+            ])),
+        }),
+        network_mode: Some(network_name(&w.environment_id)),
+        ..Default::default()
+    }
+}
+
+fn force_remove() -> bollard::query_parameters::RemoveContainerOptions {
+    RemoveContainerOptionsBuilder::new()
+        .force(true)
+        .v(true)
+        .build()
+}
+
+/// Removes a one-off container however its run ends (including when the
+/// rollout waiting on it is aborted).
+struct RemoveOnDrop {
+    docker: Docker,
+    id: String,
+}
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let (docker, id) = (self.docker.clone(), std::mem::take(&mut self.id));
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move {
+                let _ = docker.remove_container(&id, Some(force_remove())).await;
+            });
+        }
     }
 }
 

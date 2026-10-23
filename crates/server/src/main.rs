@@ -24,6 +24,21 @@ enum Command {
     },
     /// Replace the first-run setup token and print it (only while setup is pending).
     SetupToken,
+    /// Restore the control plane's database from one of its own backups
+    /// (`…/modula-control-plane/….dump.age`, downloaded from the bucket).
+    /// Stop the server first; see backup::control_plane for the procedure.
+    RestoreBackup {
+        /// The encrypted backup file.
+        file: PathBuf,
+        /// The master key the backup was made under.
+        #[arg(long, env = "MODULA_MASTER_KEY_FILE")]
+        master_key_file: PathBuf,
+        #[arg(long, env = "MODULA_DATABASE_URL", hide_env_values = true)]
+        database_url: Option<String>,
+        /// Write the decrypted pg_dump archive to stdout instead of restoring.
+        #[arg(long)]
+        decrypt_only: bool,
+    },
     /// Print a single-use command that joins a new server to this instance.
     JoinToken {
         /// Minutes until the token expires.
@@ -51,6 +66,24 @@ async fn main() -> anyhow::Result<()> {
         Command::Keygen { out } => {
             let key = config::write_new_master_key(&out)?;
             eprintln!("wrote master key {} to {}", key.id(), out.display());
+            Ok(())
+        }
+        Command::RestoreBackup {
+            file,
+            master_key_file,
+            database_url,
+            decrypt_only,
+        } => {
+            let master = config::load_master_key(&master_key_file)?;
+            modula_server::backup::control_plane::restore_cli(
+                &file,
+                &master,
+                database_url.as_deref(),
+                decrypt_only,
+            )?;
+            if !decrypt_only {
+                eprintln!("restored; start modula-server to apply any newer migrations");
+            }
             Ok(())
         }
         Command::JoinToken { ttl_minutes } => {

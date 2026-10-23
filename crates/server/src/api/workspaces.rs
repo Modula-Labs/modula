@@ -24,11 +24,11 @@ pub struct Workspace {
 }
 
 pub async fn list(State(state): State<AppState>, actor: Actor) -> AppResult<Json<Vec<Membership>>> {
-    Ok(Json(
-        super::auth::load_me(&state.db, actor.user_id)
-            .await?
-            .workspaces,
-    ))
+    let mut workspaces = super::auth::load_me(&state.db, actor.user_id)
+        .await?
+        .workspaces;
+    workspaces.retain(|w| actor.can_reach_workspace(w.id));
+    Ok(Json(workspaces))
 }
 
 #[derive(Deserialize)]
@@ -43,6 +43,10 @@ pub async fn create(
     meta: RequestMeta,
     Json(req): Json<CreateWorkspace>,
 ) -> AppResult<Json<Workspace>> {
+    // A token limited to one workspace can't create another.
+    if actor.workspace_scope().is_some() {
+        return Err(AppError::Forbidden);
+    }
     let name = validate::display_name(&req.name, "workspace name")?;
     let id = Id::new();
     let mut tx = state.db.begin().await?;
@@ -110,6 +114,23 @@ pub async fn delete(
 ) -> AppResult<Json<serde_json::Value>> {
     let ws = grant.workspace_id()?;
     let mut tx = state.db.begin().await?;
+    // Provisioned servers keep billing at the provider; deleting the
+    // workspace would cascade away the only record of them. The row lock
+    // holds off a concurrent provision (its insert needs the workspace).
+    sqlx::query("SELECT 1 FROM workspaces WHERE id = $1 FOR UPDATE")
+        .bind(ws)
+        .execute(&mut *tx)
+        .await?;
+    let servers: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM provisioned_servers WHERE workspace_id = $1")
+            .bind(ws)
+            .fetch_one(&mut *tx)
+            .await?;
+    if servers > 0 {
+        return Err(AppError::Conflict(
+            "delete this workspace's servers first".into(),
+        ));
+    }
     sqlx::query("DELETE FROM workspaces WHERE id = $1")
         .bind(ws)
         .execute(&mut *tx)

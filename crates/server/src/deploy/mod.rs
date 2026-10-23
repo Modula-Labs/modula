@@ -77,3 +77,41 @@ impl LiveFilter {
         }
     }
 }
+
+/// Before deleting a service, environment or project: queue its volumes'
+/// data for deletion on their nodes (the rows go with the cascade). Returns
+/// the nodes to kick after commit.
+pub async fn queue_volume_removals(
+    tx: &mut sqlx::PgConnection,
+    filter: LiveFilter,
+    id: Id,
+) -> AppResult<Vec<Id>> {
+    let sql = match filter {
+        LiveFilter::Service => volume_removals_sql!("s.id = $1"),
+        LiveFilter::Environment => volume_removals_sql!("i.environment_id = $1"),
+        LiveFilter::Project => volume_removals_sql!("s.project_id = $1"),
+        LiveFilter::Deployment | LiveFilter::Node => return Ok(Vec::new()),
+    };
+    let mut nodes: Vec<Id> = sqlx::query_scalar(sql).bind(id).fetch_all(&mut *tx).await?;
+    nodes.sort();
+    nodes.dedup();
+    for n in &nodes {
+        bump(&mut *tx, *n).await?;
+    }
+    Ok(nodes)
+}
+
+macro_rules! volume_removals_sql {
+    ($cond:literal) => {
+        concat!(
+            "INSERT INTO volume_removals (volume_id, node_id)
+             SELECT v.id, i.node_id FROM volumes v
+             JOIN service_instances i ON i.id = v.service_instance_id
+             JOIN services s ON s.id = i.service_id
+             WHERE i.node_id IS NOT NULL AND ",
+            $cond,
+            " ON CONFLICT DO NOTHING RETURNING node_id"
+        )
+    };
+}
+use volume_removals_sql;

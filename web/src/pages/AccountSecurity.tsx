@@ -9,6 +9,7 @@ import { OtpInput } from "@/components/ui/OtpInput";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import { ApiError, api } from "@/lib/api";
 import { describeAgent, relativeTime } from "@/lib/format";
+import { ApiTokens } from "./AccountApiTokens";
 
 function Section({ title, description, children }: { title: string; description: string; children: ReactNode }) {
   return (
@@ -297,6 +298,13 @@ export function AccountSecurityPage() {
               Sign out all other sessions
             </Button>
           ) : null}
+        </Section>
+
+        <Section
+          title="API tokens"
+          description="For the modula-deploy CLI and automation. A token acts as you, optionally in one workspace only, and never with re-authentication."
+        >
+          <ApiTokens />
         </Section>
       </div>
 

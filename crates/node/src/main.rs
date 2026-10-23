@@ -174,7 +174,13 @@ async fn main() -> anyhow::Result<()> {
                     logs,
                 })
             };
-            session::run(cli.data_dir, runtime, Capabilities { edge, build }, stop).await?;
+            let db: Arc<dyn modula_node::db::Executor> = Arc::new(modula_node::db::pg::Postgres);
+            let caps = Capabilities {
+                edge,
+                build,
+                db: Some(db),
+            };
+            session::run(cli.data_dir, runtime, caps, stop).await?;
         }
         Command::Status => {
             let id = Identity::load(&cli.data_dir)?;

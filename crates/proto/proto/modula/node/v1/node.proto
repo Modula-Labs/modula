@@ -54,6 +54,11 @@ message NodeMessage {
     LogChunk log = 4;
     RenewRequest renew = 5;
     Heartbeat heartbeat = 6;
+    BackupResult backup_result = 20;
+    DbResponse db_result = 30;
+    TunnelOpened tunnel_opened = 31;
+    TunnelData tunnel_data = 32;
+    TunnelClose tunnel_close = 33;
   }
 }
 
@@ -79,6 +84,8 @@ message NodeInfo {
   string cloud_region = 8;
   // The nearest Cloudflare edge (IATA code), a fallback for the location.
   string edge_colo = 9;
+  // The public IPv4 the node reaches the internet from (Cloudflare trace).
+  string public_ip = 10;
 }
 
 message Heartbeat {
@@ -121,6 +128,11 @@ message BuildOutput {
   RestartPolicy restart = 5;
   // The app's stack guessed from the source (e.g. "nextjs"); empty = unknown.
   string stack = 6;
+  // Set when the file has a pre-deploy command (as the container argv).
+  bool has_pre_deploy = 45;
+  repeated string pre_deploy_command = 46;
+  // restartPolicyMaxRetries from the file (0 = not set).
+  uint32 restart_max_retries = 47;
 }
 
 message StateReport {
@@ -164,6 +176,12 @@ message ServerMessage {
     LogRequest logs = 3;
     LogCancel log_cancel = 4;
     RenewResponse renewed = 5;
+    BackupRequest backup = 20;
+    RestoreRequest restore = 21;
+    DbRequest db = 30;
+    TunnelOpen tunnel_open = 31;
+    TunnelData tunnel_data = 32;
+    TunnelClose tunnel_close = 33;
   }
 }
 
@@ -179,6 +197,9 @@ message DesiredState {
   // Public hostnames served by this node's edge (Caddy).
   repeated Route routes = 4;
   EdgeSettings edge = 5;
+  repeated TcpProxy tcp_proxies = 6;
+  // Volumes to delete from this node (their service or volume was deleted).
+  repeated string volume_removals = 7;
 }
 
 // hostname → the container of one deployment on this node.
@@ -230,6 +251,32 @@ message Workload {
   // Bumped by the server to restart the running container in place. The node
   // restarts when it sees a higher value than it last applied.
   uint32 restart_generation = 13;
+  // Persistent storage mounted into the container. A workload with a volume
+  // never overlaps with another deployment of its service: the node stops
+  // the old container before starting the new one.
+  Volume volume = 14;
+  // Deploy settings (45–49).
+  // Run once from the new image, with this workload's env on its network,
+  // before its container starts (argv; empty = none). A non-zero exit fails
+  // the deployment and the previous one keeps serving.
+  repeated string pre_deploy_command = 45;
+  // SIGTERM → SIGKILL grace when the container is stopped (0 = node default).
+  uint32 draining_seconds = 46;
+  // ON_FAILURE only: give up after this many restarts (0 = unlimited).
+  uint32 restart_max_retries = 47;
+}
+
+message Volume {
+  // The Docker volume name (modula-vol-<volume id>).
+  string name = 1;
+  string mount_path = 2;
+}
+
+// node:public_port (all interfaces) → one deployment's container:target_port.
+message TcpProxy {
+  uint32 public_port = 1;
+  string deployment_id = 2;
+  uint32 target_port = 3;
 }
 
 // Build one deployment from source. The node downloads the source archive,
@@ -305,4 +352,126 @@ message LogCancel {
 
 message RenewResponse {
   bytes cert_der = 1;
+}
+
+// ---------------------------------------------------------------- backups
+//
+// Database dumps run on the node that runs the database, inside its container
+// (a fixed command per engine, never one sent by the server). The dump is
+// age-encrypted on the node as it streams and uploaded straight to the
+// workspace's S3-compatible storage through presigned URLs: the node never
+// holds storage credentials and plaintext never leaves it.
+
+enum DatabaseEngine {
+  ENGINE_UNSPECIFIED = 0;
+  ENGINE_POSTGRES = 1;
+  ENGINE_MYSQL = 2;
+  ENGINE_REDIS = 3;
+  ENGINE_MONGO = 4;
+}
+
+message BackupRequest {
+  string backup_id = 1;
+  // The deployment whose running container holds the database.
+  string deployment_id = 2;
+  DatabaseEngine engine = 3;
+  // The age X25519 recipient (age1…) the dump is encrypted to.
+  string age_recipient = 4;
+  // Presigned UploadPart URLs of one multipart upload, in part order. Every
+  // part except the last is exactly part_size bytes (of ciphertext).
+  repeated string part_urls = 5;
+  uint64 part_size = 6;
+}
+
+message RestoreRequest {
+  string restore_id = 1;
+  string deployment_id = 2;
+  DatabaseEngine engine = 3;
+  // Presigned GET URL of the encrypted backup.
+  string object_url = 4;
+  // The age identity (AGE-SECRET-KEY-1…) that decrypts it. Only ever sent
+  // over this stream; never logged or written to disk.
+  string age_identity = 5;
+}
+
+// The outcome of a BackupRequest or RestoreRequest.
+message BackupResult {
+  // The backup id, or the restore id when `restore` is set.
+  string id = 1;
+  bool restore = 2;
+  bool ok = 3;
+  // Encrypted bytes uploaded (backups).
+  uint64 size_bytes = 4;
+  string error = 5;
+  // ETags of the uploaded parts, in part order (backups).
+  repeated string etags = 6;
+}
+
+// ---------------------------------------------------------------- tunnels
+//
+// Private TCP tunnels (`modula-deploy connect`): a user's WebSocket on the
+// control plane is relayed over this stream to the node, which dials the
+// container of one deployment it runs (its address on the environment network,
+// never an arbitrary host) and pipes raw bytes both ways.
+//
+// Flow control is credit-based, per tunnel and per direction: a sender may have
+// at most TUNNEL_WINDOW (256 KiB) of data in flight; the receiver returns
+// credit (TunnelData.credit, usually without data) as it hands bytes on to its
+// side. Chunks are at most 64 KiB. A peer that exceeds its window has the
+// tunnel closed. One slow client therefore never stalls the shared stream.
+
+message TunnelOpen {
+  string tunnel_id = 1;
+  // The deployment whose running container is dialled.
+  string deployment_id = 2;
+  uint32 port = 3;
+}
+
+// The node's answer to TunnelOpen: connected, or why not.
+message TunnelOpened {
+  string tunnel_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message TunnelData {
+  string tunnel_id = 1;
+  // Raw TCP bytes (at most 64 KiB); may be empty when only returning credit.
+  bytes data = 2;
+  // Bytes the sender of this message has consumed since its last credit.
+  uint32 credit = 3;
+}
+
+// Either side: the tunnel is gone (the other side forgets it too).
+message TunnelClose {
+  string tunnel_id = 1;
+  string reason = 2;
+}
+
+// ---------------------------------------------------------------- database tab
+//
+// Browsing and querying a Postgres service. The node connects to the
+// database container over its environment network with the credentials from
+// the deployment's own environment; the server never connects to user
+// databases. One request, one response, correlated by request_id.
+
+message DbRequest {
+  string request_id = 1;
+  // The deployment whose running container holds the database.
+  string deployment_id = 2;
+  // The operation (`tables`, `rows`, `query`, …) and its arguments as JSON.
+  string op = 3;
+  string json_args = 4;
+  // Also the session's statement_timeout.
+  uint32 timeout_ms = 5;
+}
+
+message DbResponse {
+  string request_id = 1;
+  // The result as JSON, when `error` is empty.
+  string json = 2;
+  string error = 3;
+  // The error is the request's fault (a Postgres error or bad arguments),
+  // not the node's or the database's availability.
+  bool bad_request = 4;
 }

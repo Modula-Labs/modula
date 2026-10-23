@@ -270,4 +270,34 @@ mod tests {
             "internal"
         );
     }
+
+    /// Server-sent events and long polls (an SSE ping every 10s, 25s polls)
+    /// must pass through unbuffered and without short timeouts. Caddy's
+    /// defaults are right (no read/write timeouts, 5 min idle), so the
+    /// rendered config must not set any timeout of its own.
+    #[test]
+    fn streams_are_flushed_and_never_timed_out() {
+        fn walk(v: &Value, proxies: &mut usize) {
+            match v {
+                Value::Object(m) => {
+                    for (k, v) in m {
+                        assert!(!k.contains("timeout"), "unexpected {k}: {v}");
+                    }
+                    if m.get("handler").and_then(Value::as_str) == Some("reverse_proxy") {
+                        *proxies += 1;
+                        assert_eq!(m["flush_interval"], -1, "buffered proxy: {v}");
+                    }
+                    m.values().for_each(|v| walk(v, proxies));
+                }
+                Value::Array(a) => a.iter().for_each(|v| walk(v, proxies)),
+                _ => {}
+            }
+        }
+        for tls in [TlsMode::TlsAcme, TlsMode::TlsInternal, TlsMode::TlsOff] {
+            let c = render(&cfg(tls), "localhost:2019", "x");
+            let mut proxies = 0;
+            walk(&c["apps"]["http"], &mut proxies);
+            assert!(proxies > 0);
+        }
+    }
 }

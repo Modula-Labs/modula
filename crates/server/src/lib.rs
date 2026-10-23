@@ -5,19 +5,25 @@ pub mod api;
 pub mod audit;
 pub mod auth;
 pub mod authz;
+pub mod backup;
 pub mod config;
 pub mod db;
 pub mod deploy;
+pub mod domains;
 pub mod error;
 pub mod github;
 pub mod http;
+pub mod integrations;
 pub mod jobs;
 pub mod keyring;
 pub mod locations;
 pub mod nodes;
 pub mod pki;
+pub mod provision;
 pub mod ratelimit;
 pub mod state;
+pub mod templates;
+pub mod tunnel;
 pub mod validate;
 
 use std::net::SocketAddr;
@@ -57,18 +63,21 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let stop = state.shutdown.clone();
     let worker = tokio::spawn(jobs::run_worker(
         state.clone(),
-        jobs::Registry::default()
+        backup::register(jobs::Registry::default())
             .on("sessions.cleanup", |s, _| async move {
                 let n = auth::session::delete_expired(&s.db).await?;
                 tracing::info!(deleted = n, "expired sessions removed");
                 api::github::prune(&s.db).await?;
                 Ok(())
             })
-            .on(github::app::STATUS_JOB, github::app::status_job),
+            .on(github::app::STATUS_JOB, github::app::status_job)
+            .on(provision::track::TRACK_JOB, provision::track::track_job),
         format!("server-{}", modula_id::Id::new()),
         stop.clone(),
     ));
     let cleanup = tokio::spawn(schedule_cleanup(state.clone(), stop.clone()));
+    let backups = tokio::spawn(backup::schedule_loop(state.clone(), stop.clone()));
+    let domain_checks = tokio::spawn(domains::verify_loop(state.clone(), stop.clone()));
 
     // Create the CA before accepting traffic so every replica sees the same one.
     let fingerprint = state
@@ -106,6 +115,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let _ = tokio::time::timeout(Duration::from_secs(10), async {
         let _ = worker.await;
         let _ = cleanup.await;
+        let _ = backups.await;
+        let _ = domain_checks.await;
         let _ = node_endpoint.await;
     })
     .await;

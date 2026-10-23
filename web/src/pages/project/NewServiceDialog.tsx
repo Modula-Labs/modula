@@ -1,11 +1,13 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { ArrowLeft, BrandDocker, BrandGithub, ChevronRight, Database, Search } from "@/components/ui/icons";
+import { ArrowLeft, BrandDocker, BrandGithub, ChevronRight, Search } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/misc";
-import { ApiError, api } from "@/lib/api";
+import { ServiceIcon } from "@/components/ui/ServiceIcon";
+import { ApiError, api, type ProjectDetail, type Template } from "@/lib/api";
+import { templateStack, uniqueName } from "@/lib/templates";
 
 /** `ghcr.io/acme/api:1.2` → `api`, made a valid service name. */
 export function serviceNameFromImage(image: string): string {
@@ -72,6 +74,50 @@ export function NewServiceDialog({
 
   const repo = parseRepo(repoInput);
 
+  // Older servers have no templates endpoint: the Database section just doesn't show.
+  const templates = useQuery({
+    queryKey: ["templates"],
+    queryFn: async (): Promise<Template[]> => {
+      try {
+        return await api.templates();
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return [];
+        throw e;
+      }
+    },
+    staleTime: 5 * 60_000,
+    retry: false,
+    enabled: open,
+  });
+
+  const deployNew = async (svc: { instances: { id: string; environmentId: string }[] }) => {
+    const instance = svc.instances.find((i) => i.environmentId === environmentId);
+    // Deploy right away, like Railway; without a server the service just waits.
+    if (instance) {
+      try {
+        await api.deploy(instance.id);
+      } catch (e) {
+        if (!(e instanceof ApiError && e.status === 409)) throw e;
+        setNotice(e.message);
+      }
+    }
+  };
+
+  const createDatabase = useMutation({
+    mutationFn: async (t: Template) => {
+      const taken = qc.getQueryData<ProjectDetail>(["project", projectId])?.services.map((s) => s.name) ?? [];
+      const svc = await api.createService(projectId, { name: uniqueName(t.defaultName, taken), template: t.id });
+      await deployNew(svc);
+      return svc;
+    },
+    onSuccess: async (svc) => {
+      await qc.invalidateQueries({ queryKey: ["project", projectId] });
+      onCreated(svc.id);
+      onOpenChange(false);
+      reset();
+    },
+  });
+
   const create = useMutation({
     mutationFn: async () => {
       const svc = await api.createService(
@@ -89,16 +135,7 @@ export function NewServiceDialog({
               config: { source: { type: "image", image: image.trim() }, port: Number(port) || 8080 },
             },
       );
-      const instance = svc.instances.find((i) => i.environmentId === environmentId);
-      // Deploy right away, like Railway; without a server the service just waits.
-      if (instance) {
-        try {
-          await api.deploy(instance.id);
-        } catch (e) {
-          if (!(e instanceof ApiError && e.status === 409)) throw e;
-          setNotice(e.message);
-        }
-      }
+      await deployNew(svc);
       return svc;
     },
     onSuccess: async (svc) => {
@@ -137,7 +174,31 @@ export function NewServiceDialog({
             <div className="p-1.5">
               <PickerRow icon={<BrandGithub />} label="GitHub repo" onClick={() => setStep("repo")} />
               <PickerRow icon={<BrandDocker />} label="Docker image" onClick={() => setStep("image")} />
-              <PickerRow icon={<Database />} label="Database" hint="Coming soon" />
+              {templates.data?.length ? (
+                <>
+                  <div className="text-caps px-3 pt-3 pb-1 text-muted-foreground">Database</div>
+                  {createDatabase.error ? (
+                    <div className="px-1.5 pb-1.5">
+                      <Alert>{createDatabase.error.message}</Alert>
+                    </div>
+                  ) : null}
+                  {notice ? (
+                    <div className="px-1.5 pb-1.5">
+                      <Alert tone="warn">{notice}</Alert>
+                    </div>
+                  ) : null}
+                  {templates.data.map((t) => (
+                    <PickerRow
+                      key={t.id}
+                      icon={<ServiceIcon stack={templateStack(t.id)} size="sm" />}
+                      label={`Add ${t.name}`}
+                      hint={createDatabase.isPending && createDatabase.variables?.id === t.id ? "Adding…" : undefined}
+                      disabled={createDatabase.isPending}
+                      onClick={() => createDatabase.mutate(t)}
+                    />
+                  ))}
+                </>
+              ) : null}
             </div>
           ) : step === "repo" ? (
             <form
@@ -253,16 +314,18 @@ function PickerRow({
   icon,
   label,
   hint,
+  disabled,
   onClick,
 }: {
   icon: React.ReactNode;
   label: string;
   hint?: string;
+  disabled?: boolean;
   onClick?: () => void;
 }) {
   return (
     <button
-      disabled={!onClick}
+      disabled={!onClick || disabled}
       onClick={onClick}
       className="flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-accent disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent [&>svg]:size-4 [&>svg]:text-muted-foreground"
     >

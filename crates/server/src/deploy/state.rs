@@ -113,6 +113,7 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             .bind(&config)
             .execute(&mut *tx)
             .await?;
+            kick.extend(super::start::retire_for_volume(&mut tx, instance, Some(*dep)).await?);
             if let Some(stack) = ev
                 .build
                 .as_ref()

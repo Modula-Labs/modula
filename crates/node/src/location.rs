@@ -12,6 +12,8 @@ pub struct Hints {
     pub provider: String,
     pub region: String,
     pub colo: String,
+    /// The public IPv4 this server reaches the internet from.
+    pub public_ip: String,
 }
 
 const METADATA_TIMEOUT: Duration = Duration::from_millis(700);
@@ -26,7 +28,7 @@ pub async fn detect() -> Hints {
     else {
         return Hints::default();
     };
-    let (hetzner, aws, gcp, digitalocean, azure, colo) = tokio::join!(
+    let (hetzner, aws, gcp, digitalocean, azure, edge) = tokio::join!(
         text(
             &http,
             "http://169.254.169.254/hetzner/v1/metadata/availability-zone",
@@ -44,7 +46,7 @@ pub async fn detect() -> Hints {
             "http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text",
             &[("Metadata", "true")]
         ),
-        edge_colo(),
+        edge_trace(),
     );
     let (provider, region) = if let Some(r) = hetzner {
         ("hetzner", r)
@@ -67,7 +69,8 @@ pub async fn detect() -> Hints {
     Hints {
         provider: provider.into(),
         region,
-        colo: colo.unwrap_or_default(),
+        colo: edge.colo,
+        public_ip: edge.ip,
     }
 }
 
@@ -114,7 +117,34 @@ async fn aws_region(http: &reqwest::Client) -> Option<String> {
     .await
 }
 
-async fn edge_colo() -> Option<String> {
+#[derive(Default)]
+struct Edge {
+    colo: String,
+    ip: String,
+}
+
+/// The nearest Cloudflare edge and our public IPv4, from Cloudflare's trace.
+async fn edge_trace() -> Edge {
+    let Some(body) = trace_body().await else {
+        return Edge::default();
+    };
+    let field = |k: &str| {
+        body.lines()
+            .find_map(|l| l.strip_prefix(k))
+            .map(str::trim)
+            .unwrap_or("")
+    };
+    let colo = clean(field("colo="))
+        .filter(|c| c.len() == 3)
+        .unwrap_or_default();
+    let ip = field("ip=")
+        .parse::<std::net::Ipv4Addr>()
+        .map(|ip| ip.to_string())
+        .unwrap_or_default();
+    Edge { colo, ip }
+}
+
+async fn trace_body() -> Option<String> {
     // Cloudflare turns away requests without a User-Agent.
     let http = reqwest::Client::builder()
         .user_agent(concat!("modula-node/", env!("CARGO_PKG_VERSION")))
@@ -129,10 +159,7 @@ async fn edge_colo() -> Option<String> {
         .text()
         .await
         .ok()?;
-    body.lines()
-        .find_map(|l| l.strip_prefix("colo="))
-        .and_then(clean)
-        .filter(|c| c.len() == 3)
+    Some(body)
 }
 
 #[cfg(test)]

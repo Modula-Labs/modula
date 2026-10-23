@@ -6,6 +6,12 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # basic-toml is unmaintained (no vulnerability). It is only reached through
+    # age's i18n proc macro, which reads age's own bundled i18n.toml at compile
+    # time; it never parses input at runtime. Drop once age moves off it.
+    { id = "RUSTSEC-2026-0374", reason = "compile-time only, via age's i18n-embed-fl macro" },
+]
 
 [licenses]
 version = 2

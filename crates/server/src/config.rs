@@ -27,11 +27,18 @@ pub struct Config {
     pub edge_tls: EdgeTls,
     /// Contact address for ACME accounts (optional).
     pub acme_email: Option<String>,
+    /// The host clients use for TCP proxies (`MODULA_TCP_PROXY_DOMAIN`).
+    /// None = each node's detected public IP.
+    pub tcp_proxy_host: Option<String>,
     /// The installed release (binaries + signed checksums). Served to servers
     /// joining this instance so they run the same version. None in development.
     pub release_dir: Option<PathBuf>,
     /// GitHub's REST API (a mock in tests).
     pub github_api: Url,
+    /// Cloudflare's v4 API (a mock in tests).
+    pub cloudflare_api: Url,
+    /// Hetzner Cloud's API, ending in `/v1` (a mock in tests).
+    pub hetzner_api: Url,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +95,9 @@ impl Config {
             acme_email: std::env::var("MODULA_ACME_EMAIL")
                 .ok()
                 .filter(|e| !e.is_empty()),
+            tcp_proxy_host: std::env::var("MODULA_TCP_PROXY_HOST")
+                .ok()
+                .filter(|h| !h.is_empty()),
             release_dir: std::env::var("MODULA_RELEASE_DIR")
                 .ok()
                 .filter(|d| !d.is_empty())
@@ -96,6 +106,14 @@ impl Config {
                 .unwrap_or_else(|_| "https://api.github.com".into())
                 .parse()
                 .context("invalid MODULA_GITHUB_API_URL")?,
+            cloudflare_api: std::env::var("MODULA_CLOUDFLARE_API_URL")
+                .unwrap_or_else(|_| crate::integrations::cloudflare::client::API_URL.into())
+                .parse()
+                .context("invalid MODULA_CLOUDFLARE_API_URL")?,
+            hetzner_api: std::env::var("MODULA_HETZNER_API_URL")
+                .unwrap_or_else(|_| "https://api.hetzner.cloud/v1".into())
+                .parse()
+                .context("invalid MODULA_HETZNER_API_URL")?,
         };
         let mut cfg = cfg;
         cfg.node_url = match std::env::var("MODULA_NODE_URL") {
@@ -255,8 +273,11 @@ impl Config {
             apps_domain: None,
             edge_tls: EdgeTls::Acme,
             acme_email: None,
+            tcp_proxy_host: None,
             release_dir: None,
             github_api: "https://api.github.com".parse().unwrap(),
+            cloudflare_api: "https://api.cloudflare.com/client/v4".parse().unwrap(),
+            hetzner_api: "https://api.hetzner.cloud/v1".parse().unwrap(),
         }
     }
 }

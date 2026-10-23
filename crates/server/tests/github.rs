@@ -539,3 +539,65 @@ async fn installation_binds_to_the_workspace_that_started_it(pool: PgPool) {
         json!([{ "fullName": "acme/secret", "private": true, "defaultBranch": "main" }])
     );
 }
+
+/// One service in two environments, each tracking its own branch (the
+/// source is per environment): a push deploys only the environment that
+/// tracks the pushed branch.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn each_environment_deploys_its_own_branch(pool: PgPool) {
+    let (app, admin) = app_with_github(pool).await;
+    create_app(&app, &admin).await;
+    let repo = |branch: &str| json!({ "type": "repo", "repo": "acme/app", "branch": branch });
+    let production = seed(&app, &admin, &[("api", json!({ "source": repo("main") }))]).await[0];
+    // The same service's instance in a staging environment.
+    let (project, service, node): (Id, Id, Id) = sqlx::query_as(
+        "SELECT s.project_id, i.service_id, i.node_id FROM service_instances i
+         JOIN services s ON s.id = i.service_id WHERE i.id = $1",
+    )
+    .bind(production)
+    .fetch_one(app.db())
+    .await
+    .unwrap();
+    let (env, staging) = (Id::new(), Id::new());
+    sqlx::query("INSERT INTO environments (id, project_id, name) VALUES ($1, $2, 'staging')")
+        .bind(env)
+        .bind(project)
+        .execute(app.db())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO service_instances (id, service_id, environment_id, node_id, config)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(staging)
+    .bind(service)
+    .bind(env)
+    .bind(node)
+    .bind(json!({ "source": repo("staging") }))
+    .execute(app.db())
+    .await
+    .unwrap();
+
+    let r = signed(
+        &app,
+        "push",
+        push("refs/heads/staging", INSTALLATION, &["src/a.ts"]),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let deployed: Vec<Id> = deployments(&app).await.iter().map(|d| d.0).collect();
+    assert_eq!(deployed, [staging]);
+
+    let r = signed(
+        &app,
+        "push",
+        push("refs/heads/main", INSTALLATION, &["src/a.ts"]),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let mut deployed: Vec<Id> = deployments(&app).await.iter().map(|d| d.0).collect();
+    deployed.sort();
+    let mut want = vec![production, staging];
+    want.sort();
+    assert_eq!(deployed, want);
+}

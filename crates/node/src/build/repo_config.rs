@@ -1,7 +1,9 @@
 //! Config as code: `modula.toml`, `railway.toml` or `railway.json` at the
 //! build root, with Railway's keys (`[build]`: builder, buildCommand,
-//! dockerfilePath, watchPatterns; `[deploy]`: startCommand, healthcheckPath,
-//! healthcheckTimeout, restartPolicyType, preDeployCommand).
+//! dockerfilePath; `[deploy]`: startCommand, healthcheckPath,
+//! healthcheckTimeout, restartPolicyType, restartPolicyMaxRetries,
+//! preDeployCommand). `watchPatterns` is not read: whether a push deploys is
+//! decided before anything is built, from the dashboard's watch paths.
 //!
 //! The first file found in that order wins (files are not merged), and its
 //! values override the dashboard's. The file is repository content, so it is
@@ -35,7 +37,8 @@ pub struct RepoConfig {
     pub healthcheck_path: Option<String>,
     pub healthcheck_timeout: Option<u32>,
     pub restart_policy: Option<pb::RestartPolicy>,
-    /// Parsed and validated, not run yet.
+    pub restart_max_retries: Option<u32>,
+    /// Shell commands, run in order before the deployment starts.
     pub pre_deploy_command: Option<Vec<String>>,
 }
 
@@ -47,6 +50,9 @@ pub struct RuntimeOverrides {
     pub healthcheck_path: Option<String>,
     pub healthcheck_timeout: Option<u32>,
     pub restart_policy: Option<pb::RestartPolicy>,
+    pub restart_max_retries: Option<u32>,
+    /// Replaces `Workload.pre_deploy_command` (container argv).
+    pub pre_deploy_command: Option<Vec<String>>,
 }
 
 impl RuntimeOverrides {
@@ -59,6 +65,9 @@ impl RuntimeOverrides {
             healthcheck_timeout_secs: self.healthcheck_timeout.unwrap_or(0),
             restart: self.restart_policy.map_or(0, |r| r as i32),
             stack: String::new(),
+            has_pre_deploy: self.pre_deploy_command.is_some(),
+            pre_deploy_command: self.pre_deploy_command.clone().unwrap_or_default(),
+            restart_max_retries: self.restart_max_retries.unwrap_or(0),
         }
     }
 
@@ -79,6 +88,19 @@ impl RuntimeOverrides {
         }
         if let Some(r) = self.restart_policy {
             w.restart = r as i32;
+        }
+        if let Some(n) = self.restart_max_retries {
+            w.restart_max_retries = n;
+        }
+        // A retry limit only means something for on-failure.
+        if matches!(
+            pb::RestartPolicy::try_from(w.restart),
+            Ok(pb::RestartPolicy::Always | pb::RestartPolicy::Never)
+        ) {
+            w.restart_max_retries = 0;
+        }
+        if let Some(cmd) = &self.pre_deploy_command {
+            w.pre_deploy_command = cmd.clone();
         }
     }
 }
@@ -185,6 +207,7 @@ pub fn parse(file: &'static str, text: &str) -> (Option<RepoConfig>, Vec<String>
                 _ => None,
             },
         ),
+        restart_max_retries: p.max_retries(deploy),
         pre_deploy_command: p.pre_deploy(deploy),
     };
     (Some(cfg), p.warnings)
@@ -215,6 +238,12 @@ impl RepoConfig {
             healthcheck_path: self.healthcheck_path.clone(),
             healthcheck_timeout: self.healthcheck_timeout,
             restart_policy: self.restart_policy,
+            restart_max_retries: self.restart_max_retries,
+            // Railway runs each in a shell, in order, stopping at the first failure.
+            pre_deploy_command: self
+                .pre_deploy_command
+                .as_ref()
+                .map(|cmds| container_shell(&cmds.join(" && "))),
         }
     }
 
@@ -250,8 +279,11 @@ impl RepoConfig {
         if let Some(r) = self.restart_policy {
             parts.push(format!("restart policy {}", r.as_str_name()));
         }
+        if let Some(n) = self.restart_max_retries {
+            parts.push(format!("max {n} restarts"));
+        }
         if self.pre_deploy_command.is_some() {
-            parts.push("pre-deploy command (not run yet)".into());
+            parts.push("pre-deploy command".into());
         }
         (!parts.is_empty()).then(|| format!("Using {}: {}", self.file, parts.join(", ")))
     }
@@ -359,6 +391,19 @@ impl Parser {
             }
             None => {
                 self.warn(key, "not a whole number of seconds");
+                None
+            }
+        }
+    }
+
+    fn max_retries(&mut self, sec: &Map<String, Value>) -> Option<u32> {
+        let key = "deploy.restartPolicyMaxRetries";
+        match sec.get("restartPolicyMaxRetries")?.as_u64() {
+            // Railway's 0 means "use the default": no limit here.
+            Some(0) => None,
+            Some(n @ 1..=1000) => Some(n as u32),
+            _ => {
+                self.warn(key, "must be a whole number from 0 to 1000");
                 None
             }
         }
@@ -472,6 +517,23 @@ mod tests {
             cfg.pre_deploy_command,
             Some(vec!["npm run migrate".to_owned()])
         );
+        assert_eq!(cfg.restart_max_retries, Some(3));
+        // The pre-deploy command runs in a shell inside the new image.
+        let rt = cfg.runtime();
+        assert_eq!(
+            rt.pre_deploy_command.as_deref(),
+            Some(&["/bin/sh".to_owned(), "-c".into(), "npm run migrate".into()][..])
+        );
+        let mut w = pb::Workload {
+            restart_max_retries: 7,
+            ..Default::default()
+        };
+        rt.apply(&mut w);
+        assert_eq!(w.pre_deploy_command[2], "npm run migrate");
+        assert_eq!(w.restart_max_retries, 0, "the file's policy is NEVER");
+        let out = rt.to_output();
+        assert!(out.has_pre_deploy);
+        assert_eq!(out.restart_max_retries, 3);
     }
 
     #[test]

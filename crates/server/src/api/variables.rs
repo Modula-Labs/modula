@@ -32,9 +32,13 @@ pub const PLATFORM: &[&str] = &[
     "MODULA_PUBLIC_DOMAIN",
     "MODULA_SERVICE_NAME",
     "MODULA_SERVICE_ID",
+    // A service's own is its new deployment; another's, the one serving it.
+    "MODULA_DEPLOYMENT_ID",
     "MODULA_ENVIRONMENT_NAME",
     "MODULA_ENVIRONMENT_ID",
     "MODULA_PROJECT_ID",
+    "MODULA_TCP_PROXY_DOMAIN",
+    "MODULA_TCP_PROXY_PORT",
 ];
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -440,4 +444,58 @@ pub async fn reveal(
     Ok(Json(
         json!({ "name": name, "value": plain.expose_secret() }),
     ))
+}
+
+/// A variable sealed and ready to insert (sealing happens outside the
+/// transaction because the keyring may create the environment's key).
+pub struct SealedVariable {
+    id: Id,
+    name: String,
+    value: Vec<u8>,
+    refs: Vec<String>,
+}
+
+pub async fn seal_new(
+    state: &AppState,
+    environment: Id,
+    vars: &[(String, String)],
+) -> AppResult<Vec<SealedVariable>> {
+    let mut out = Vec::with_capacity(vars.len());
+    for (name, value) in vars {
+        env::validate_name(name)?;
+        env::validate_value(value)?;
+        let id = Id::new();
+        out.push(SealedVariable {
+            id,
+            name: name.clone(),
+            value: env::seal_variable(&state.keys, &state.db, environment, id, value).await?,
+            refs: refs::references(value).iter().map(Ref::key).collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// Insert the variables of a new service instance (no cycle check needed:
+/// nothing references a service that didn't exist).
+pub async fn insert_new(
+    tx: &mut sqlx::PgConnection,
+    environment: Id,
+    instance: Id,
+    vars: &[SealedVariable],
+) -> AppResult<()> {
+    for v in vars {
+        sqlx::query(
+            "INSERT INTO variables (id, environment_id, service_instance_id, name, value_sealed, refs)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(v.id)
+        .bind(environment)
+        .bind(instance)
+        .bind(&v.name)
+        .bind(&v.value)
+        .bind(&v.refs)
+        .execute(&mut *tx)
+        .await?;
+    }
+    Ok(())
 }

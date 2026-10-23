@@ -37,8 +37,11 @@ pub fn config() -> Config {
         apps_domain: Some("apps.test".into()),
         edge_tls: modula_server::config::EdgeTls::Acme,
         acme_email: None,
+        tcp_proxy_host: None,
         release_dir: None,
         github_api: "http://127.0.0.1:9".parse().unwrap(),
+        cloudflare_api: "http://127.0.0.1:9".parse().unwrap(),
+        hetzner_api: "http://127.0.0.1:9/v1".parse().unwrap(),
     }
 }
 
@@ -288,6 +291,10 @@ pub struct Chain {
     pub deployment: Id,
     pub domain: Id,
     pub node: Id,
+    pub backup_target: Id,
+    pub backup: Id,
+    pub volume: Id,
+    pub tcp_proxy: Id,
 }
 
 impl TestApp {
@@ -301,6 +308,10 @@ impl TestApp {
             deployment: Id::new(),
             domain: Id::new(),
             node: Id::new(),
+            backup_target: Id::new(),
+            backup: Id::new(),
+            volume: Id::new(),
+            tcp_proxy: Id::new(),
         };
         let db = self.db();
         sqlx::query("INSERT INTO projects (id, workspace_id, name) VALUES ($1, $2, 'p')")
@@ -367,6 +378,44 @@ impl TestApp {
         )
         .bind(c.domain)
         .bind(c.instance)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO backup_targets (id, workspace_id, name, provider, endpoint, region, bucket,
+                                         access_key_id, secret_sealed)
+             VALUES ($1, $2, 't', 'minio', 'http://10.0.0.1:9000/', 'us-east-1', 'b', 'k', '\\x00')",
+        )
+        .bind(c.backup_target)
+        .bind(workspace)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO backups (id, service_instance_id, target_id, kind, engine, status, object_key)
+             VALUES ($1, $2, $3, 'manual', 'postgres', 'completed', 'x.dump.age')",
+        )
+        .bind(c.backup)
+        .bind(c.instance)
+        .bind(c.backup_target)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO volumes (id, service_instance_id, mount_path) VALUES ($1, $2, '/data')",
+        )
+        .bind(c.volume)
+        .bind(c.instance)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO tcp_proxies (id, service_instance_id, node_id, target_port, public_port)
+             VALUES ($1, $2, $3, 5432, 20000)",
+        )
+        .bind(c.tcp_proxy)
+        .bind(c.instance)
+        .bind(c.node)
         .execute(db)
         .await
         .unwrap();

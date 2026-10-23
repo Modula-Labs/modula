@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::build::{BuildLog, BuildSupport, Built, LOCAL_PREFIX};
+use crate::edge::tcp::TcpProxies;
 use crate::edge::{EdgeConfig, EdgeSink, ResolvedRoute};
 use crate::runtime::{Container, Runtime};
 
@@ -27,6 +28,10 @@ const REPAIR_EVERY: Duration = Duration::from_secs(2);
 const PROBE_EVERY: Duration = Duration::from_secs(1);
 /// Without an HTTP health check, a container must stay up this long.
 const SETTLE: Duration = Duration::from_secs(2);
+/// A pre-deploy command (migrations) must finish within this.
+const PRE_DEPLOY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// How much of a failed pre-deploy command's output its error shows.
+const PRE_DEPLOY_TAIL: usize = 1500;
 
 struct Tracked {
     phase: Phase,
@@ -36,11 +41,13 @@ struct Tracked {
     restarted: Option<u32>,
 }
 
-/// Optional parts of a node: an edge (Caddy) and a builder.
+/// Optional parts of a node: an edge (Caddy), a builder and database access.
 #[derive(Clone, Default)]
 pub struct Capabilities {
     pub edge: Option<Arc<dyn EdgeSink>>,
     pub build: Option<BuildSupport>,
+    /// The Database tab ([`crate::db`]).
+    pub db: Option<Arc<dyn crate::db::Executor>>,
 }
 
 pub struct Reconciler {
@@ -50,6 +57,13 @@ pub struct Reconciler {
     out: mpsc::Sender<pb::NodeMessage>,
     tracked: Mutex<HashMap<String, Tracked>>,
     applied: AtomicU64,
+    tcp: TcpProxies,
+}
+
+/// Volumes this node manages (see the server's `volume_name`).
+fn is_volume_name(name: &str) -> bool {
+    name.strip_prefix("modula-vol-")
+        .is_some_and(|id| id.parse::<modula_id::Id>().is_ok())
 }
 
 fn now_ms() -> i64 {
@@ -85,6 +99,7 @@ impl Reconciler {
             out,
             tracked: Mutex::new(HashMap::new()),
             applied: AtomicU64::new(0),
+            tcp: TcpProxies::default(),
         })
     }
 
@@ -207,6 +222,7 @@ impl Reconciler {
         //    traffic moves to a new deployment before the old one stops.
         let containers = self.runtime.containers().await?;
         self.apply_edge(ds, &containers).await;
+        self.apply_tcp(ds, &containers).await;
 
         // 2. Stop what is no longer wanted.
         for c in containers
@@ -239,6 +255,16 @@ impl Reconciler {
             for c in self.runtime.containers().await? {
                 if stale.contains(&c.deployment_id) {
                     self.runtime.remove(&c.id).await?;
+                }
+            }
+        }
+
+        // Data of deleted volumes. Only our own volumes, never anything else.
+        for name in ds.volume_removals.iter().filter(|n| is_volume_name(n)) {
+            match self.runtime.remove_volume(name).await {
+                Ok(()) => tracing::info!(volume = %name, "removed volume"),
+                Err(e) => {
+                    tracing::warn!(volume = %name, error = format!("{e:#}"), "cannot remove volume yet")
                 }
             }
         }
@@ -325,6 +351,33 @@ impl Reconciler {
         if let Err(e) = edge.apply(&cfg).await {
             tracing::warn!(error = format!("{e:#}"), "edge update failed; will retry");
         }
+    }
+
+    /// Point each TCP proxy at its deployment's running container.
+    async fn apply_tcp(&self, ds: &pb::DesiredState, containers: &[Container]) {
+        let mut wanted = HashMap::new();
+        for p in &ds.tcp_proxies {
+            let (Ok(public), Ok(target)) =
+                (u16::try_from(p.public_port), u16::try_from(p.target_port))
+            else {
+                continue;
+            };
+            let mut upstream = None;
+            if let Some(c) = containers
+                .iter()
+                .find(|c| c.deployment_id == p.deployment_id && c.running)
+            {
+                match self.runtime.address(&c.id, &c.environment_id).await {
+                    Ok(ip) => upstream = ip.map(|ip| std::net::SocketAddr::new(ip, target)),
+                    Err(e) => tracing::warn!(
+                        error = format!("{e:#}"),
+                        "cannot resolve a tcp proxy upstream"
+                    ),
+                }
+            }
+            wanted.insert(public, upstream);
+        }
+        self.tcp.apply(&wanted).await;
     }
 
     fn rollout_running(&self, deployment: &str) -> bool {
@@ -467,6 +520,35 @@ impl Reconciler {
                 .map_err(|e| format!("Image pull failed: {e:#}"))?;
         }
 
+        // Before anything of this deployment starts (and before a volume
+        // service's old container stops): a failure leaves the serving one alone.
+        if !w.pre_deploy_command.is_empty() {
+            self.pre_deploy(w).await?;
+        }
+
+        // Two containers must never share a volume's data (a database would
+        // corrupt it): stop any other deployment of this service first.
+        if w.volume.is_some() {
+            let others = self
+                .runtime
+                .containers()
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+            for c in others
+                .iter()
+                .filter(|c| c.service_id == w.service_id && c.deployment_id != w.deployment_id)
+            {
+                self.set_phase(
+                    id,
+                    Phase::Creating,
+                    "Stopping the previous deployment (volume)",
+                );
+                self.runtime
+                    .remove(&c.id)
+                    .await
+                    .map_err(|e| format!("Could not stop the previous deployment: {e:#}"))?;
+            }
+        }
         self.set_phase(id, Phase::Creating, "Creating container");
         let container = self
             .runtime
@@ -516,6 +598,65 @@ impl Reconciler {
         Ok(())
     }
 
+    /// Run the pre-deploy command to completion. Its output goes to the
+    /// deployment's build log; the tail of it into the error when it fails.
+    async fn pre_deploy(&self, w: &pb::Workload) -> Result<(), String> {
+        let id = w.deployment_id.as_str();
+        let shown: String = w.pre_deploy_command.join(" ").chars().take(200).collect();
+        self.set_phase(
+            id,
+            Phase::Creating,
+            format!("Running pre-deploy command: {shown}"),
+        );
+        let log = self.build.as_ref().and_then(|b| b.logs.append(id).ok());
+        let _finish = log.clone().map(FinishOnDrop);
+        if let Some(l) = &log {
+            l.line(false, &format!("Running pre-deploy command: {shown}"));
+        }
+        let tail = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
+        let sink = {
+            let (tail, log) = (tail.clone(), log.clone());
+            Box::new(move |line: crate::runtime::LogLine| {
+                if let Some(l) = &log {
+                    l.line(line.stderr, &line.text);
+                }
+                let mut t = tail.lock().expect("tail lock");
+                t.push_back(line.text);
+                while t.len() > 20 {
+                    t.pop_front();
+                }
+            })
+        };
+        let result = self
+            .runtime
+            .run_once(w, &w.pre_deploy_command, PRE_DEPLOY_TIMEOUT, sink)
+            .await;
+        let outcome = match &result {
+            Ok(0) => return Ok(()),
+            Ok(code) => format!("Pre-deploy command exited with code {code}"),
+            Err(e) => format!("Pre-deploy command failed: {e:#}"),
+        };
+        if let Some(l) = &log {
+            l.line(true, &outcome);
+        }
+        let output = tail
+            .lock()
+            .expect("tail lock")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = redact(&output, &w.env);
+        let cut = output.len().saturating_sub(PRE_DEPLOY_TAIL);
+        let cut = (cut..=output.len())
+            .find(|i| output.is_char_boundary(*i))
+            .unwrap_or(output.len());
+        Err(match &output[cut..] {
+            "" => outcome,
+            out => format!("{outcome}:\n{out}"),
+        })
+    }
+
     /// Build the workload's image.
     async fn build(&self, w: &pb::Workload, spec: &pb::Build) -> Result<Built, String> {
         let id = w.deployment_id.as_str();
@@ -557,6 +698,23 @@ impl Reconciler {
             None => Err("The container disappeared during startup".into()),
         }
     }
+}
+
+/// Masks the workload's variable values in text that leaves the node outside
+/// the log stream (which the server redacts itself), e.g. a failure message.
+fn redact(text: &str, env: &[pb::EnvVar]) -> String {
+    let mut out = text.to_owned();
+    let mut secrets: Vec<&str> = env
+        .iter()
+        .filter(|e| !e.name.starts_with("MODULA_") && e.name != "PORT" && e.value.len() >= 6)
+        .map(|e| e.value.as_str())
+        .collect();
+    // Longest first, so a value containing another is masked whole.
+    secrets.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    for v in secrets {
+        out = out.replace(v, "••••••");
+    }
+    out
 }
 
 struct FinishOnDrop(BuildLog);
@@ -949,5 +1107,68 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pre_deploy_runs_before_start_and_its_failure_keeps_the_old_one() {
+        let rt = Arc::new(FakeRuntime::new());
+        let (tx, mut rx) = mpsc::channel(256);
+        let r = Reconciler::new(rt.clone(), Capabilities::default(), tx);
+        let (env, d1, d2) = (Id::new(), Id::new(), Id::new());
+        r.apply(&state(1, env, vec![workload(d1, env, "")]))
+            .await
+            .unwrap();
+        settle(&r, d1).await;
+        drain(&mut rx);
+
+        // The new deployment's migration fails: it never starts, d1 keeps running.
+        let migrate = vec!["./migrate".to_owned(), "up".into()];
+        rt.once_exit
+            .lock()
+            .unwrap()
+            .insert("./migrate up".into(), 3);
+        let mut w2 = workload(d2, env, "");
+        w2.pre_deploy_command = migrate.clone();
+        w2.env = vec![pb::EnvVar {
+            name: "DATABASE_URL".into(),
+            value: "./migrate".into(),
+        }];
+        r.apply(&state(2, env, vec![workload(d1, env, ""), w2.clone()]))
+            .await
+            .unwrap();
+        settle(&r, d2).await;
+        assert_eq!(
+            phases(&mut rx, d2),
+            [Phase::Pulling, Phase::Creating, Phase::Failed]
+        );
+        let message = r.tracked.lock().unwrap()[&d2.to_string()].message.clone();
+        assert!(
+            message.starts_with("Pre-deploy command exited with code 3"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("ran ./migrate"),
+            "variable values are masked in the error: {message}"
+        );
+        assert_eq!(rt.running_deployments(), [d1.to_string()].into());
+        let once = rt.onces.lock().unwrap()[0].clone();
+        assert_eq!(once.cmd, migrate);
+        assert_eq!(once.network, env.to_string());
+        assert_eq!(once.running, [d1.to_string()].into());
+
+        // Exit 0: the deployment goes on to start.
+        let d3 = Id::new();
+        rt.once_exit.lock().unwrap().clear();
+        let w3 = pb::Workload {
+            deployment_id: d3.to_string(),
+            ..w2
+        };
+        r.apply(&state(3, env, vec![workload(d1, env, ""), w3]))
+            .await
+            .unwrap();
+        settle(&r, d3).await;
+        assert_eq!(phases(&mut rx, d3).last(), Some(&Phase::Active));
+        assert!(rt.running_deployments().contains(&d3.to_string()));
+        assert_eq!(rt.onces.lock().unwrap().len(), 2);
     }
 }

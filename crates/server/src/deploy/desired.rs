@@ -32,6 +32,10 @@ struct Row {
     project_id: Id,
     public_domain: Option<String>,
     restart_generation: i32,
+    volume_id: Option<Id>,
+    mount_path: Option<String>,
+    node_public_ip: Option<String>,
+    tcp_public_port: Option<i32>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -39,6 +43,7 @@ struct RouteRow {
     hostname: String,
     deployment_id: Id,
     config: serde_json::Value,
+    target_port: Option<i32>,
 }
 
 pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
@@ -50,11 +55,15 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
         "SELECT d.id, d.status, d.image, d.commit_sha, p.workspace_id,
                 d.config, d.env_sealed, i.environment_id, e.name AS environment_name,
                 s.id AS service_id, s.name AS service_name, s.project_id,
-                (SELECT hostname FROM domains WHERE service_instance_id = i.id
+                (SELECT hostname FROM domains WHERE service_instance_id = i.id AND status = 'verified'
                  ORDER BY created_at LIMIT 1) AS public_domain,
-                d.restart_generation
+                d.restart_generation, v.id AS volume_id, v.mount_path,
+                n.public_ip AS node_public_ip, t.public_port AS tcp_public_port
          FROM deployments d
          JOIN service_instances i ON i.id = d.service_instance_id
+         JOIN nodes n ON n.id = d.node_id
+         LEFT JOIN volumes v ON v.service_instance_id = i.id
+         LEFT JOIN tcp_proxies t ON t.service_instance_id = i.id
          JOIN environments e ON e.id = i.environment_id
          JOIN services s ON s.id = i.service_id
          JOIN projects p ON p.id = s.project_id
@@ -91,6 +100,14 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
             (
                 "MODULA_PUBLIC_DOMAIN",
                 r.public_domain.clone().unwrap_or_default(),
+            ),
+            (
+                "MODULA_TCP_PROXY_DOMAIN",
+                tcp_proxy_host(state, r.node_public_ip.as_deref(), r.tcp_public_port),
+            ),
+            (
+                "MODULA_TCP_PROXY_PORT",
+                r.tcp_public_port.map(|p| p.to_string()).unwrap_or_default(),
             ),
         ];
         // User variables win over platform defaults (e.g. a custom PORT);
@@ -162,15 +179,30 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
             } as i32,
             build,
             restart_generation: u32::try_from(r.restart_generation).unwrap_or(0),
+            volume: r
+                .volume_id
+                .zip(r.mount_path)
+                .map(|(id, mount_path)| pb::Volume {
+                    name: volume_name(id),
+                    mount_path,
+                }),
+            pre_deploy_command: cfg.pre_deploy_command.clone().unwrap_or_default(),
+            draining_seconds: draining_seconds(&cfg, &vars),
+            restart_max_retries: match cfg.restart_policy {
+                RestartPolicy::OnFailure => cfg.restart_policy_max_retries.unwrap_or(0),
+                _ => 0,
+            },
         });
     }
     // Public hostnames route to the serving deployment only (never one still
     // rolling out), so traffic moves in the same snapshot that retires the old one.
+    // Unverified custom domains are left out, which also keeps them off the
+    // node's `ask` allowlist (no certificate).
     let routes: Vec<RouteRow> = sqlx::query_as(
-        "SELECT m.hostname, d.id AS deployment_id, d.config
+        "SELECT m.hostname, d.id AS deployment_id, d.config, m.target_port
          FROM domains m
          JOIN deployments d ON d.service_instance_id = m.service_instance_id
-         WHERE d.node_id = $1 AND d.status IN ('active', 'crashed')
+         WHERE d.node_id = $1 AND d.status IN ('active', 'crashed') AND m.status = 'verified'
          ORDER BY m.hostname",
     )
     .bind(node)
@@ -182,9 +214,29 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
         pb_routes.push(pb::Route {
             hostname: r.hostname,
             deployment_id: r.deployment_id.to_string(),
-            port: u32::from(cfg.port),
+            port: r
+                .target_port
+                .and_then(|p| u32::try_from(p).ok())
+                .unwrap_or(u32::from(cfg.port)),
         });
     }
+    // TCP proxies point at the serving deployment, like routes.
+    let proxies: Vec<(i32, Id, i32)> = sqlx::query_as(
+        "SELECT t.public_port, d.id, t.target_port
+         FROM tcp_proxies t
+         JOIN deployments d ON d.service_instance_id = t.service_instance_id
+         WHERE t.node_id = $1 AND d.node_id = $1 AND d.status IN ('active', 'crashed')
+         ORDER BY t.public_port",
+    )
+    .bind(node)
+    .fetch_all(&state.db)
+    .await?;
+    let volume_removals: Vec<Id> = sqlx::query_scalar(
+        "SELECT volume_id FROM volume_removals WHERE node_id = $1 ORDER BY volume_id",
+    )
+    .bind(node)
+    .fetch_all(&state.db)
+    .await?;
     let tls = match state.cfg.edge_tls {
         EdgeTls::Acme => pb::TlsMode::TlsAcme,
         EdgeTls::Internal => pb::TlsMode::TlsInternal,
@@ -201,11 +253,29 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
             .collect(),
         workloads,
         routes: pb_routes,
+        tcp_proxies: proxies
+            .into_iter()
+            .map(|(public_port, deployment, target_port)| pb::TcpProxy {
+                public_port: public_port as u32,
+                deployment_id: deployment.to_string(),
+                target_port: target_port as u32,
+            })
+            .collect(),
+        volume_removals: volume_removals.into_iter().map(volume_name).collect(),
         edge: Some(pb::EdgeSettings {
             tls: tls as i32,
             acme_email: state.cfg.acme_email.clone().unwrap_or_default(),
         }),
     })
+}
+
+/// The configured draining time, or Railway's variable for it when the
+/// service sets one (so a migrated app keeps its setting). Capped like the setting.
+fn draining_seconds(cfg: &ServiceConfig, vars: &env::EnvMap) -> u32 {
+    vars.get("RAILWAY_DEPLOYMENT_DRAINING_SECONDS")
+        .and_then(|v| v.expose_secret().trim().parse::<u32>().ok())
+        .unwrap_or(cfg.draining_seconds)
+        .min(super::config::MAX_DRAINING_SECS)
 }
 
 /// Changes whenever a variable value changes, without revealing any: an HMAC
@@ -245,6 +315,24 @@ pub fn shell_join(argv: &[String]) -> String {
         .join(" ")
 }
 
+/// The Docker volume backing a `volumes` row.
+pub fn volume_name(id: Id) -> String {
+    format!("modula-vol-{id}")
+}
+
+/// Where clients reach a TCP proxy: the configured host, else the node's IP.
+pub fn tcp_proxy_host(state: &AppState, node_public_ip: Option<&str>, port: Option<i32>) -> String {
+    match port {
+        None => String::new(),
+        Some(_) => state
+            .cfg
+            .tcp_proxy_host
+            .clone()
+            .or_else(|| node_public_ip.map(str::to_owned))
+            .unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +347,28 @@ mod tests {
             shell_join(&argv),
             "node server.js --name 'a b' 'it'\\''s' ''"
         );
+    }
+
+    #[test]
+    fn railway_draining_variable_overrides_the_setting() {
+        let mut cfg: ServiceConfig = serde_json::from_value(serde_json::json!({
+            "source": { "type": "image", "image": "api:1" }, "drainingSeconds": 15
+        }))
+        .unwrap();
+        let vars = |pairs: &[(&str, &str)]| -> env::EnvMap {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned().into()))
+                .collect()
+        };
+        assert_eq!(draining_seconds(&cfg, &vars(&[])), 15);
+        let railway = vars(&[("RAILWAY_DEPLOYMENT_DRAINING_SECONDS", "30")]);
+        assert_eq!(draining_seconds(&cfg, &railway), 30);
+        // Garbage is ignored; values are capped.
+        let bad = vars(&[("RAILWAY_DEPLOYMENT_DRAINING_SECONDS", "soon")]);
+        assert_eq!(draining_seconds(&cfg, &bad), 15);
+        cfg.draining_seconds = 0;
+        let big = vars(&[("RAILWAY_DEPLOYMENT_DRAINING_SECONDS", "9999")]);
+        assert_eq!(draining_seconds(&cfg, &big), 300);
     }
 }

@@ -1,42 +1,130 @@
 //! Public hostnames. Generated domains live under the instance's apps domain
-//! (`MODULA_APPS_DOMAIN`); custom domains with ownership checks come later.
+//! (`MODULA_APPS_DOMAIN`) and route immediately. Custom domains route (and get
+//! certificates) only after their TXT ownership record verifies.
 
 use axum::Json;
 use axum::extract::State;
 use modula_id::Id;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
-use crate::deploy;
+use crate::domains::{self, DnsRecord, bump_serving_nodes};
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
 use crate::state::AppState;
 
 const MAX_GENERATED: i64 = 5;
+const MAX_CUSTOM: i64 = 20;
+/// "Check now" fans out to public resolvers; once per domain per this window.
+const CHECK_COOLDOWN_SECS: i64 = 5;
 
-#[derive(Serialize, sqlx::FromRow)]
+/// Columns of [`Row`], shared by every query that returns domains.
+macro_rules! domain_columns {
+    () => {
+        "id, service_instance_id, hostname, kind, status, target_port, verification_token,
+         last_error, dns_target_ok, checked_at, verified_at, rate_limit_per_minute, created_at"
+    };
+}
+
+#[derive(sqlx::FromRow)]
+struct Row {
+    id: Id,
+    service_instance_id: Id,
+    hostname: String,
+    kind: String,
+    status: String,
+    target_port: Option<i32>,
+    verification_token: Option<String>,
+    last_error: Option<String>,
+    dns_target_ok: Option<bool>,
+    checked_at: Option<OffsetDateTime>,
+    verified_at: Option<OffsetDateTime>,
+    rate_limit_per_minute: Option<i32>,
+    created_at: OffsetDateTime,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Domain {
     pub id: Id,
     pub hostname: String,
+    /// `generated` or `custom`.
     pub kind: String,
+    /// `pending`, `verified` or `failed`; generated domains are always verified.
+    pub status: String,
+    /// None = the service's port.
+    pub target_port: Option<i32>,
+    pub last_error: Option<String>,
+    /// Whether the routing record pointed at us on the last check.
+    pub dns_target_ok: Option<bool>,
+    /// Records to create at the DNS host (custom domains only).
+    pub dns_records: Vec<DnsRecord>,
+    pub rate_limit_per_minute: Option<i32>,
+    /// False until the edge's Caddy build includes the rate-limit module.
+    pub rate_limit_enforced: bool,
+    /// Set when automatic DNS at the workspace's provider failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_note: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub checked_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub verified_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
 
-pub async fn list(State(state): State<AppState>, grant: Grant) -> AppResult<Json<Vec<Domain>>> {
-    Ok(Json(
-        sqlx::query_as(
-            "SELECT id, hostname, kind, created_at FROM domains WHERE service_instance_id = $1 ORDER BY created_at",
-        )
-        .bind(grant.id())
-        .fetch_all(&state.db)
-        .await?,
+fn to_api(r: Row, target: &domains::Target) -> Domain {
+    let dns_records = match (&r.kind[..], &r.verification_token) {
+        ("custom", Some(token)) => domains::required_records(&r.hostname, token, target),
+        _ => Vec::new(),
+    };
+    Domain {
+        id: r.id,
+        hostname: r.hostname,
+        kind: r.kind,
+        status: r.status,
+        target_port: r.target_port,
+        last_error: r.last_error,
+        dns_target_ok: r.dns_target_ok,
+        dns_records,
+        rate_limit_per_minute: r.rate_limit_per_minute,
+        rate_limit_enforced: false,
+        provider_note: None,
+        checked_at: r.checked_at,
+        verified_at: r.verified_at,
+        created_at: r.created_at,
+    }
+}
+
+async fn fetch_one(state: &AppState, id: Id) -> AppResult<Domain> {
+    let row: Row = sqlx::query_as(concat!(
+        "SELECT ",
+        domain_columns!(),
+        " FROM domains WHERE id = $1"
     ))
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    let target = domains::target(&state.db, row.service_instance_id).await?;
+    Ok(to_api(row, &target))
+}
+
+pub async fn list(State(state): State<AppState>, grant: Grant) -> AppResult<Json<Vec<Domain>>> {
+    let rows: Vec<Row> = sqlx::query_as(concat!(
+        "SELECT ",
+        domain_columns!(),
+        " FROM domains WHERE service_instance_id = $1 ORDER BY created_at"
+    ))
+    .bind(grant.id())
+    .fetch_all(&state.db)
+    .await?;
+    let target = domains::target(&state.db, grant.id()).await?;
+    Ok(Json(rows.into_iter().map(|r| to_api(r, &target)).collect()))
 }
 
 /// `<service>-<environment>-<4 random>` (production omits the environment),
@@ -65,22 +153,6 @@ fn generated_label(service: &str, environment: &str) -> anyhow::Result<String> {
     };
     let base: String = base.chars().take(63 - 5).collect();
     Ok(format!("{}-{suffix}", base.trim_matches('-')))
-}
-
-/// Nodes serving this instance, whose routes change with its domains.
-async fn serving_nodes(tx: &mut sqlx::PgConnection, instance: Id) -> AppResult<Vec<Id>> {
-    let nodes: Vec<Option<Id>> = sqlx::query_scalar(
-        "SELECT DISTINCT node_id FROM deployments
-         WHERE service_instance_id = $1 AND status IN ('active', 'crashed')",
-    )
-    .bind(instance)
-    .fetch_all(&mut *tx)
-    .await?;
-    let nodes: Vec<Id> = nodes.into_iter().flatten().collect();
-    for n in &nodes {
-        deploy::bump(&mut *tx, *n).await?;
-    }
-    Ok(nodes)
 }
 
 pub async fn generate(
@@ -131,7 +203,7 @@ pub async fn generate(
             break;
         }
     }
-    let nodes = serving_nodes(&mut tx, instance).await?;
+    let nodes = bump_serving_nodes(&mut tx, instance).await?;
     Entry::new("domain.create", &meta)
         .actor(&actor)
         .workspace(grant.workspace_id()?)
@@ -141,12 +213,181 @@ pub async fn generate(
         .await?;
     tx.commit().await?;
     state.hub.kick_all(&nodes);
-    Ok(Json(
-        sqlx::query_as("SELECT id, hostname, kind, created_at FROM domains WHERE id = $1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await?,
-    ))
+    Ok(Json(fetch_one(&state, id).await?))
+}
+
+fn check_port(port: Option<i32>) -> AppResult<()> {
+    match port {
+        Some(p) if !(1..=65535).contains(&p) => {
+            Err(AppError::bad_request("the target port must be 1–65535"))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn check_rate_limit(limit: Option<i32>) -> AppResult<()> {
+    match limit {
+        Some(l) if !(1..=1_000_000).contains(&l) => Err(AppError::bad_request(
+            "the rate limit must be 1–1,000,000 requests per minute",
+        )),
+        _ => Ok(()),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateCustom {
+    hostname: String,
+    #[serde(default)]
+    target_port: Option<i32>,
+}
+
+pub async fn create_custom(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+    Json(body): Json<CreateCustom>,
+) -> AppResult<Json<Domain>> {
+    let instance = grant.id();
+    let workspace = grant.workspace_id()?;
+    let host = domains::parse_custom(&body.hostname, &state.cfg).map_err(AppError::BadRequest)?;
+    check_port(body.target_port)?;
+    let provider = domains::provider_for(&state, workspace).await;
+    if host.wildcard && !provider.as_ref().is_some_and(|p| p.supports_dns01()) {
+        return Err(AppError::bad_request(
+            "wildcard domains need DNS-01 certificates, which need a DNS provider \
+             (Cloudflare) connected to this workspace. Add each subdomain instead.",
+        ));
+    }
+    let token = domains::new_token()?;
+    let id = Id::new();
+    let mut tx = state.db.begin().await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM domains WHERE service_instance_id = $1 AND kind = 'custom'",
+    )
+    .bind(instance)
+    .fetch_one(&mut *tx)
+    .await?;
+    if count >= MAX_CUSTOM {
+        return Err(AppError::Conflict(format!(
+            "a service can have at most {MAX_CUSTOM} custom domains"
+        )));
+    }
+    // Hostnames are unique across the whole instance: one name, one service.
+    let inserted = sqlx::query(
+        "INSERT INTO domains (id, service_instance_id, hostname, kind, status, target_port, verification_token)
+         VALUES ($1, $2, $3, 'custom', 'pending', $4, $5)
+         ON CONFLICT (hostname) DO NOTHING",
+    )
+    .bind(id)
+    .bind(instance)
+    .bind(&host.name)
+    .bind(body.target_port)
+    .bind(&token)
+    .execute(&mut *tx)
+    .await?;
+    if inserted.rows_affected() == 0 {
+        return Err(AppError::Conflict(format!(
+            "{} is already in use by a service",
+            host.name
+        )));
+    }
+    Entry::new("domain.create", &meta)
+        .actor(&actor)
+        .workspace(workspace)
+        .target("domain", id)
+        .metadata(json!({
+            "hostname": host.name,
+            "kind": "custom",
+            "serviceInstance": instance,
+            "targetPort": body.target_port,
+        }))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    // Unverified: nothing routes yet, so no node needs a new snapshot.
+    let mut domain = fetch_one(&state, id).await?;
+    if provider.is_some() {
+        domain.provider_note =
+            domains::sync_records(&state, workspace, &host.name, &domain.dns_records, false).await;
+    }
+    Ok(Json(domain))
+}
+
+/// "Check now": look up the DNS records immediately.
+pub async fn check(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+) -> AppResult<Json<Domain>> {
+    let id = grant.id();
+    let (kind, wait): (String, Option<f64>) = sqlx::query_as(
+        "SELECT kind, EXTRACT(EPOCH FROM checked_at + make_interval(secs => $2) - now())::float8
+         FROM domains WHERE id = $1",
+    )
+    .bind(id)
+    .bind(CHECK_COOLDOWN_SECS as f64)
+    .fetch_one(&state.db)
+    .await?;
+    if kind != "custom" {
+        return Err(AppError::bad_request("generated domains need no DNS check"));
+    }
+    if let Some(w) = wait.filter(|w| *w > 0.0) {
+        return Err(AppError::TooManyRequests {
+            retry_after_secs: w.ceil() as u64,
+        });
+    }
+    domains::check(&state, id, Some((&actor, &meta))).await?;
+    Ok(Json(fetch_one(&state, id).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateDomain {
+    /// Replaces the stored value; null = the service's port.
+    target_port: Option<i32>,
+    /// Replaces the stored value; null = no limit.
+    rate_limit_per_minute: Option<i32>,
+}
+
+/// Port and edge settings (both fields replace the stored values).
+pub async fn update(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+    Json(body): Json<UpdateDomain>,
+) -> AppResult<Json<Domain>> {
+    let id = grant.id();
+    check_port(body.target_port)?;
+    check_rate_limit(body.rate_limit_per_minute)?;
+    let mut tx = state.db.begin().await?;
+    let (instance, hostname): (Id, String) = sqlx::query_as(
+        "UPDATE domains SET target_port = $2, rate_limit_per_minute = $3 WHERE id = $1
+         RETURNING service_instance_id, hostname",
+    )
+    .bind(id)
+    .bind(body.target_port)
+    .bind(body.rate_limit_per_minute)
+    .fetch_one(&mut *tx)
+    .await?;
+    let nodes = bump_serving_nodes(&mut tx, instance).await?;
+    Entry::new("domain.update", &meta)
+        .actor(&actor)
+        .workspace(grant.workspace_id()?)
+        .target("domain", id)
+        .metadata(json!({
+            "hostname": hostname,
+            "targetPort": body.target_port,
+            "rateLimitPerMinute": body.rate_limit_per_minute,
+        }))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    state.hub.kick_all(&nodes);
+    Ok(Json(fetch_one(&state, id).await?))
 }
 
 pub async fn delete(
@@ -156,23 +397,31 @@ pub async fn delete(
     meta: RequestMeta,
 ) -> AppResult<Json<serde_json::Value>> {
     let id = grant.id();
+    let workspace = grant.workspace_id()?;
+    // The records to clean up at the DNS provider, computed before the row goes.
+    let before = fetch_one(&state, id).await?;
     let mut tx = state.db.begin().await?;
     let (instance, hostname): (Id, String) =
         sqlx::query_as("DELETE FROM domains WHERE id = $1 RETURNING service_instance_id, hostname")
             .bind(id)
             .fetch_one(&mut *tx)
             .await?;
-    let nodes = serving_nodes(&mut tx, instance).await?;
+    let nodes = bump_serving_nodes(&mut tx, instance).await?;
     Entry::new("domain.delete", &meta)
         .actor(&actor)
-        .workspace(grant.workspace_id()?)
+        .workspace(workspace)
         .target("domain", id)
         .metadata(json!({ "hostname": hostname }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
     state.hub.kick_all(&nodes);
-    Ok(Json(json!({ "ok": true })))
+    let note = if before.kind == "custom" {
+        domains::sync_records(&state, workspace, &hostname, &before.dns_records, true).await
+    } else {
+        None
+    };
+    Ok(Json(json!({ "ok": true, "providerNote": note })))
 }
 
 #[cfg(test)]

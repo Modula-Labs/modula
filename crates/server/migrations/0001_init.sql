@@ -113,6 +113,8 @@ CREATE TABLE audit_log (
     workspace_id        id,
     actor_user_id       id,
     actor_session_id    id,
+    -- Set instead of actor_session_id when the caller used an API token.
+    actor_token_id      id,
     action              text NOT NULL,
     target_type         text,
     target_id           text,
@@ -179,6 +181,8 @@ CREATE TABLE nodes (
     -- provider metadata unless an admin set it (location_pinned).
     location            text,
     location_pinned     boolean NOT NULL DEFAULT false,
+    -- The public IPv4 the node reaches the internet from (TCP proxy host).
+    public_ip           text,
     -- Desired-state generation the server wants vs. the one the node applied.
     desired_generation  bigint NOT NULL DEFAULT 1,
     applied_generation  bigint NOT NULL DEFAULT 0,
@@ -227,6 +231,8 @@ CREATE TABLE services (
     project_id  id NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     name        text NOT NULL CHECK (name ~ '^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'),
     icon        text,
+    -- The database template it was created from (icon, Connect, backups).
+    template    text CHECK (template IN ('postgres', 'mysql', 'redis', 'mongo')),
     created_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (project_id, name)
 );
@@ -268,14 +274,60 @@ CREATE TABLE variables (
 );
 CREATE INDEX variables_instance_idx ON variables (service_instance_id);
 
+-- Persistent storage: one Docker volume per service instance, on the node it
+-- runs on (placement sticks to that node). Services with a volume redeploy
+-- with a short stop-then-start instead of overlapping.
+CREATE TABLE volumes (
+    id                  id PRIMARY KEY,
+    service_instance_id id NOT NULL UNIQUE REFERENCES service_instances (id) ON DELETE CASCADE,
+    mount_path          text NOT NULL CHECK (mount_path ~ '^/[A-Za-z0-9._/-]{0,254}$' AND mount_path NOT LIKE '%..%'),
+    created_at          timestamptz NOT NULL DEFAULT now()
+);
+
+-- Volumes whose data must be deleted on a node (the volume or its service was
+-- deleted). The node removes the Docker volume; rows are pruned after a week.
+CREATE TABLE volume_removals (
+    volume_id   id PRIMARY KEY,
+    node_id     id NOT NULL REFERENCES nodes (id) ON DELETE CASCADE,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Public TCP access to a service (databases): node public_port → container target_port.
+CREATE TABLE tcp_proxies (
+    id                  id PRIMARY KEY,
+    service_instance_id id NOT NULL UNIQUE REFERENCES service_instances (id) ON DELETE CASCADE,
+    node_id             id NOT NULL REFERENCES nodes (id) ON DELETE CASCADE,
+    target_port         integer NOT NULL CHECK (target_port BETWEEN 1 AND 65535),
+    public_port         integer NOT NULL CHECK (public_port BETWEEN 20000 AND 29999),
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (node_id, public_port)
+);
+
 -- Public hostnames for service instances. Generated domains live under the
--- instance's apps domain; custom domains (with ownership verification) are C5.
+-- instance's apps domain and are verified from the start. Custom domains start
+-- pending: only once a TXT record at _modula-challenge.<hostname> holds their
+-- token are they routed (and so allowed a certificate by the node's `ask`).
 CREATE TABLE domains (
     id                  id PRIMARY KEY,
     service_instance_id id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
     hostname            text NOT NULL UNIQUE CHECK (hostname = lower(hostname)),
     kind                text NOT NULL CHECK (kind IN ('generated', 'custom')),
-    created_at          timestamptz NOT NULL DEFAULT now()
+    -- Container port to route to; NULL = the service's configured port.
+    target_port         integer CHECK (target_port BETWEEN 1 AND 65535),
+    verification_token  text,
+    status              text NOT NULL DEFAULT 'verified'
+                        CHECK (status IN ('pending', 'verified', 'failed')),
+    last_error          text,
+    -- Whether the CNAME/A record pointed at us on the last check. Informational
+    -- only: a proxied (e.g. Cloudflare) record legitimately points elsewhere.
+    dns_target_ok       boolean,
+    checked_at          timestamptz,
+    verified_at         timestamptz,
+    -- Edge settings. Stored; not enforced until the edge's Caddy build ships
+    -- the rate-limit module.
+    rate_limit_per_minute integer CHECK (rate_limit_per_minute BETWEEN 1 AND 1000000),
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    CHECK (kind = 'generated' OR verification_token IS NOT NULL)
 );
 CREATE INDEX domains_instance_idx ON domains (service_instance_id);
 
@@ -414,3 +466,186 @@ CREATE TABLE github_deliveries (
     received_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX github_deliveries_received_idx ON github_deliveries (received_at);
+
+---------------------------------------------------------------------------
+-- Backups
+---------------------------------------------------------------------------
+
+-- S3-compatible storage (AWS S3, Cloudflare R2, Backblaze B2, MinIO) for a
+-- workspace's backups. The secret key is sealed with the workspace data key
+-- (AAD: backup_targets/secret_access_key/<id>) and never returned.
+CREATE TABLE backup_targets (
+    id                  id PRIMARY KEY,
+    workspace_id        id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    name                text NOT NULL,
+    provider            text NOT NULL CHECK (provider IN ('s3', 'r2', 'b2', 'minio')),
+    endpoint            text NOT NULL,
+    region              text NOT NULL,
+    bucket              text NOT NULL,
+    -- Object key prefix: empty, or ends with '/'.
+    prefix              text NOT NULL DEFAULT '',
+    access_key_id       text NOT NULL,
+    secret_sealed       bytea NOT NULL,
+    created_by          id REFERENCES users (id) ON DELETE SET NULL,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (workspace_id, name)
+);
+
+-- The age X25519 key pair a workspace's backups are encrypted to. The
+-- identity is sealed with the workspace data key (AAD: backup_keys/identity/<workspace>).
+CREATE TABLE backup_keys (
+    workspace_id        id PRIMARY KEY REFERENCES workspaces (id) ON DELETE CASCADE,
+    recipient           text NOT NULL,
+    identity_sealed     bytea NOT NULL,
+    created_at          timestamptz NOT NULL DEFAULT now()
+);
+
+-- Daily backups of a database service instance, with GFS retention: the
+-- newest backup of each day/ISO week/month is kept for that many days.
+CREATE TABLE backup_schedules (
+    service_instance_id id PRIMARY KEY REFERENCES service_instances (id) ON DELETE CASCADE,
+    enabled             boolean NOT NULL DEFAULT true,
+    target_id           id NOT NULL REFERENCES backup_targets (id) ON DELETE CASCADE,
+    hour_utc            smallint NOT NULL CHECK (hour_utc BETWEEN 0 AND 23),
+    daily_days          integer NOT NULL DEFAULT 6 CHECK (daily_days BETWEEN 0 AND 3660),
+    weekly_days         integer NOT NULL DEFAULT 27 CHECK (weekly_days BETWEEN 0 AND 3660),
+    monthly_days        integer NOT NULL DEFAULT 89 CHECK (monthly_days BETWEEN 0 AND 3660),
+    last_scheduled_at   timestamptz,
+    updated_at          timestamptz NOT NULL DEFAULT now()
+);
+
+-- One encrypted object in a target. service_instance_id NULL = a backup of
+-- the control plane's own database (see instance_backup). Deleting a service
+-- or target deletes these records but leaves the objects in the bucket.
+CREATE TABLE backups (
+    id                  id PRIMARY KEY,
+    service_instance_id id REFERENCES service_instances (id) ON DELETE CASCADE,
+    target_id           id NOT NULL REFERENCES backup_targets (id) ON DELETE CASCADE,
+    -- The node running the dump (whose result alone is accepted).
+    node_id             id REFERENCES nodes (id) ON DELETE SET NULL,
+    kind                text NOT NULL CHECK (kind IN ('scheduled', 'manual')),
+    engine              text NOT NULL CHECK (engine IN ('postgres', 'mysql', 'redis', 'mongo')),
+    status              text NOT NULL DEFAULT 'running'
+                        CHECK (status IN ('running', 'completed', 'failed', 'deleted')),
+    object_key          text NOT NULL,
+    -- The S3 multipart upload while running.
+    upload_id           text,
+    size_bytes          bigint,
+    error               text,
+    created_by          id REFERENCES users (id) ON DELETE SET NULL,
+    started_at          timestamptz NOT NULL DEFAULT now(),
+    finished_at         timestamptz,
+    deleted_at          timestamptz
+);
+CREATE INDEX backups_instance_idx ON backups (service_instance_id, started_at DESC);
+CREATE INDEX backups_running_idx ON backups (started_at) WHERE status = 'running';
+-- One backup at a time per service instance (and for the control plane).
+CREATE UNIQUE INDEX backups_one_running ON backups (service_instance_id) NULLS NOT DISTINCT
+    WHERE status = 'running';
+
+CREATE TABLE backup_restores (
+    id                  id PRIMARY KEY,
+    backup_id           id NOT NULL REFERENCES backups (id) ON DELETE CASCADE,
+    service_instance_id id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    node_id             id REFERENCES nodes (id) ON DELETE SET NULL,
+    status              text NOT NULL DEFAULT 'running'
+                        CHECK (status IN ('running', 'completed', 'failed')),
+    error               text,
+    created_by          id REFERENCES users (id) ON DELETE SET NULL,
+    started_at          timestamptz NOT NULL DEFAULT now(),
+    finished_at         timestamptz
+);
+CREATE INDEX backup_restores_instance_idx ON backup_restores (service_instance_id, started_at DESC);
+CREATE UNIQUE INDEX backup_restores_one_running ON backup_restores (service_instance_id)
+    WHERE status = 'running';
+
+-- Daily backups of the control plane's database (single row), encrypted to a
+-- key derived from the master key so they decrypt without this database.
+CREATE TABLE instance_backup (
+    id                  boolean PRIMARY KEY DEFAULT true CHECK (id),
+    enabled             boolean NOT NULL DEFAULT false,
+    target_id           id REFERENCES backup_targets (id) ON DELETE SET NULL,
+    hour_utc            smallint NOT NULL DEFAULT 3 CHECK (hour_utc BETWEEN 0 AND 23),
+    last_scheduled_at   timestamptz,
+    updated_by          id REFERENCES users (id) ON DELETE SET NULL,
+    updated_at          timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO instance_backup (id) VALUES (true);
+
+---------------------------------------------------------------------------
+-- API tokens (the modula-deploy CLI, automation)
+---------------------------------------------------------------------------
+
+-- Personal bearer tokens (mdt_…); only SHA-256 hashes are stored. A token acts
+-- as its user without sudo, limited to one workspace when workspace_id is set.
+CREATE TABLE api_tokens (
+    id              id PRIMARY KEY,
+    user_id         id NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    workspace_id    id REFERENCES workspaces (id) ON DELETE CASCADE,
+    name            text NOT NULL,
+    token_hash      bytea NOT NULL UNIQUE,
+    last_used_at    timestamptz,
+    expires_at      timestamptz,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX api_tokens_user_idx ON api_tokens (user_id, created_at);
+
+---------------------------------------------------------------------------
+-- Integrations (Hetzner, Cloudflare): one per kind per workspace
+---------------------------------------------------------------------------
+
+-- The provider's API token is sealed with the workspace data key
+-- (AAD: integrations/secret/<id>) and never returned. metadata holds
+-- non-secret settings (e.g. Hetzner provisioning caps).
+CREATE TABLE integrations (
+    id              id PRIMARY KEY,
+    workspace_id    id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    kind            text NOT NULL,
+    secret_sealed   bytea NOT NULL,
+    metadata        jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_by      id REFERENCES users (id) ON DELETE SET NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (workspace_id, kind)
+);
+
+-- Cloudflare ingress mode of a custom domain whose zone the workspace's
+-- Cloudflare token manages: false = DNS only, true = proxied (orange cloud;
+-- the zone's SSL mode must then be Full (strict)).
+ALTER TABLE domains ADD COLUMN proxied boolean NOT NULL DEFAULT false;
+
+---------------------------------------------------------------------------
+-- Provisioning: servers created at a cloud provider on a user's request
+---------------------------------------------------------------------------
+
+-- One server created through a provider API. It joins with a single-use join
+-- token (join_token_id); enrollment records the node on that token, which is
+-- how the row learns its node_id. Prices are the provider's gross monthly
+-- price in euro cents.
+CREATE TABLE provisioned_servers (
+    id                  id PRIMARY KEY,
+    workspace_id        id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    provider            text NOT NULL CHECK (provider IN ('hetzner')),
+    -- The provider's server id, once created.
+    provider_id         text,
+    -- The provider's create action, followed until the server boots.
+    provider_action_id  text,
+    firewall_id         text,
+    name                text NOT NULL,
+    -- Catalog location id (locations.rs), e.g. hetzner:fsn1.
+    location            text NOT NULL,
+    server_type         text NOT NULL,
+    monthly_price_cents integer NOT NULL CHECK (monthly_price_cents >= 0),
+    status              text NOT NULL DEFAULT 'creating'
+                        CHECK (status IN ('creating', 'booting', 'joining', 'ready', 'failed', 'deleting')),
+    error               text,
+    ssh_enabled         boolean NOT NULL DEFAULT false,
+    ipv4                text,
+    join_token_id       id REFERENCES node_join_tokens (id) ON DELETE SET NULL,
+    node_id             id REFERENCES nodes (id) ON DELETE SET NULL,
+    created_by          id REFERENCES users (id) ON DELETE SET NULL,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (provider, provider_id)
+);
+CREATE INDEX provisioned_servers_workspace_idx ON provisioned_servers (workspace_id, created_at);

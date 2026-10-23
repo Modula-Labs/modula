@@ -9,6 +9,7 @@
 pub mod ask;
 pub mod caddy;
 mod http;
+pub mod tcp;
 
 use std::net::SocketAddr;
 

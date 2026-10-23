@@ -9,6 +9,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 
 use crate::activity::{self, Change};
+use crate::api::variables;
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
@@ -17,6 +18,7 @@ use crate::deploy::{self, LiveFilter};
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
 use crate::state::AppState;
+use crate::templates;
 
 pub fn validate_service_name(name: &str) -> AppResult<()> {
     let b = name.as_bytes();
@@ -53,6 +55,14 @@ pub struct Instance {
     #[sqlx(skip)]
     pub location: Option<&'static crate::locations::Location>,
     pub stack: Option<String>,
+    /// The database template the service was created from.
+    pub template: Option<String>,
+    #[sqlx(json(nullable))]
+    pub volume: Option<serde_json::Value>,
+    #[sqlx(json(nullable))]
+    pub tcp_proxy: Option<serde_json::Value>,
+    #[serde(skip)]
+    pub tcp_node_ip: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
@@ -61,6 +71,13 @@ pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
     let mut i: Instance = sqlx::query_as(
         "SELECT i.id, i.service_id, s.name AS service_name, i.environment_id, e.name AS environment_name,
                 s.project_id, i.node_id, i.config, i.stack, i.updated_at, n.location AS location_id,
+                s.template,
+                (SELECT json_build_object('id', v.id, 'mountPath', v.mount_path, 'createdAt', v.created_at)
+                 FROM volumes v WHERE v.service_instance_id = i.id) AS volume,
+                (SELECT json_build_object('id', t.id, 'publicPort', t.public_port, 'targetPort', t.target_port)
+                 FROM tcp_proxies t WHERE t.service_instance_id = i.id) AS tcp_proxy,
+                (SELECT tn.public_ip FROM tcp_proxies t JOIN nodes tn ON tn.id = t.node_id
+                 WHERE t.service_instance_id = i.id) AS tcp_node_ip,
                 CASE
                   WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id AND status = 'active')
                     THEN 'online'
@@ -82,6 +99,15 @@ pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
     .await?
     .ok_or(AppError::NotFound)?;
     i.location = i.location_id.as_deref().and_then(crate::locations::get);
+    if let Some(p) = i.tcp_proxy.as_mut() {
+        let host = state
+            .cfg
+            .tcp_proxy_host
+            .clone()
+            .or(i.tcp_node_ip.clone())
+            .unwrap_or_default();
+        p["host"] = serde_json::Value::String(host);
+    }
     Ok(i)
 }
 
@@ -89,7 +115,10 @@ pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateService {
     pub name: String,
-    pub config: ServiceConfig,
+    /// Required unless `template` is given.
+    pub config: Option<ServiceConfig>,
+    /// A database template id (see `templates.rs`).
+    pub template: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -109,17 +138,46 @@ pub async fn create(
 ) -> AppResult<Json<CreatedService>> {
     let project = grant.id();
     validate_service_name(&req.name)?;
-    req.config.validate()?;
-    let config = serde_json::to_value(&req.config).map_err(anyhow::Error::from)?;
+    let template = match req.template.as_deref() {
+        Some(t) => {
+            Some(templates::get(t).ok_or_else(|| AppError::bad_request("unknown template"))?)
+        }
+        None => None,
+    };
+    let cfg = match (&req.config, template) {
+        (Some(c), _) => c.clone(),
+        (None, Some(t)) => t.config(),
+        (None, None) => return Err(AppError::bad_request("config or template is required")),
+    };
+    cfg.validate()?;
+    let config = serde_json::to_value(&cfg).map_err(anyhow::Error::from)?;
     let id = Id::new();
+
+    // One instance per environment; a template's variables (with their own
+    // passwords) are sealed per environment before the transaction.
+    let envs: Vec<Id> =
+        sqlx::query_scalar("SELECT id FROM environments WHERE project_id = $1 ORDER BY created_at")
+            .bind(project)
+            .fetch_all(&state.db)
+            .await?;
+    let mut instances = Vec::with_capacity(envs.len());
+    for env in envs {
+        let vars = match template {
+            Some(t) => variables::seal_new(&state, env, &t.variables()).await?,
+            None => Vec::new(),
+        };
+        instances.push((env, Id::new(), vars));
+    }
+
     let mut tx = state.db.begin().await?;
     let inserted = sqlx::query(
-        "INSERT INTO services (id, project_id, name) VALUES ($1, $2, $3)
+        "INSERT INTO services (id, project_id, name, template) VALUES ($1, $2, $3, $4)
          ON CONFLICT (project_id, name) DO NOTHING",
     )
     .bind(id)
     .bind(project)
     .bind(&req.name)
+    .bind(template.map(|t| t.id))
     .execute(&mut *tx)
     .await?;
     if inserted.rows_affected() == 0 {
@@ -128,42 +186,51 @@ pub async fn create(
             req.name
         )));
     }
-    let instance_ids: Vec<Id> = sqlx::query_scalar(
-        "INSERT INTO service_instances (id, service_id, environment_id, config)
-         SELECT new_id(), $1, e.id, $3 FROM environments e WHERE e.project_id = $2
-         RETURNING id",
-    )
-    .bind(id)
-    .bind(project)
-    .bind(&config)
-    .fetch_all(&mut *tx)
-    .await?;
-    let envs: Vec<Id> = sqlx::query_scalar("SELECT id FROM environments WHERE project_id = $1")
-        .bind(project)
-        .fetch_all(&mut *tx)
+    for (env, instance, vars) in &instances {
+        sqlx::query(
+            "INSERT INTO service_instances (id, service_id, environment_id, config) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(instance)
+        .bind(id)
+        .bind(env)
+        .bind(&config)
+        .execute(&mut *tx)
         .await?;
-    for env in envs {
+        variables::insert_new(&mut tx, *env, *instance, vars).await?;
+        if let Some(t) = template {
+            sqlx::query(
+                "INSERT INTO volumes (id, service_instance_id, mount_path) VALUES ($1, $2, $3)",
+            )
+            .bind(Id::new())
+            .bind(instance)
+            .bind(t.mount_path)
+            .execute(&mut *tx)
+            .await?;
+        }
         let created = [Change::new("service", "created", req.name.as_str())];
-        activity::record(&mut tx, env, Some(id), Some(actor.user_id), &created).await?;
+        activity::record(&mut tx, *env, Some(id), Some(actor.user_id), &created).await?;
     }
     Entry::new("service.create", &meta)
         .actor(&actor)
         .workspace(grant.workspace_id()?)
         .target("service", id)
-        .metadata(
-            json!({ "project": project, "name": req.name, "source": req.config.source_label() }),
-        )
+        .metadata(json!({
+            "project": project,
+            "name": req.name,
+            "source": cfg.source_label(),
+            "template": template.map(|t| t.id),
+        }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
-    let mut instances = Vec::with_capacity(instance_ids.len());
-    for i in instance_ids {
-        instances.push(load_instance(&state, i).await?);
+    let mut loaded = Vec::with_capacity(instances.len());
+    for (_, i, _) in instances {
+        loaded.push(load_instance(&state, i).await?);
     }
     Ok(Json(CreatedService {
         id,
         name: req.name,
-        instances,
+        instances: loaded,
     }))
 }
 
@@ -175,7 +242,8 @@ pub async fn delete(
 ) -> AppResult<Json<serde_json::Value>> {
     let id = grant.id();
     let mut tx = state.db.begin().await?;
-    let nodes = deploy::remove_live(&mut tx, LiveFilter::Service, id).await?;
+    let mut nodes = deploy::remove_live(&mut tx, LiveFilter::Service, id).await?;
+    nodes.extend(deploy::queue_volume_removals(&mut tx, LiveFilter::Service, id).await?);
     sqlx::query("DELETE FROM services WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)

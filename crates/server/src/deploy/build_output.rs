@@ -26,6 +26,16 @@ pub fn apply(mut cfg: ServiceConfig, out: &pb::BuildOutput) -> ServiceConfig {
         Ok(pb::RestartPolicy::Never) => cfg.restart_policy = RestartPolicy::Never,
         _ => {}
     }
+    if out.restart_max_retries > 0 {
+        cfg.restart_policy_max_retries = Some(out.restart_max_retries);
+    }
+    if cfg.restart_policy != RestartPolicy::OnFailure {
+        cfg.restart_policy_max_retries = None;
+    }
+    if out.has_pre_deploy {
+        cfg.pre_deploy_command =
+            (!out.pre_deploy_command.is_empty()).then(|| out.pre_deploy_command.clone());
+    }
     if cfg.validate().is_ok() { cfg } else { before }
 }
 
@@ -57,6 +67,19 @@ mod tests {
             (c.healthcheck_timeout_secs, c.restart_policy),
             (60, RestartPolicy::Always)
         );
+
+        // The file's pre-deploy command and retry limit are recorded too.
+        let c = apply(
+            base(),
+            &pb::BuildOutput {
+                has_pre_deploy: true,
+                pre_deploy_command: vec!["/bin/sh".into(), "-c".into(), "./migrate".into()],
+                restart_max_retries: 5,
+                ..Default::default()
+            },
+        );
+        assert_eq!(c.pre_deploy_command.as_deref().unwrap()[2], "./migrate");
+        assert_eq!(c.restart_policy_max_retries, Some(5));
 
         let bad = pb::BuildOutput {
             healthcheck_path: "no-slash".into(),

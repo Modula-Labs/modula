@@ -120,6 +120,7 @@ impl Cluster {
                 builder: Arc::new(modula_node::build::FakeBuilder::default()),
                 logs: modula_node::build::BuildLogs::new(dir.join("build-logs")).unwrap(),
             }),
+            db: None,
         };
         tokio::spawn(modula_node::session::run(
             dir,
@@ -825,4 +826,215 @@ async fn references_resolve_across_services_and_edges_follow(pool: PgPool) {
         .map(|s| s["serviceName"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["api"]);
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn database_templates_get_a_volume_a_proxy_and_stop_before_start(pool: PgPool) {
+    let mut cfg = config();
+    cfg.tcp_proxy_host = Some("db.example.test".into());
+    let c = cluster_with(pool, cfg).await;
+    let (_node, rt, _stop) = c.start_node().await;
+    let call = |m: Method, path: String, body: Option<Value>| {
+        let app = &c.app;
+        let admin = c.admin.clone();
+        async move { app.call(m, &path, Some(&admin), body).await }
+    };
+    // A project with a plain service, then a Postgres from the template.
+    let web = c.service("app:1").await;
+    let inst = call(Method::GET, format!("/api/service-instances/{web}"), None).await;
+    let project = inst.json["projectId"].as_str().unwrap().to_owned();
+    let r = call(
+        Method::POST,
+        format!("/api/projects/{project}/services"),
+        Some(json!({ "name": "postgres", "template": "postgres" })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let pg = &r.json["instances"][0];
+    let pg_id = pg["id"].as_str().unwrap().to_owned();
+    assert_eq!(pg["template"], "postgres");
+    assert_eq!(pg["volume"]["mountPath"], "/var/lib/postgresql/data");
+    let volume_id = pg["volume"]["id"].as_str().unwrap().to_owned();
+
+    // Public TCP access, then deploy: the URLs resolve, the volume is mounted.
+    let r = call(
+        Method::POST,
+        format!("/api/service-instances/{pg_id}/tcp-proxy"),
+        Some(json!({ "targetPort": 5432 })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["tcpProxy"]["publicPort"], 20000);
+    assert_eq!(r.json["tcpProxy"]["host"], "db.example.test");
+    let first = c.deploy(pg_id.parse().unwrap()).await;
+    c.wait_status(first, "active").await;
+    let env = rt.env_of(&first.to_string());
+    let password = env["POSTGRES_PASSWORD"].clone();
+    assert_eq!(password.len(), 32);
+    assert_eq!(
+        env["DATABASE_URL"],
+        format!("postgresql://postgres:{password}@postgres.modula.internal:5432/app")
+    );
+    assert_eq!(
+        env["DATABASE_PUBLIC_URL"],
+        format!("postgresql://postgres:{password}@db.example.test:20000/app?sslmode=require")
+    );
+    assert_eq!(
+        rt.mount_of(&first.to_string()),
+        Some((
+            format!("modula-vol-{volume_id}"),
+            "/var/lib/postgresql/data".into()
+        ))
+    );
+
+    // A redeploy never overlaps on the volume: the old one goes first.
+    let second = c.deploy(pg_id.parse().unwrap()).await;
+    assert_eq!(c.status(first).await, "removed");
+    c.wait_status(second, "active").await;
+    assert!(!rt.running_deployments().contains(&first.to_string()));
+
+    // Deleting the service deletes the volume's data on the node.
+    let svc = r.json["serviceId"].as_str().unwrap().to_owned();
+    let d = call(Method::DELETE, format!("/api/services/{svc}"), None).await;
+    assert_eq!(d.status, StatusCode::OK, "{:?}", d.json);
+    wait_for("volume removed", || async {
+        rt.removed_volumes()
+            .contains(&format!("modula-vol-{volume_id}"))
+    })
+    .await;
+}
+
+/// Railway-style deploy settings end to end: a pre-deploy command runs from
+/// the new image with the deployment's variables before it starts, and its
+/// failure (like a failing health check) leaves the serving deployment alone;
+/// draining and restart limits reach the container.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn pre_deploy_draining_retries_and_health_gating(pool: PgPool) {
+    let c = cluster(pool).await;
+    let (_node, rt, _stop) = c.start_node().await;
+    let migrate = ["bunx", "prisma", "migrate", "deploy"];
+    let config = json!({
+        "source": { "type": "image", "image": "ghcr.io/acme/anton-api:1" },
+        "port": 3000,
+        "healthcheckPath": "/v1/ready",
+        "healthcheckTimeoutSecs": 120,
+        "restartPolicyMaxRetries": 5,
+        "preDeployCommand": migrate,
+    });
+    let instance = c.service_with(config.clone()).await;
+    let call = |m: Method, path: String, body: Option<Value>| {
+        let app = &c.app;
+        let admin = c.admin.clone();
+        async move { app.call(m, &path, Some(&admin), body).await }
+    };
+    // Railway's variable sets the draining time (the config has none).
+    let r = call(
+        Method::PATCH,
+        format!("/api/service-instances/{instance}/variables"),
+        Some(json!({ "set": {
+            "DATABASE_URL": "postgres://u:pw@postgres.modula.internal:5432/app",
+            "RAILWAY_DEPLOYMENT_DRAINING_SECONDS": "30",
+            "RELEASE": "${{MODULA_DEPLOYMENT_ID}}"
+        } })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let r = call(
+        Method::POST,
+        format!("/api/service-instances/{instance}/domains"),
+        None,
+    )
+    .await;
+    let host = r.json["hostname"].as_str().unwrap().to_owned();
+
+    let d1 = c.deploy(instance).await;
+    c.wait_status(d1, "active").await;
+    let once = rt.onces.lock().unwrap()[0].clone();
+    assert_eq!(once.deployment_id, d1.to_string());
+    assert_eq!(once.cmd, migrate);
+    assert_eq!(once.image, "ghcr.io/acme/anton-api:1");
+    assert_eq!(
+        once.env["DATABASE_URL"],
+        "postgres://u:pw@postgres.modula.internal:5432/app"
+    );
+    assert_eq!(
+        once.env["RELEASE"],
+        d1.to_string(),
+        "its own new deployment"
+    );
+    assert!(
+        once.running.is_empty(),
+        "it ran before the container started"
+    );
+    let w = rt.workload_of(&d1.to_string()).unwrap();
+    assert_eq!(w.draining_seconds, 30);
+    assert_eq!(w.restart_max_retries, 5);
+    assert_eq!(w.health.unwrap().timeout_secs, 120);
+    wait_for("route to d1", || async { c.routed(&host).is_some() }).await;
+    let upstream = c.routed(&host).unwrap();
+
+    // The migration fails: the new deployment fails, d1 keeps serving.
+    rt.once_exit.lock().unwrap().insert(migrate.join(" "), 1);
+    let d2 = c.deploy(instance).await;
+    c.wait_status(d2, "failed").await;
+    assert_eq!(c.status(d1).await, "active");
+    let detail = call(Method::GET, format!("/api/deployments/{d2}"), None).await;
+    let error = detail.json["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("Pre-deploy command exited with code 1"),
+        "{error}"
+    );
+    assert!(
+        detail.json["events"]
+            .to_string()
+            .contains("Running pre-deploy command: bunx prisma migrate deploy")
+    );
+    // Its output is in the deployment's log.
+    let (_, body) = c
+        .app
+        .get_text(
+            &format!("/api/deployments/{d2}/logs?kind=build&follow=false"),
+            &c.admin,
+        )
+        .await;
+    assert!(body.contains("ran bunx prisma migrate deploy"), "{body}");
+    assert_eq!(rt.running_deployments(), [d1.to_string()].into());
+
+    // Health gating: a deployment that never returns 2xx in time fails, and
+    // traffic never leaves d1.
+    rt.once_exit.lock().unwrap().clear();
+    rt.unhealthy.lock().unwrap().insert("*".into());
+    let mut quick = config.clone();
+    quick["healthcheckTimeoutSecs"] = json!(1);
+    let r = call(
+        Method::PATCH,
+        format!("/api/service-instances/{instance}"),
+        Some(json!({ "config": quick })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let d3 = c.deploy(instance).await;
+    c.wait_status(d3, "failed").await;
+    assert_eq!(c.status(d1).await, "active");
+    assert_eq!(c.routed(&host), Some(upstream));
+    assert_eq!(rt.running_deployments(), [d1.to_string()].into());
+
+    // Out-of-range settings are refused.
+    for bad in [
+        json!({ "drainingSeconds": 301 }),
+        json!({ "restartPolicyMaxRetries": 0 }),
+        json!({ "restartPolicy": "always", "restartPolicyMaxRetries": 3 }),
+    ] {
+        let mut cfg = config.clone();
+        cfg.as_object_mut()
+            .unwrap()
+            .extend(bad.as_object().unwrap().clone());
+        let r = call(
+            Method::PATCH,
+            format!("/api/service-instances/{instance}"),
+            Some(json!({ "config": cfg })),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}: {:?}", r.json);
+    }
 }

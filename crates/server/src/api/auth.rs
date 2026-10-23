@@ -386,6 +386,10 @@ pub async fn sudo(
     jar: CookieJar,
     Json(req): Json<SudoRequest>,
 ) -> AppResult<(CookieJar, Json<SudoResponse>)> {
+    // Sudo belongs to cookie sessions; an API token can never be elevated.
+    if actor.api_token.is_some() {
+        return Err(AppError::Forbidden);
+    }
     state
         .limiter
         .check("sudo", &actor.user_id.to_string(), SUDO_PER_USER)
@@ -442,6 +446,10 @@ pub async fn logout(
     meta: RequestMeta,
     jar: CookieJar,
 ) -> AppResult<(CookieJar, Json<serde_json::Value>)> {
+    // API tokens are revoked through /api/account/tokens, not by "logging out".
+    if actor.api_token.is_some() {
+        return Err(AppError::Forbidden);
+    }
     session::revoke(&state.db, actor.session_id).await?;
     Entry::new("auth.logout", &meta)
         .actor(&actor)
@@ -454,5 +462,7 @@ pub async fn logout(
 }
 
 pub async fn me(State(state): State<AppState>, actor: Actor) -> AppResult<Json<Me>> {
-    Ok(Json(load_me(&state.db, actor.user_id).await?))
+    let mut me = load_me(&state.db, actor.user_id).await?;
+    me.workspaces.retain(|w| actor.can_reach_workspace(w.id));
+    Ok(Json(me))
 }

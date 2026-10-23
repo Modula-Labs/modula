@@ -3,6 +3,7 @@ use axum::http::{HeaderValue, Method, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
+use crate::api::tokens;
 use crate::error::AppError;
 use crate::state::AppState;
 
@@ -12,14 +13,33 @@ const SIGNED_WEBHOOK: (Method, &str) = (Method::POST, crate::api::github::WEBHOO
 /// CSRF defence: every state-changing request must come from our exact origin.
 /// Browsers always send `Origin` on cross-origin and same-origin non-GET fetches,
 /// so a missing header on a mutation is rejected too.
-// TODO(C6): exempt requests authenticated by a Bearer API token (the CLI sends no
-// Origin). The exemption must come from token auth, not from the header alone.
+///
+/// Requests carrying `Authorization: Bearer <API token>` (the CLI sends no
+/// Origin) are exempt, but only once the token itself checks out: it is
+/// resolved here and handed to the route guard, which then authenticates by
+/// that token alone and never by cookies. A forged cross-site request can't
+/// carry the token, so the exemption can't be ridden with a victim's cookie.
 pub async fn require_same_origin(
     State(state): State<AppState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    // Safe methods need no exemption; the route guard checks their token.
+    if let Some(presented) = tokens::bearer(req.headers()).filter(|_| !safe) {
+        let actor = match presented {
+            Ok(t) => tokens::resolve(&state.db, t).await,
+            Err(e) => Err(e),
+        };
+        return match actor {
+            Ok(Some(actor)) => {
+                req.extensions_mut().insert(tokens::BearerActor(actor));
+                next.run(req).await
+            }
+            Ok(None) => AppError::Unauthorized.into_response(),
+            Err(e) => e.into_response(),
+        };
+    }
     let webhook = *req.method() == SIGNED_WEBHOOK.0 && req.uri().path() == SIGNED_WEBHOOK.1;
     if safe || webhook {
         return next.run(req).await;

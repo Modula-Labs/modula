@@ -193,7 +193,8 @@ impl pb::node_server::Node for NodeService {
         sqlx::query(
             "UPDATE nodes SET status = 'online', node_version = $2, protocol = $3, runtime = $4,
                     applied_generation = $5, info = $6, last_seen_at = now(),
-                    location = CASE WHEN location_pinned THEN location ELSE coalesce($7, location) END
+                    location = CASE WHEN location_pinned THEN location ELSE coalesce($7, location) END,
+                    public_ip = coalesce($8, public_ip)
              WHERE id = $1",
         )
         .bind(node)
@@ -213,6 +214,7 @@ impl pb::node_server::Node for NodeService {
             "edgeColo": info.edge_colo.chars().take(8).collect::<String>(),
         }))
         .bind(location.map(|l| l.id))
+        .bind(info.public_ip.parse::<std::net::Ipv4Addr>().ok().map(|ip| ip.to_string()))
         .execute(&state.db)
         .await
         .map_err(internal)?;
@@ -286,6 +288,8 @@ impl pb::node_server::Node for NodeService {
                     .await;
                     tracing::info!(%node, "node detached");
                 }
+                // Tunnels through this stream are gone with it.
+                state.tunnels.node_gone(node);
             });
         }
 
@@ -331,6 +335,14 @@ async fn handle(
                     msg: Some(Out::LogCancel(pb::LogCancel { request_id })),
                 };
                 let _ = tx.try_send(Ok(cancel));
+            }
+        }
+        In::BackupResult(r) => crate::backup::on_result(state, node, r).await?,
+        In::DbResult(r) => state.hub.deliver_db(node, r),
+        // Never waits: see crate::tunnel on flow control.
+        m @ (In::TunnelOpened(_) | In::TunnelData(_) | In::TunnelClose(_)) => {
+            if let Some(reply) = state.tunnels.from_node(node, m) {
+                let _ = tx.try_send(Ok(reply));
             }
         }
         In::Renew(r) => {

@@ -6,6 +6,7 @@
 #
 # Output (the layout install.sh downloads):
 #   modula-server-linux-<arch>  modula-node-linux-<arch>  caddy-linux-<arch>
+#   modula-deploy-linux-<arch> (the CLI; not installed on servers; install-cli.sh)
 #   SHA256SUMS  SHA256SUMS.sig  (Ed25519 over SHA256SUMS)
 #
 # The signing key never enters a container or the repo. Default location:
@@ -26,6 +27,8 @@ CADDY_PLUGINS=(github.com/caddy-dns/cloudflare)
 embedded=$(sed -n 's/^RELEASE_PUBKEY="\${MODULA_RELEASE_PUBKEY:-\(.*\)}"$/\1/p' deploy/install.sh)
 actual=$(openssl pkey -in "$KEY" -pubout | sed -n 2p)
 [[ $embedded == "$actual" ]] || { echo "install.sh embeds a different public key than $KEY" >&2; exit 1; }
+cli_embedded=$(sed -n 's/^RELEASE_PUBKEY="\${MODULA_RELEASE_PUBKEY:-\(.*\)}"$/\1/p' scripts/install-cli.sh)
+[[ $cli_embedded == "$actual" ]] || { echo "install-cli.sh embeds a different public key than $KEY" >&2; exit 1; }
 cmp -s <(openssl pkey -in "$KEY" -pubout) deploy/release.pub.pem \
   || { echo "deploy/release.pub.pem does not match $KEY" >&2; exit 1; }
 
@@ -36,7 +39,7 @@ echo "web: building the dashboard (embedded into modula-server)"
 (cd web && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
 
 for arch in $ARCHES; do
-  echo "$arch: compiling modula-server and modula-node"
+  echo "$arch: compiling modula-server, modula-node and the modula-deploy CLI"
   docker run --rm --platform "linux/$arch" \
     -v "$PWD":/src:ro \
     -v modula-cargo-registry:/usr/local/cargo/registry \
@@ -46,9 +49,10 @@ for arch in $ARCHES; do
     -w /src rust:1-alpine \
     sh -euc "
       apk add -q --no-cache musl-dev protobuf-dev >/dev/null
-      cargo build -q --release --locked -p modula-server -p modula-node
+      cargo build -q --release --locked -p modula-server -p modula-node -p modula-cli
       cp /target/release/modula-server /out/modula-server-linux-$arch
       cp /target/release/modula-node /out/modula-node-linux-$arch
+      cp /target/release/modula-deploy /out/modula-deploy-linux-$arch
     "
 
   echo "$arch: building Caddy $CADDY_VERSION with ${CADDY_PLUGINS[*]}"
@@ -73,4 +77,5 @@ openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$OUT/SHA256SUMS" -out "$OUT/SHA2
 openssl pkeyutl -verify -pubin -inkey deploy/release.pub.pem -rawin \
   -in "$OUT/SHA256SUMS" -sigfile "$OUT/SHA256SUMS.sig" >/dev/null
 cp deploy/install.sh "$OUT/install.sh"
+cp scripts/install-cli.sh "$OUT/install-cli.sh"
 echo "release: $OUT ($(cd "$OUT" && ls | tr '\n' ' '))"

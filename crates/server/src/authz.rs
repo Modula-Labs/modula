@@ -87,7 +87,15 @@ pub enum Action {
     /// Redeploy, roll back to, or restart an existing deployment.
     DeploymentRollout,
     DomainCreate,
+    /// Check a custom domain's DNS now, or change its port and edge settings.
+    DomainUpdate,
     DomainDelete,
+    /// Attach a volume / expose a TCP port (service instance).
+    VolumeCreate,
+    /// Deletes the volume's data.
+    VolumeDelete,
+    TcpProxyCreate,
+    TcpProxyDelete,
     /// Instance-level, no path parameter.
     NodeList,
     /// Instance-level, no path parameter.
@@ -101,6 +109,53 @@ pub enum Action {
     GithubInstall,
     /// List repositories reachable through a workspace's installations.
     GithubRepoList,
+    /// A workspace's backup storage targets (never their secrets).
+    BackupTargetList,
+    BackupTargetCreate,
+    BackupTargetDelete,
+    /// A service instance's backup schedule and backups.
+    BackupRead,
+    BackupScheduleUpdate,
+    /// Back up now.
+    BackupCreate,
+    /// Replace a database's data with a backup.
+    BackupRestore,
+    BackupDelete,
+    /// Instance-level, no path parameter: the control plane's own backups.
+    SelfBackupRead,
+    SelfBackupUpdate,
+    /// Delete one of the caller's own API tokens.
+    TokenRevoke,
+    /// Open a private TCP tunnel to a service instance's running container.
+    TunnelOpen,
+    /// A workspace's Cloudflare connection (never the token) and its zones.
+    CloudflareRead,
+    /// Verify and store (or replace) a workspace's Cloudflare token.
+    CloudflareConnect,
+    CloudflareDisconnect,
+    /// Database tab (Postgres services): browse tables and rows, read-only
+    /// queries, stats, extensions; and any database's connection credentials.
+    DatabaseRead,
+    /// Run SQL, edit rows, vacuum, install or remove extensions.
+    DatabaseWrite,
+    /// Regenerate the database password.
+    DatabasePassword,
+    /// A workspace's Hetzner connection (never the token), caps and usage.
+    HetznerRead,
+    /// Verify and store (or replace) the Hetzner token; change the caps.
+    HetznerConnect,
+    HetznerDisconnect,
+    /// Hetzner locations, server types with prices, and SSH keys.
+    HetznerCatalog,
+    /// Servers created through a provider, and their progress.
+    ServerList,
+    ServerRead,
+    /// Create a server at the provider (costs money).
+    ServerProvision,
+    /// Which server has room for a service, or which to add.
+    ServerSuggest,
+    /// Delete a provisioned server at the provider and remove its node.
+    ServerDelete,
 }
 
 impl Action {
@@ -126,13 +181,37 @@ impl Action {
             }
             Self::VariableReveal => K::Variable,
             Self::DomainCreate => K::ServiceInstance,
-            Self::DomainDelete => K::Domain,
+            Self::DomainUpdate | Self::DomainDelete => K::Domain,
+            Self::VolumeCreate | Self::TcpProxyCreate => K::ServiceInstance,
+            Self::VolumeDelete => K::Volume,
+            Self::TcpProxyDelete => K::TcpProxy,
             Self::DeploymentRead | Self::DeploymentRemove | Self::DeploymentRollout => {
                 K::Deployment
             }
             Self::NodeRevoke | Self::NodeUpdate => K::Node,
             Self::GithubInstall | Self::GithubRepoList => K::Workspace,
             Self::NodeList | Self::NodeJoinTokenCreate | Self::GithubAppCreate => return None,
+            Self::BackupTargetList | Self::BackupTargetCreate => K::Workspace,
+            Self::BackupTargetDelete => K::BackupTarget,
+            Self::BackupRead | Self::BackupScheduleUpdate | Self::BackupCreate => {
+                K::ServiceInstance
+            }
+            Self::BackupRestore | Self::BackupDelete => K::Backup,
+            Self::SelfBackupRead | Self::SelfBackupUpdate => return None,
+            Self::TokenRevoke => K::ApiToken,
+            Self::TunnelOpen => K::ServiceInstance,
+            Self::CloudflareRead | Self::CloudflareConnect | Self::CloudflareDisconnect => {
+                K::Workspace
+            }
+            Self::DatabaseRead | Self::DatabaseWrite | Self::DatabasePassword => K::ServiceInstance,
+            Self::HetznerRead
+            | Self::HetznerConnect
+            | Self::HetznerDisconnect
+            | Self::HetznerCatalog
+            | Self::ServerList
+            | Self::ServerProvision
+            | Self::ServerSuggest => K::Workspace,
+            Self::ServerRead | Self::ServerDelete => K::ProvisionedServer,
         })
     }
 
@@ -164,12 +243,17 @@ impl Action {
             | Self::InstanceUpdate
             | Self::VariableReveal
             | Self::DomainCreate
+            | Self::DomainUpdate
             | Self::DomainDelete
+            | Self::VolumeCreate
+            | Self::TcpProxyCreate
+            | Self::TcpProxyDelete
             | Self::GithubRepoList => Role::Member,
             Self::WorkspaceUpdate
             | Self::WorkspaceDelete
             | Self::ProjectDelete
             | Self::EnvironmentDelete
+            | Self::VolumeDelete
             | Self::GithubInstall => Role::Admin,
             Self::SessionRevoke
             | Self::NodeList
@@ -177,6 +261,31 @@ impl Action {
             | Self::NodeRevoke
             | Self::NodeUpdate
             | Self::GithubAppCreate => Role::Admin,
+            Self::BackupRead => Role::Viewer,
+            Self::BackupCreate => Role::Deployer,
+            Self::BackupTargetList
+            | Self::BackupScheduleUpdate
+            | Self::BackupRestore
+            | Self::BackupDelete => Role::Member,
+            Self::BackupTargetCreate
+            | Self::BackupTargetDelete
+            | Self::SelfBackupRead
+            | Self::SelfBackupUpdate => Role::Admin,
+            // Account-owned: the role is not consulted.
+            Self::TokenRevoke => Role::Admin,
+            Self::TunnelOpen => Role::Member,
+            Self::CloudflareRead => Role::Member,
+            Self::CloudflareConnect | Self::CloudflareDisconnect => Role::Admin,
+            // Rows hold application data and credentials grant full access, so
+            // even reading is Member+ (Viewers and Deployers see neither).
+            Self::DatabaseRead | Self::DatabaseWrite | Self::DatabasePassword => Role::Member,
+            Self::HetznerRead | Self::ServerList | Self::ServerRead => Role::Viewer,
+            Self::ServerSuggest => Role::Member,
+            Self::HetznerConnect
+            | Self::HetznerDisconnect
+            | Self::HetznerCatalog
+            | Self::ServerProvision
+            | Self::ServerDelete => Role::Admin,
         }
     }
 
@@ -187,6 +296,7 @@ impl Action {
             | Self::ProjectDelete
             | Self::EnvironmentDelete
             | Self::ServiceDelete
+            | Self::VolumeDelete
             | Self::VariableReveal
             | Self::NodeJoinTokenCreate
             | Self::NodeRevoke
@@ -212,11 +322,39 @@ impl Action {
             | Self::DeploymentRemove
             | Self::DeploymentRollout
             | Self::DomainCreate
+            | Self::DomainUpdate
             | Self::DomainDelete
+            | Self::VolumeCreate
+            | Self::TcpProxyCreate
+            | Self::TcpProxyDelete
             | Self::NodeList
             | Self::NodeUpdate
             | Self::GithubInstall
             | Self::GithubRepoList => false,
+            Self::BackupTargetDelete
+            | Self::BackupRestore
+            | Self::BackupDelete
+            | Self::SelfBackupUpdate => true,
+            Self::BackupTargetList
+            | Self::BackupTargetCreate
+            | Self::BackupRead
+            | Self::BackupScheduleUpdate
+            | Self::BackupCreate
+            | Self::SelfBackupRead => false,
+            Self::TokenRevoke | Self::TunnelOpen => false,
+            Self::CloudflareRead => false,
+            Self::CloudflareConnect | Self::CloudflareDisconnect => true,
+            Self::DatabaseRead | Self::DatabaseWrite => false,
+            Self::DatabasePassword => true,
+            Self::HetznerRead
+            | Self::HetznerCatalog
+            | Self::ServerList
+            | Self::ServerRead
+            | Self::ServerSuggest => false,
+            Self::HetznerConnect
+            | Self::HetznerDisconnect
+            | Self::ServerProvision
+            | Self::ServerDelete => true,
         }
     }
 }
@@ -235,6 +373,12 @@ pub enum ResourceKind {
     Deployment,
     Domain,
     Node,
+    Volume,
+    TcpProxy,
+    BackupTarget,
+    Backup,
+    ApiToken,
+    ProvisionedServer,
 }
 
 impl ResourceKind {
@@ -249,6 +393,12 @@ impl ResourceKind {
         ResourceKind::Deployment,
         ResourceKind::Domain,
         ResourceKind::Node,
+        ResourceKind::Volume,
+        ResourceKind::TcpProxy,
+        ResourceKind::BackupTarget,
+        ResourceKind::Backup,
+        ResourceKind::ApiToken,
+        ResourceKind::ProvisionedServer,
     ];
 
     pub fn param(self) -> &'static str {
@@ -263,12 +413,18 @@ impl ResourceKind {
             Self::Deployment => "deployment_id",
             Self::Domain => "domain_id",
             Self::Node => "node_id",
+            Self::Volume => "volume_id",
+            Self::TcpProxy => "tcp_proxy_id",
+            Self::BackupTarget => "backup_target_id",
+            Self::Backup => "backup_id",
+            Self::ApiToken => "token_id",
+            Self::ProvisionedServer => "server_id",
         }
     }
 
     pub fn owner(self) -> OwnerKind {
         match self {
-            Self::Session => OwnerKind::Account,
+            Self::Session | Self::ApiToken => OwnerKind::Account,
             Self::Node => OwnerKind::Instance,
             Self::Workspace
             | Self::Project
@@ -277,7 +433,12 @@ impl ResourceKind {
             | Self::ServiceInstance
             | Self::Variable
             | Self::Deployment
-            | Self::Domain => OwnerKind::Workspace,
+            | Self::Domain
+            | Self::Volume
+            | Self::TcpProxy
+            | Self::BackupTarget
+            | Self::Backup
+            | Self::ProvisionedServer => OwnerKind::Workspace,
         }
     }
 
@@ -323,6 +484,28 @@ impl ResourceKind {
                  JOIN projects p ON p.id = s.project_id WHERE m.id = $1"
             }
             Self::Node => "SELECT '0000000000000000' FROM nodes WHERE id = $1",
+            Self::Volume => {
+                "SELECT p.workspace_id FROM volumes v
+                 JOIN service_instances i ON i.id = v.service_instance_id
+                 JOIN services s ON s.id = i.service_id
+                 JOIN projects p ON p.id = s.project_id WHERE v.id = $1"
+            }
+            Self::TcpProxy => {
+                "SELECT p.workspace_id FROM tcp_proxies t
+                 JOIN service_instances i ON i.id = t.service_instance_id
+                 JOIN services s ON s.id = i.service_id
+                 JOIN projects p ON p.id = s.project_id WHERE t.id = $1"
+            }
+            Self::BackupTarget => "SELECT workspace_id FROM backup_targets WHERE id = $1",
+            // Control plane backups have no service instance: never reachable here.
+            Self::Backup => {
+                "SELECT p.workspace_id FROM backups b
+                 JOIN service_instances i ON i.id = b.service_instance_id
+                 JOIN services s ON s.id = i.service_id
+                 JOIN projects p ON p.id = s.project_id WHERE b.id = $1"
+            }
+            Self::ApiToken => "SELECT user_id FROM api_tokens WHERE id = $1",
+            Self::ProvisionedServer => "SELECT workspace_id FROM provisioned_servers WHERE id = $1",
         };
         Ok(sqlx::query_scalar(sql).bind(id).fetch_optional(db).await?)
     }
@@ -385,7 +568,9 @@ pub async fn authorize(
         OwnerKind::Account if owner == actor.user_id => Scope::Account { user_id: owner },
         OwnerKind::Account => return Err(AppError::NotFound),
         // Instance-owned resources are invisible to everyone but instance admins.
-        OwnerKind::Instance if actor.is_instance_admin => Scope::Instance,
+        OwnerKind::Instance if actor.is_instance_admin && actor.workspace_scope().is_none() => {
+            Scope::Instance
+        }
         OwnerKind::Instance => return Err(AppError::NotFound),
         OwnerKind::Workspace => {
             let role: Option<String> = sqlx::query_scalar(
@@ -398,6 +583,10 @@ pub async fn authorize(
             let Some(role) = role.as_deref().and_then(Role::parse) else {
                 return Err(AppError::NotFound);
             };
+            // A workspace-restricted API token sees nothing outside its workspace.
+            if !actor.can_reach_workspace(owner) {
+                return Err(AppError::NotFound);
+            }
             if role < action.min_role() {
                 return Err(AppError::Forbidden);
             }

@@ -61,15 +61,36 @@ impl SessionKind {
 #[derive(Debug, Clone)]
 pub struct Actor {
     pub user_id: Id,
+    /// The cookie session, or the API token's id when `api_token` is set.
     pub session_id: Id,
     pub is_instance_admin: bool,
     pub sudo_until: Option<OffsetDateTime>,
+    /// Set when the caller authenticated with an API token (never sudo).
+    pub api_token: Option<TokenAuth>,
+}
+
+/// How an API-token caller is limited.
+#[derive(Debug, Clone, Copy)]
+pub struct TokenAuth {
+    pub id: Id,
+    /// The only workspace the token reaches; `None` = all of the user's.
+    pub workspace: Option<Id>,
 }
 
 impl Actor {
     pub fn sudo_active(&self) -> bool {
         self.sudo_until
             .is_some_and(|t| t > OffsetDateTime::now_utc())
+    }
+
+    /// The workspace an API token is restricted to, if any.
+    pub fn workspace_scope(&self) -> Option<Id> {
+        self.api_token.and_then(|t| t.workspace)
+    }
+
+    /// Whether workspace `id` is within reach of this caller's credential.
+    pub fn can_reach_workspace(&self, id: Id) -> bool {
+        self.workspace_scope().is_none_or(|w| w == id)
     }
 }
 
@@ -184,6 +205,7 @@ pub async fn resolve(db: &PgPool, presented: &str, kind: SessionKind) -> AppResu
         session_id: row.id,
         is_instance_admin: row.is_instance_admin,
         sudo_until: row.sudo_until,
+        api_token: None,
     }))
 }
 

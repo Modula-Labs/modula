@@ -49,6 +49,9 @@ pub async fn run(
     let (out_tx, mut out_rx) = mpsc::channel(1024);
     let has_edge = caps.edge.is_some();
     let build_logs = caps.build.as_ref().map(|b| b.logs.clone());
+    let db = caps.db.clone();
+    // Backup results also go through the outbox, to survive reconnects.
+    let results = out_tx.clone();
     let reconciler = Reconciler::new(runtime.clone(), caps, out_tx);
     let (desired_tx, desired_rx) = watch::channel(None);
     let reconcile_task = tokio::spawn(reconciler.clone().run(desired_rx, stop.clone()));
@@ -69,7 +72,9 @@ pub async fn run(
             stop: &stop,
             has_edge,
             build_logs: build_logs.as_ref(),
+            results: &results,
             location: &location,
+            db: db.as_ref(),
         };
         match ctx.session().await {
             Ok(()) => break,
@@ -100,8 +105,11 @@ struct Ctx<'a> {
     outbox: &'a mut mpsc::Receiver<pb::NodeMessage>,
     stop: &'a CancellationToken,
     has_edge: bool,
+    results: &'a mpsc::Sender<pb::NodeMessage>,
     build_logs: Option<&'a BuildLogs>,
     location: &'a crate::location::Hints,
+    /// Runs Database-tab operations; None = this node doesn't offer them.
+    db: Option<&'a Arc<dyn crate::db::Executor>>,
 }
 
 fn msg(m: Out) -> pb::NodeMessage {
@@ -139,13 +147,15 @@ impl Ctx<'_> {
         }
 
         let mut logs: HashMap<String, JoinHandle<()>> = HashMap::new();
+        // Closed (dropped) when this session ends.
+        let tunnels = crate::tunnel::Tunnels::new(self.runtime.clone(), tx.clone());
         let mut heartbeat = tokio::time::interval(HEARTBEAT_EVERY);
         let result = loop {
             tokio::select! {
                 _ = self.stop.cancelled() => break Ok(()),
                 incoming = inbound.message() => match incoming {
                     Ok(Some(pb::ServerMessage { msg: Some(m) })) => {
-                        if let Err(e) = self.handle(m, &tx, &mut logs, &mut pending_key).await {
+                        if let Err(e) = self.handle(m, &tx, &mut logs, &tunnels, &mut pending_key).await {
                             break Err(e);
                         }
                     }
@@ -178,6 +188,7 @@ impl Ctx<'_> {
         m: In,
         tx: &mpsc::Sender<pb::NodeMessage>,
         logs: &mut HashMap<String, JoinHandle<()>>,
+        tunnels: &crate::tunnel::Tunnels,
         pending_key: &mut Option<rcgen::KeyPair>,
     ) -> anyhow::Result<()> {
         match m {
@@ -209,6 +220,57 @@ impl Ctx<'_> {
                     old.abort();
                 }
             }
+            // Not tied to this session: a restore must not stop halfway because
+            // the control plane restarted.
+            In::Backup(req) => {
+                tokio::spawn(crate::backup::backup(
+                    self.runtime.clone(),
+                    req,
+                    self.results.clone(),
+                ));
+            }
+            In::Restore(req) => {
+                tokio::spawn(crate::backup::restore(
+                    self.runtime.clone(),
+                    req,
+                    self.results.clone(),
+                ));
+            }
+            // Answered on this session: the caller waits on this connection.
+            In::Db(req) => match self.db {
+                Some(executor) => {
+                    // Credentials as of the newest desired state.
+                    let env = self.desired.borrow().as_ref().and_then(|ds| {
+                        ds.workloads
+                            .iter()
+                            .find(|w| w.deployment_id == req.deployment_id)
+                            .map(|w| {
+                                w.env
+                                    .iter()
+                                    .map(|e| (e.name.clone(), e.value.clone()))
+                                    .collect()
+                            })
+                    });
+                    tokio::spawn(crate::db::handle(
+                        self.runtime.clone(),
+                        executor.clone(),
+                        env,
+                        req,
+                        tx.clone(),
+                    ));
+                }
+                None => {
+                    let r = pb::DbResponse {
+                        request_id: req.request_id,
+                        error: "this server does not run database operations".into(),
+                        ..Default::default()
+                    };
+                    tx.send(msg(Out::DbResult(r))).await?;
+                }
+            },
+            In::TunnelOpen(req) => tunnels.open(req),
+            In::TunnelData(d) => tunnels.data(d),
+            In::TunnelClose(c) => tunnels.close(c),
             In::LogCancel(c) => {
                 if let Some(h) = logs.remove(&c.request_id) {
                     h.abort();
@@ -250,10 +312,11 @@ impl Ctx<'_> {
         pb::Hello {
             protocol: pb::PROTOCOL,
             node_version: crate::VERSION.to_owned(),
-            capabilities: ["logs", "renew"]
+            capabilities: ["logs", "renew", "backup", "tunnel"]
                 .into_iter()
                 .chain(self.has_edge.then_some("edge"))
                 .chain(self.build_logs.is_some().then_some("build"))
+                .chain(self.db.is_some().then_some("db"))
                 .map(String::from)
                 .collect(),
             applied_generation: self.reconciler.applied_generation(),
@@ -261,6 +324,7 @@ impl Ctx<'_> {
                 cloud_provider: self.location.provider.clone(),
                 cloud_region: self.location.region.clone(),
                 edge_colo: self.location.colo.clone(),
+                public_ip: self.location.public_ip.clone(),
                 ..host_info(self.runtime.describe().await.unwrap_or_default())
             }),
         }

@@ -76,6 +76,12 @@ impl Keyring {
         Ok(self.data_key(db, aad.scope).await?.open(sealed, &aad)?)
     }
 
+    /// A secret derived from the master key itself, for data that must be
+    /// recoverable without the database (see `MasterKey::derive`).
+    pub fn derive_from_master(&self, purpose: &str) -> Zeroizing<[u8; 32]> {
+        self.kek.derive(purpose)
+    }
+
     /// Drop a scope's cached key (e.g. after its workspace is deleted).
     pub fn forget(&self, scope: Id) {
         self.cache.write().expect("keyring lock").remove(&scope);

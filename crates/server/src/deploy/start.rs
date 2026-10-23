@@ -69,7 +69,15 @@ pub async fn start(
 ) -> AppResult<Started> {
     d.config.validate()?;
     let id = Id::new();
-    let resolved = env::resolve(&state.keys, &state.db, env_id, d.instance).await?;
+    let resolved = env::resolve_for_deployment(
+        &state.keys,
+        &state.db,
+        state.cfg.tcp_proxy_host.as_deref(),
+        env_id,
+        d.instance,
+        Some(id),
+    )
+    .await?;
     let env_sealed = env::seal_snapshot(&state.keys, &state.db, env_id, id, &resolved.vars).await?;
     let service_id: Id =
         sqlx::query_scalar("SELECT service_id FROM service_instances WHERE id = $1 FOR UPDATE")
@@ -93,6 +101,14 @@ pub async fn start(
     .bind(d.instance)
     .fetch_all(&mut *tx)
     .await?;
+    // A service with a volume can't run twice on the same data: an image
+    // deployment retires the serving one now (a build does so once built,
+    // see state.rs), and the node stops it before starting the new one.
+    let retired = if status == "deploying" {
+        retire_for_volume(&mut *tx, d.instance, None).await?
+    } else {
+        Vec::new()
+    };
     let commit = d.commit.as_ref();
     sqlx::query(
         "INSERT INTO deployments (id, service_instance_id, node_id, status, image, image_digest, config,
@@ -140,7 +156,7 @@ pub async fn start(
         .execute(&mut *tx)
         .await?;
     }
-    let mut kick: Vec<Id> = superseded.into_iter().flatten().collect();
+    let mut kick: Vec<Id> = superseded.into_iter().flatten().chain(retired).collect();
     kick.push(node);
     kick.sort();
     kick.dedup();
@@ -148,4 +164,25 @@ pub async fn start(
         bump(&mut *tx, *n).await?;
     }
     Ok(Started { id, node, kick })
+}
+
+/// For a service with a volume, mark its serving deployment removed (other
+/// than `keep`). Returns the nodes to kick. No-op without a volume.
+pub async fn retire_for_volume(
+    tx: &mut sqlx::PgConnection,
+    instance: Id,
+    keep: Option<Id>,
+) -> AppResult<Vec<Id>> {
+    let nodes: Vec<Option<Id>> = sqlx::query_scalar(
+        "UPDATE deployments SET status = 'removed', finished_at = now(), updated_at = now()
+         WHERE service_instance_id = $1 AND status IN ('active', 'crashed')
+           AND id IS DISTINCT FROM $2
+           AND EXISTS (SELECT 1 FROM volumes WHERE service_instance_id = $1)
+         RETURNING node_id",
+    )
+    .bind(instance)
+    .bind(keep)
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(nodes.into_iter().flatten().collect())
 }

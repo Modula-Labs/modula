@@ -13,9 +13,13 @@ path = "src/main.rs"
 modula-crypto.workspace = true
 modula-id = { workspace = true, features = ["sqlx"] }
 modula-proto.workspace = true
+modula-backup.workspace = true
 
 anyhow.workspace = true
-axum.workspace = true
+bytes.workspace = true
+percent-encoding.workspace = true
+rusty-s3.workspace = true
+axum = { workspace = true, features = ["ws"] }
 axum-extra.workspace = true
 clap.workspace = true
 futures.workspace = true
@@ -26,6 +30,7 @@ base64.workspace = true
 rustls.workspace = true
 reqwest.workspace = true
 hmac.workspace = true
+hickory-resolver.workspace = true
 globset.workspace = true
 jsonwebtoken.workspace = true
 x509-parser.workspace = true
@@ -40,8 +45,8 @@ serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
-tokio.workspace = true
-tokio-util.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
+tokio-util = { workspace = true, features = ["io"] }
 tokio-rustls.workspace = true
 tower.workspace = true
 tower-http.workspace = true
@@ -51,7 +56,10 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+time = { workspace = true, features = ["macros"] }
 modula-node.workspace = true
+modula-cli.workspace = true
+tokio-tungstenite.workspace = true
 http-body-util = "0.1"
 data-encoding.workspace = true
 tower = { workspace = true }

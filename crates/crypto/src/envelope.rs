@@ -131,6 +131,17 @@ impl MasterKey {
         let arr: [u8; KEY_LEN] = plain.as_slice().try_into().map_err(|_| Error::Malformed)?;
         Ok(DataKey(arr))
     }
+
+    /// Derive a purpose-bound secret that must survive without the database
+    /// (e.g. the key the control plane's own backups are encrypted to).
+    pub fn derive(&self, purpose: &str) -> Zeroizing<[u8; KEY_LEN]> {
+        let mut h = Sha256::new();
+        h.update(b"modula/kek-derive/v1");
+        h.update((purpose.len() as u32).to_be_bytes());
+        h.update(purpose.as_bytes());
+        h.update(self.0);
+        Zeroizing::new(h.finalize().into())
+    }
 }
 
 fn dek_aad(scope: Id) -> Vec<u8> {

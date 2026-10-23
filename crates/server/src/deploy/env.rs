@@ -101,17 +101,54 @@ pub struct Resolved {
 /// environment's variables (references can reach any of them) and adds each
 /// service's platform variables (`PORT`, `MODULA_PRIVATE_DOMAIN`, …) so they
 /// can be referenced too; only the instance's own variables are returned.
-pub async fn resolve(keys: &Keyring, db: &PgPool, env: Id, instance: Id) -> AppResult<Resolved> {
+pub async fn resolve(
+    keys: &Keyring,
+    db: &PgPool,
+    tcp_proxy_host: Option<&str>,
+    env: Id,
+    instance: Id,
+) -> AppResult<Resolved> {
+    resolve_for_deployment(keys, db, tcp_proxy_host, env, instance, None).await
+}
+
+/// [`resolve`] for a new deployment `deployment` of `instance`: its own
+/// `MODULA_DEPLOYMENT_ID` is that id; other services' is the deployment
+/// serving them right now (empty when none is).
+pub async fn resolve_for_deployment(
+    keys: &Keyring,
+    db: &PgPool,
+    tcp_proxy_host: Option<&str>,
+    env: Id,
+    instance: Id,
+    deployment: Option<Id>,
+) -> AppResult<Resolved> {
     use super::refs::{Expander, VarKey};
 
-    // (instance, service, service name, environment name, project, config, public domain)
+    // (instance, service, service name, environment name, project, config,
+    // public domain, TCP proxy port, its node's public IP, serving deployment)
     #[allow(clippy::type_complexity)]
-    let services: Vec<(Id, Id, String, String, Id, serde_json::Value, Option<String>)> = sqlx::query_as(
+    let services: Vec<(
+        Id,
+        Id,
+        String,
+        String,
+        Id,
+        serde_json::Value,
+        Option<String>,
+        Option<i32>,
+        Option<String>,
+        Option<Id>,
+    )> = sqlx::query_as(
         "SELECT i.id, s.id, s.name, e.name, s.project_id, i.config,
-                (SELECT hostname FROM domains WHERE service_instance_id = i.id ORDER BY created_at LIMIT 1)
+                (SELECT hostname FROM domains WHERE service_instance_id = i.id AND status = 'verified' ORDER BY created_at LIMIT 1),
+                t.public_port, n.public_ip,
+                (SELECT d.id FROM deployments d WHERE d.service_instance_id = i.id
+                   AND d.status IN ('active', 'crashed') ORDER BY d.created_at DESC LIMIT 1)
          FROM service_instances i
          JOIN services s ON s.id = i.service_id
          JOIN environments e ON e.id = i.environment_id
+         LEFT JOIN tcp_proxies t ON t.service_instance_id = i.id
+         LEFT JOIN nodes n ON n.id = t.node_id
          WHERE i.environment_id = $1",
     )
     .bind(env)
@@ -135,7 +172,30 @@ pub async fn resolve(keys: &Keyring, db: &PgPool, env: Id, instance: Id) -> AppR
         raw.insert((owner, name), value.expose_secret().to_owned());
     }
     let mut own = None;
-    for (inst, service_id, service, env_name, project, config, domain) in services {
+    for (
+        inst,
+        service_id,
+        service,
+        env_name,
+        project,
+        config,
+        domain,
+        tcp_port,
+        node_ip,
+        serving,
+    ) in services
+    {
+        let deployment_id = match deployment {
+            Some(d) if inst == instance => Some(d),
+            _ => serving,
+        };
+        let tcp_host = match tcp_port {
+            Some(_) => tcp_proxy_host
+                .or(node_ip.as_deref())
+                .unwrap_or_default()
+                .to_owned(),
+            None => String::new(),
+        };
         let port = config.get("port").and_then(|p| p.as_u64()).unwrap_or(8080);
         let platform = [
             ("PORT", port.to_string()),
@@ -146,9 +206,18 @@ pub async fn resolve(keys: &Keyring, db: &PgPool, env: Id, instance: Id) -> AppR
             ("MODULA_PUBLIC_DOMAIN", domain.unwrap_or_default()),
             ("MODULA_SERVICE_NAME", service.clone()),
             ("MODULA_SERVICE_ID", service_id.to_string()),
+            (
+                "MODULA_DEPLOYMENT_ID",
+                deployment_id.map(|d| d.to_string()).unwrap_or_default(),
+            ),
             ("MODULA_ENVIRONMENT_NAME", env_name),
             ("MODULA_ENVIRONMENT_ID", env.to_string()),
             ("MODULA_PROJECT_ID", project.to_string()),
+            ("MODULA_TCP_PROXY_DOMAIN", tcp_host),
+            (
+                "MODULA_TCP_PROXY_PORT",
+                tcp_port.map(|p| p.to_string()).unwrap_or_default(),
+            ),
         ];
         for (k, v) in platform {
             // A user PORT overrides the platform one.

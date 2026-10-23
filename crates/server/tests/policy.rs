@@ -59,6 +59,38 @@ async fn fixture(
         ResourceKind::Deployment => chain.deployment,
         ResourceKind::Domain => chain.domain,
         ResourceKind::Node => chain.node,
+        ResourceKind::BackupTarget => chain.backup_target,
+        ResourceKind::Backup => chain.backup,
+        ResourceKind::Volume => chain.volume,
+        ResourceKind::TcpProxy => chain.tcp_proxy,
+        ResourceKind::ProvisionedServer => {
+            let id = Id::new();
+            sqlx::query(
+                "INSERT INTO provisioned_servers (id, workspace_id, provider, name, location, server_type, monthly_price_cents)
+                 VALUES ($1, $2, 'hetzner', 'worker', 'hetzner:fsn1', 'cx22', 452)",
+            )
+            .bind(id)
+            .bind(workspace)
+            .execute(app.db())
+            .await
+            .unwrap();
+            id
+        }
+        ResourceKind::ApiToken => {
+            let id = Id::new();
+            let t =
+                modula_crypto::token::generate(modula_crypto::token::prefix::API_TOKEN).unwrap();
+            sqlx::query(
+                "INSERT INTO api_tokens (id, user_id, name, token_hash) VALUES ($1, $2, 'cli', $3)",
+            )
+            .bind(id)
+            .bind(victim)
+            .bind(t.hash.as_bytes())
+            .execute(app.db())
+            .await
+            .unwrap();
+            id
+        }
     }
 }
 
@@ -104,6 +136,29 @@ async fn every_guarded_route_rejects_anonymous_and_bad_sessions(pool: PgPool) {
                 r.status,
                 StatusCode::UNAUTHORIZED,
                 "{} {} with {cookie:?}",
+                spec.method,
+                spec.path
+            );
+        }
+        // Bad API tokens: unknown, malformed, and a session token as a bearer.
+        let unknown = modula_crypto::token::generate(modula_crypto::token::prefix::API_TOKEN)
+            .unwrap()
+            .plaintext;
+        for auth in [
+            format!("Bearer {}", unknown.expose_secret()),
+            "Bearer garbage".to_owned(),
+            format!("Bearer {}", forged.plaintext.expose_secret()),
+            "Basic dXNlcjpwdw==".to_owned(),
+        ] {
+            let b = axum::http::Request::builder()
+                .method(spec.method.clone())
+                .uri(&path)
+                .header(axum::http::header::AUTHORIZATION, &auth);
+            let r = app.send(b, None, Some(serde_json::json!({}))).await;
+            assert_eq!(
+                r.status,
+                StatusCode::UNAUTHORIZED,
+                "{} {} with {auth}",
                 spec.method,
                 spec.path
             );

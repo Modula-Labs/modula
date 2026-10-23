@@ -1,17 +1,22 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { Rocket } from "@/components/ui/icons";
+import { Plug, Rocket } from "@/components/ui/icons";
 import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { Sheet } from "@/components/ui/Sheet";
 import { TabPanel, Tabs } from "@/components/ui/Tabs";
 import { Alert, Skeleton } from "@/components/ui/misc";
-import { api, type Role } from "@/lib/api";
+import { ApiError, api, type Role, type Template } from "@/lib/api";
+import { templateStack } from "@/lib/templates";
 import { atLeast } from "@/lib/roles";
+import { BackupsTab } from "./BackupsTab";
+import { ConnectDialog } from "./ConnectDialog";
+import { DatabaseTab } from "./database/DatabaseTab";
 import { DeploymentsTab } from "./DeploymentsTab";
 import { SettingsTab } from "./SettingsTab";
 import { VariablesTab } from "./VariablesTab";
 
-export type ServiceTab = "deployments" | "variables" | "settings";
+export type ServiceTab = "deployments" | "database" | "variables" | "backups" | "settings";
 
 export function ServiceSheet({
   instanceId,
@@ -45,6 +50,22 @@ export function ServiceSheet({
     },
   });
   const i = instance.data;
+  const [connecting, setConnecting] = useState(false);
+  const templates = useQuery({
+    queryKey: ["templates"],
+    queryFn: async (): Promise<Template[]> => {
+      try {
+        return await api.templates();
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return [];
+        throw e;
+      }
+    },
+    staleTime: 5 * 60_000,
+    retry: false,
+    enabled: !!i?.template,
+  });
+  const template = templates.data?.find((t) => t.id === i?.template);
   const canDeploy = atLeast(role, "deployer");
 
   return (
@@ -55,12 +76,17 @@ export function ServiceSheet({
         i ? (
           <div className="flex items-center gap-3">
             <ServiceIcon
-              stack={i.stack}
+              stack={templateStack(i.template) ?? i.stack}
               image={i.config.source.type === "image" ? i.config.source.image : null}
               repo={i.config.source.type === "repo" ? i.config.source.repo : null}
             />
             <h2 className="truncate text-xl font-semibold">{i.serviceName}</h2>
-            <div className="ml-auto pr-2">
+            <div className="ml-auto flex items-center gap-2 pr-2">
+              {i.template ? (
+                <Button size="sm" variant="secondary" icon={<Plug />} onClick={() => setConnecting(true)}>
+                  Connect
+                </Button>
+              ) : null}
               {canDeploy ? (
                 <Button size="sm" variant="secondary" icon={<Rocket />} loading={deploy.isPending} onClick={() => deploy.mutate()}>
                   Deploy
@@ -83,12 +109,17 @@ export function ServiceSheet({
         onChange={onTab}
         tabs={[
           { value: "deployments", label: "Deployments" },
+          ...(i?.template === "postgres" ? [{ value: "database" as const, label: "Database" }] : []),
           { value: "variables", label: "Variables" },
+          ...(i?.template ? [{ value: "backups" as const, label: "Backups" }] : []),
           { value: "settings", label: "Settings" },
         ]}
       >
         <TabPanel value="deployments">
           <DeploymentsTab instanceId={instanceId} selected={deploymentId} canDeploy={canDeploy} onOpen={onOpenDeployment} />
+        </TabPanel>
+        <TabPanel value="database">
+          {i ? <DatabaseTab instance={i} canEdit={atLeast(role, "member")} onConnect={() => setConnecting(true)} /> : <Skeleton className="h-32" />}
         </TabPanel>
         <TabPanel value="variables">
           {i ? (
@@ -96,6 +127,9 @@ export function ServiceSheet({
           ) : (
             <Skeleton className="h-32" />
           )}
+        </TabPanel>
+        <TabPanel value="backups">
+          {i ? <BackupsTab instance={i} canEdit={atLeast(role, "member")} /> : <Skeleton className="h-32" />}
         </TabPanel>
         <TabPanel value="settings">
           {i ? (
@@ -110,6 +144,9 @@ export function ServiceSheet({
           )}
         </TabPanel>
       </Tabs>
+      {i?.template ? (
+        <ConnectDialog open={connecting} onOpenChange={setConnecting} instance={i} template={template} canEdit={atLeast(role, "member")} />
+      ) : null}
     </Sheet>
   );
 }

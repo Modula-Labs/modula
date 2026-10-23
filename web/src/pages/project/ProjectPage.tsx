@@ -13,6 +13,7 @@ import { Alert, Skeleton } from "@/components/ui/misc";
 import { ApiError, api, type DeploymentStatus, type Environment } from "@/lib/api";
 import { atLeast } from "@/lib/roles";
 import { isLive } from "@/lib/status";
+import { templateStack } from "@/lib/templates";
 import { useMe } from "@/lib/workspace";
 import { ActivityPanel } from "./ActivityPanel";
 import { Canvas, type CanvasService } from "./Canvas";
@@ -70,7 +71,8 @@ export function ProjectPage({
         domain: i?.domain ?? undefined,
         repo: i?.sourceType === "repo" ? (i.repo ?? undefined) : undefined,
         status: (i?.latestDeploymentStatus ?? null) as DeploymentStatus | null,
-        stack: i?.stack,
+        stack: templateStack(s.template ?? i?.template) ?? i?.stack,
+        volume: i?.volume?.mountPath ?? null,
         image: i?.sourceType === "image" ? i.image : undefined,
         dependsOn: i?.dependsOn,
       };
@@ -228,7 +230,7 @@ export function ProjectPage({
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div className="pointer-events-auto flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-card px-10 py-8 text-center">
               <div className="text-base font-semibold">Add your first service</div>
-              <p className="max-w-xs text-sm text-muted-foreground">Deploy from a GitHub repository or a Docker image.</p>
+              <p className="max-w-xs text-sm text-muted-foreground">Deploy from a GitHub repository or a Docker image, or add a database.</p>
               {atLeast(role, "member") ? (
                 <Button variant="outline" icon={<Plus />} onClick={() => setAdding(true)}>
                   Add a service

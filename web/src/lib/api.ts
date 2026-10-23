@@ -81,6 +81,17 @@ export interface Security {
   backupCodesRemaining: number;
   sudoUntil: string | null;
 }
+/** A personal API token (`Authorization: Bearer mdt_…`), e.g. for the CLI. */
+export interface ApiToken {
+  id: string;
+  name: string;
+  /** null = every workspace the user belongs to. */
+  workspaceId: string | null;
+  workspaceName: string | null;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+}
 export interface SessionInfo {
   id: string;
   ip: string | null;
@@ -106,6 +117,8 @@ export interface ServiceSummary {
   id: string;
   name: string;
   icon: string | null;
+  /** Database template the service was created from, if any. */
+  template?: string | null;
 }
 export type DeploymentStatus = "queued" | "building" | "deploying" | "active" | "failed" | "crashed" | "removed" | "cancelled";
 export interface InstanceSummary {
@@ -123,6 +136,9 @@ export interface InstanceSummary {
   stack?: string | null;
   /** Ids of the services this instance references through `${{service.NAME}}`. */
   dependsOn?: string[];
+  template?: string | null;
+  /** Mount path of the attached volume, if any. */
+  volume?: { id: string; mountPath: string; createdAt: string } | null;
 }
 export interface ProjectDetail extends Project {
   environments: Environment[];
@@ -169,6 +185,12 @@ export interface ServiceConfig {
   healthcheckPath?: string;
   healthcheckTimeoutSecs: number;
   restartPolicy: RestartPolicy;
+  /** on_failure only: stop restarting after this many tries (unset = never give up). */
+  restartPolicyMaxRetries?: number;
+  /** argv run once from the new image before it starts (e.g. migrations). */
+  preDeployCommand?: string[];
+  /** SIGTERM → SIGKILL grace for a retired container, 0–300 (unset = 10s default). */
+  drainingSeconds?: number;
   memoryMb?: number;
   cpuMillis?: number;
   /** Each replica runs on a different server. */
@@ -197,7 +219,78 @@ export interface Instance {
   location?: Location | null;
   status?: InstanceState;
   stack?: string | null;
+  template?: string | null;
+  volume?: Volume | null;
+  tcpProxy?: TcpProxy | null;
   updatedAt: string;
+}
+export interface Volume {
+  id: string;
+  mountPath: string;
+  createdAt: string;
+}
+export interface TcpProxy {
+  id: string;
+  host: string;
+  publicPort: number;
+  targetPort: number;
+}
+export type TemplateId = "postgres" | "mysql" | "redis" | "mongo";
+export interface Template {
+  id: TemplateId;
+  name: string;
+  description: string;
+  image: string;
+  defaultName: string;
+  /** Variables a client connects with, e.g. DATABASE_URL. */
+  connect: { label: string; variable: string }[];
+}
+export type BackupProvider = "s3" | "r2" | "b2" | "minio";
+export interface BackupTarget {
+  id: string;
+  name: string;
+  provider: BackupProvider;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  createdAt: string;
+}
+export interface BackupTargetInput {
+  name: string;
+  provider: BackupProvider;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix?: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+}
+export interface BackupSchedule {
+  enabled: boolean;
+  targetId: string;
+  hourUtc: number;
+  retention: { dailyDays: number; weeklyDays: number; monthlyDays: number };
+}
+export type BackupStatus = "running" | "completed" | "failed" | "deleted";
+export interface Backup {
+  id: string;
+  status: BackupStatus;
+  kind: "scheduled" | "manual";
+  sizeBytes: number | null;
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+  targetName: string;
+}
+export interface BackupsInfo {
+  schedule: BackupSchedule | null;
+  backups: Backup[];
+}
+export interface SelfBackup {
+  enabled: boolean;
+  targetId: string | null;
+  hourUtc: number;
 }
 export interface VariableInfo {
   id: string;
@@ -253,10 +346,29 @@ export interface DeploymentEvent {
 export interface DeploymentDetail extends Deployment {
   events: DeploymentEvent[];
 }
+export interface DnsRecord {
+  type: "CNAME" | "A" | "TXT";
+  name: string;
+  value: string;
+}
 export interface Domain {
   id: string;
   hostname: string;
   kind: "generated" | "custom";
+  /** Generated domains are always verified; custom ones route only once verified. */
+  status: "pending" | "verified" | "failed";
+  /** null = the service's port. */
+  targetPort: number | null;
+  lastError: string | null;
+  /** Whether the CNAME/A record pointed at us on the last check (null = unknown). */
+  dnsTargetOk: boolean | null;
+  dnsRecords: DnsRecord[];
+  rateLimitPerMinute: number | null;
+  /** False until the edge's Caddy build has the rate-limit module. */
+  rateLimitEnforced: boolean;
+  providerNote?: string;
+  checkedAt: string | null;
+  verifiedAt: string | null;
   createdAt: string;
 }
 export interface NodeInfo {
@@ -285,6 +397,84 @@ export interface JoinToken {
   nodeCommand: string;
 }
 
+// ---- database browser (Postgres services) ----
+
+export interface DbTable {
+  schema: string;
+  name: string;
+  rowEstimate: number;
+}
+export interface DbColumn {
+  name: string;
+  type: string;
+  nullable: boolean;
+  primaryKey: boolean;
+}
+export interface DbRows {
+  columns: DbColumn[];
+  rows: (string | null)[][];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+export interface DbQueryResult {
+  columns: { name: string; type: string }[];
+  rows: (string | null)[][];
+  rowCount: number;
+  command: string;
+  durationMs: number;
+  truncated: boolean;
+}
+export interface DbRowsQuery {
+  table: string;
+  page: number;
+  pageSize: number;
+  orderBy?: string;
+  dir?: "asc" | "desc";
+}
+export interface DbTableStats {
+  name: string;
+  rows: number;
+  dataBytes: number;
+  indexBytes: number;
+  seqScans: number;
+  idxScans: number;
+  deadRows: number;
+  deadPct: number;
+  lastVacuum: string | null;
+  xidAge: number;
+}
+export interface DbStats {
+  connections: { used: number; max: number; active: number; idle: number; idleInTransaction: number };
+  cacheHitRatio: number;
+  sizes: { database: number; tables: number; indexes: number; system: number; other: number; wal: number };
+  tables: DbTableStats[];
+  unusedIndexes: { name: string; table: string; bytes: number; scans: number }[];
+  pgStatStatements: boolean;
+  topQueries: { query: string; calls: number; meanMs: number; totalMs: number }[];
+}
+export interface DbExtension {
+  name: string;
+  version: string;
+  comment: string;
+}
+export interface DbExtensions {
+  installed: DbExtension[];
+  available: DbExtension[];
+}
+export interface DbCredentials {
+  username: string;
+  password: string;
+  database: string;
+  host: string;
+  port: number;
+  privateUrl: string;
+  publicUrl: string | null;
+}
+
+/** True when the server doesn't have the database endpoints yet. */
+export const isNotAvailable = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 501);
+
 const enc = encodeURIComponent;
 
 export const api = {
@@ -306,6 +496,11 @@ export const api = {
     post<{ ok: true; sessionsRevoked: number }>("/api/account/password", { newPassword }),
   sessions: () => get<SessionInfo[]>("/api/account/sessions"),
   revokeSession: (id: string) => del<{ ok: true }>(`/api/account/sessions/${encodeURIComponent(id)}`),
+  apiTokens: () => get<ApiToken[]>("/api/account/tokens"),
+  /** Needs sudo (the request layer asks). The token is returned only here. */
+  createApiToken: (b: { name: string; workspaceId?: string; expiresInDays?: number }) =>
+    post<ApiToken & { token: string }>("/api/account/tokens", b),
+  revokeApiToken: (id: string) => del<{ ok: true }>(`/api/account/tokens/${encodeURIComponent(id)}`),
   createWorkspace: (name: string) => post<{ id: string; name: string }>("/api/workspaces", { name }),
   updateWorkspace: (id: string, name: string) => patch<{ id: string; name: string }>(`/api/workspaces/${enc(id)}`, { name }),
   deleteWorkspace: (id: string) => del<{ ok: true }>(`/api/workspaces/${enc(id)}`),
@@ -329,7 +524,10 @@ export const api = {
   },
   deleteEnvironment: (id: string) => del<{ ok: true }>(`/api/environments/${enc(id)}`),
 
-  createService: (project: string, b: { name: string; config: Partial<ServiceConfig> & { source: ServiceConfig["source"] } }) =>
+  createService: (
+    project: string,
+    b: { name: string; config: Partial<ServiceConfig> & { source: ServiceConfig["source"] } } | { name: string; template: TemplateId },
+  ) =>
     post<{ id: string; name: string; instances: Instance[] }>(`/api/projects/${enc(project)}/services`, b),
   deleteService: (id: string) => del<{ ok: true }>(`/api/services/${enc(id)}`),
   serviceInstance: (id: string) => get<Instance>(`/api/service-instances/${enc(id)}`),
@@ -361,7 +559,56 @@ export const api = {
 
   domains: (instance: string) => get<Domain[]>(`/api/service-instances/${enc(instance)}/domains`),
   generateDomain: (instance: string) => post<Domain>(`/api/service-instances/${enc(instance)}/domains`),
+  addCustomDomain: (instance: string, body: { hostname: string; targetPort: number | null }) =>
+    post<Domain>(`/api/service-instances/${enc(instance)}/custom-domains`, body),
+  checkDomain: (id: string) => post<Domain>(`/api/domains/${enc(id)}/check`),
+  updateDomain: (id: string, body: { targetPort: number | null; rateLimitPerMinute: number | null }) =>
+    patch<Domain>(`/api/domains/${enc(id)}`, body),
   deleteDomain: (id: string) => del<{ ok: true }>(`/api/domains/${enc(id)}`),
+
+  templates: () => get<Template[]>("/api/templates"),
+  createVolume: (instance: string, mountPath: string) => post<Instance>(`/api/service-instances/${enc(instance)}/volume`, { mountPath }),
+  deleteVolume: (id: string) => del<{ ok: true }>(`/api/volumes/${enc(id)}`),
+  createTcpProxy: (instance: string, targetPort: number) =>
+    post<Instance>(`/api/service-instances/${enc(instance)}/tcp-proxy`, { targetPort }),
+  deleteTcpProxy: (id: string) => del<{ ok: true }>(`/api/tcp-proxies/${enc(id)}`),
+
+  backupTargets: (workspace: string) => get<BackupTarget[]>(`/api/workspaces/${enc(workspace)}/backup-targets`),
+  createBackupTarget: (workspace: string, b: BackupTargetInput) =>
+    post<BackupTarget>(`/api/workspaces/${enc(workspace)}/backup-targets`, b),
+  deleteBackupTarget: (id: string) => del<{ ok: true }>(`/api/backup-targets/${enc(id)}`),
+  backups: (instance: string) => get<BackupsInfo>(`/api/service-instances/${enc(instance)}/backups`),
+  saveBackupSchedule: (instance: string, b: BackupSchedule) =>
+    request<BackupsInfo>("PUT", `/api/service-instances/${enc(instance)}/backup-schedule`, b),
+  backupNow: (instance: string) => post<Backup>(`/api/service-instances/${enc(instance)}/backups`),
+  restoreBackup: (id: string) => post<{ ok: true }>(`/api/backups/${enc(id)}/restore`),
+  deleteBackup: (id: string) => del<{ ok: true }>(`/api/backups/${enc(id)}`),
+  selfBackup: () => get<SelfBackup>("/api/instance/self-backup"),
+  saveSelfBackup: (b: SelfBackup) => request<SelfBackup>("PUT", "/api/instance/self-backup", b),
+
+  dbTables: (i: string) => get<{ tables: DbTable[] }>(`/api/service-instances/${enc(i)}/database/tables`),
+  dbRows: (i: string, q: DbRowsQuery) => {
+    const p = new URLSearchParams({ table: q.table, page: String(q.page), pageSize: String(q.pageSize) });
+    if (q.orderBy) {
+      p.set("orderBy", q.orderBy);
+      p.set("dir", q.dir ?? "asc");
+    }
+    return get<DbRows>(`/api/service-instances/${enc(i)}/database/rows?${p}`);
+  },
+  dbQuery: (i: string, sql: string) => post<DbQueryResult>(`/api/service-instances/${enc(i)}/database/query`, { sql }),
+  dbInsertRow: (i: string, table: string, values: Record<string, string | null>) =>
+    post<unknown>(`/api/service-instances/${enc(i)}/database/rows`, { table, values }),
+  dbUpdateRow: (i: string, table: string, key: Record<string, string | null>, values: Record<string, string | null>) =>
+    patch<unknown>(`/api/service-instances/${enc(i)}/database/rows`, { table, key, values }),
+  dbDeleteRow: (i: string, table: string, key: Record<string, string | null>) =>
+    request<unknown>("DELETE", `/api/service-instances/${enc(i)}/database/rows`, { table, key }),
+  dbStats: (i: string) => get<DbStats>(`/api/service-instances/${enc(i)}/database/stats`),
+  dbVacuum: (i: string, table: string) => post<unknown>(`/api/service-instances/${enc(i)}/database/vacuum`, { table }),
+  dbExtensions: (i: string) => get<DbExtensions>(`/api/service-instances/${enc(i)}/database/extensions`),
+  dbSetExtension: (i: string, name: string, action: "install" | "uninstall") =>
+    post<unknown>(`/api/service-instances/${enc(i)}/database/extensions`, { name, action }),
+  dbCredentials: (i: string) => get<DbCredentials>(`/api/service-instances/${enc(i)}/database/credentials`),
+  dbRegeneratePassword: (i: string) => post<DbCredentials>(`/api/service-instances/${enc(i)}/database/password`),
 
   nodes: () => get<NodeInfo[]>("/api/nodes"),
   createJoinToken: () => post<JoinToken>("/api/nodes/join-tokens"),

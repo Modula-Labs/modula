@@ -18,7 +18,7 @@ import {
 import "@xyflow/react/dist/base.css";
 import { clsx } from "clsx";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Maximize, Minus, Plus } from "@/components/ui/icons";
+import { Disk, Maximize, Minus, Plus } from "@/components/ui/icons";
 import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { StatusDot } from "@/components/ui/misc";
 import type { DeploymentStatus } from "@/lib/api";
@@ -39,6 +39,8 @@ export interface CanvasService {
   stack?: string | null;
   /** Ids of the services this one references; drawn as edges pointing at them. */
   dependsOn?: string[];
+  /** Mount path of the attached volume. */
+  volume?: string | null;
 }
 
 type ServiceNode = Node<{ service: CanvasService; selected: boolean }, "service">;
@@ -59,8 +61,17 @@ function ServiceCard({ data }: NodeProps<ServiceNode>) {
         <span className="truncate text-base font-semibold">{service.name}</span>
       </div>
       <div className="mt-1 truncate text-sm text-muted-foreground">{service.domain ?? service.repo ?? " "}</div>
-      <div className="mt-auto">
+      <div className="mt-auto flex items-center justify-between gap-2">
         <StatusDot tone={state.tone}>{state.label}</StatusDot>
+        {service.volume ? (
+          <span
+            title={`Volume mounted at ${service.volume}`}
+            className="inline-flex max-w-[55%] items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground [&_svg]:size-3.5"
+          >
+            <Disk aria-hidden />
+            <span className="truncate font-mono">{service.volume}</span>
+          </span>
+        ) : null}
       </div>
       <Handle type="source" position={Position.Right} className="!opacity-0" />
     </div>

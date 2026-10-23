@@ -60,18 +60,20 @@ pub fn parse(inner: &str) -> Option<Ref> {
             && !s.as_bytes()[0].is_ascii_digit()
             && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     };
-    let is_service = |s: &str| {
-        !s.is_empty()
-            && s.bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    };
+    // Service names are stored lowercase, but Railway configs write them as
+    // displayed (`${{Postgres.DATABASE_URL}}`), so the service segment matches
+    // case-insensitively. Variable names stay case-sensitive.
+    let is_service =
+        |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
     match inner.split_once('.') {
-        Some(("shared", name)) if is_var(name) => Some(Ref {
+        // Any case, like service names: `Shared.X` must not become a service
+        // named "shared" whose key (`shared.X`) then reads back as shared.
+        Some((svc, name)) if svc.eq_ignore_ascii_case("shared") && is_var(name) => Some(Ref {
             target: Target::Shared,
             name: name.to_owned(),
         }),
         Some((svc, name)) if is_service(svc) && is_var(name) => Some(Ref {
-            target: Target::Service(svc.to_owned()),
+            target: Target::Service(svc.to_ascii_lowercase()),
             name: name.to_owned(),
         }),
         None if is_var(inner) => Some(Ref {
@@ -245,6 +247,46 @@ mod tests {
         );
         let keys: Vec<String> = refs.iter().map(Ref::key).collect();
         assert_eq!(keys, ["db.USER", "shared.PASS", "HOST"]);
+    }
+
+    #[test]
+    fn service_names_match_case_insensitively() {
+        let keys: Vec<String> = references(
+            "${{Postgres.DATABASE_URL}}${{REDIS-cache.URL}}${{postgres.database_url}}${{Shared.X}}",
+        )
+        .iter()
+        .map(Ref::key)
+        .collect();
+        // The service is normalized to its stored (lowercase) form; variable
+        // names keep their case.
+        assert_eq!(
+            keys,
+            [
+                "postgres.DATABASE_URL",
+                "redis-cache.URL",
+                "postgres.database_url",
+                "shared.X"
+            ]
+        );
+        assert_eq!(parse("Shared.X").unwrap().target, Target::Shared);
+
+        let raw: BTreeMap<VarKey, String> = [
+            (
+                key(Some("api"), "DATABASE_URL"),
+                "${{Postgres.DATABASE_URL}}?schema=public".into(),
+            ),
+            (
+                key(Some("postgres"), "DATABASE_URL"),
+                "postgresql://db".into(),
+            ),
+        ]
+        .into();
+        let mut e = Expander::new(&raw);
+        assert_eq!(
+            e.value(&key(Some("api"), "DATABASE_URL")).unwrap().unwrap(),
+            "postgresql://db?schema=public"
+        );
+        assert!(e.missing.is_empty());
     }
 
     #[test]

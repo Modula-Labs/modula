@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, delete, get, patch, post, put};
 use modula_id::Id;
 
+use crate::api::tokens;
 use crate::auth::session::{self, SessionKind};
 use crate::authz::{self, Action, Resource, ResourceKind};
 use crate::error::AppError;
@@ -191,6 +192,22 @@ async fn authorize_request(
     access: Access,
     req: Request,
 ) -> Result<Request, AppError> {
+    // An `Authorization` header means API-token auth only: never fall back to
+    // cookies (the CSRF middleware let the request through on the token alone).
+    let bearer = match req.extensions().get::<tokens::BearerActor>() {
+        Some(b) => Some(b.0.clone()),
+        None => match tokens::bearer(req.headers()) {
+            Some(presented) => Some(
+                tokens::resolve(&state.db, presented?)
+                    .await?
+                    .ok_or(AppError::Unauthorized)?,
+            ),
+            None => None,
+        },
+    };
+    if access == Access::MfaPending && bearer.is_some() {
+        return Err(AppError::Unauthorized);
+    }
     if access == Access::MfaPending {
         let presented = session::read_cookie(
             req.headers(),
@@ -205,13 +222,22 @@ async fn authorize_request(
         return Ok(Request::from_parts(parts, body));
     }
 
-    let presented = session::read_cookie(req.headers(), SessionKind::Full.cookie_name(&state.cfg))
-        .ok_or(AppError::Unauthorized)?;
-    let actor = session::resolve(&state.db, &presented, SessionKind::Full)
-        .await?
-        .ok_or(AppError::Unauthorized)?;
+    let actor = match bearer {
+        Some(actor) => actor,
+        None => {
+            let presented =
+                session::read_cookie(req.headers(), SessionKind::Full.cookie_name(&state.cfg))
+                    .ok_or(AppError::Unauthorized)?;
+            session::resolve(&state.db, &presented, SessionKind::Full)
+                .await?
+                .ok_or(AppError::Unauthorized)?
+        }
+    };
 
-    if matches!(access, Access::Instance(_)) && !actor.is_instance_admin {
+    // Instance administration is out of reach of workspace-restricted tokens.
+    if matches!(access, Access::Instance(_))
+        && (!actor.is_instance_admin || actor.workspace_scope().is_some())
+    {
         return Err(AppError::Forbidden);
     }
     let (mut parts, body) = req.into_parts();

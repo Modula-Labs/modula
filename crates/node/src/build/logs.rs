@@ -52,6 +52,21 @@ impl BuildLogs {
         })
     }
 
+    /// The deployment's log for more output after its build (or a new one
+    /// for an image deployment), e.g. its pre-deploy command.
+    pub fn append(&self, deployment: &str) -> anyhow::Result<BuildLog> {
+        let path = self
+            .path(deployment)
+            .ok_or_else(|| anyhow::anyhow!("bad deployment id"))?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let written = file.metadata()?.len();
+        let _ = std::fs::remove_file(done_marker(&path));
+        Ok(BuildLog {
+            inner: Arc::new(Mutex::new(Inner { file, written })),
+            path,
+        })
+    }
+
     /// The last `tail` lines, then (with `follow`) new lines until the build ends.
     pub fn read(&self, deployment: &str, tail: u32, follow: bool) -> Option<Reader> {
         let path = self.path(deployment)?;

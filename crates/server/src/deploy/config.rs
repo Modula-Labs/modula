@@ -62,6 +62,17 @@ pub struct ServiceConfig {
     pub healthcheck_timeout_secs: u32,
     #[serde(default)]
     pub restart_policy: RestartPolicy,
+    /// `on_failure` only: stop restarting after this many tries (None = never give up).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_policy_max_retries: Option<u32>,
+    /// argv run once from the new image before it starts (migrations). Its
+    /// failure fails the deployment; the previous one keeps serving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_deploy_command: Option<Vec<String>>,
+    /// How long a retired container gets between SIGTERM and SIGKILL
+    /// (0 = the node's default). Railway's RAILWAY_DEPLOYMENT_DRAINING_SECONDS.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub draining_seconds: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mb: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,9 +103,16 @@ fn yes() -> bool {
     true
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 fn one() -> u32 {
     1
 }
+
+/// Upper bound for `draining_seconds` (and its variable override).
+pub const MAX_DRAINING_SECS: u32 = 300;
 
 fn default_port() -> u16 {
     8080
@@ -167,6 +185,26 @@ impl ServiceConfig {
             return Err(AppError::bad_request(
                 "start command is too long or contains NUL bytes",
             ));
+        }
+        if let Some(cmd) = &self.pre_deploy_command
+            && (cmd.len() > 64 || cmd.iter().any(|a| a.len() > 4096 || a.contains('\0')))
+        {
+            return Err(AppError::bad_request(
+                "pre-deploy command is too long or contains NUL bytes",
+            ));
+        }
+        if self.draining_seconds > MAX_DRAINING_SECS {
+            return Err(AppError::bad_request("draining time must be 0–300 seconds"));
+        }
+        if let Some(n) = self.restart_policy_max_retries {
+            if self.restart_policy != RestartPolicy::OnFailure {
+                return Err(AppError::bad_request(
+                    "max retries only applies to the on-failure restart policy",
+                ));
+            }
+            if !(1..=1000).contains(&n) {
+                return Err(AppError::bad_request("max retries must be 1–1000"));
+            }
         }
         if self.port == 0 {
             return Err(AppError::bad_request("port must be 1–65535"));
@@ -399,6 +437,36 @@ mod tests {
         let mut bad = c.clone();
         bad.start_command = Some(vec!["a\0b".into()]);
         assert!(bad.validate().is_err());
+
+        // Deploy settings: pre-deploy argv, draining and max retries.
+        let d: ServiceConfig = serde_json::from_value(serde_json::json!({
+            "source": { "type": "image", "image": "api:1" },
+            "preDeployCommand": ["bunx", "prisma", "migrate", "deploy"],
+            "drainingSeconds": 30,
+            "restartPolicyMaxRetries": 5,
+        }))
+        .unwrap();
+        d.validate().unwrap();
+        assert_eq!(d.pre_deploy_command.as_deref().unwrap()[0], "bunx");
+        assert_eq!(
+            (d.draining_seconds, d.restart_policy_max_retries),
+            (30, Some(5))
+        );
+        let mut bad = d.clone();
+        bad.draining_seconds = 301;
+        assert!(bad.validate().is_err());
+        let mut bad = d.clone();
+        bad.restart_policy_max_retries = Some(0);
+        assert!(bad.validate().is_err());
+        let mut bad = d.clone();
+        bad.restart_policy = RestartPolicy::Always;
+        assert!(bad.validate().is_err(), "max retries needs on_failure");
+        let mut bad = d.clone();
+        bad.pre_deploy_command = Some(vec!["x\0".into()]);
+        assert!(bad.validate().is_err());
+        // Defaults stay out of the stored JSON.
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("drainingSeconds").is_none() && v.get("preDeployCommand").is_none());
         assert!(
             serde_json::from_value::<ServiceConfig>(serde_json::json!({
                 "source": { "type": "image", "image": "nginx" },

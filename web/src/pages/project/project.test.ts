@@ -60,6 +60,21 @@ describe("service config payload", () => {
     expect(bare.watchPaths).toBeUndefined();
   });
 
+  it("round-trips deploy settings and drops retries without on_failure", () => {
+    const c: ServiceConfig = {
+      ...base,
+      source: { type: "image", image: "api:1" },
+      preDeployCommand: ["bunx", "prisma", "migrate", "deploy"],
+      restartPolicyMaxRetries: 5,
+      drainingSeconds: 30,
+    };
+    expect(JSON.parse(JSON.stringify(toConfig(toForm(c))))).toEqual(c);
+    const always = toConfig({ ...toForm(c), restartPolicy: "always", drainingSeconds: "0", preDeployCommand: " " });
+    expect(always.restartPolicyMaxRetries).toBeUndefined();
+    expect(always.drainingSeconds).toBeUndefined();
+    expect(always.preDeployCommand).toBeUndefined();
+  });
+
   it("omits dockerfilePath for the railpack builder", () => {
     const f = { ...toForm({ ...base, source: { type: "repo", repo: "a/b", branch: "main" } }), dockerfilePath: "X" };
     expect(toConfig(f).dockerfilePath).toBeUndefined();

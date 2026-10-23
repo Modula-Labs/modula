@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeAgent, relativeTime } from "./format";
+import { describeAgent, formatCount, formatMs, formatRatio, relativeTime } from "./format";
 
 describe("format", () => {
   it("describes user agents", () => {
@@ -12,5 +12,14 @@ describe("format", () => {
     expect(relativeTime("2026-10-22T11:59:50Z", now)).toBe("just now");
     expect(relativeTime("2026-10-22T11:00:00Z", now)).toBe("1h ago");
     expect(relativeTime("2026-10-20T12:00:00Z", now)).toBe("2d ago");
+  });
+  it("formats counts, ratios and durations", () => {
+    expect(formatCount(1234567)).toBe("1,234,567");
+    expect(formatCount(null)).toBe("—");
+    expect(formatRatio(0.5)).toBe("50%");
+    expect(formatRatio(0.9876)).toBe("98.8%");
+    expect(formatMs(0.5)).toBe("0.50 ms");
+    expect(formatMs(250)).toBe("250 ms");
+    expect(formatMs(1500)).toBe("1.5 s");
   });
 });

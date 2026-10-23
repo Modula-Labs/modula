@@ -13,6 +13,7 @@ pub struct Entry<'a> {
     pub workspace_id: Option<Id>,
     pub user_id: Option<Id>,
     pub session_id: Option<Id>,
+    pub token_id: Option<Id>,
     pub target: Option<(&'static str, String)>,
     pub meta: &'a RequestMeta,
     pub metadata: Value,
@@ -25,6 +26,7 @@ impl<'a> Entry<'a> {
             workspace_id: None,
             user_id: None,
             session_id: None,
+            token_id: None,
             target: None,
             meta,
             metadata: Value::Object(Default::default()),
@@ -33,7 +35,10 @@ impl<'a> Entry<'a> {
 
     pub fn actor(mut self, actor: &Actor) -> Self {
         self.user_id = Some(actor.user_id);
-        self.session_id = Some(actor.session_id);
+        match actor.api_token {
+            Some(t) => self.token_id = Some(t.id),
+            None => self.session_id = Some(actor.session_id),
+        }
         self
     }
 
@@ -64,13 +69,14 @@ impl<'a> Entry<'a> {
         };
         sqlx::query(
             "INSERT INTO audit_log
-               (workspace_id, actor_user_id, actor_session_id, action, target_type, target_id,
-                ip, user_agent, metadata)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+               (workspace_id, actor_user_id, actor_session_id, actor_token_id, action,
+                target_type, target_id, ip, user_agent, metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(self.workspace_id)
         .bind(self.user_id)
         .bind(self.session_id)
+        .bind(self.token_id)
         .bind(self.action)
         .bind(target_type)
         .bind(target_id)

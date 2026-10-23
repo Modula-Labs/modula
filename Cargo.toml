@@ -13,8 +13,16 @@ modula-crypto = { path = "crates/crypto" }
 modula-proto = { path = "crates/proto" }
 modula-id = { path = "crates/id" }
 modula-node = { path = "crates/node" }
+modula-backup = { path = "crates/backup" }
+modula-cli = { path = "crates/cli" }
 
 anyhow = "1"
+# Backups: age encryption (x25519 recipients, streaming) and S3 request signing.
+age = { version = "0.12", features = ["async"] }
+bech32 = "0.11"
+bytes = "1"
+percent-encoding = "2"
+rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto", "xml"] }
 async-trait = "0.1"
 argon2 = { version = "0.6", features = ["zeroize"] }
 axum = { version = "0.8", features = ["macros"] }
@@ -22,6 +30,7 @@ axum-extra = { version = "0.12", features = ["cookie"] }
 base64 = "0.23"
 chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 futures = "0.3"
 hex = "0.4"
 http = "1"
@@ -36,6 +45,10 @@ tonic-prost-build = "0.14"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser", "crypto"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# The CLI verifies TLS with the OS trust store (as reqwest already does).
+rustls-platform-verifier = "0.7"
+# WebSocket client for `modula-deploy connect`; TLS is ours (tokio-rustls, ring).
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 x509-parser = "0.18"
 bollard = "0.21"
 tokio-stream = "0.1"
@@ -52,12 +65,18 @@ subtle = "2"
 thiserror = "2"
 totp-rs = { version = "6", default-features = false, features = ["alloc"] }
 hmac = "0.13"
+# Custom domain verification: TXT/CNAME/A lookups against public resolvers.
+hickory-resolver = { version = "0.26", default-features = false, features = ["tokio"] }
 # 9.x signs with ring (already in the tree); 10+ needs aws-lc or RustCrypto RSA.
 jsonwebtoken = "9"
 data-encoding = "2"
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "time", "sync", "fs"] }
 tokio-util = "0.7"
+# The Database tab: the node talks to Postgres containers on their private network.
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+# SCRAM verifiers, so a new database password never travels in clear.
+postgres-protocol = "0.6"
 toml = "1"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace", "request-id", "limit", "set-header", "timeout"] }

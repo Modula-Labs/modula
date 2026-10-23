@@ -25,10 +25,14 @@ pub struct Inner {
     pub jobs_notify: Notify,
     /// Attached nodes.
     pub hub: Hub,
+    /// Open database tunnels (relayed over the node streams).
+    pub tunnels: crate::tunnel::Tunnels,
     /// Cancelled when the server starts shutting down; long-lived streams
     /// (node sessions, log follows) end on it so shutdown stays fast.
     pub shutdown: CancellationToken,
     pub github: github::Client,
+    /// DNS lookups for custom domain verification (swapped out in tests).
+    pub dns: std::sync::RwLock<Arc<dyn crate::domains::dns::Resolver>>,
     pki: tokio::sync::OnceCell<Pki>,
 }
 
@@ -42,10 +46,17 @@ impl AppState {
             limiter,
             jobs_notify: Notify::new(),
             hub: Hub::default(),
+            tunnels: crate::tunnel::Tunnels::default(),
             shutdown: CancellationToken::new(),
             github,
+            dns: std::sync::RwLock::new(Arc::new(crate::domains::dns::PublicDns)),
             pki: tokio::sync::OnceCell::new(),
         }))
+    }
+
+    /// Replaces the DNS resolver used to verify custom domains (tests).
+    pub fn set_dns_resolver(&self, r: Arc<dyn crate::domains::dns::Resolver>) {
+        *self.0.dns.write().expect("dns lock") = r;
     }
 
     /// The internal CA, created on first use.

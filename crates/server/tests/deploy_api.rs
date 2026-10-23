@@ -645,3 +645,216 @@ async fn environments_clone_config_and_optionally_variables(pool: PgPool) {
         "sealed variables are never copied"
     );
 }
+
+impl Fixture {
+    /// A one-click database service; returns its instance in production.
+    async fn template_service(&self, template: &str) -> Value {
+        let r = self
+            .app
+            .call(
+                Method::POST,
+                &format!("/api/projects/{}/services", self.project),
+                Some(&self.admin),
+                Some(json!({ "name": template, "template": template })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+        r.json["instances"][0].clone()
+    }
+
+    async fn production(&self) -> Id {
+        sqlx::query_scalar("SELECT environment_id FROM service_instances WHERE id = $1")
+            .bind(&self.instance)
+            .fetch_one(&self.app.state.db)
+            .await
+            .unwrap()
+    }
+
+    async fn resolve(&self, env: Id, instance: &str) -> modula_server::deploy::env::Resolved {
+        modula_server::deploy::env::resolve(
+            &self.app.state.keys,
+            &self.app.state.db,
+            None,
+            env,
+            instance.parse().unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn railway_style_capitalised_references_resolve(pool: PgPool) {
+    use secrecy::ExposeSecret;
+    let f = fixture(pool).await;
+    let pg = f.template_service("postgres").await;
+    let r = f
+        .set_vars(
+            &f.admin,
+            json!({ "set": { "DATABASE_URL": "${{Postgres.DATABASE_URL}}?schema=public" } }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+
+    let resolved = f.resolve(f.production().await, &f.instance).await;
+    assert!(resolved.missing.is_empty(), "{:?}", resolved.missing);
+    let url = resolved.vars["DATABASE_URL"].expose_secret().to_owned();
+    assert!(
+        url.starts_with("postgresql://postgres:")
+            && url.ends_with("@postgres.modula.internal:5432/app?schema=public"),
+        "{url}"
+    );
+
+    // The canvas edge comes from the stored (normalized) reference.
+    let p = f
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/projects/{}", f.project),
+            Some(&f.admin),
+            None,
+        )
+        .await;
+    let api = p.json["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == f.instance.as_str())
+        .unwrap();
+    assert_eq!(api["dependsOn"], json!([pg["serviceId"]]));
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn cloned_environments_get_volumes_and_fresh_database_passwords(pool: PgPool) {
+    use secrecy::ExposeSecret;
+    let f = fixture(pool).await;
+    let pg = f.template_service("postgres").await;
+    let prod = f.production().await;
+    f.set_vars(&f.admin, json!({ "set": { "PLAIN": "1" } }))
+        .await;
+    let db = f.app.state.db.clone();
+    let keys = &f.app.state.keys;
+    let password = |env: Id| {
+        let db = db.clone();
+        async move {
+            let (id, sealed): (Id, Vec<u8>) = sqlx::query_as(
+                "SELECT v.id, v.value_sealed FROM variables v
+                 JOIN service_instances i ON i.id = v.service_instance_id
+                 JOIN services s ON s.id = i.service_id
+                 WHERE v.environment_id = $1 AND s.name = 'postgres' AND v.name = 'POSTGRES_PASSWORD'",
+            )
+            .bind(env)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            modula_server::deploy::env::open_variable(keys, &db, env, id, &sealed)
+                .await
+                .unwrap()
+                .expose_secret()
+                .to_owned()
+        }
+    };
+    let prod_password = password(prod).await;
+
+    for copy_variables in [false, true] {
+        let name = format!("clone-{copy_variables}");
+        let r = f
+            .app
+            .call(
+                Method::POST,
+                &format!("/api/projects/{}/environments", f.project),
+                Some(&f.admin),
+                Some(json!({ "name": name, "cloneFrom": prod, "copyVariables": copy_variables })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+        let env: Id = r.json["id"].as_str().unwrap().parse().unwrap();
+        let instance: String = sqlx::query_scalar(
+            "SELECT i.id FROM service_instances i JOIN services s ON s.id = i.service_id
+             WHERE i.environment_id = $1 AND s.name = 'postgres'",
+        )
+        .bind(env)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+
+        // A volume of its own at the same path; no public exposure.
+        let (volume, mount): (String, String) =
+            sqlx::query_as("SELECT id, mount_path FROM volumes WHERE service_instance_id = $1")
+                .bind(&instance)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_ne!(volume, pg["volume"]["id"].as_str().unwrap());
+        assert_eq!(mount, pg["volume"]["mountPath"].as_str().unwrap());
+        let exposed: i64 = sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM domains WHERE service_instance_id = $1)
+                  + (SELECT count(*) FROM tcp_proxies WHERE service_instance_id = $1)",
+        )
+        .bind(&instance)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(exposed, 0);
+
+        // The database works: every template variable, a new password.
+        let fresh = password(env).await;
+        assert_eq!(fresh.len(), 32);
+        assert_ne!(fresh, prod_password, "copyVariables={copy_variables}");
+        let resolved = f.resolve(env, &instance).await;
+        assert!(resolved.missing.is_empty(), "{:?}", resolved.missing);
+        assert!(
+            resolved.vars["DATABASE_URL"]
+                .expose_secret()
+                .contains(&format!(":{fresh}@postgres.modula.internal:5432/app"))
+        );
+        let plain: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM variables WHERE environment_id = $1 AND name = 'PLAIN'",
+        )
+        .bind(env)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(plain, i64::from(copy_variables));
+    }
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn public_domain_variable_skips_unverified_custom_domains(pool: PgPool) {
+    use secrecy::ExposeSecret;
+    let f = fixture(pool).await;
+    let prod = f.production().await;
+    f.set_vars(
+        &f.admin,
+        json!({ "set": { "PUB": "${{MODULA_PUBLIC_DOMAIN}}" } }),
+    )
+    .await;
+    let public = || async {
+        f.resolve(prod, &f.instance).await.vars["PUB"]
+            .expose_secret()
+            .to_owned()
+    };
+
+    // An older custom domain that hasn't been verified yet is not served.
+    sqlx::query(
+        "INSERT INTO domains (id, service_instance_id, hostname, kind, status, verification_token, created_at)
+         VALUES ($1, $2, 'shop.example.com', 'custom', 'pending', 'token', now() - interval '1 hour')",
+    )
+    .bind(Id::new())
+    .bind(&f.instance)
+    .execute(&f.app.state.db)
+    .await
+    .unwrap();
+    assert_eq!(public().await, "");
+
+    sqlx::query(
+        "INSERT INTO domains (id, service_instance_id, hostname, kind)
+         VALUES ($1, $2, 'api-shop.modula.app', 'generated')",
+    )
+    .bind(Id::new())
+    .bind(&f.instance)
+    .execute(&f.app.state.db)
+    .await
+    .unwrap();
+    assert_eq!(public().await, "api-shop.modula.app");
+}

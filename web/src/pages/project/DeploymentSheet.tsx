@@ -34,6 +34,8 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
   });
   const d = dep.data;
   const isRepo = !!d?.commitSha;
+  // The node writes a pre-deploy command's output to the build log too.
+  const hasBuildLog = isRepo || !!d?.events.some((e) => e.message.startsWith("Running pre-deploy command"));
   // Settle the default once, so the tab doesn't jump when a build finishes.
   if (d && !initial) setInitial(d.status === "building" && d.commitSha ? "build" : "logs");
   const tab = picked ?? initial ?? "logs";
@@ -64,7 +66,7 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
         onChange={setPicked}
         tabs={[
           { value: "details", label: "Details" },
-          ...(isRepo ? [{ value: "build" as const, label: "Build logs" }] : []),
+          ...(hasBuildLog ? [{ value: "build" as const, label: isRepo ? "Build logs" : "Pre-deploy logs" }] : []),
           { value: "logs", label: "Deploy logs" },
         ]}
       >
@@ -155,7 +157,7 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
             </div>
           ) : null}
         </TabPanel>
-        {isRepo ? (
+        {hasBuildLog ? (
           <TabPanel value="build">
             <div className="flex h-full flex-col">
               <LogViewer url={api.deploymentLogsUrl(deploymentId, 500, "build")} downloadName={`deployment-${deploymentId}-build.log`} />

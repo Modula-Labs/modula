@@ -14,10 +14,12 @@ use crate::activity::{self, Change};
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
+use crate::deploy::refs::{self, Ref};
 use crate::deploy::{self, LiveFilter, env};
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
 use crate::state::AppState;
+use crate::templates;
 use crate::validate;
 use secrecy::ExposeSecret;
 
@@ -61,6 +63,9 @@ pub struct InstanceSummary {
     /// Services this one references (`${{service.NAME}}`, directly or through
     /// a shared variable): the canvas draws an edge to each.
     pub depends_on: Vec<Id>,
+    pub template: Option<String>,
+    #[sqlx(json(nullable))]
+    pub volume: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -69,6 +74,7 @@ pub struct Service {
     pub id: Id,
     pub name: String,
     pub icon: Option<String>,
+    pub template: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -167,7 +173,7 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
     .fetch_all(&state.db)
     .await?;
     let services = sqlx::query_as(
-        "SELECT id, name, icon FROM services WHERE project_id = $1 ORDER BY created_at",
+        "SELECT id, name, icon, template FROM services WHERE project_id = $1 ORDER BY created_at",
     )
     .bind(id)
     .fetch_all(&state.db)
@@ -175,7 +181,7 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
     let instances = sqlx::query_as(
         "SELECT i.id, i.service_id, i.environment_id, i.node_id,
                 d.id AS latest_deployment_id, d.status AS latest_deployment_status,
-                (SELECT hostname FROM domains WHERE service_instance_id = i.id
+                (SELECT hostname FROM domains WHERE service_instance_id = i.id AND status = 'verified'
                  ORDER BY created_at LIMIT 1) AS domain,
                 i.config->'source'->>'type' AS source_type,
                 i.config->'source'->>'repo' AS repo,
@@ -193,7 +199,10 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
                     JOIN services d ON d.project_id = s.project_id AND d.id <> s.id
                                    AND d.name = split_part(x.r, '.', 1)
                     WHERE position('.' in x.r) > 0 AND x.r NOT LIKE 'shared.%'
-                ) AS depends_on
+                ) AS depends_on,
+                s.template,
+                (SELECT json_build_object('id', v.id, 'mountPath', v.mount_path)
+                 FROM volumes v WHERE v.service_instance_id = i.id) AS volume
          FROM service_instances i
          JOIN services s ON s.id = i.service_id
          LEFT JOIN LATERAL (
@@ -274,7 +283,8 @@ pub async fn delete(
 ) -> AppResult<Json<serde_json::Value>> {
     let id = grant.id();
     let mut tx = state.db.begin().await?;
-    let nodes = deploy::remove_live(&mut tx, LiveFilter::Project, id).await?;
+    let mut nodes = deploy::remove_live(&mut tx, LiveFilter::Project, id).await?;
+    nodes.extend(deploy::queue_volume_removals(&mut tx, LiveFilter::Project, id).await?);
     let envs: Vec<Id> = sqlx::query_scalar("SELECT id FROM environments WHERE project_id = $1")
         .bind(id)
         .fetch_all(&mut *tx)
@@ -360,6 +370,20 @@ pub async fn create_environment(
     .bind(id)
     .execute(&mut *tx)
     .await?;
+    // Volume definitions too (a fresh, empty volume each, never the data), so
+    // databases keep their persistence. Domains and TCP proxies are not
+    // copied: public exposure is always explicit.
+    sqlx::query(
+        "INSERT INTO volumes (id, service_instance_id, mount_path)
+         SELECT new_id(), ti.id, v.mount_path FROM volumes v
+         JOIN service_instances si ON si.id = v.service_instance_id
+         JOIN service_instances ti ON ti.service_id = si.service_id AND ti.environment_id = $2
+         WHERE si.environment_id = $1",
+    )
+    .bind(source)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
     Entry::new("environment.create", &meta)
         .actor(&actor)
         .workspace(grant.workspace_id()?)
@@ -368,15 +392,75 @@ pub async fn create_environment(
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
+    // Fresh template passwords go in first so a variable copy can't bring
+    // the source's; the template's other variables fill whatever is still
+    // missing afterwards.
+    seed_template_variables(&state, id, true).await?;
     if let (true, Some(from)) = (req.copy_variables, source) {
         copy_environment(&state, actor.user_id, id, from).await?;
     }
+    seed_template_variables(&state, id, false).await?;
     Ok(Json(
         sqlx::query_as("SELECT id, name, created_at FROM environments WHERE id = $1")
             .bind(id)
             .fetch_one(&state.db)
             .await?,
     ))
+}
+
+/// Give the template (database) services of a new environment the
+/// variables their template creates, with freshly generated passwords: sealed
+/// values are never copied, and a clone shouldn't share credentials with its
+/// source anyway. `secrets_only` adds just the passwords. Existing variables
+/// are kept.
+async fn seed_template_variables(
+    state: &AppState,
+    environment: Id,
+    secrets_only: bool,
+) -> AppResult<()> {
+    let instances: Vec<(Id, String)> = sqlx::query_as(
+        "SELECT i.id, s.template FROM service_instances i
+         JOIN services s ON s.id = i.service_id
+         WHERE i.environment_id = $1 AND s.template IS NOT NULL",
+    )
+    .bind(environment)
+    .fetch_all(&state.db)
+    .await?;
+    // Seal before the transaction (the keyring may create the data key).
+    let mut rows = Vec::new();
+    for (instance, template) in instances {
+        let Some(t) = templates::get(&template) else {
+            continue;
+        };
+        for ((name, default), (_, value)) in t.variables.iter().zip(t.variables()) {
+            if secrets_only && *default != templates::SECRET {
+                continue;
+            }
+            let id = Id::new();
+            let sealed =
+                env::seal_variable(&state.keys, &state.db, environment, id, &value).await?;
+            let refs: Vec<String> = refs::references(&value).iter().map(Ref::key).collect();
+            rows.push((id, instance, *name, sealed, refs));
+        }
+    }
+    let mut tx = state.db.begin().await?;
+    for (id, instance, name, sealed, refs) in &rows {
+        sqlx::query(
+            "INSERT INTO variables (id, environment_id, service_instance_id, name, value_sealed, refs)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (environment_id, service_instance_id, name) DO NOTHING",
+        )
+        .bind(id)
+        .bind(environment)
+        .bind(instance)
+        .bind(name)
+        .bind(sealed)
+        .bind(refs)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 pub async fn delete_environment(
@@ -399,7 +483,8 @@ pub async fn delete_environment(
             "a project needs at least one environment".into(),
         ));
     }
-    let nodes = deploy::remove_live(&mut tx, LiveFilter::Environment, id).await?;
+    let mut nodes = deploy::remove_live(&mut tx, LiveFilter::Environment, id).await?;
+    nodes.extend(deploy::queue_volume_removals(&mut tx, LiveFilter::Environment, id).await?);
     sqlx::query("DELETE FROM environments WHERE id = $1")
         .bind(id)
         .execute(&mut *tx)

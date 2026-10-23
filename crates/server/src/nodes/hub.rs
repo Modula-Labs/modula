@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use modula_id::Id;
 use modula_proto::node::v1 as pb;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
@@ -33,6 +33,8 @@ pub struct Hub {
     conns: Mutex<HashMap<Id, Conn>>,
     /// request id → (node that must answer, where chunks go).
     logs: Mutex<HashMap<String, (Id, mpsc::Sender<pb::LogChunk>)>>,
+    /// Database tab: request id → (node that must answer, the waiting caller).
+    db: Mutex<HashMap<String, (Id, oneshot::Sender<pb::DbResponse>)>>,
     next: AtomicU64,
 }
 
@@ -67,6 +69,7 @@ impl Hub {
                 .lock()
                 .expect("hub lock")
                 .retain(|_, (n, _)| *n != node);
+            self.forget_db(node);
             return true;
         }
         false
@@ -80,6 +83,7 @@ impl Hub {
             .lock()
             .expect("hub lock")
             .retain(|_, (n, _)| *n != node);
+        self.forget_db(node);
     }
 
     pub fn is_connected(&self, node: Id) -> bool {
@@ -104,6 +108,16 @@ impl Hub {
             .expect("hub lock")
             .get(&node)
             .map(|c| c.tx.clone())
+    }
+
+    /// Send one message to `node`; false when it is not connected.
+    pub async fn send(&self, node: Id, msg: pb::server_message::Msg) -> bool {
+        let Some(tx) = self.sender(node) else {
+            return false;
+        };
+        tx.send(Ok(pb::ServerMessage { msg: Some(msg) }))
+            .await
+            .is_ok()
     }
 
     /// Ask `node` for a deployment's logs. Chunks arrive on the returned receiver
@@ -177,5 +191,68 @@ impl Hub {
                 Some(id)
             }
         }
+    }
+}
+
+/// Why a database request got no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbCallError {
+    /// The node is not connected, or disconnected before answering.
+    Offline,
+    TimedOut,
+}
+
+impl Hub {
+    /// Run one Database-tab operation on the node that runs `deployment` and
+    /// wait (at most `timeout`) for its answer.
+    pub async fn db_call(
+        &self,
+        node: Id,
+        mut req: pb::DbRequest,
+        timeout: std::time::Duration,
+    ) -> Result<pb::DbResponse, DbCallError> {
+        let tx = self.sender(node).ok_or(DbCallError::Offline)?;
+        let request_id = Id::new().to_string();
+        req.request_id = request_id.clone();
+        let (rtx, rrx) = oneshot::channel();
+        self.db
+            .lock()
+            .expect("hub lock")
+            .insert(request_id.clone(), (node, rtx));
+        let msg = pb::ServerMessage {
+            msg: Some(pb::server_message::Msg::Db(req)),
+        };
+        let outcome = if tx.send(Ok(msg)).await.is_err() {
+            Err(DbCallError::Offline)
+        } else {
+            match tokio::time::timeout(timeout, rrx).await {
+                Ok(Ok(r)) => Ok(r),
+                Ok(Err(_)) => Err(DbCallError::Offline),
+                Err(_) => Err(DbCallError::TimedOut),
+            }
+        };
+        self.db.lock().expect("hub lock").remove(&request_id);
+        outcome
+    }
+
+    /// Hand a node's answer to the waiting caller. Answers for requests another
+    /// node owns (or that already gave up) are dropped.
+    pub fn deliver_db(&self, node: Id, r: pb::DbResponse) {
+        let mut db = self.db.lock().expect("hub lock");
+        if db
+            .get(&r.request_id)
+            .is_some_and(|(owner, _)| *owner == node)
+            && let Some((_, tx)) = db.remove(&r.request_id)
+        {
+            let _ = tx.send(r);
+        }
+    }
+
+    /// Fail every request waiting on `node` (dropping the senders wakes them).
+    fn forget_db(&self, node: Id) {
+        self.db
+            .lock()
+            .expect("hub lock")
+            .retain(|_, (n, _)| *n != node);
     }
 }
