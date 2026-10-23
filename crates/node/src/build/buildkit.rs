@@ -21,6 +21,7 @@ use bollard::Docker;
 use bollard::models::{ContainerCreateBody, HostConfig, RestartPolicy, RestartPolicyNameEnum};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ImportImageOptionsBuilder,
+    RemoveContainerOptionsBuilder,
 };
 use futures::TryStreamExt;
 use modula_proto::node::v1 as pb;
@@ -33,6 +34,30 @@ use super::{BuildLog, Builder, Built};
 
 /// Pinned by digest; bump together with the buildctl in the release.
 pub const BUILDKIT_IMAGE: &str = "moby/buildkit:v0.34.1-rootless@sha256:f68752a5a94acfcdad2d07867b7075601a421638e17fc5f28efc1c814d0c4f89";
+/// The AppArmor profile install.sh loads where unprivileged user namespaces
+/// are restricted (Ubuntu 23.10+): unconfined, plus `userns`.
+const APPARMOR_PROFILE: &str = "modula-buildkit";
+
+/// Whether the kernel has `name` loaded (no AppArmor: false).
+fn apparmor_profile_loaded(name: &str) -> bool {
+    std::fs::read_to_string("/sys/kernel/security/apparmor/profiles").is_ok_and(|all| {
+        all.lines()
+            .any(|l| l.split_once(' ').map_or(l, |(n, _)| n) == name)
+    })
+}
+
+/// The build engine's security options: with our AppArmor profile when it
+/// is loaded (it allows the user namespace rootless BuildKit creates), else
+/// unconfined.
+fn security_opts(profile_loaded: bool) -> Vec<String> {
+    let apparmor = if profile_loaded {
+        format!("apparmor={APPARMOR_PROFILE}")
+    } else {
+        "apparmor=unconfined".to_owned()
+    };
+    vec!["seccomp=unconfined".to_owned(), apparmor]
+}
+
 pub const RAILPACK_FRONTEND: &str = "ghcr.io/railwayapp/railpack-frontend:v0.43.0";
 const CONTAINER: &str = "modula-buildkit";
 /// Rootless BuildKit runs as this user inside its container.
@@ -91,12 +116,23 @@ impl BuildkitBuilder {
         std::fs::create_dir_all(&self.socket_dir)?;
         #[cfg(unix)]
         std::os::unix::fs::chown(&self.socket_dir, Some(BUILDKIT_UID), Some(BUILDKIT_UID))?;
-        if self
-            .docker
-            .inspect_container(CONTAINER, None)
-            .await
-            .is_err()
-        {
+        let security = security_opts(apparmor_profile_loaded(APPARMOR_PROFILE));
+        // A container created with other security options (say, before
+        // install.sh added the AppArmor profile) is recreated.
+        let existing = self.docker.inspect_container(CONTAINER, None).await.ok();
+        let stale = existing.as_ref().is_some_and(|c| {
+            c.host_config.as_ref().and_then(|h| h.security_opt.as_ref()) != Some(&security)
+        });
+        if stale {
+            let _ = self
+                .docker
+                .remove_container(
+                    CONTAINER,
+                    Some(RemoveContainerOptionsBuilder::new().force(true).build()),
+                )
+                .await;
+        }
+        if existing.is_none() || stale {
             let (from, _) = BUILDKIT_IMAGE
                 .split_once('@')
                 .unwrap_or((BUILDKIT_IMAGE, ""));
@@ -116,10 +152,7 @@ impl BuildkitBuilder {
                 // Rootless BuildKit needs these to create its user namespace;
                 // the daemon itself runs unprivileged (uid 1000), with no
                 // Docker socket and no host mounts beyond its own socket.
-                security_opt: Some(vec![
-                    "seccomp=unconfined".into(),
-                    "apparmor=unconfined".into(),
-                ]),
+                security_opt: Some(security),
                 // `--security-opt systempaths=unconfined` in API terms: it
                 // mounts its own /proc for the build sandboxes.
                 masked_paths: Some(vec![]),
@@ -164,7 +197,9 @@ impl BuildkitBuilder {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        bail!("the build engine did not start")
+        bail!(
+            "the build engine did not start (on the server: `docker logs modula-buildkit`; on Ubuntu 23.10+ install.sh adds the {APPARMOR_PROFILE} AppArmor profile it needs)"
+        )
     }
 
     async fn run_build(
@@ -438,4 +473,22 @@ fn resolve_file(root: &Path, rel: &str) -> anyhow::Result<PathBuf> {
         bail!("{rel} is not a file inside the root directory");
     }
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apparmor_profile_when_loaded() {
+        assert_eq!(
+            security_opts(true),
+            ["seccomp=unconfined", "apparmor=modula-buildkit"]
+        );
+        assert_eq!(
+            security_opts(false),
+            ["seccomp=unconfined", "apparmor=unconfined"]
+        );
+        assert!(!apparmor_profile_loaded("surely-not-a-profile"));
+    }
 }

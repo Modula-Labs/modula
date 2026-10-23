@@ -6,7 +6,9 @@
 //!   template service, the template's), so removing a line resets it.
 //! - Only custom domains are managed; generated ones are never deleted.
 //! - Variables not in the file are deleted unless listed in `preserve` (or
-//!   created by the service's template). A `{ secret = true }` variable needs
+//!   created by the service's template). A service (or `shared`) that lists
+//!   no variables and no `preserve` leaves its variables alone: they are
+//!   managed elsewhere (the dashboard, `modula variables`). A `{ secret = true }` variable needs
 //!   a value from the secrets file or the environment unless it exists.
 //! - Sealed values can't be compared: they are only set when missing (or with
 //!   `--update-sealed`).
@@ -415,8 +417,11 @@ fn diff_variables(
             }
         }
     }
+    // Nothing listed: these variables aren't managed by the file.
+    let managed = !scope.desired.is_empty() || !scope.preserve.is_empty();
     for (name, h) in &remote {
-        let keep = scope.desired.contains_key(*name)
+        let keep = !managed
+            || scope.desired.contains_key(*name)
             || scope.preserve.iter().any(|p| p == name)
             || scope.unmanaged.iter().any(|p| p == name);
         if !keep {
@@ -1038,6 +1043,20 @@ source = { local = "." }
         assert_eq!(p.shared.len(), 1);
         assert_eq!(p.shared[0].op, VarOp::Update);
         assert_eq!(p.shared[0].to.as_deref(), Some("us"));
+    }
+
+    #[test]
+    fn unlisted_variables_are_left_alone() {
+        let mut r = remote(vec![]);
+        r.shared = vec![var("REGION", Some("eu"), false)];
+        let p = plan(
+            "production",
+            &spec("[shared]\n"),
+            Some(&r),
+            &BTreeMap::new(),
+            Options::default(),
+        );
+        assert!(p.shared.is_empty(), "{:?}", p.shared);
     }
 
     #[test]

@@ -810,8 +810,29 @@ server_env() { local v; v=$(sed -n "s/^$1=//p" "$CONF/server.env" 2>/dev/null | 
 
 UPGRADE_DIR=/var/lib/modula-upgrade
 
+# Rootless BuildKit creates a user namespace, which Ubuntu 23.10+ forbids
+# unless an AppArmor profile allows it (kernel.apparmor_restrict_unprivileged_userns).
+# Rather than lifting that host-wide, a profile only the build engine's
+# container runs under; modula-node uses it when it is loaded.
+buildkit_apparmor() {
+  [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] || return 0
+  [[ -f /etc/apparmor.d/abi/4.0 ]] && command -v apparmor_parser >/dev/null || return 0
+  cat >/etc/apparmor.d/modula-buildkit <<'EOF_AA'
+# Modula: the build engine (rootless BuildKit) may create user namespaces.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile modula-buildkit flags=(unconfined) {
+  userns,
+}
+EOF_AA
+  apparmor_parser -r /etc/apparmor.d/modula-buildkit 2>/dev/null \
+    || TIPS+=("Couldn't load the modula-buildkit AppArmor profile; builds may fail to start (docker logs modula-buildkit).")
+}
+
 units() {
   CHANGED=" "
+  buildkit_apparmor
   local caddy_sockets=0 server_sockets=0 upgrades=0
   has_feature modula-node caddy-sockets && caddy_sockets=1
   if [[ -f $CONF/server.env ]]; then
