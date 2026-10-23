@@ -47,6 +47,16 @@ impl EdgeSink for RecordingEdge {
     }
 }
 
+/// Parses `--route host=127.0.0.1:7100` (a route this node serves itself).
+pub fn parse_local_route(s: &str) -> Result<ResolvedRoute, String> {
+    let (host, addr) = s.split_once('=').ok_or("expected HOST=ADDR:PORT")?;
+    let hostname = normalize_host(host).ok_or_else(|| format!("{host:?} is not a DNS name"))?;
+    let upstream: SocketAddr = addr
+        .parse()
+        .map_err(|_| format!("{addr:?} is not an address like 127.0.0.1:7100"))?;
+    Ok(ResolvedRoute { hostname, upstream })
+}
+
 /// Lowercase, no trailing dot; `None` for anything that is not a plain DNS
 /// name (IP literals, ports, empty labels, odd characters).
 pub fn normalize_host(raw: &str) -> Option<String> {
@@ -67,6 +77,21 @@ pub fn normalize_host(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_routes() {
+        let r = parse_local_route("Deploy.Example.com=127.0.0.1:7100").unwrap();
+        assert_eq!(r.hostname, "deploy.example.com");
+        assert_eq!(r.upstream, "127.0.0.1:7100".parse().unwrap());
+        for bad in [
+            "deploy.example.com",
+            "1.2.3.4=127.0.0.1:1",
+            "a.com=localhost:1",
+            "a.com=127.0.0.1",
+        ] {
+            assert!(parse_local_route(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn hosts() {

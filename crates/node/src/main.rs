@@ -65,6 +65,10 @@ enum Command {
         /// Run workloads without managing Caddy (no public routes).
         #[arg(long)]
         no_edge: bool,
+        /// A route this server serves itself, as HOST=ADDR:PORT (repeatable).
+        /// The installer uses it for the dashboard on the main server.
+        #[arg(long = "route", value_name = "HOST=ADDR", value_parser = modula_node::edge::parse_local_route)]
+        routes: Vec<modula_node::edge::ResolvedRoute>,
     },
     /// Show this server's identity.
     Status,
@@ -108,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
             caddy_admin,
             ask_listen,
             no_edge,
+            routes,
         } => {
             let runtime = Arc::new(DockerRuntime::connect()?);
             let stop = CancellationToken::new();
@@ -123,11 +128,14 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     .with_context(|| format!("cannot bind {ask_listen}"))?;
                 tokio::spawn(ask::serve(listener, allowlist.clone(), stop.clone()));
-                Some(Arc::new(CaddyEdge::new(
+                let caddy = Arc::new(CaddyEdge::new(
                     &caddy_admin,
                     format!("http://{ask_listen}/ask"),
                     allowlist,
-                )?))
+                    routes,
+                )?);
+                tokio::spawn(caddy.clone().watch(stop.clone()));
+                Some(caddy)
             };
             tokio::spawn({
                 let stop = stop.clone();

@@ -196,7 +196,10 @@ export interface JoinToken {
   expiresAt: string;
   server: string;
   fingerprint: string;
+  /** Installs Docker, Caddy and modula-node on a fresh server, then joins. */
   command: string;
+  /** The join step alone, for a server that already runs modula-node. */
+  nodeCommand: string;
 }
 
 const enc = encodeURIComponent;
@@ -221,11 +224,14 @@ export const api = {
   sessions: () => get<SessionInfo[]>("/api/account/sessions"),
   revokeSession: (id: string) => del<{ ok: true }>(`/api/account/sessions/${encodeURIComponent(id)}`),
   createWorkspace: (name: string) => post<{ id: string; name: string }>("/api/workspaces", { name }),
+  updateWorkspace: (id: string, name: string) => patch<{ id: string; name: string }>(`/api/workspaces/${enc(id)}`, { name }),
+  deleteWorkspace: (id: string) => del<{ ok: true }>(`/api/workspaces/${enc(id)}`),
 
   projects: (workspace: string) => get<Project[]>(`/api/workspaces/${enc(workspace)}/projects`),
   createProject: (workspace: string, b: { name: string; description?: string }) =>
     post<ProjectDetail>(`/api/workspaces/${enc(workspace)}/projects`, b),
   project: (id: string) => get<ProjectDetail>(`/api/projects/${enc(id)}`),
+  updateProject: (id: string, b: { name?: string; description?: string }) => patch<Project>(`/api/projects/${enc(id)}`, b),
   deleteProject: (id: string) => del<{ ok: true }>(`/api/projects/${enc(id)}`),
   createEnvironment: (project: string, name: string) =>
     post<Environment>(`/api/projects/${enc(project)}/environments`, { name }),

@@ -18,6 +18,8 @@ use uuid::Uuid;
 const PUBLIC_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/health"),
     ("GET", "/api/instance"),
+    ("GET", "/api/install.sh"),
+    ("GET", "/api/releases"),
     ("POST", "/api/auth/setup"),
     ("POST", "/api/auth/login"),
 ];

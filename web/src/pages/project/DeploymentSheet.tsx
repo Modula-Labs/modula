@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { CopyButton } from "@/components/ui/CopyButton";
 import { Sheet } from "@/components/ui/Sheet";
 import { TabPanel, Tabs } from "@/components/ui/Tabs";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
@@ -57,6 +58,29 @@ export function DeploymentSheet({ deploymentId, onClose }: { deploymentId: strin
           {d ? (
             <div className="flex flex-col gap-5">
               {d.error ? <Alert title="Deployment failed">{d.error}</Alert> : null}
+              <dl className="grid grid-cols-[6rem_1fr] items-center gap-x-4 gap-y-2 text-sm">
+                <dt className="text-muted-foreground">Deployment</dt>
+                <dd className="flex min-w-0 items-center gap-1">
+                  <span className="truncate font-mono text-[13px]">{d.id}</span>
+                  <CopyButton value={d.id} label="Copy deployment id" />
+                </dd>
+                <dt className="text-muted-foreground">Image</dt>
+                <dd className="truncate font-mono text-[13px]">{d.image}</dd>
+                <dt className="text-muted-foreground">Created</dt>
+                <dd>{relativeTime(d.createdAt)}</dd>
+                {d.finishedAt ? (
+                  <>
+                    <dt className="text-muted-foreground">Finished</dt>
+                    <dd>{relativeTime(d.finishedAt)}</dd>
+                  </>
+                ) : null}
+                {d.nodeId ? (
+                  <>
+                    <dt className="text-muted-foreground">Node</dt>
+                    <dd className="truncate font-mono text-[13px]">{d.nodeId.slice(0, 8)}</dd>
+                  </>
+                ) : null}
+              </dl>
               <ol className="flex flex-col gap-2">
                 {d.events.map((e, i) => (
                   <li key={i} className="flex gap-3 text-sm">
@@ -81,7 +105,7 @@ export function DeploymentSheet({ deploymentId, onClose }: { deploymentId: strin
         </TabPanel>
         <TabPanel value="logs">
           <div className="flex h-full flex-col">
-            <LogViewer url={api.deploymentLogsUrl(deploymentId)} />
+            <LogViewer url={api.deploymentLogsUrl(deploymentId)} downloadName={`deployment-${deploymentId}.log`} />
           </div>
         </TabPanel>
       </Tabs>

@@ -12,7 +12,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/base.css";
 import { clsx } from "clsx";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { BrandDocker, Maximize, Minus, Plus } from "@/components/ui/icons";
 import { StatusDot } from "@/components/ui/misc";
 import type { DeploymentStatus } from "@/lib/api";
@@ -80,6 +80,27 @@ function CanvasInner({
 }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<ServiceNode>([]);
   const flow = useReactFlow();
+  const box = useRef<HTMLDivElement>(null);
+
+  // The service sheet covers the right ~60%: keep the selected card in view
+  // to its left, like Railway, without changing the zoom.
+  useEffect(() => {
+    if (!selected || !box.current) return;
+    const node = flow.getNode(selected);
+    if (!node) return;
+    const { width } = box.current.getBoundingClientRect();
+    const zoom = flow.getZoom();
+    const visible = width * 0.4;
+    const cardW = node.measured?.width ?? 288;
+    const cardH = node.measured?.height ?? 144;
+    const screenX = node.position.x * zoom + flow.getViewport().x;
+    if (screenX >= 16 && screenX + cardW * zoom <= visible - 16) return;
+    void flow.setCenter(node.position.x + cardW / 2 + (width / 2 - visible / 2) / zoom, node.position.y + cardH / 2, {
+      zoom,
+      duration: 250,
+    });
+    // Only when the selection changes, not on every data refresh.
+  }, [selected]);
 
   useEffect(() => {
     const saved = savedPositions(projectId);
@@ -94,43 +115,45 @@ function CanvasInner({
   }, [projectId, services, selected, setNodes]);
 
   return (
-    <ReactFlow
-      nodes={nodes}
-      edges={[]}
-      nodeTypes={nodeTypes}
-      onNodesChange={onNodesChange}
-      onNodeClick={(_, n) => onSelect(n.id)}
-      onPaneClick={() => onSelect(undefined)}
-      onNodeDragStop={() => {
-        const map = Object.fromEntries(flow.getNodes().map((n) => [n.id, n.position]));
-        save(`mc.canvas.${projectId}`, JSON.stringify(map));
-      }}
-      fitView
-      fitViewOptions={{ maxZoom: 1, padding: 0.4 }}
-      minZoom={0.3}
-      maxZoom={1.5}
-      proOptions={{ hideAttribution: true }}
-      className="bg-background"
-    >
-      <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="var(--canvas-dot)" />
-      <div className="absolute bottom-4 left-4 z-10 flex flex-col gap-1 rounded-lg border border-border bg-card p-1">
-        {[
-          { label: "Zoom in", icon: <Plus />, run: () => flow.zoomIn() },
-          { label: "Zoom out", icon: <Minus />, run: () => flow.zoomOut() },
-          { label: "Fit to screen", icon: <Maximize />, run: () => flow.fitView({ maxZoom: 1, padding: 0.4 }) },
-        ].map((b) => (
-          <button
-            key={b.label}
-            title={b.label}
-            aria-label={b.label}
-            onClick={b.run}
-            className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground [&_svg]:size-4"
-          >
-            {b.icon}
-          </button>
-        ))}
-      </div>
-    </ReactFlow>
+    <div ref={box} className="h-full w-full">
+      <ReactFlow
+        nodes={nodes}
+        edges={[]}
+        nodeTypes={nodeTypes}
+        onNodesChange={onNodesChange}
+        onNodeClick={(_, n) => onSelect(n.id)}
+        onPaneClick={() => onSelect(undefined)}
+        onNodeDragStop={() => {
+          const map = Object.fromEntries(flow.getNodes().map((n) => [n.id, n.position]));
+          save(`mc.canvas.${projectId}`, JSON.stringify(map));
+        }}
+        fitView
+        fitViewOptions={{ maxZoom: 1, padding: 0.4 }}
+        minZoom={0.3}
+        maxZoom={1.5}
+        proOptions={{ hideAttribution: true }}
+        className="bg-background"
+      >
+        <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="var(--canvas-dot)" />
+        <div className="absolute bottom-4 left-4 z-10 flex flex-col gap-1 rounded-lg border border-border bg-card p-1">
+          {[
+            { label: "Zoom in", icon: <Plus />, run: () => flow.zoomIn() },
+            { label: "Zoom out", icon: <Minus />, run: () => flow.zoomOut() },
+            { label: "Fit to screen", icon: <Maximize />, run: () => flow.fitView({ maxZoom: 1, padding: 0.4 }) },
+          ].map((b) => (
+            <button
+              key={b.label}
+              title={b.label}
+              aria-label={b.label}
+              onClick={b.run}
+              className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground [&_svg]:size-4"
+            >
+              {b.icon}
+            </button>
+          ))}
+        </div>
+      </ReactFlow>
+    </div>
   );
 }
 

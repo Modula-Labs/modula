@@ -207,8 +207,13 @@ async fn join_tokens_are_single_use_and_the_ca_is_pinned(pool: PgPool) {
     let t = c.join_token().await;
     let token = t["token"].as_str().unwrap();
     let fp = t["fingerprint"].as_str().unwrap();
+    let command = t["command"].as_str().unwrap();
+    assert!(command.starts_with(
+        "curl -fsSL https://cloud.test/api/install.sh | sudo bash -s -- join --server "
+    ));
+    assert!(command.ends_with(&format!("--token {token} --ca {fp}")));
     assert!(
-        t["command"]
+        t["nodeCommand"]
             .as_str()
             .unwrap()
             .starts_with("modula-node join --server ")

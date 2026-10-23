@@ -27,6 +27,9 @@ pub struct Config {
     pub edge_tls: EdgeTls,
     /// Contact address for ACME accounts (optional).
     pub acme_email: Option<String>,
+    /// The installed release (binaries + signed checksums). Served to servers
+    /// joining this instance so they run the same version. None in development.
+    pub release_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +86,10 @@ impl Config {
             acme_email: std::env::var("MODULA_ACME_EMAIL")
                 .ok()
                 .filter(|e| !e.is_empty()),
+            release_dir: std::env::var("MODULA_RELEASE_DIR")
+                .ok()
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from),
         };
         let mut cfg = cfg;
         cfg.node_url = match std::env::var("MODULA_NODE_URL") {
@@ -227,14 +234,13 @@ pub fn write_new_master_key(path: &Path) -> anyhow::Result<MasterKey> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cfg(url: &str) -> Config {
+impl Config {
+    /// A minimal valid config for unit tests.
+    pub(crate) fn for_tests(public_url: &str) -> Self {
         Config {
             database_url: String::new(),
             redis_url: String::new(),
-            public_url: url.parse().unwrap(),
+            public_url: public_url.parse().unwrap(),
             listen: "127.0.0.1:0".parse().unwrap(),
             master_key_file: PathBuf::new(),
             trusted_proxies: vec![],
@@ -243,7 +249,17 @@ mod tests {
             apps_domain: None,
             edge_tls: EdgeTls::Acme,
             acme_email: None,
+            release_dir: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(url: &str) -> Config {
+        Config::for_tests(url)
     }
 
     #[test]

@@ -8,3 +8,4 @@
 # Railway reference screenshots are never committed (closed-source UI, reference only)
 /docs/ui-ref/
 /.dev/
+/dist/

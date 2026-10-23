@@ -37,6 +37,7 @@ pub fn config() -> Config {
         apps_domain: Some("apps.test".into()),
         edge_tls: modula_server::config::EdgeTls::Acme,
         acme_email: None,
+        release_dir: None,
     }
 }
 

@@ -10,29 +10,89 @@ use modula_proto::node::v1::TlsMode;
 use serde_json::{Value, json};
 
 use super::ask::Allowlist;
-use super::http::{AdminAddr, post_json};
-use super::{EdgeConfig, EdgeSink, normalize_host};
+use super::http::{self, AdminAddr, post_json};
+use super::{EdgeConfig, EdgeSink, ResolvedRoute, normalize_host};
 
 /// Re-load even an unchanged config this often: it restores our routes after
 /// Caddy restarts, and Caddy skips identical configs without a reload.
 const REFRESH_EVERY: Duration = Duration::from_secs(30);
+/// How often the watchdog checks that Caddy still has our config.
+const WATCH_EVERY: Duration = Duration::from_secs(3);
 const NOT_FOUND: &str = "No service is deployed at this address.";
 
 pub struct CaddyEdge {
     admin: AdminAddr,
     ask_url: String,
     allowlist: Allowlist,
+    /// Routes this node serves on its own, e.g. the dashboard on the main server.
+    local_routes: Vec<ResolvedRoute>,
     last: Mutex<Option<(Value, Instant)>>,
 }
 
 impl CaddyEdge {
-    pub fn new(admin: &str, ask_url: String, allowlist: Allowlist) -> anyhow::Result<Self> {
+    pub fn new(
+        admin: &str,
+        ask_url: String,
+        allowlist: Allowlist,
+        local_routes: Vec<ResolvedRoute>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             admin: AdminAddr::parse(admin)?,
             ask_url,
             allowlist,
+            local_routes,
             last: Mutex::new(None),
         })
+    }
+
+    /// Re-loads the last config as soon as Caddy comes back empty (it keeps
+    /// nothing across restarts: `persist: false`), instead of waiting for the
+    /// next reconcile.
+    pub async fn watch(self: std::sync::Arc<Self>, stop: tokio_util::sync::CancellationToken) {
+        let mut tick = tokio::time::interval(WATCH_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = tick.tick() => {}
+            }
+            let Some(config) = self
+                .last
+                .lock()
+                .expect("edge lock")
+                .as_ref()
+                .map(|(c, _)| c.clone())
+            else {
+                continue;
+            };
+            let missing = match http::get(&self.admin, "/config/apps/http/servers/modula").await {
+                Ok(r) => r.status != 200 || r.body.trim() == "null",
+                Err(_) => continue, // Caddy is down; check again once it's up
+            };
+            if missing {
+                match self.load(&config).await {
+                    Ok(()) => tracing::info!("restored the edge config after a Caddy restart"),
+                    Err(e) => tracing::warn!(
+                        error = format!("{e:#}"),
+                        "could not restore the edge config"
+                    ),
+                }
+            }
+        }
+    }
+
+    async fn load(&self, rendered: &Value) -> anyhow::Result<()> {
+        let body = serde_json::to_vec(rendered)?;
+        let resp = post_json(&self.admin, "/load", &body).await?;
+        if resp.status != 200 {
+            anyhow::bail!(
+                "Caddy rejected the config ({}): {}",
+                resp.status,
+                resp.body.chars().take(500).collect::<String>()
+            );
+        }
+        *self.last.lock().expect("edge lock") = Some((rendered.clone(), Instant::now()));
+        Ok(())
     }
 }
 
@@ -111,6 +171,9 @@ pub fn render(cfg: &EdgeConfig, admin_listen: &str, ask_url: &str) -> Value {
 #[async_trait]
 impl EdgeSink for CaddyEdge {
     async fn apply(&self, cfg: &EdgeConfig) -> anyhow::Result<()> {
+        let mut cfg = cfg.clone();
+        cfg.routes.extend(self.local_routes.iter().cloned());
+        let cfg = &cfg;
         let hosts: HashSet<String> = cfg
             .routes
             .iter()
@@ -129,17 +192,7 @@ impl EdgeSink for CaddyEdge {
         if !fresh {
             return Ok(());
         }
-        let body = serde_json::to_vec(&rendered)?;
-        let resp = post_json(&self.admin, "/load", &body).await?;
-        if resp.status != 200 {
-            anyhow::bail!(
-                "Caddy rejected the config ({}): {}",
-                resp.status,
-                resp.body.chars().take(500).collect::<String>()
-            );
-        }
-        *self.last.lock().expect("edge lock") = Some((rendered, Instant::now()));
-        Ok(())
+        self.load(&rendered).await
     }
 }
 

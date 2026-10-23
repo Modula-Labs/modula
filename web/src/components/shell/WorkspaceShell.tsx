@@ -2,7 +2,7 @@ import * as Popover from "@radix-ui/react-popover";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
-import { Check, ChevronDown, DotsVertical, LayoutGrid, Logout, Moon, Plus, Server, ShieldLock, Sun } from "@/components/ui/icons";
+import { Check, ChevronDown, DotsVertical, LayoutGrid, Logout, Moon, Plus, Server, Settings, ShieldLock, Sun } from "@/components/ui/icons";
 import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
@@ -131,6 +131,7 @@ export function WorkspaceShell() {
         <div className="my-2 h-px bg-border" />
         <nav className="flex flex-col gap-0.5" aria-label="Workspace">
           <NavItem to="/projects" icon={<LayoutGrid />}>Projects</NavItem>
+          <NavItem to="/settings" icon={<Settings />}>Settings</NavItem>
         </nav>
         {me.user.isInstanceAdmin ? (
           <>

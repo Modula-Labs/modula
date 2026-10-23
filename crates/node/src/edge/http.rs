@@ -54,6 +54,19 @@ pub async fn post_json(addr: &AdminAddr, path: &str, body: &[u8]) -> anyhow::Res
         addr.host_header(),
         body.len()
     );
+    send(addr, head, body).await
+}
+
+pub async fn get(addr: &AdminAddr, path: &str) -> anyhow::Result<Response> {
+    let head = format!(
+        // HTTP/1.0 so the reply is never chunked; we only compare the body.
+        "GET {path} HTTP/1.0\r\nHost: {}\r\n\r\n",
+        addr.host_header()
+    );
+    send(addr, head, &[]).await
+}
+
+async fn send(addr: &AdminAddr, head: String, body: &[u8]) -> anyhow::Result<Response> {
     let fut = async {
         match addr {
             AdminAddr::Unix(p) => {

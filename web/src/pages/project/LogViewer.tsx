@@ -1,6 +1,7 @@
 import { clsx } from "clsx";
 import { useEffect, useRef, useState } from "react";
-import { Search } from "@/components/ui/icons";
+import { Button } from "@/components/ui/Button";
+import { Download, Search } from "@/components/ui/icons";
 
 interface Line {
   ts: number;
@@ -14,11 +15,12 @@ const MAX_LINES = 5000;
 
 /** Follows a deployment's container logs over SSE. Values of secret variables
  *  are already masked by the server. */
-export function LogViewer({ url }: { url: string }) {
+export function LogViewer({ url, downloadName = "logs.log" }: { url: string; downloadName?: string }) {
   const [lines, setLines] = useState<Line[]>([]);
   const [state, setState] = useState<StreamState>("connecting");
   const [message, setMessage] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  const [wrap, setWrap] = useState(true);
   const box = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
 
@@ -55,6 +57,16 @@ export function LogViewer({ url }: { url: string }) {
   const q = filter.trim().toLowerCase();
   const shown = q ? lines.filter((l) => l.text.toLowerCase().includes(q)) : lines;
 
+  const download = () => {
+    const body = lines.map((l) => `${new Date(l.ts).toISOString()} ${l.text}`).join("\n");
+    const href = URL.createObjectURL(new Blob([body + "\n"], { type: "text/plain" }));
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = downloadName;
+    a.click();
+    URL.revokeObjectURL(href);
+  };
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex items-center gap-3">
@@ -68,6 +80,19 @@ export function LogViewer({ url }: { url: string }) {
             onChange={(e) => setFilter(e.target.value)}
           />
         </label>
+        <Button
+          variant="ghost"
+          size="sm"
+          role="switch"
+          aria-checked={wrap}
+          className={clsx(wrap && "bg-accent text-foreground")}
+          onClick={() => setWrap((w) => !w)}
+        >
+          Wrap
+        </Button>
+        <Button variant="ghost" size="sm" icon={<Download />} disabled={lines.length === 0} onClick={download}>
+          Download
+        </Button>
         <span className="text-xs text-muted-foreground">
           {state === "live" ? "Following" : state === "connecting" ? "Connecting…" : state === "ended" ? "Stream ended" : "Disconnected"}
         </span>
@@ -91,7 +116,7 @@ export function LogViewer({ url }: { url: string }) {
               <span className="shrink-0 text-muted-foreground tabular-nums select-none">
                 {new Date(l.ts).toLocaleTimeString([], { hour12: false })}
               </span>
-              <span className={clsx("break-all whitespace-pre-wrap", l.stderr && "text-foreground/85")}>{l.text}</span>
+              <span className={clsx(wrap ? "break-all whitespace-pre-wrap" : "whitespace-pre", l.stderr && "text-foreground/85")}>{l.text}</span>
             </div>
           ))
         )}

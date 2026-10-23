@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
-import { Check, ChevronDown, LayoutGrid, Plus, Server } from "@/components/ui/icons";
+import { Check, ChevronDown, LayoutGrid, Plus, Server, Settings } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
 import { LogoMark } from "@/components/ui/Logo";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
@@ -16,6 +16,7 @@ import { useMe } from "@/lib/workspace";
 import { Canvas, type CanvasService } from "./Canvas";
 import { DeploymentSheet } from "./DeploymentSheet";
 import { NewServiceDialog } from "./NewServiceDialog";
+import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { ServiceSheet, type ServiceTab } from "./ServiceSheet";
 
 export interface ProjectSearch {
@@ -39,6 +40,7 @@ export function ProjectPage({
   const { data: me } = useMe();
   const [adding, setAdding] = useState(false);
   const [newEnv, setNewEnv] = useState(false);
+  const [settings, setSettings] = useState(false);
   const project = useQuery({
     queryKey: ["project", projectId],
     queryFn: () => api.project(projectId),
@@ -115,6 +117,16 @@ export function ProjectPage({
             ) : null}
           </Menu>
         ) : null}
+        {p ? (
+          <button
+            aria-label="Project settings"
+            title="Project settings"
+            onClick={() => setSettings(true)}
+            className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground [&>svg]:size-4"
+          >
+            <Settings />
+          </button>
+        ) : null}
         <div className="ml-auto">
           {atLeast(role, "member") && env ? (
             <Button variant="primary" size="sm" icon={<Plus />} onClick={() => setAdding(true)}>
@@ -182,6 +194,16 @@ export function ProjectPage({
           projectId={projectId}
           environmentId={env.id}
           onCreated={(service) => setSearch({ env: search.env, service, tab: "deployments" })}
+        />
+      ) : null}
+      {p && env ? (
+        <ProjectSettingsDialog
+          open={settings}
+          onOpenChange={setSettings}
+          project={p}
+          role={role}
+          environmentId={env.id}
+          onEnvironmentDeleted={() => setSearch({})}
         />
       ) : null}
       <NewEnvironmentDialog

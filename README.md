@@ -12,6 +12,32 @@ by `modula-node`, with generated domains and on-demand TLS; the dashboard has th
 project canvas, service and deployment sheets, live logs, variables and a
 Servers page. Next in C1b: `install.sh` (install, upgrade, recovery kit).
 
+## Install
+
+On a fresh Ubuntu 22.04+/Debian 12+ server with DNS for the dashboard (and,
+optionally, a wildcard for generated app domains) pointing at it:
+
+```bash
+curl -fsSL https://github.com/modula-deploy/modula-deploy/releases/latest/download/install.sh \
+  | sudo bash -s -- --domain deploy.example.com --email you@example.com --apps-domain apps.example.com
+```
+
+It installs Postgres, Redis and Docker from the distribution (Docker only if
+missing), downloads prebuilt binaries checked against Ed25519-signed SHA-256
+sums, writes hardened systemd units, joins the server to itself, and prints the
+one-time setup token. It also writes `/root/modula-recovery-kit.txt` with the
+master key: copy it somewhere safe and delete it from the server.
+
+More servers join from **Servers → Add server**, which prints a one-line
+command that fetches the installer from your instance. Upgrade with
+`… install.sh | sudo bash -s -- upgrade`; it swaps the release atomically and
+rolls back if the new version doesn't come up.
+
+Releases are built with `scripts/release.sh` and signed with
+`.dev/release-signing/release.key` (keep it offline; its public half is
+`deploy/release.pub.pem`, embedded in `install.sh`). `deploy/e2e/run.sh` runs
+the installer end to end in systemd containers.
+
 ## Layout
 
 ```
@@ -21,7 +47,8 @@ crates/server   modula-server: axum API, sessions, 2FA, authz, audit log, jobs, 
                 embedded UI, internal CA, node endpoint (gRPC :7101), deployments
 crates/node     modula-node: join, one outbound mTLS stream, reconciler, Docker runtime
 web/            React SPA (served by modula-server)
-scripts/        check.sh (everything CI runs), dev-services.sh, no-shell.sh
+deploy/         install.sh, release.pub.pem, e2e/ (install test), dev/ (simulated server)
+scripts/        check.sh (everything CI runs), release.sh, dev-*.sh, no-shell.sh
 ```
 
 ## Develop

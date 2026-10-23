@@ -127,6 +127,13 @@ function AddServerDialog({ open, onOpenChange }: { open: boolean; onOpenChange: 
             <code className="min-w-0 flex-1 font-mono text-[12.5px] leading-5 break-all">{token.command}</code>
             <CopyButton value={token.command} label="Copy command" />
           </div>
+          <details className="text-xs text-muted-foreground">
+            <summary className="cursor-pointer select-none hover:text-foreground">modula-node is already installed there</summary>
+            <div className="mt-2 flex items-start gap-2 rounded-lg border border-border bg-background p-3">
+              <code className="min-w-0 flex-1 font-mono text-[12.5px] leading-5 break-all text-foreground">{token.nodeCommand}</code>
+              <CopyButton value={token.nodeCommand} label="Copy join command" />
+            </div>
+          </details>
           <p className="text-xs text-muted-foreground">
             Single use, expires {relativeTime(token.expiresAt)}. The command pins this instance's certificate ({token.fingerprint.slice(0, 19)}…), so it can't be redirected.
           </p>

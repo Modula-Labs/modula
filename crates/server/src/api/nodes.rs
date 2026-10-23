@@ -62,8 +62,10 @@ pub struct JoinToken {
     pub expires_at: OffsetDateTime,
     pub server: String,
     pub fingerprint: String,
-    /// Ready-to-paste command for the new server.
+    /// Ready-to-paste command for a fresh server (installs, then joins).
     pub command: String,
+    /// The join step alone, for a server that already runs modula-node.
+    pub node_command: String,
 }
 
 pub async fn create_join_token(
@@ -83,6 +85,7 @@ pub async fn create_join_token(
     let token = token.expose_secret().to_owned();
     Ok(Json(JoinToken {
         command: crate::nodes::join_command(&state.cfg, &token, &fingerprint),
+        node_command: crate::nodes::node_join_command(&state.cfg, &token, &fingerprint),
         token,
         expires_at,
         server,

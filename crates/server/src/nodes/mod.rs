@@ -40,9 +40,20 @@ pub async fn create_join_token(
 }
 
 /// The command a new server runs to join this control plane.
-pub fn join_command(cfg: &Config, token: &str, fingerprint: &str) -> String {
+/// The bare `modula-node join` invocation, for a server that already has it.
+pub fn node_join_command(cfg: &Config, token: &str, fingerprint: &str) -> String {
     let server = cfg.node_url.as_str().trim_end_matches('/');
     format!("modula-node join --server {server} --token {token} --ca {fingerprint}")
+}
+
+/// One line for a fresh server: fetch this instance's installer, which
+/// installs Docker, Caddy and modula-node and then joins.
+pub fn join_command(cfg: &Config, token: &str, fingerprint: &str) -> String {
+    let server = cfg.node_url.as_str().trim_end_matches('/');
+    format!(
+        "curl -fsSL {}/api/install.sh | sudo bash -s -- join --server {server} --token {token} --ca {fingerprint}",
+        cfg.public_origin()
+    )
 }
 
 pub async fn serve(

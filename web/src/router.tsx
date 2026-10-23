@@ -8,6 +8,7 @@ import { AccountSecurityPage } from "./pages/AccountSecurity";
 import { LoginPage } from "./pages/Login";
 import { ProjectsPage } from "./pages/Projects";
 import { ServersPage } from "./pages/Servers";
+import { WorkspaceSettingsPage } from "./pages/WorkspaceSettings";
 import type { ProjectSearch } from "./pages/project/ProjectPage";
 import type { ServiceTab } from "./pages/project/ServiceSheet";
 import { SetupPage } from "./pages/Setup";
@@ -86,6 +87,7 @@ const appRoute = createRoute({
 const workspaceRoute = createRoute({ getParentRoute: () => appRoute, id: "workspace", component: WorkspaceShell });
 const projectsRoute = createRoute({ getParentRoute: () => workspaceRoute, path: "/projects", component: ProjectsPage });
 const securityRoute = createRoute({ getParentRoute: () => workspaceRoute, path: "/account/security", component: AccountSecurityPage });
+const settingsRoute = createRoute({ getParentRoute: () => workspaceRoute, path: "/settings", component: WorkspaceSettingsPage });
 const serversRoute = createRoute({ getParentRoute: () => workspaceRoute, path: "/servers", component: ServersPage });
 
 // The canvas (React Flow) is the heaviest part of the app; load it on demand.
@@ -121,7 +123,7 @@ const routeTree = rootRoute.addChildren([
   setupRoute,
   loginRoute,
   twoFactorRoute,
-  appRoute.addChildren([workspaceRoute.addChildren([projectsRoute, securityRoute, serversRoute]), projectRoute]),
+  appRoute.addChildren([workspaceRoute.addChildren([projectsRoute, settingsRoute, securityRoute, serversRoute]), projectRoute]),
 ]);
 
 export function makeRouter(queryClient: QueryClient) {

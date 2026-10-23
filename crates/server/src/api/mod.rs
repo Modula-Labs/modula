@@ -2,6 +2,7 @@ pub mod account;
 pub mod auth;
 pub mod deployments;
 pub mod domains;
+pub mod install;
 pub mod instance;
 pub mod nodes;
 pub mod projects;
@@ -20,6 +21,9 @@ pub fn routes(state: AppState) -> ApiRouter {
     ApiRouter::new(state)
         .get("/api/health", Public, instance::health)
         .get("/api/instance", Public, instance::status)
+        // Installer and release files for servers joining this instance
+        .get("/api/install.sh", Public, install::install_script)
+        .get("/api/releases", Public, install::release_file)
         // Auth
         .post("/api/auth/setup", Public, auth::setup)
         .post("/api/auth/login", Public, auth::login)

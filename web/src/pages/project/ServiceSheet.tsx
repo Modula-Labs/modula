@@ -79,7 +79,7 @@ export function ServiceSheet({
         ]}
       >
         <TabPanel value="deployments">
-          <DeploymentsTab instanceId={instanceId} selected={deploymentId} onOpen={onOpenDeployment} />
+          <DeploymentsTab instanceId={instanceId} selected={deploymentId} canDeploy={canDeploy} onOpen={onOpenDeployment} />
         </TabPanel>
         <TabPanel value="variables">
           <VariablesTab instanceId={instanceId} canEdit={canDeploy} />
