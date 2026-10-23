@@ -2,7 +2,7 @@ import * as Popover from "@radix-ui/react-popover";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
-import { Check, ChevronDown, LayoutGrid, LogOut, MoreVertical, Moon, Plus, Shield, Sun } from "lucide-react";
+import { Check, ChevronDown, DotsVertical, LayoutGrid, Logout, Moon, Plus, Server, ShieldLock, Sun } from "@/components/ui/icons";
 import { useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
@@ -18,7 +18,7 @@ function Avatar({ name, size = 24, round }: { name: string; size?: number; round
     <span
       aria-hidden
       style={{ width: size, height: size, fontSize: size * 0.45 }}
-      className={clsx("inline-flex shrink-0 items-center justify-center bg-accent-subtle font-semibold text-accent-text", round ? "rounded-full" : "rounded-md")}
+      className={clsx("inline-flex shrink-0 items-center justify-center bg-brand-soft font-semibold text-brand-text", round ? "rounded-full" : "rounded-md")}
     >
       {name.trim().charAt(0).toUpperCase() || "?"}
     </span>
@@ -29,8 +29,8 @@ function NavItem({ to, icon, children }: { to: string; icon: ReactNode; children
   return (
     <Link
       to={to}
-      className="flex h-9 items-center gap-2.5 rounded-md px-2.5 text-base text-fg-muted hover:bg-surface-3 hover:text-fg [&>svg]:size-4"
-      activeProps={{ className: "!bg-surface-3 !text-fg [&>svg]:text-accent" }}
+      className="flex h-9 items-center gap-2.5 rounded-md px-2.5 text-base text-muted-foreground hover:bg-accent hover:text-foreground [&>svg]:size-4"
+      activeProps={{ className: "!bg-accent !text-foreground [&>svg]:text-brand-text" }}
     >
       {icon}
       {children}
@@ -38,7 +38,7 @@ function NavItem({ to, icon, children }: { to: string; icon: ReactNode; children
   );
 }
 
-const menuItem = "flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-sm text-fg hover:bg-surface-3 [&>svg]:size-4 [&>svg]:text-fg-muted";
+const menuItem = "flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-sm text-foreground hover:bg-accent [&>svg]:size-4 [&>svg]:text-muted-foreground";
 
 function NewWorkspaceDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (o: boolean) => void; onCreated: (w: Membership) => void }) {
   const qc = useQueryClient();
@@ -103,21 +103,21 @@ export function WorkspaceShell() {
 
       <aside className="flex min-h-0 flex-col px-2 pb-2">
         <Popover.Root open={wsOpen} onOpenChange={setWsOpen}>
-          <Popover.Trigger className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-surface-3">
+          <Popover.Trigger className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-accent">
             <Avatar name={current.name} />
             <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-1 text-sm font-semibold"><span className="truncate">{current.name}</span><ChevronDown className="size-3.5 shrink-0 text-fg-muted" /></span>
+              <span className="flex items-center gap-1 text-sm font-semibold"><span className="truncate">{current.name}</span><ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /></span>
               <span className="text-caps text-info">{current.role}</span>
             </span>
           </Popover.Trigger>
           <Popover.Portal>
-            <Popover.Content align="start" sideOffset={4} className="anim-pop z-30 w-64 rounded-md bg-surface-2 p-1 shadow-menu">
-              <div className="text-caps px-2.5 py-1.5 text-fg-subtle">Workspaces</div>
+            <Popover.Content align="start" sideOffset={4} className="anim-pop z-30 w-64 rounded-md bg-card p-1 shadow-menu">
+              <div className="text-caps px-2.5 py-1.5 text-muted-foreground">Workspaces</div>
               {me.workspaces.map((w) => (
                 <button key={w.id} className={menuItem} onClick={() => { select(w.id); setWsOpen(false); }}>
                   <Avatar name={w.name} size={20} />
                   <span className="flex-1 truncate text-left">{w.name}</span>
-                  {w.id === current.id ? <Check className="!text-accent" /> : null}
+                  {w.id === current.id ? <Check className="!text-brand-text" /> : null}
                 </button>
               ))}
               <div className="my-1 h-px bg-border" />
@@ -132,38 +132,46 @@ export function WorkspaceShell() {
         <nav className="flex flex-col gap-0.5" aria-label="Workspace">
           <NavItem to="/projects" icon={<LayoutGrid />}>Projects</NavItem>
         </nav>
+        {me.user.isInstanceAdmin ? (
+          <>
+            <div className="my-2 h-px bg-border" />
+            <nav className="flex flex-col gap-0.5" aria-label="Instance">
+              <NavItem to="/servers" icon={<Server />}>Servers</NavItem>
+            </nav>
+          </>
+        ) : null}
         <div className="my-2 h-px bg-border" />
         <nav className="flex flex-col gap-0.5" aria-label="Account">
-          <NavItem to="/account/security" icon={<Shield />}>Security</NavItem>
+          <NavItem to="/account/security" icon={<ShieldLock />}>Security</NavItem>
         </nav>
 
         <div className="mt-auto">
           <div className="my-2 h-px bg-border" />
           <Popover.Root open={acctOpen} onOpenChange={setAcctOpen}>
-            <Popover.Trigger className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-surface-3" aria-label="Account menu">
+            <Popover.Trigger className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-accent" aria-label="Account menu">
               <Avatar name={me.user.name} round />
               <span className="min-w-0 flex-1 truncate text-sm">{me.user.name}</span>
-              <MoreVertical className="size-4 text-fg-muted" />
+              <DotsVertical className="size-4 text-muted-foreground" />
             </Popover.Trigger>
             <Popover.Portal>
-              <Popover.Content side="top" align="start" sideOffset={6} className="anim-pop z-30 w-64 rounded-md bg-surface-2 p-1 shadow-menu">
+              <Popover.Content side="top" align="start" sideOffset={6} className="anim-pop z-30 w-64 rounded-md bg-card p-1 shadow-menu">
                 <div className="flex items-center gap-3 px-2.5 py-3">
                   <Avatar name={me.user.name} size={40} round />
                   <div className="min-w-0">
                     <div className="truncate text-sm font-semibold">{me.user.name}</div>
-                    <div className="truncate text-xs text-fg-muted">{me.user.email}</div>
+                    <div className="truncate text-xs text-muted-foreground">{me.user.email}</div>
                   </div>
                 </div>
                 <div className="my-1 h-px bg-border" />
-                <Link to="/account/security" className={menuItem} onClick={() => setAcctOpen(false)}><Shield /> Account security</Link>
+                <Link to="/account/security" className={menuItem} onClick={() => setAcctOpen(false)}><ShieldLock /> Account security</Link>
                 <div className="my-1 h-px bg-border" />
                 <div className="flex items-center justify-between px-1">
-                  <button className="flex h-9 items-center gap-2 rounded-md px-1.5 text-sm text-fg-muted hover:text-fg" onClick={toggle}>
+                  <button className="flex h-9 items-center gap-2 rounded-md px-1.5 text-sm text-muted-foreground hover:text-foreground" onClick={toggle}>
                     {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
                     {theme === "dark" ? "Light theme" : "Dark theme"}
                   </button>
-                  <button className="flex h-9 items-center gap-2 rounded-md px-1.5 text-sm text-danger hover:bg-danger-subtle" onClick={() => void logout()}>
-                    Log out <LogOut className="size-4" />
+                  <button className="flex h-9 items-center gap-2 rounded-md px-1.5 text-sm text-error hover:bg-destructive/10" onClick={() => void logout()}>
+                    Log out <Logout className="size-4" />
                   </button>
                 </div>
               </Popover.Content>
@@ -172,7 +180,7 @@ export function WorkspaceShell() {
         </div>
       </aside>
 
-      <main className="mr-2 mb-2 min-h-0 overflow-auto rounded-md border border-border bg-surface">
+      <main className="mr-2 mb-2 min-h-0 overflow-auto rounded-md border border-border bg-card">
         <div className="mx-auto max-w-[880px] px-8 py-10">
           <Outlet />
         </div>

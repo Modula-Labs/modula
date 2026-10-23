@@ -1529,6 +1529,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tonic",

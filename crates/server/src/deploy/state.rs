@@ -80,6 +80,8 @@ pub async fn apply_event(db: &PgPool, node: Uuid, ev: &DeploymentEvent) -> AppRe
             .execute(&mut *tx)
             .await?;
             kick.extend(old.into_iter().flatten());
+            // This node's routes now point at the new deployment.
+            kick.push(node);
         }
         (DeploymentPhase::Failed, "deploying") => {
             sqlx::query(

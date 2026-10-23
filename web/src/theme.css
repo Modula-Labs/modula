@@ -1,0 +1,199 @@
+/* Copied from design/tokens.css (the design source of truth). Edit the knobs there
+   first, then copy here. */
+
+/*
+ * Modula Deploy theme — Kobra (shadcn registry @kobra) components: neutral greys, teal only on the primary button and the logo. Checkboxes, radios and switches use --foreground (switch knob --background).
+ *
+ * Drop-in for a shadcn / Kobra project (Tailwind v4): import this file from the app's
+ * global CSS instead of the stock shadcn colour block. Variable names are shadcn's, so
+ * `npx shadcn@latest add @kobra/<component>` works unchanged.
+ *
+ * Default theme is dark: put class="dark" on <html>. Light is the same knobs.
+ *
+ * To re-theme, edit ONLY the four knobs below.
+ *   --brand-h  hue of primary buttons, links, focus ring, "Deploying"   (teal 188)
+ *   --brand-c  primary chroma, 0 = grey primary                          (.1)
+ *   --tint-h   hue mixed into every grey surface                         (200)
+ *   --tint-c   amount of that hue, 0 = Kobra's stock neutral greys       (0)
+ * Presets: teal 188/.1/200/0 (default) · violet 302/.21/292/.022 · indigo 275/.19/270/.02 · blue 255/.17/255/.016
+ *          emerald 160/.14/200/.01 · mono 0/0/0/0
+ *
+ * Fonts: Kobra uses ABC Diatype (commercial licence). Geist / Geist Mono stand in;
+ * swap --app-font-sans if Diatype is licensed.
+ *
+ * Glows: none in brand colour; focus ring and selection are neutral.
+ * Contrast (checked): foreground/muted-foreground/badges/status text >= 4.5:1 on card in
+ * both themes; white on primary 4.9:1 at L .52 (both themes,
+ * teal preset). Keep --primary at L <= .52 for high-luminance hues (teal, green).
+ */
+
+:root {
+  /* knobs */
+  --brand-h: 188;
+  --brand-c: 0.1;
+  --tint-h: 200;
+  --tint-c: 0;
+
+  --radius: 0.625rem; /* 10px; sm 6 · md 8 · lg 10 · xl 14 */
+  --app-font-sans: "Geist Variable", "Geist", "ABC Diatype", ui-sans-serif, system-ui, sans-serif;
+  --app-font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* light */
+  --background: oklch(0.985 calc(var(--tint-c) * 0.25) var(--tint-h));
+  --foreground: oklch(0.2 var(--tint-c) var(--tint-h));
+  --card: oklch(1 0 0);
+  --card-foreground: var(--foreground);
+  --popover: oklch(1 0 0);
+  --popover-foreground: var(--foreground);
+  --primary: oklch(0.52 var(--brand-c) var(--brand-h));
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.955 calc(var(--tint-c) * 0.6) var(--tint-h));
+  --secondary-foreground: var(--foreground);
+  --muted: oklch(0.96 calc(var(--tint-c) * 0.5) var(--tint-h));
+  --muted-foreground: oklch(0.5 var(--tint-c) var(--tint-h));
+  --accent: oklch(0.95 calc(var(--tint-c) * 0.6) var(--tint-h));
+  --accent-foreground: var(--foreground);
+  --nav-hover: var(--accent);
+  --destructive: oklch(0.55 0.21 27);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0 0 0 / 0.09);
+  --input: oklch(0 0 0 / 0.14);
+  --ring: oklch(0.6 0 0);
+
+  /* ours (not in stock shadcn) */
+  --brand-text: oklch(0.25 0 0);   /* links, active text: neutral (teal stays on buttons) */
+  --brand-soft: oklch(0 0 0 / 0.05); /* selected rows, staged chips: neutral, no tint */
+  --canvas-dot: oklch(0 0 0 / 0.1);
+
+  /* status — Kobra's names (toast, alerts) */
+  --error: oklch(0.5 0.21 27.3);
+  --warning: oklch(0.5 0.14 70);
+  --success: oklch(0.5 0.13 152);
+  --info: oklch(0.5 0.17 255);
+
+  /* badges — Kobra's names + red/violet/neutral */
+  --badge-blue-bg: oklch(0.62 0.19 258 / 0.12);
+  --badge-blue-fg: oklch(0.48 0.17 258);
+  --badge-green-bg: oklch(0.62 0.16 152 / 0.12);
+  --badge-green-fg: oklch(0.46 0.125 152);
+  --badge-amber-bg: oklch(0.62 0.15 75 / 0.14);
+  --badge-amber-fg: oklch(0.48 0.115 75);
+  --badge-red-bg: oklch(0.62 0.2 25 / 0.12);
+  --badge-red-fg: oklch(0.5 0.19 27);
+  --badge-violet-bg: oklch(0 0 0 / 0.07); /* 'Deploying' / emphasis: neutral strong */
+  --badge-violet-fg: oklch(0.3 0 0);
+  --badge-neutral-bg: oklch(0 0 0 / 0.06);
+  --badge-neutral-fg: var(--muted-foreground);
+
+  /* charts: neutral greys (no brand tint) */
+  --chart-1: oklch(0.36 0 0);
+  --chart-2: oklch(0.45 0 0);
+  --chart-3: oklch(0.55 0 0);
+  --chart-4: oklch(0.65 0 0);
+  --chart-5: oklch(0.74 0 0);
+
+  /* sidebar */
+  --sidebar: oklch(0.975 calc(var(--tint-c) * 0.4) var(--tint-h));
+  --sidebar-foreground: var(--foreground);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+  --sidebar-accent: var(--accent);
+  --sidebar-accent-foreground: var(--foreground);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--ring);
+}
+
+.dark {
+  --background: oklch(0.205 var(--tint-c) var(--tint-h));
+  --foreground: oklch(0.975 calc(var(--tint-c) * 0.25) var(--tint-h));
+  --card: oklch(0.232 var(--tint-c) var(--tint-h));
+  --popover: oklch(0.255 var(--tint-c) var(--tint-h));
+  --primary: oklch(0.52 var(--brand-c) var(--brand-h));
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.305 var(--tint-c) var(--tint-h));
+  --muted: oklch(0.28 var(--tint-c) var(--tint-h));
+  --muted-foreground: oklch(0.72 calc(var(--tint-c) * 1.4) var(--tint-h));
+  --accent: oklch(0.305 var(--tint-c) var(--tint-h));
+  --destructive: oklch(0.55 0.2 25);
+  --border: oklch(1 0 0 / 0.1);
+  --input: oklch(1 0 0 / 0.15);
+  --ring: oklch(0.62 0 0);
+
+  --brand-text: oklch(0.93 0 0);
+  --brand-soft: oklch(1 0 0 / 0.07);
+  --canvas-dot: oklch(1 0 0 / 0.07);
+
+  --error: oklch(0.704 0.191 22.2);
+  --warning: oklch(0.704 0.15 75);
+  --success: oklch(0.704 0.15 152);
+  --info: oklch(0.704 0.15 255);
+
+  --badge-blue-bg: oklch(0.62 0.19 258 / 0.18);
+  --badge-blue-fg: oklch(0.78 0.13 258);
+  --badge-green-bg: oklch(0.62 0.16 152 / 0.18);
+  --badge-green-fg: oklch(0.78 0.15 152);
+  --badge-amber-bg: oklch(0.62 0.15 75 / 0.18);
+  --badge-amber-fg: oklch(0.8 0.13 75);
+  --badge-red-bg: oklch(0.62 0.2 25 / 0.18);
+  --badge-red-fg: oklch(0.78 0.14 25);
+  --badge-violet-bg: oklch(1 0 0 / 0.1);
+  --badge-violet-fg: oklch(0.9 0 0);
+  --badge-neutral-bg: oklch(1 0 0 / 0.08);
+
+  --chart-1: oklch(0.76 0 0);
+  --chart-2: oklch(0.69 0 0);
+  --chart-3: oklch(0.62 0 0);
+  --chart-4: oklch(0.55 0 0);
+  --chart-5: oklch(0.48 0 0);
+
+  --sidebar: oklch(0.218 var(--tint-c) var(--tint-h));
+  --sidebar-border: oklch(1 0 0 / 0.08);
+}
+
+@theme inline {
+  --font-sans: var(--app-font-sans);
+  --font-mono: var(--app-font-mono);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-nav-hover: var(--nav-hover);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand-text: var(--brand-text);
+  --color-brand-soft: var(--brand-soft);
+  --color-error: var(--error);
+  --color-warning: var(--warning);
+  --color-success: var(--success);
+  --color-info: var(--info);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}

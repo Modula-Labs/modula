@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
 use common::*;
+use modula_node::edge::RecordingEdge;
 use modula_node::join::{JoinArgs, join};
 use modula_node::runtime::fake::FakeRuntime;
 use serde_json::{Value, json};
@@ -21,6 +22,7 @@ struct Cluster {
     app: TestApp,
     admin: String,
     server_url: String,
+    edge: Arc<RecordingEdge>,
     stop: CancellationToken,
 }
 
@@ -45,6 +47,7 @@ async fn cluster(pool: PgPool) -> Cluster {
         app,
         admin,
         server_url: format!("https://localhost:{port}"),
+        edge: Arc::new(RecordingEdge::default()),
         stop,
     }
 }
@@ -68,6 +71,16 @@ where
 }
 
 impl Cluster {
+    /// The upstream the node's edge currently routes `host` to.
+    fn routed(&self, host: &str) -> Option<std::net::SocketAddr> {
+        let last = self.edge.last.lock().unwrap();
+        last.as_ref()?
+            .routes
+            .iter()
+            .find(|r| r.hostname == host)
+            .map(|r| r.upstream)
+    }
+
     async fn join_token(&self) -> Value {
         let r = self
             .app
@@ -97,7 +110,12 @@ impl Cluster {
         .expect("join");
         let rt = Arc::new(FakeRuntime::new());
         let stop = self.stop.child_token();
-        tokio::spawn(modula_node::session::run(dir, rt.clone(), stop.clone()));
+        tokio::spawn(modula_node::session::run(
+            dir,
+            rt.clone(),
+            Some(self.edge.clone()),
+            stop.clone(),
+        ));
         let node = id.meta.node_id;
         wait_for("node online", || async {
             let r = self
@@ -296,12 +314,35 @@ async fn deploy_redeploy_logs_and_revoke(pool: PgPool) {
     );
     assert!(body.contains("event: end"));
 
+    // A generated domain is routed to the serving container.
+    let r = c
+        .app
+        .call(
+            Method::POST,
+            &format!("/api/service-instances/{instance}/domains"),
+            Some(&c.admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let host = r.json["hostname"].as_str().unwrap().to_owned();
+    assert!(
+        host.starts_with("api-") && host.ends_with(".apps.test"),
+        "{host}"
+    );
+    wait_for("route to d1", || async { c.routed(&host).is_some() }).await;
+    let d1_upstream = c.routed(&host).unwrap();
+
     // A redeploy replaces the running deployment only once it is healthy.
     let d2 = c.deploy(instance).await;
     c.wait_status(d2, "active").await;
     c.wait_status(d1, "removed").await;
     wait_for("old container stopped", || async {
         rt.running_deployments() == [d2.to_string()].into()
+    })
+    .await;
+    wait_for("route moved to d2", || async {
+        c.routed(&host).is_some_and(|u| u != d1_upstream)
     })
     .await;
 

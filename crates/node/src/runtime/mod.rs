@@ -55,6 +55,13 @@ pub trait Runtime: Send + Sync + 'static {
     /// Stop gracefully (SIGTERM, then SIGKILL after a grace period) and delete.
     async fn remove(&self, container_id: &str) -> anyhow::Result<()>;
 
+    /// The container's address on its environment network, once it has one.
+    async fn address(
+        &self,
+        container_id: &str,
+        environment_id: &str,
+    ) -> anyhow::Result<Option<std::net::IpAddr>>;
+
     /// One HTTP health probe: `GET path` on the container's port inside its
     /// environment network. `Ok(true)` only for a 2xx response.
     async fn probe(

@@ -263,6 +263,24 @@ impl Runtime for DockerRuntime {
         Ok(())
     }
 
+    async fn address(
+        &self,
+        container_id: &str,
+        environment_id: &str,
+    ) -> anyhow::Result<Option<std::net::IpAddr>> {
+        let info = self.docker.inspect_container(container_id, None).await?;
+        let ip = info
+            .network_settings
+            .and_then(|n| n.networks)
+            .and_then(|mut n| n.remove(&network_name(environment_id)))
+            .and_then(|e| e.ip_address)
+            .filter(|ip| !ip.is_empty());
+        Ok(match ip {
+            Some(ip) => Some(ip.parse()?),
+            None => None,
+        })
+    }
+
     async fn probe(
         &self,
         container_id: &str,
@@ -274,15 +292,11 @@ impl Runtime for DockerRuntime {
             path.starts_with('/') && path.bytes().all(|b| b.is_ascii_graphic()),
             "invalid health check path"
         );
-        let info = self.docker.inspect_container(container_id, None).await?;
-        let ip = info
-            .network_settings
-            .and_then(|n| n.networks)
-            .and_then(|mut n| n.remove(&network_name(environment_id)))
-            .and_then(|e| e.ip_address)
-            .filter(|ip| !ip.is_empty())
+        let ip = self
+            .address(container_id, environment_id)
+            .await?
             .context("container has no address yet")?;
-        let addr = SocketAddr::new(ip.parse()?, port);
+        let addr = SocketAddr::new(ip, port);
         let attempt = async {
             let mut conn = tokio::net::TcpStream::connect(addr).await?;
             let req = format!(

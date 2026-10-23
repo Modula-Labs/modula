@@ -34,6 +34,9 @@ pub fn config() -> Config {
         trusted_proxies: vec!["127.0.0.1".parse().unwrap()],
         node_listen: "127.0.0.1:0".parse().unwrap(),
         node_url: "https://localhost:7101".parse().unwrap(),
+        apps_domain: Some("apps.test".into()),
+        edge_tls: modula_server::config::EdgeTls::Acme,
+        acme_email: None,
     }
 }
 
@@ -273,6 +276,7 @@ pub struct Chain {
     pub instance: Uuid,
     pub variable: Uuid,
     pub deployment: Uuid,
+    pub domain: Uuid,
     pub node: Uuid,
 }
 
@@ -285,6 +289,7 @@ impl TestApp {
             instance: Uuid::now_v7(),
             variable: Uuid::now_v7(),
             deployment: Uuid::now_v7(),
+            domain: Uuid::now_v7(),
             node: Uuid::now_v7(),
         };
         let db = self.db();
@@ -343,6 +348,14 @@ impl TestApp {
         .bind(c.deployment)
         .bind(c.instance)
         .bind(c.node)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO domains (id, service_instance_id, hostname, kind) VALUES ($1, $2, $1::text || '.apps.test', 'generated')",
+        )
+        .bind(c.domain)
+        .bind(c.instance)
         .execute(db)
         .await
         .unwrap();

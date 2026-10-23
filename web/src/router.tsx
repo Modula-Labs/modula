@@ -1,11 +1,15 @@
 import { QueryClient } from "@tanstack/react-query";
-import { Outlet, createRootRouteWithContext, createRoute, createRouter, redirect } from "@tanstack/react-router";
+import { Suspense, lazy } from "react";
+import { Outlet, createRootRouteWithContext, createRoute, createRouter, redirect, useNavigate } from "@tanstack/react-router";
 import { SudoDialog } from "./components/SudoDialog";
 import { WorkspaceShell } from "./components/shell/WorkspaceShell";
 import { ApiError, api } from "./lib/api";
 import { AccountSecurityPage } from "./pages/AccountSecurity";
 import { LoginPage } from "./pages/Login";
 import { ProjectsPage } from "./pages/Projects";
+import { ServersPage } from "./pages/Servers";
+import type { ProjectSearch } from "./pages/project/ProjectPage";
+import type { ServiceTab } from "./pages/project/ServiceSheet";
 import { SetupPage } from "./pages/Setup";
 import { TwoFactorPage } from "./pages/TwoFactor";
 
@@ -75,18 +79,49 @@ const appRoute = createRoute({
       throw e;
     }
   },
-  component: WorkspaceShell,
+  component: Outlet,
 });
 
-const projectsRoute = createRoute({ getParentRoute: () => appRoute, path: "/projects", component: ProjectsPage });
-const securityRoute = createRoute({ getParentRoute: () => appRoute, path: "/account/security", component: AccountSecurityPage });
+/** Pages inside the workspace sidebar. */
+const workspaceRoute = createRoute({ getParentRoute: () => appRoute, id: "workspace", component: WorkspaceShell });
+const projectsRoute = createRoute({ getParentRoute: () => workspaceRoute, path: "/projects", component: ProjectsPage });
+const securityRoute = createRoute({ getParentRoute: () => workspaceRoute, path: "/account/security", component: AccountSecurityPage });
+const serversRoute = createRoute({ getParentRoute: () => workspaceRoute, path: "/servers", component: ServersPage });
+
+// The canvas (React Flow) is the heaviest part of the app; load it on demand.
+const ProjectPage = lazy(() => import("./pages/project/ProjectPage").then((m) => ({ default: m.ProjectPage })));
+
+const tabs: ServiceTab[] = ["deployments", "variables", "settings"];
+const str = (v: unknown) => (typeof v === "string" && v.length <= 64 ? v : undefined);
+
+/** The project canvas is full-bleed, outside the workspace sidebar. */
+const projectRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: "/projects/$projectId",
+  validateSearch: (s: Record<string, unknown>): ProjectSearch => ({
+    env: str(s.env),
+    service: str(s.service),
+    tab: tabs.find((t) => t === s.tab),
+    deployment: str(s.deployment),
+  }),
+  component: function Project() {
+    const { projectId } = projectRoute.useParams();
+    const search = projectRoute.useSearch();
+    const navigate = useNavigate({ from: projectRoute.fullPath });
+    return (
+      <Suspense fallback={null}>
+        <ProjectPage projectId={projectId} search={search} setSearch={(s) => void navigate({ search: s })} />
+      </Suspense>
+    );
+  },
+});
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
   setupRoute,
   loginRoute,
   twoFactorRoute,
-  appRoute.addChildren([projectsRoute, securityRoute]),
+  appRoute.addChildren([workspaceRoute.addChildren([projectsRoute, securityRoute, serversRoute]), projectRoute]),
 ]);
 
 export function makeRouter(queryClient: QueryClient) {

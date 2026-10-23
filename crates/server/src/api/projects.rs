@@ -46,6 +46,8 @@ pub struct InstanceSummary {
     pub node_id: Option<Uuid>,
     pub latest_deployment_id: Option<Uuid>,
     pub latest_deployment_status: Option<String>,
+    /// The first public hostname, shown on the canvas card.
+    pub domain: Option<String>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -159,7 +161,9 @@ pub async fn detail(state: &AppState, id: Uuid) -> AppResult<ProjectDetail> {
     .await?;
     let instances = sqlx::query_as(
         "SELECT i.id, i.service_id, i.environment_id, i.node_id,
-                d.id AS latest_deployment_id, d.status AS latest_deployment_status
+                d.id AS latest_deployment_id, d.status AS latest_deployment_status,
+                (SELECT hostname FROM domains WHERE service_instance_id = i.id
+                 ORDER BY created_at LIMIT 1) AS domain
          FROM service_instances i
          JOIN services s ON s.id = i.service_id
          LEFT JOIN LATERAL (

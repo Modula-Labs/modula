@@ -24,6 +24,12 @@ enum Command {
     },
     /// Replace the first-run setup token and print it (only while setup is pending).
     SetupToken,
+    /// Print a single-use command that joins a new server to this instance.
+    JoinToken {
+        /// Minutes until the token expires.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..=1440))]
+        ttl_minutes: u16,
+    },
 }
 
 #[tokio::main]
@@ -45,6 +51,24 @@ async fn main() -> anyhow::Result<()> {
         Command::Keygen { out } => {
             let key = config::write_new_master_key(&out)?;
             eprintln!("wrote master key {} to {}", key.id(), out.display());
+            Ok(())
+        }
+        Command::JoinToken { ttl_minutes } => {
+            use secrecy::ExposeSecret;
+            let cfg = Config::from_env()?;
+            let db = modula_server::db::connect(&cfg.database_url).await?;
+            modula_server::db::migrate(&db).await?;
+            let keys = modula_server::keyring::Keyring::new(cfg.load_master_key()?);
+            let pki = modula_server::pki::Pki::load_or_init(&db, &keys).await?;
+            let ttl = time::Duration::minutes(i64::from(ttl_minutes));
+            let (token, expires) = modula_server::nodes::create_join_token(&db, None, ttl)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            eprintln!("Run this on the new server (expires {expires}):");
+            println!(
+                "{}",
+                modula_server::nodes::join_command(&cfg, token.expose_secret(), &pki.fingerprint())
+            );
             Ok(())
         }
         Command::SetupToken => {

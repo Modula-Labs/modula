@@ -20,6 +20,31 @@ pub struct Config {
     pub node_listen: SocketAddr,
     /// The address nodes dial, embedded in join commands and the server cert.
     pub node_url: Url,
+    /// Parent domain for generated app hostnames, e.g. `apps.example.com`
+    /// (`localhost` in local development). None = generated domains disabled.
+    pub apps_domain: Option<String>,
+    /// How nodes' Caddy obtains certificates for app hostnames.
+    pub edge_tls: EdgeTls,
+    /// Contact address for ACME accounts (optional).
+    pub acme_email: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeTls {
+    Acme,
+    Internal,
+    Off,
+}
+
+impl EdgeTls {
+    fn parse(s: &str) -> anyhow::Result<Self> {
+        Ok(match s {
+            "acme" => Self::Acme,
+            "internal" => Self::Internal,
+            "off" => Self::Off,
+            other => bail!("MODULA_EDGE_TLS must be acme, internal or off (got {other})"),
+        })
+    }
 }
 
 impl Config {
@@ -53,11 +78,34 @@ impl Config {
                 .parse()
                 .context("invalid MODULA_NODE_LISTEN")?,
             node_url: Url::parse("https://placeholder.invalid").expect("static url"),
+            apps_domain: None,
+            edge_tls: EdgeTls::Acme,
+            acme_email: std::env::var("MODULA_ACME_EMAIL")
+                .ok()
+                .filter(|e| !e.is_empty()),
         };
         let mut cfg = cfg;
         cfg.node_url = match std::env::var("MODULA_NODE_URL") {
             Ok(u) => u.parse().context("invalid MODULA_NODE_URL")?,
             Err(_) => default_node_url(&cfg.public_url, cfg.node_listen.port())?,
+        };
+        let local = cfg.is_local_dev();
+        cfg.apps_domain = match std::env::var("MODULA_APPS_DOMAIN") {
+            Ok(d) if !d.trim().is_empty() => Some(normalize_apps_domain(&d)?),
+            _ if local => Some("localhost".into()),
+            _ => None,
+        };
+        cfg.edge_tls = match std::env::var("MODULA_EDGE_TLS") {
+            Ok(v) => EdgeTls::parse(v.trim())?,
+            Err(_)
+                if cfg
+                    .apps_domain
+                    .as_deref()
+                    .is_some_and(|d| d == "localhost" || d.ends_with(".localhost")) =>
+            {
+                EdgeTls::Internal
+            }
+            Err(_) => EdgeTls::Acme,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -110,6 +158,24 @@ impl Config {
     pub fn load_master_key(&self) -> anyhow::Result<MasterKey> {
         load_master_key(&self.master_key_file)
     }
+}
+
+/// Lowercase, no scheme, no trailing dot, valid DNS labels.
+pub fn normalize_apps_domain(raw: &str) -> anyhow::Result<String> {
+    let d = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    let ok = !d.is_empty()
+        && d.len() <= 200
+        && d.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+    if !ok {
+        bail!("MODULA_APPS_DOMAIN must be a domain like apps.example.com");
+    }
+    Ok(d)
 }
 
 fn default_node_url(public: &Url, port: u16) -> anyhow::Result<Url> {
@@ -174,6 +240,20 @@ mod tests {
             trusted_proxies: vec![],
             node_listen: "127.0.0.1:7101".parse().unwrap(),
             node_url: "https://localhost:7101".parse().unwrap(),
+            apps_domain: None,
+            edge_tls: EdgeTls::Acme,
+            acme_email: None,
+        }
+    }
+
+    #[test]
+    fn apps_domain_rules() {
+        assert_eq!(
+            normalize_apps_domain(" Apps.Example.COM. ").unwrap(),
+            "apps.example.com"
+        );
+        for bad in ["", "https://x.com", "-a.com", "a..com", "a b.com"] {
+            assert!(normalize_apps_domain(bad).is_err(), "{bad}");
         }
     }
 

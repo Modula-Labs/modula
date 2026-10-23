@@ -14,9 +14,5 @@ docker exec modula-cloud-pg psql -U modula -tc "SELECT 1 FROM pg_database WHERE 
 mkdir -p .dev
 [[ -f .dev/master.key ]] || cargo run -q -p modula-server -- keygen --out .dev/master.key
 
-export MODULA_DATABASE_URL=postgres://modula:modula@127.0.0.1:55432/modula_dev
-export MODULA_REDIS_URL=redis://:modula@127.0.0.1:56379
-export MODULA_PUBLIC_URL=${MODULA_PUBLIC_URL:-http://localhost:7100}
-export MODULA_LISTEN=${MODULA_LISTEN:-127.0.0.1:7100}
-export MODULA_MASTER_KEY_FILE=.dev/master.key
+set -a; . scripts/dev-env.sh; set +a
 exec cargo run -q -p modula-server -- serve

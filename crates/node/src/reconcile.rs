@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::edge::{EdgeConfig, EdgeSink, ResolvedRoute};
 use crate::runtime::{Container, Runtime};
 
 const REPAIR_EVERY: Duration = Duration::from_secs(2);
@@ -34,6 +35,7 @@ struct Tracked {
 
 pub struct Reconciler {
     runtime: Arc<dyn Runtime>,
+    edge: Option<Arc<dyn EdgeSink>>,
     out: mpsc::Sender<pb::NodeMessage>,
     tracked: Mutex<HashMap<String, Tracked>>,
     applied: AtomicU64,
@@ -60,9 +62,14 @@ fn workload_is_sane(w: &pb::Workload) -> bool {
 }
 
 impl Reconciler {
-    pub fn new(runtime: Arc<dyn Runtime>, out: mpsc::Sender<pb::NodeMessage>) -> Arc<Self> {
+    pub fn new(
+        runtime: Arc<dyn Runtime>,
+        edge: Option<Arc<dyn EdgeSink>>,
+        out: mpsc::Sender<pb::NodeMessage>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             runtime,
+            edge,
             out,
             tracked: Mutex::new(HashMap::new()),
             applied: AtomicU64::new(0),
@@ -169,8 +176,12 @@ impl Reconciler {
             self.runtime.ensure_network(net).await?;
         }
 
-        // 1. Stop what is no longer wanted.
+        // 1. Point the edge at what serves now, *before* retiring anything, so
+        //    traffic moves to a new deployment before the old one stops.
         let containers = self.runtime.containers().await?;
+        self.apply_edge(ds, &containers).await;
+
+        // 2. Stop what is no longer wanted.
         for c in containers
             .iter()
             .filter(|c| !wanted.contains(c.deployment_id.as_str()))
@@ -205,7 +216,7 @@ impl Reconciler {
             }
         }
 
-        // 2. Start, adopt, and watch what is wanted.
+        // 3. Start, adopt, and watch what is wanted.
         let containers = self.runtime.containers().await?;
         for w in workloads {
             let mine: Vec<&Container> = containers
@@ -215,7 +226,7 @@ impl Reconciler {
             self.observe(w, &mine).await?;
         }
 
-        // 3. Drop networks nobody uses any more.
+        // 4. Drop networks nobody uses any more.
         let used: HashSet<String> = self
             .runtime
             .containers()
@@ -251,6 +262,42 @@ impl Reconciler {
             msg: Some(Msg::Report(report)),
         });
         Ok(())
+    }
+
+    /// Resolve routes to running containers and hand them to the edge. Edge
+    /// failures are logged, never fatal: workloads keep reconciling.
+    async fn apply_edge(&self, ds: &pb::DesiredState, containers: &[Container]) {
+        let Some(edge) = &self.edge else { return };
+        let mut routes = Vec::new();
+        for r in &ds.routes {
+            let Ok(port) = u16::try_from(r.port) else {
+                continue;
+            };
+            for c in containers
+                .iter()
+                .filter(|c| c.deployment_id == r.deployment_id && c.running)
+            {
+                match self.runtime.address(&c.id, &c.environment_id).await {
+                    Ok(Some(ip)) => routes.push(ResolvedRoute {
+                        hostname: r.hostname.clone(),
+                        upstream: std::net::SocketAddr::new(ip, port),
+                    }),
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(error = format!("{e:#}"), "cannot resolve a route upstream")
+                    }
+                }
+            }
+        }
+        let settings = ds.edge.clone().unwrap_or_default();
+        let cfg = EdgeConfig {
+            routes,
+            tls: pb::TlsMode::try_from(settings.tls).unwrap_or(pb::TlsMode::TlsAcme),
+            acme_email: settings.acme_email,
+        };
+        if let Err(e) = edge.apply(&cfg).await {
+            tracing::warn!(error = format!("{e:#}"), "edge update failed; will retry");
+        }
     }
 
     fn rollout_running(&self, deployment: &str) -> bool {
@@ -447,6 +494,7 @@ mod tests {
                 environment_id: env.to_string(),
             }],
             workloads: ws,
+            ..Default::default()
         }
     }
 
@@ -488,7 +536,7 @@ mod tests {
     async fn rolls_out_supersedes_and_removes() {
         let rt = Arc::new(FakeRuntime::new());
         let (tx, mut rx) = mpsc::channel(256);
-        let r = Reconciler::new(rt.clone(), tx);
+        let r = Reconciler::new(rt.clone(), None, tx);
         let (env, d1, d2) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
 
         r.apply(&state(1, env, vec![workload(d1, env, "/health")]))
@@ -539,7 +587,7 @@ mod tests {
     async fn failures_are_reported_once_and_cleaned_up() {
         let rt = Arc::new(FakeRuntime::new());
         let (tx, mut rx) = mpsc::channel(256);
-        let r = Reconciler::new(rt.clone(), tx);
+        let r = Reconciler::new(rt.clone(), None, tx);
         let (env, bad_pull, unhealthy) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
         rt.unpullable
             .lock()
@@ -570,7 +618,7 @@ mod tests {
     async fn crashes_and_recoveries_are_reported() {
         let rt = Arc::new(FakeRuntime::new());
         let (tx, mut rx) = mpsc::channel(256);
-        let r = Reconciler::new(rt.clone(), tx);
+        let r = Reconciler::new(rt.clone(), None, tx);
         let (env, dep) = (Uuid::now_v7(), Uuid::now_v7());
         let ds = state(1, env, vec![workload(dep, env, "")]);
         r.apply(&ds).await.unwrap();
@@ -591,10 +639,49 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn routes_follow_the_serving_deployment() {
+        let rt = Arc::new(FakeRuntime::new());
+        let edge = Arc::new(crate::edge::RecordingEdge::default());
+        let (tx, _rx) = mpsc::channel(256);
+        let r = Reconciler::new(rt.clone(), Some(edge.clone()), tx);
+        let (env, dep) = (Uuid::now_v7(), Uuid::now_v7());
+        let mut ds = state(1, env, vec![workload(dep, env, "")]);
+        r.apply(&ds).await.unwrap();
+        settle(&r, dep).await;
+        ds.generation = 2;
+        ds.routes = vec![pb::Route {
+            hostname: "api.apps.test".into(),
+            deployment_id: dep.to_string(),
+            port: 8080,
+        }];
+        ds.edge = Some(pb::EdgeSettings {
+            tls: pb::TlsMode::TlsInternal as i32,
+            acme_email: String::new(),
+        });
+        r.apply(&ds).await.unwrap();
+        let cfg = edge.last.lock().unwrap().clone().unwrap();
+        assert_eq!(cfg.tls, pb::TlsMode::TlsInternal);
+        assert_eq!(cfg.routes.len(), 1);
+        assert_eq!(cfg.routes[0].upstream.port(), 8080);
+        // A crashed container is not routed to.
+        rt.crash(&dep.to_string(), 1);
+        r.apply(&ds).await.unwrap();
+        assert!(
+            edge.last
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .routes
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn malformed_workloads_are_ignored() {
         let rt = Arc::new(FakeRuntime::new());
         let (tx, _rx) = mpsc::channel(256);
-        let r = Reconciler::new(rt.clone(), tx);
+        let r = Reconciler::new(rt.clone(), None, tx);
         let env = Uuid::now_v7();
         let mut w = workload(Uuid::now_v7(), env, "");
         w.service_name = "web; rm -rf /".into();

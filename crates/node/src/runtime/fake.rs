@@ -168,6 +168,18 @@ impl Runtime for FakeRuntime {
         Ok(())
     }
 
+    async fn address(
+        &self,
+        container_id: &str,
+        _env: &str,
+    ) -> anyhow::Result<Option<std::net::IpAddr>> {
+        let n: u8 = container_id
+            .trim_start_matches("fake-")
+            .parse()
+            .unwrap_or(0);
+        Ok(Some(std::net::IpAddr::from([10, 88, 0, n])))
+    }
+
     async fn probe(
         &self,
         container_id: &str,

@@ -73,7 +73,7 @@ export function OtpInput({
             const filled = set(e.clipboardData.getData("text"));
             refs.current[Math.min(filled.length, 5)]?.focus();
           }}
-          className="h-[52px] w-11 rounded-sm border border-border-strong bg-surface text-center font-mono text-[22px] text-fg focus:border-accent focus:outline-none aria-[invalid=true]:border-danger"
+          className="h-[52px] w-11 rounded-sm border border-input bg-card text-center font-mono text-[22px] text-foreground focus:border-ring focus:outline-none aria-[invalid=true]:border-destructive"
         />
       ))}
     </div>

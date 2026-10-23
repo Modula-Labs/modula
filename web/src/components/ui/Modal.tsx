@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { X } from "lucide-react";
+import { IconX } from "@tabler/icons-react";
 import type { ReactNode } from "react";
 
 export function Modal({
@@ -22,22 +22,25 @@ export function Modal({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-40 bg-[hsl(var(--overlay))] backdrop-blur-[2px]" />
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60 backdrop-blur-[2px]" />
         <Dialog.Content
           style={{ width }}
-          className="anim-modal fixed top-[18%] left-1/2 z-50 max-w-[calc(100vw-32px)] -translate-x-1/2 rounded-lg bg-surface-2 p-6 shadow-modal"
+          className="anim-modal fixed top-[18%] left-1/2 z-50 max-w-[calc(100vw-32px)] -translate-x-1/2 rounded-xl bg-popover p-6 text-popover-foreground shadow-modal"
         >
           <div className="mb-4 flex items-start justify-between gap-4">
             <div>
               <Dialog.Title className="text-lg font-semibold">{title}</Dialog.Title>
               {description ? (
-                <Dialog.Description className="mt-1 text-sm text-fg-muted">{description}</Dialog.Description>
+                <Dialog.Description className="mt-1 text-sm text-muted-foreground">{description}</Dialog.Description>
               ) : (
                 <Dialog.Description className="sr-only">{title}</Dialog.Description>
               )}
             </div>
-            <Dialog.Close className="rounded-md p-1 text-fg-muted hover:bg-surface-3 hover:text-fg" aria-label="Close">
-              <X className="size-4" />
+            <Dialog.Close
+              className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+              aria-label="Close"
+            >
+              <IconX className="size-4" stroke={1.8} />
             </Dialog.Close>
           </div>
           {children}

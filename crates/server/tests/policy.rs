@@ -53,6 +53,7 @@ async fn fixture(
         ResourceKind::ServiceInstance => chain.instance,
         ResourceKind::Variable => chain.variable,
         ResourceKind::Deployment => chain.deployment,
+        ResourceKind::Domain => chain.domain,
         ResourceKind::Node => chain.node,
     }
 }

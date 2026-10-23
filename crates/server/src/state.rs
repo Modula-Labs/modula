@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::error::AppResult;
@@ -23,6 +24,9 @@ pub struct Inner {
     pub jobs_notify: Notify,
     /// Attached nodes.
     pub hub: Hub,
+    /// Cancelled when the server starts shutting down; long-lived streams
+    /// (node sessions, log follows) end on it so shutdown stays fast.
+    pub shutdown: CancellationToken,
     pki: tokio::sync::OnceCell<Pki>,
 }
 
@@ -35,6 +39,7 @@ impl AppState {
             limiter,
             jobs_notify: Notify::new(),
             hub: Hub::default(),
+            shutdown: CancellationToken::new(),
             pki: tokio::sync::OnceCell::new(),
         }))
     }

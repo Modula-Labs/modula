@@ -62,7 +62,7 @@ export function SetupPage() {
         </Field>
         <div className="-mt-2 grid grid-cols-3 gap-1" aria-hidden>
           {[1, 2, 3].map((i) => (
-            <div key={i} className={`h-1 rounded-full ${s.score >= i ? (s.score === 3 ? "bg-success" : s.score === 2 ? "bg-accent" : "bg-warn") : "bg-surface-3"}`} />
+            <div key={i} className={`h-1 rounded-full ${s.score >= i ? (s.score === 3 ? "bg-success" : s.score === 2 ? "bg-primary" : "bg-warning") : "bg-accent"}`} />
           ))}
         </div>
         <Button type="submit" variant="primary" size="lg" loading={busy} disabled={s.score === 0}>

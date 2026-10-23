@@ -22,13 +22,16 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
+use crate::edge::EdgeSink;
 use crate::identity::{Identity, pem, pem_blocks};
 use crate::join::{connect, renewal_request};
 use crate::reconcile::Reconciler;
 use crate::runtime::Runtime;
 
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(15);
-const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Kept short so a server upgrade or restart costs nodes seconds, not minutes;
+/// a failed attempt is one TCP connect.
+const MAX_BACKOFF: Duration = Duration::from_secs(8);
 /// A session that lasted this long resets the backoff.
 const STABLE_AFTER: Duration = Duration::from_secs(60);
 /// Renew when less than this much certificate lifetime is left.
@@ -40,10 +43,12 @@ const LOG_BATCH_WAIT: Duration = Duration::from_millis(50);
 pub async fn run(
     dir: PathBuf,
     runtime: Arc<dyn Runtime>,
+    edge: Option<Arc<dyn EdgeSink>>,
     stop: CancellationToken,
 ) -> anyhow::Result<()> {
     let (out_tx, mut out_rx) = mpsc::channel(1024);
-    let reconciler = Reconciler::new(runtime.clone(), out_tx);
+    let has_edge = edge.is_some();
+    let reconciler = Reconciler::new(runtime.clone(), edge, out_tx);
     let (desired_tx, desired_rx) = watch::channel(None);
     let reconcile_task = tokio::spawn(reconciler.clone().run(desired_rx, stop.clone()));
 
@@ -58,6 +63,7 @@ pub async fn run(
             desired: &desired_tx,
             outbox: &mut out_rx,
             stop: &stop,
+            has_edge,
         };
         match ctx.session().await {
             Ok(()) => break,
@@ -87,6 +93,7 @@ struct Ctx<'a> {
     desired: &'a watch::Sender<Option<pb::DesiredState>>,
     outbox: &'a mut mpsc::Receiver<pb::NodeMessage>,
     stop: &'a CancellationToken,
+    has_edge: bool,
 }
 
 fn msg(m: Out) -> pb::NodeMessage {
@@ -228,7 +235,11 @@ impl Ctx<'_> {
         pb::Hello {
             protocol: pb::PROTOCOL,
             node_version: crate::VERSION.to_owned(),
-            capabilities: vec!["logs".into(), "renew".into()],
+            capabilities: ["logs", "renew"]
+                .into_iter()
+                .chain(self.has_edge.then_some("edge"))
+                .map(String::from)
+                .collect(),
             applied_generation: self.reconciler.applied_generation(),
             info: Some(host_info(self.runtime.describe().await.unwrap_or_default())),
         }

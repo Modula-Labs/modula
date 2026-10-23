@@ -5,10 +5,12 @@ staged changes, GitHub auto-deploys, variables, domains, database backups, and
 the `modula-deploy` CLI. Rust control plane + `modula-node` on each server; Docker runtime,
 Caddy edge, Railpack builds.
 
-Status: **C1a — servers and image deploys.** On top of C0 (auth, 2FA, sudo
-mode, web shell): servers join over mTLS with single-use tokens, and projects,
-environments, services, encrypted variables and image deployments work through
-the API, with live deploy logs. No UI for these yet (C1b).
+Status: **C1b — edge and canvas (in progress).** On top of C0 (auth, 2FA, sudo
+mode) and C1a (servers join over mTLS; projects, environments, services,
+encrypted variables and image deployments): every server runs Caddy, configured
+by `modula-node`, with generated domains and on-demand TLS; the dashboard has the
+project canvas, service and deployment sheets, live logs, variables and a
+Servers page. Next in C1b: `install.sh` (install, upgrade, recovery kit).
 
 ## Layout
 
@@ -42,7 +44,14 @@ cargo test -p modula-node --test docker -- --ignored    # real Docker round trip
 ```
 
 On macOS, Docker Desktop can't route to container IPs from the host, so HTTP
-health checks only pass when `modula-node` itself runs on Linux.
+health checks only pass when `modula-node` itself runs on Linux. For that, run a
+simulated server: a privileged container with its own dockerd, Caddy and
+`modula-node`, joined to the dev server (`scripts/dev-server.sh` must be running):
+
+```bash
+scripts/dev-node.sh dev-node-1 8080      # apps on http://<generated>.localhost:8080
+scripts/dev-node.sh dev-node-1 --rm      # remove it
+```
 
 ## Security model (enforced in code and tests)
 
@@ -73,6 +82,9 @@ health checks only pass when `modula-node` itself runs on Linux.
   single-use, hashed, 1-hour join token, and pin the root CA fingerprint. The
   node endpoint accepts only the node's current certificate serial, so revoking
   a server cuts it off. A node can only report on deployments placed on it.
+- **Edge:** Caddy's config is replaced as a whole by `modula-node` over a unix
+  admin socket (`persist: false`). Hostnames route only to a serving deployment;
+  on-demand TLS asks the node, which allows only hostnames it routes.
 - **Containers:** all capabilities dropped except a small allowlist,
   `no-new-privileges`, an init process, pids/memory/CPU limits, one network per
   environment, nothing published on the host. Config fields like `privileged`

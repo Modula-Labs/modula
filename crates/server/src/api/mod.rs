@@ -1,6 +1,7 @@
 pub mod account;
 pub mod auth;
 pub mod deployments;
+pub mod domains;
 pub mod instance;
 pub mod nodes;
 pub mod projects;
@@ -63,6 +64,10 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/deployments/{deployment_id}", Resource(Action::DeploymentRead), deployments::get)
         .delete("/api/deployments/{deployment_id}", Resource(Action::DeploymentRemove), deployments::remove)
         .get("/api/deployments/{deployment_id}/logs", Resource(Action::DeploymentRead), deployments::logs)
+        // Domains
+        .get("/api/service-instances/{instance_id}/domains", Resource(Action::InstanceRead), domains::list)
+        .post("/api/service-instances/{instance_id}/domains", Resource(Action::DomainCreate), domains::generate)
+        .delete("/api/domains/{domain_id}", Resource(Action::DomainDelete), domains::delete)
         // Servers (instance admins)
         .get("/api/nodes", Instance(Action::NodeList), nodes::list)
         .post("/api/nodes/join-tokens", Instance(Action::NodeJoinTokenCreate), nodes::create_join_token)

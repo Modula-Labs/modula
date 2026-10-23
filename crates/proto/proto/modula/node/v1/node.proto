@@ -152,6 +152,32 @@ message DesiredState {
   uint64 generation = 1;
   repeated Network networks = 2;
   repeated Workload workloads = 3;
+  // Public hostnames served by this node's edge (Caddy).
+  repeated Route routes = 4;
+  EdgeSettings edge = 5;
+}
+
+// hostname → the container of one deployment on this node.
+message Route {
+  string hostname = 1;
+  string deployment_id = 2;
+  uint32 port = 3;
+}
+
+enum TlsMode {
+  TLS_UNSPECIFIED = 0;
+  // Publicly trusted certificates (ACME), issued on demand only for
+  // hostnames the node's ask endpoint approves.
+  TLS_ACME = 1;
+  // Caddy's internal CA (local development, *.localhost).
+  TLS_INTERNAL = 2;
+  // Plain HTTP only (local development behind something else).
+  TLS_OFF = 3;
+}
+
+message EdgeSettings {
+  TlsMode tls = 1;
+  string acme_email = 2;
 }
 
 // One isolated bridge network per environment.

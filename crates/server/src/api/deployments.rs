@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
@@ -297,5 +297,6 @@ pub async fn logs(
             }
         },
     );
+    let stream = stream.take_until(state.shutdown.clone().cancelled_owned());
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }

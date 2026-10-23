@@ -72,7 +72,7 @@ pub async fn create_join_token(
     meta: RequestMeta,
 ) -> AppResult<Json<JoinToken>> {
     let (token, expires_at) =
-        crate::nodes::grpc::create_join_token(&state, actor.user_id, JOIN_TOKEN_TTL).await?;
+        crate::nodes::create_join_token(&state.db, Some(actor.user_id), JOIN_TOKEN_TTL).await?;
     let fingerprint = state.pki().await?.fingerprint();
     let server = state.cfg.node_url.as_str().trim_end_matches('/').to_owned();
     Entry::new("node.join_token.create", &meta)
@@ -82,7 +82,7 @@ pub async fn create_join_token(
         .await?;
     let token = token.expose_secret().to_owned();
     Ok(Json(JoinToken {
-        command: format!("modula-node join --server {server} --token {token} --ca {fingerprint}"),
+        command: crate::nodes::join_command(&state.cfg, &token, &fingerprint),
         token,
         expires_at,
         server,

@@ -43,7 +43,7 @@ export function TwoFactorPage() {
     <AuthCard
       title="Two-factor authentication"
       subtitle={recovery ? "Enter one of your recovery codes. Each code works once." : "Enter the 6-digit code from your authenticator app."}
-      footer={<Link to="/login" className="hover:text-fg">← Back to sign in</Link>}
+      footer={<Link to="/login" className="hover:text-foreground">← Back to sign in</Link>}
     >
       <form
         className="flex flex-col gap-4"
@@ -71,7 +71,7 @@ export function TwoFactorPage() {
         )}
         <button
           type="button"
-          className="self-start text-sm text-accent-text hover:underline"
+          className="self-start text-sm text-brand-text hover:underline"
           onClick={() => {
             setRecovery(!recovery);
             setCode("");

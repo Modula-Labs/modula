@@ -28,6 +28,12 @@ pub struct Pki {
     int_key: KeyPair,
 }
 
+pub struct ServerCert {
+    pub chain_der: Vec<Vec<u8>>,
+    pub key_der: Vec<u8>,
+    pub not_after: OffsetDateTime,
+}
+
 pub struct Issued {
     pub der: Vec<u8>,
     pub serial_hex: String,
@@ -179,9 +185,10 @@ impl Pki {
         })
     }
 
-    /// Server certificate for the node listener. Returns (chain PEM, key PEM);
-    /// the chain includes the root so joining nodes can check their pin.
-    pub fn issue_server_cert(&self, hosts: &[String]) -> anyhow::Result<(String, String)> {
+    /// Server certificate for the node listener: the chain (leaf,
+    /// intermediate, root, so joining nodes can check their pin) and a fresh
+    /// PKCS#8 key, both DER.
+    pub fn issue_server_cert(&self, hosts: &[String]) -> anyhow::Result<ServerCert> {
         if hosts.is_empty() {
             bail!("no node host names configured");
         }
@@ -203,13 +210,15 @@ impl Pki {
         p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         p.use_authority_key_identifier_extension = true;
         let cert = p.signed_by(&key, &self.issuer()?)?;
-        let chain = format!(
-            "{}{}{}",
-            cert.pem(),
-            pem("CERTIFICATE", &self.int_der),
-            pem("CERTIFICATE", &self.root_der)
-        );
-        Ok((chain, key.serialize_pem()))
+        Ok(ServerCert {
+            chain_der: vec![
+                cert.der().to_vec(),
+                self.int_der.clone(),
+                self.root_der.clone(),
+            ],
+            key_der: key.serialize_der(),
+            not_after: p.not_after,
+        })
     }
 
     pub fn root_pem(&self) -> String {
@@ -252,11 +261,17 @@ pub fn node_identity(leaf_der: &[u8]) -> anyhow::Result<(Uuid, String)> {
     Ok((Uuid::parse_str(id)?, serial_hex))
 }
 
+/// A throwaway CA for unit tests (no database).
+#[cfg(test)]
+pub(crate) fn test_pki() -> Pki {
+    tests::pki()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn pki() -> Pki {
+    pub(super) fn pki() -> Pki {
         let root_key = KeyPair::generate().unwrap();
         let root_params = ca_params("root", Duration::days(1), None).unwrap();
         let root = root_params.self_signed(&root_key).unwrap();
@@ -312,21 +327,12 @@ mod tests {
     fn rejects_garbage_csr_and_foreign_certs() {
         let p = pki();
         assert!(p.issue_node_cert(Uuid::now_v7(), b"not a csr").is_err());
-        let (chain, _) = p
+        let cert = p
             .issue_server_cert(&["localhost".into(), "127.0.0.1".into()])
             .unwrap();
-        assert_eq!(chain.matches("BEGIN CERTIFICATE").count(), 3);
+        assert_eq!(cert.chain_der.len(), 3);
         // A server cert has no node URI.
-        let leaf_b64: String = chain
-            .lines()
-            .skip(1)
-            .take_while(|l| !l.starts_with("-----"))
-            .collect();
-        use base64::Engine as _;
-        let leaf = base64::engine::general_purpose::STANDARD
-            .decode(leaf_b64)
-            .unwrap();
-        assert!(node_identity(&leaf).is_err());
+        assert!(node_identity(&cert.chain_der[0]).is_err());
     }
 
     #[test]

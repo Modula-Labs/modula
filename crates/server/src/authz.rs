@@ -76,6 +76,8 @@ pub enum Action {
     DeploymentCreate,
     DeploymentRead,
     DeploymentRemove,
+    DomainCreate,
+    DomainDelete,
     /// Instance-level, no path parameter.
     NodeList,
     /// Instance-level, no path parameter.
@@ -101,6 +103,8 @@ impl Action {
                 K::ServiceInstance
             }
             Self::VariableReveal => K::Variable,
+            Self::DomainCreate => K::ServiceInstance,
+            Self::DomainDelete => K::Domain,
             Self::DeploymentRead | Self::DeploymentRemove => K::Deployment,
             Self::NodeRevoke => K::Node,
             Self::NodeList | Self::NodeJoinTokenCreate => return None,
@@ -128,7 +132,9 @@ impl Action {
             | Self::ServiceCreate
             | Self::ServiceDelete
             | Self::InstanceUpdate
-            | Self::VariableReveal => Role::Member,
+            | Self::VariableReveal
+            | Self::DomainCreate
+            | Self::DomainDelete => Role::Member,
             Self::WorkspaceUpdate
             | Self::WorkspaceDelete
             | Self::ProjectDelete
@@ -164,6 +170,8 @@ impl Action {
             | Self::DeploymentCreate
             | Self::DeploymentRead
             | Self::DeploymentRemove
+            | Self::DomainCreate
+            | Self::DomainDelete
             | Self::NodeList => false,
         }
     }
@@ -181,6 +189,7 @@ pub enum ResourceKind {
     ServiceInstance,
     Variable,
     Deployment,
+    Domain,
     Node,
 }
 
@@ -194,6 +203,7 @@ impl ResourceKind {
         ResourceKind::ServiceInstance,
         ResourceKind::Variable,
         ResourceKind::Deployment,
+        ResourceKind::Domain,
         ResourceKind::Node,
     ];
 
@@ -207,6 +217,7 @@ impl ResourceKind {
             Self::ServiceInstance => "instance_id",
             Self::Variable => "variable_id",
             Self::Deployment => "deployment_id",
+            Self::Domain => "domain_id",
             Self::Node => "node_id",
         }
     }
@@ -221,7 +232,8 @@ impl ResourceKind {
             | Self::Service
             | Self::ServiceInstance
             | Self::Variable
-            | Self::Deployment => OwnerKind::Workspace,
+            | Self::Deployment
+            | Self::Domain => OwnerKind::Workspace,
         }
     }
 
@@ -260,6 +272,12 @@ impl ResourceKind {
                  JOIN service_instances i ON i.id = d.service_instance_id
                  JOIN services s ON s.id = i.service_id
                  JOIN projects p ON p.id = s.project_id WHERE d.id = $1"
+            }
+            Self::Domain => {
+                "SELECT p.workspace_id FROM domains m
+                 JOIN service_instances i ON i.id = m.service_instance_id
+                 JOIN services s ON s.id = i.service_id
+                 JOIN projects p ON p.id = s.project_id WHERE m.id = $1"
             }
             Self::Node => {
                 "SELECT '00000000-0000-0000-0000-000000000000'::uuid FROM nodes WHERE id = $1"

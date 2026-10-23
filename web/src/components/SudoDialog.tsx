@@ -89,7 +89,7 @@ export function SudoDialog() {
         )}
         <div className="flex items-center justify-between">
           {totp ? (
-            <button type="button" className="text-sm text-accent-text hover:underline" onClick={() => { setRecovery(!recovery); setValue(""); }}>
+            <button type="button" className="text-sm text-brand-text hover:underline" onClick={() => { setRecovery(!recovery); setValue(""); }}>
               {recovery ? "Use authenticator app" : "Use a recovery code"}
             </button>
           ) : <span />}

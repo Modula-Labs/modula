@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Download, Globe, KeyRound, ScrollText, Smartphone } from "lucide-react";
+import { Copy, Download, FileText, Key, Phone, World } from "@/components/ui/icons";
 import QRCode from "qrcode";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
@@ -14,7 +14,7 @@ function Section({ title, description, children }: { title: string; description:
   return (
     <section className="border-t border-border py-8 first:border-t-0 first:pt-0">
       <h2 className="text-lg font-semibold">{title}</h2>
-      <p className="mt-1 text-sm text-fg-muted">{description}</p>
+      <p className="mt-1 text-sm text-muted-foreground">{description}</p>
       <div className="mt-5">{children}</div>
     </section>
   );
@@ -22,11 +22,11 @@ function Section({ title, description, children }: { title: string; description:
 
 function Row({ icon, title, meta, action }: { icon: ReactNode; title: string; meta: ReactNode; action: ReactNode }) {
   return (
-    <div className="flex items-center gap-4 rounded-lg border border-border bg-surface-2 px-4 py-3">
-      <span className="text-fg-muted [&>svg]:size-5">{icon}</span>
+    <div className="flex items-center gap-4 rounded-lg border border-border bg-card px-4 py-3">
+      <span className="text-muted-foreground [&>svg]:size-5">{icon}</span>
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium">{title}</div>
-        <div className="text-xs text-fg-muted">{meta}</div>
+        <div className="text-xs text-muted-foreground">{meta}</div>
       </div>
       {action}
     </div>
@@ -37,7 +37,7 @@ export function RecoveryCodes({ codes }: { codes: string[] }) {
   const text = codes.join("\n");
   return (
     <div className="flex flex-col gap-3">
-      <div className="grid grid-cols-2 gap-2 rounded-md bg-surface-3 p-4 font-mono text-[13px]">
+      <div className="grid grid-cols-2 gap-2 rounded-md bg-accent p-4 font-mono text-[13px]">
         {codes.map((c) => (
           <span key={c}>{c}</span>
         ))}
@@ -130,8 +130,8 @@ function EnrollDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
               {qr ? <img src={qr} alt="QR code for your authenticator app" width={168} height={168} /> : <Skeleton className="size-full" />}
             </div>
             <div className="min-w-0 text-sm">
-              <div className="text-fg-muted">Can't scan? Enter this key manually:</div>
-              <code className="mt-2 block rounded-md bg-surface-3 p-2 font-mono text-[13px] break-all select-all">
+              <div className="text-muted-foreground">Can't scan? Enter this key manually:</div>
+              <code className="mt-2 block rounded-md bg-accent p-2 font-mono text-[13px] break-all select-all">
                 {enrollment?.secret.match(/.{1,4}/g)?.join(" ") ?? "…"}
               </code>
             </div>
@@ -198,7 +198,7 @@ export function AccountSecurityPage() {
 
   return (
     <div>
-      <p className="text-[30px] leading-9 text-fg-muted">Account</p>
+      <p className="text-[30px] leading-9 text-muted-foreground">Account</p>
       <h1 className="mt-6 border-b border-border pb-4 text-xl font-semibold">Security</h1>
 
       <div className="mt-8">
@@ -208,26 +208,26 @@ export function AccountSecurityPage() {
           ) : (
             <div className="flex flex-col gap-3">
               <Row
-                icon={<Smartphone />}
+                icon={<Phone />}
                 title="Authenticator app"
                 meta={sec.totpEnabled ? <Badge tone="success">On</Badge> : "Not set up"}
                 action={
                   sec.totpEnabled ? (
                     <Button variant="danger-outline" onClick={() => setDisable(true)}>Disable 2FA</Button>
                   ) : (
-                    <Button variant="outline-accent" onClick={() => setEnroll(true)}>Set up</Button>
+                    <Button variant="outline" onClick={() => setEnroll(true)}>Set up</Button>
                   )
                 }
               />
               {sec.totpEnabled ? (
                 <Row
-                  icon={<ScrollText />}
+                  icon={<FileText />}
                   title="Recovery codes"
                   meta={`${sec.backupCodesRemaining} of 10 unused`}
                   action={<Button loading={regen.isPending} onClick={() => regen.mutate()}>Regenerate codes</Button>}
                 />
               ) : null}
-              <Row icon={<KeyRound />} title="Passkeys" meta="Coming soon: sign in with your device." action={<Button disabled>Add passkey</Button>} />
+              <Row icon={<Key />} title="Passkeys" meta="Coming soon: sign in with your device." action={<Button disabled>Add passkey</Button>} />
             </div>
           )}
         </Section>
@@ -254,7 +254,7 @@ export function AccountSecurityPage() {
         <Section title="Sessions" description="Devices signed in to your account.">
           <div className="overflow-hidden rounded-lg border border-border">
             <table className="w-full text-sm">
-              <thead className="bg-surface-2 text-left text-xs text-fg-muted">
+              <thead className="bg-card text-left text-xs text-muted-foreground">
                 <tr>
                   <th className="px-4 py-2 font-medium">Device</th>
                   <th className="px-4 py-2 font-medium">Last active</th>
@@ -267,14 +267,14 @@ export function AccountSecurityPage() {
                   <tr key={s.id} className="border-t border-border">
                     <td className="px-4 py-3">
                       <span className="flex items-center gap-2">
-                        <Globe className="size-4 text-fg-muted" />
+                        <World className="size-4 text-muted-foreground" />
                         {describeAgent(s.userAgent)}
-                        {s.current ? <span className="text-fg-muted">(this device)</span> : null}
+                        {s.current ? <span className="text-muted-foreground">(this device)</span> : null}
                       </span>
-                      <span className="ml-6 font-mono text-xs text-fg-subtle">{s.ip}</span>
+                      <span className="ml-6 font-mono text-xs text-muted-foreground">{s.ip}</span>
                     </td>
-                    <td className="px-4 py-3 text-fg-muted">{relativeTime(s.lastSeenAt)}</td>
-                    <td className="px-4 py-3 text-fg-muted">{new Date(s.createdAt).toLocaleDateString()}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{relativeTime(s.lastSeenAt)}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{new Date(s.createdAt).toLocaleDateString()}</td>
                     <td className="px-4 py-3 text-right">
                       {!s.current ? (
                         <Button size="sm" variant="ghost" onClick={() => revoke.mutate(s.id)}>Revoke</Button>

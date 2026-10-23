@@ -90,6 +90,117 @@ export interface SessionInfo {
   current: boolean;
 }
 
+export interface Project {
+  id: string;
+  workspaceId: string;
+  name: string;
+  description: string;
+  createdAt: string;
+}
+export interface Environment {
+  id: string;
+  name: string;
+  createdAt: string;
+}
+export interface ServiceSummary {
+  id: string;
+  name: string;
+  icon: string | null;
+}
+export type DeploymentStatus = "queued" | "deploying" | "active" | "failed" | "crashed" | "removed" | "cancelled";
+export interface InstanceSummary {
+  id: string;
+  serviceId: string;
+  environmentId: string;
+  nodeId: string | null;
+  latestDeploymentId: string | null;
+  latestDeploymentStatus: DeploymentStatus | null;
+  domain: string | null;
+}
+export interface ProjectDetail extends Project {
+  environments: Environment[];
+  services: ServiceSummary[];
+  instances: InstanceSummary[];
+}
+export type RestartPolicy = "on_failure" | "always" | "never";
+export interface ServiceConfig {
+  source: { type: "image"; image: string };
+  startCommand?: string[];
+  port: number;
+  healthcheckPath?: string;
+  healthcheckTimeoutSecs: number;
+  restartPolicy: RestartPolicy;
+  memoryMb?: number;
+  cpuMillis?: number;
+}
+export interface Instance {
+  id: string;
+  serviceId: string;
+  serviceName: string;
+  environmentId: string;
+  environmentName: string;
+  projectId: string;
+  nodeId: string | null;
+  config: ServiceConfig;
+  updatedAt: string;
+}
+export interface VariableInfo {
+  id: string;
+  name: string;
+  sealed: boolean;
+  updatedAt: string;
+}
+export interface Deployment {
+  id: string;
+  serviceInstanceId: string;
+  nodeId: string | null;
+  status: DeploymentStatus;
+  image: string;
+  trigger: string;
+  error: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+}
+export interface DeploymentEvent {
+  phase: string;
+  message: string;
+  at: string;
+}
+export interface DeploymentDetail extends Deployment {
+  events: DeploymentEvent[];
+}
+export interface Domain {
+  id: string;
+  hostname: string;
+  kind: "generated" | "custom";
+  createdAt: string;
+}
+export interface NodeInfo {
+  id: string;
+  name: string;
+  status: "online" | "offline" | "revoked";
+  nodeVersion: string | null;
+  runtime: string | null;
+  info: { hostname?: string; os?: string; arch?: string; cpus?: number; memoryBytes?: number };
+  desiredGeneration: number;
+  appliedGeneration: number;
+  lastSeenAt: string | null;
+  certExpiresAt: string;
+  createdAt: string;
+  connected: boolean;
+}
+export interface JoinToken {
+  token: string;
+  expiresAt: string;
+  server: string;
+  fingerprint: string;
+  command: string;
+}
+
+const enc = encodeURIComponent;
+
 export const api = {
   instance: () => get<InstanceStatus>("/api/instance"),
   me: () => get<Me>("/api/auth/me"),
@@ -110,4 +221,38 @@ export const api = {
   sessions: () => get<SessionInfo[]>("/api/account/sessions"),
   revokeSession: (id: string) => del<{ ok: true }>(`/api/account/sessions/${encodeURIComponent(id)}`),
   createWorkspace: (name: string) => post<{ id: string; name: string }>("/api/workspaces", { name }),
+
+  projects: (workspace: string) => get<Project[]>(`/api/workspaces/${enc(workspace)}/projects`),
+  createProject: (workspace: string, b: { name: string; description?: string }) =>
+    post<ProjectDetail>(`/api/workspaces/${enc(workspace)}/projects`, b),
+  project: (id: string) => get<ProjectDetail>(`/api/projects/${enc(id)}`),
+  deleteProject: (id: string) => del<{ ok: true }>(`/api/projects/${enc(id)}`),
+  createEnvironment: (project: string, name: string) =>
+    post<Environment>(`/api/projects/${enc(project)}/environments`, { name }),
+  deleteEnvironment: (id: string) => del<{ ok: true }>(`/api/environments/${enc(id)}`),
+
+  createService: (project: string, b: { name: string; config: Partial<ServiceConfig> & { source: ServiceConfig["source"] } }) =>
+    post<{ id: string; name: string; instances: Instance[] }>(`/api/projects/${enc(project)}/services`, b),
+  deleteService: (id: string) => del<{ ok: true }>(`/api/services/${enc(id)}`),
+  serviceInstance: (id: string) => get<Instance>(`/api/service-instances/${enc(id)}`),
+  updateInstance: (id: string, config: ServiceConfig) => patch<Instance>(`/api/service-instances/${enc(id)}`, { config }),
+
+  variables: (instance: string) => get<VariableInfo[]>(`/api/service-instances/${enc(instance)}/variables`),
+  updateVariables: (instance: string, b: { set?: Record<string, string>; sealed?: string[]; delete?: string[] }) =>
+    patch<VariableInfo[]>(`/api/service-instances/${enc(instance)}/variables`, b),
+  revealVariable: (id: string) => post<{ name: string; value: string }>(`/api/variables/${enc(id)}/reveal`),
+
+  deployments: (instance: string) => get<Deployment[]>(`/api/service-instances/${enc(instance)}/deployments`),
+  deploy: (instance: string) => post<DeploymentDetail>(`/api/service-instances/${enc(instance)}/deployments`),
+  deployment: (id: string) => get<DeploymentDetail>(`/api/deployments/${enc(id)}`),
+  removeDeployment: (id: string) => del<DeploymentDetail>(`/api/deployments/${enc(id)}`),
+  deploymentLogsUrl: (id: string, tail = 500) => `/api/deployments/${enc(id)}/logs?tail=${tail}&follow=true`,
+
+  domains: (instance: string) => get<Domain[]>(`/api/service-instances/${enc(instance)}/domains`),
+  generateDomain: (instance: string) => post<Domain>(`/api/service-instances/${enc(instance)}/domains`),
+  deleteDomain: (id: string) => del<{ ok: true }>(`/api/domains/${enc(id)}`),
+
+  nodes: () => get<NodeInfo[]>("/api/nodes"),
+  createJoinToken: () => post<JoinToken>("/api/nodes/join-tokens"),
+  revokeNode: (id: string) => del<{ ok: true }>(`/api/nodes/${enc(id)}`),
 };

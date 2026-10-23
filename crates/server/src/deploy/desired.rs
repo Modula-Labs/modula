@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use super::config::{RestartPolicy, ServiceConfig};
 use super::env;
+use crate::config::EdgeTls;
 use crate::error::AppResult;
 use crate::state::AppState;
 
@@ -22,6 +23,14 @@ struct Row {
     service_id: Uuid,
     service_name: String,
     project_id: Uuid,
+    public_domain: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct RouteRow {
+    hostname: String,
+    deployment_id: Uuid,
+    config: serde_json::Value,
 }
 
 pub async fn build(state: &AppState, node: Uuid) -> AppResult<pb::DesiredState> {
@@ -31,7 +40,9 @@ pub async fn build(state: &AppState, node: Uuid) -> AppResult<pb::DesiredState> 
         .await?;
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT d.id, d.config, d.env_sealed, i.environment_id, e.name AS environment_name,
-                s.id AS service_id, s.name AS service_name, s.project_id
+                s.id AS service_id, s.name AS service_name, s.project_id,
+                (SELECT hostname FROM domains WHERE service_instance_id = i.id
+                 ORDER BY created_at LIMIT 1) AS public_domain
          FROM deployments d
          JOIN service_instances i ON i.id = d.service_instance_id
          JOIN environments e ON e.id = i.environment_id
@@ -65,6 +76,10 @@ pub async fn build(state: &AppState, node: Uuid) -> AppResult<pb::DesiredState> 
             (
                 "MODULA_PRIVATE_DOMAIN",
                 format!("{}.modula.internal", r.service_name),
+            ),
+            (
+                "MODULA_PUBLIC_DOMAIN",
+                r.public_domain.clone().unwrap_or_default(),
             ),
         ];
         // User variables win over platform defaults (e.g. a custom PORT);
@@ -109,6 +124,33 @@ pub async fn build(state: &AppState, node: Uuid) -> AppResult<pb::DesiredState> 
             } as i32,
         });
     }
+    // Public hostnames route to the serving deployment only (never one still
+    // rolling out), so traffic moves in the same snapshot that retires the old one.
+    let routes: Vec<RouteRow> = sqlx::query_as(
+        "SELECT m.hostname, d.id AS deployment_id, d.config
+         FROM domains m
+         JOIN deployments d ON d.service_instance_id = m.service_instance_id
+         WHERE d.node_id = $1 AND d.status IN ('active', 'crashed')
+         ORDER BY m.hostname",
+    )
+    .bind(node)
+    .fetch_all(&state.db)
+    .await?;
+    let mut pb_routes = Vec::with_capacity(routes.len());
+    for r in routes {
+        let cfg: ServiceConfig = serde_json::from_value(r.config).map_err(anyhow::Error::from)?;
+        pb_routes.push(pb::Route {
+            hostname: r.hostname,
+            deployment_id: r.deployment_id.to_string(),
+            port: u32::from(cfg.port),
+        });
+    }
+    let tls = match state.cfg.edge_tls {
+        EdgeTls::Acme => pb::TlsMode::TlsAcme,
+        EdgeTls::Internal => pb::TlsMode::TlsInternal,
+        EdgeTls::Off => pb::TlsMode::TlsOff,
+    };
+
     Ok(pb::DesiredState {
         generation: generation as u64,
         networks: networks
@@ -118,5 +160,10 @@ pub async fn build(state: &AppState, node: Uuid) -> AppResult<pb::DesiredState> 
             })
             .collect(),
         workloads,
+        routes: pb_routes,
+        edge: Some(pb::EdgeSettings {
+            tls: tls as i32,
+            acme_email: state.cfg.acme_email.clone().unwrap_or_default(),
+        }),
     })
 }

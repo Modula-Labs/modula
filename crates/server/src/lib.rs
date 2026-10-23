@@ -51,7 +51,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
 
     let listen = cfg.listen;
     let state = AppState::new(db, cfg, Keyring::new(kek), RateLimiter::Redis(redis));
-    let stop = CancellationToken::new();
+    let stop = state.shutdown.clone();
     let worker = tokio::spawn(jobs::run_worker(
         state.clone(),
         jobs::Registry::default().on("sessions.cleanup", |s, _| async move {
@@ -145,4 +145,5 @@ async fn shutdown_signal(stop: CancellationToken) {
         _ = stop.cancelled() => {}
     }
     tracing::info!("shutting down");
+    stop.cancel();
 }

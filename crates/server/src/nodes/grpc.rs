@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::time::Duration;
 
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use modula_crypto::token::{self, prefix};
 use modula_proto::node::v1 as pb;
 use modula_proto::node::v1::node_message::Msg as In;
@@ -282,7 +282,9 @@ impl pb::node_server::Node for NodeService {
             });
         }
 
-        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+        // The node reconnects to whichever server comes back up.
+        let out = ReceiverStream::new(rx).take_until(self.state.shutdown.clone().cancelled_owned());
+        Ok(Response::new(Box::pin(out)))
     }
 }
 
@@ -343,22 +345,4 @@ async fn handle(
         }
     }
     Ok(())
-}
-
-/// Join tokens: `mcj_…`, single use, short-lived; only the hash is stored.
-pub async fn create_join_token(
-    state: &AppState,
-    created_by: Uuid,
-    ttl: time::Duration,
-) -> crate::error::AppResult<(secrecy::SecretString, time::OffsetDateTime)> {
-    let t = token::generate(prefix::NODE_JOIN)?;
-    let expires = time::OffsetDateTime::now_utc() + ttl;
-    sqlx::query("INSERT INTO node_join_tokens (id, token_hash, created_by, expires_at) VALUES ($1, $2, $3, $4)")
-        .bind(Uuid::now_v7())
-        .bind(t.hash.as_bytes())
-        .bind(created_by)
-        .bind(expires)
-        .execute(&state.db)
-        .await?;
-    Ok((t.plaintext, expires))
 }

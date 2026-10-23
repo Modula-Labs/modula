@@ -5,6 +5,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use modula_node::edge::EdgeSink;
+use modula_node::edge::ask::{self, Allowlist};
+use modula_node::edge::caddy::CaddyEdge;
 use modula_node::identity::Identity;
 use modula_node::join::{JoinArgs, join};
 use modula_node::runtime::docker::DockerRuntime;
@@ -48,7 +51,21 @@ enum Command {
         name: Option<String>,
     },
     /// Connect to the control plane and run workloads.
-    Run,
+    Run {
+        /// Caddy admin API: `unix:/path` or `host:port`.
+        #[arg(
+            long,
+            env = "MODULA_CADDY_ADMIN",
+            default_value = "unix:/run/caddy/admin.sock"
+        )]
+        caddy_admin: String,
+        /// Loopback address for Caddy's on-demand TLS `ask` endpoint.
+        #[arg(long, env = "MODULA_ASK_LISTEN", default_value = "127.0.0.1:7102")]
+        ask_listen: std::net::SocketAddr,
+        /// Run workloads without managing Caddy (no public routes).
+        #[arg(long)]
+        no_edge: bool,
+    },
     /// Show this server's identity.
     Status,
 }
@@ -87,9 +104,31 @@ async fn main() -> anyhow::Result<()> {
                 id.meta.node_id
             );
         }
-        Command::Run => {
+        Command::Run {
+            caddy_admin,
+            ask_listen,
+            no_edge,
+        } => {
             let runtime = Arc::new(DockerRuntime::connect()?);
             let stop = CancellationToken::new();
+            let edge: Option<Arc<dyn EdgeSink>> = if no_edge {
+                None
+            } else {
+                anyhow::ensure!(
+                    ask_listen.ip().is_loopback(),
+                    "--ask-listen must be a loopback address"
+                );
+                let allowlist = Allowlist::default();
+                let listener = tokio::net::TcpListener::bind(ask_listen)
+                    .await
+                    .with_context(|| format!("cannot bind {ask_listen}"))?;
+                tokio::spawn(ask::serve(listener, allowlist.clone(), stop.clone()));
+                Some(Arc::new(CaddyEdge::new(
+                    &caddy_admin,
+                    format!("http://{ask_listen}/ask"),
+                    allowlist,
+                )?))
+            };
             tokio::spawn({
                 let stop = stop.clone();
                 async move {
@@ -97,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
                     stop.cancel();
                 }
             });
-            session::run(cli.data_dir, runtime, stop).await?;
+            session::run(cli.data_dir, runtime, edge, stop).await?;
         }
         Command::Status => {
             let id = Identity::load(&cli.data_dir)?;
