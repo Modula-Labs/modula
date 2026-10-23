@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::model::{ProjectSpec, ServiceSpec, VarSpec};
 use super::remote::{RemoteEnv, RemoteService, RemoteVar};
@@ -257,7 +257,8 @@ pub fn normalize(config: &Value) -> Map<String, Value> {
 }
 
 /// The config `spec` asks for: the template's (or the defaults) with the
-/// file's settings on top. A local or omitted source keeps the current one.
+/// file's settings on top. A local or omitted source keeps the current one;
+/// a new service with a local source is created as one (`modula up` deploys it).
 /// A service created from a template keeps the template's settings as its
 /// base even when the file doesn't name the template.
 pub fn desired_config(spec: &ServiceSpec, remote: Option<&RemoteService>) -> Value {
@@ -270,6 +271,9 @@ pub fn desired_config(spec: &ServiceSpec, remote: Option<&RemoteService>) -> Val
         && let Some(source) = remote.and_then(|r| r.config.get("source"))
     {
         config.insert("source".into(), source.clone());
+    }
+    if remote.is_none() && spec.is_local() {
+        config.insert("source".into(), json!({ "type": "local" }));
     }
     Value::Object(config)
 }
@@ -589,12 +593,6 @@ pub fn plan(
     let mut services = Vec::new();
     for (name, s) in &spec.services {
         let have = r.service(name);
-        if have.is_none() && s.is_local() {
-            manual.push(format!(
-                "{name}: a local source can't create a service; create it first (`modula add` or the dashboard), then apply again and deploy the directory with `modula up`"
-            ));
-            continue;
-        }
         services.push(diff_service(
             name,
             s,
@@ -970,13 +968,12 @@ source = { local = "." }
         );
         assert_eq!(web.volume.as_deref(), Some("/cache"));
         assert_eq!(web.domains, [DomainChange::Generate]);
-        // Deleting a service or a volume, and creating a local service, are manual.
-        assert_eq!(p.manual.len(), 2, "{:?}", p.manual);
-        assert!(
-            p.manual
-                .iter()
-                .any(|m| m.starts_with("site:") && m.contains("up"))
-        );
+        // A local service is created as one; `modula up` deploys it.
+        let site = p.services.iter().find(|s| s.service == "site").unwrap();
+        assert_eq!(site.action, ServiceAction::Create);
+        assert_eq!(site.config, json!({ "source": { "type": "local" } }));
+        // Deleting a service or a volume is manual.
+        assert_eq!(p.manual.len(), 1, "{:?}", p.manual);
         assert!(
             p.manual
                 .iter()

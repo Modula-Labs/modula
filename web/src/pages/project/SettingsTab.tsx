@@ -57,7 +57,7 @@ export function joinArgs(a: string[] | undefined): string {
 }
 
 interface Form {
-  kind: "image" | "repo";
+  kind: "image" | "repo" | "local";
   image: string;
   repo: string;
   branch: string;
@@ -85,7 +85,7 @@ export const toForm = (c: ServiceConfig): Form => ({
   image: c.source.type === "image" ? c.source.image : "",
   repo: c.source.type === "repo" ? c.source.repo : "",
   branch: c.source.type === "repo" ? c.source.branch : "main",
-  rootDir: c.source.type === "repo" ? (c.source.rootDir ?? "") : "",
+  rootDir: c.source.type !== "image" ? (c.source.rootDir ?? "") : "",
   builder: c.builder ?? "railpack",
   dockerfilePath: c.dockerfilePath ?? "",
   buildCommand: c.buildCommand ?? "",
@@ -132,6 +132,20 @@ export const toConfig = (f: Form): ServiceConfig => {
   };
   if (f.kind === "image")
     return { source: { type: "image", image: f.image.trim() }, ...common };
+  const build = {
+    builder: f.builder,
+    dockerfilePath:
+      f.builder === "dockerfile"
+        ? f.dockerfilePath.trim() || undefined
+        : undefined,
+    buildCommand: f.buildCommand.trim() || undefined,
+  };
+  if (f.kind === "local")
+    return {
+      source: { type: "local", rootDir: f.rootDir.trim() || undefined },
+      ...build,
+      ...common,
+    };
   const watchPaths = f.watchPaths
     .split("\n")
     .map((l) => l.trim())
@@ -143,12 +157,7 @@ export const toConfig = (f: Form): ServiceConfig => {
       branch: f.branch.trim() || "main",
       rootDir: f.rootDir.trim() || undefined,
     },
-    builder: f.builder,
-    dockerfilePath:
-      f.builder === "dockerfile"
-        ? f.dockerfilePath.trim() || undefined
-        : undefined,
-    buildCommand: f.buildCommand.trim() || undefined,
+    ...build,
     autoDeploy: f.autoDeploy,
     watchPaths: watchPaths.length ? watchPaths : undefined,
     ...common,
@@ -206,11 +215,16 @@ export function SettingsTab({
 
   return (
     <div className="flex flex-col pb-20">
-      {form.kind === "repo" ? (
+      {form.kind !== "image" ? (
         <Section
           title="Source"
-          description="The repository every deploy builds from."
+          description={
+            form.kind === "repo"
+              ? "The repository every deploy builds from."
+              : "Local files, uploaded with `modula up` from your machine. Deploying again reuses the latest upload."
+          }
         >
+          {form.kind === "repo" ? (
           <Field label="Repository">
             {(p) => (
               <Input
@@ -222,7 +236,9 @@ export function SettingsTab({
               />
             )}
           </Field>
+          ) : null}
           <div className="grid grid-cols-2 gap-3">
+            {form.kind === "repo" ? (
             <Field label="Branch">
               {(p) => (
                 <Input
@@ -234,6 +250,7 @@ export function SettingsTab({
                 />
               )}
             </Field>
+            ) : null}
             <Field label="Root directory" hint="For monorepos.">
               {(p) => (
                 <Input
@@ -265,7 +282,9 @@ export function SettingsTab({
             <p className="text-xs text-muted-foreground">
               {form.builder === "railpack"
                 ? "Detects your language and builds without a Dockerfile."
-                : "Builds with a Dockerfile from the repository."}
+                : form.kind === "repo"
+                  ? "Builds with a Dockerfile from the repository."
+                  : "Builds with the Dockerfile in the uploaded files."}
             </p>
           </div>
           {form.builder === "dockerfile" ? (
@@ -300,6 +319,8 @@ export function SettingsTab({
               />
             )}
           </Field>
+          {form.kind === "repo" ? (
+          <>
           <label className="flex items-start gap-2.5 text-sm">
             <input
               type="checkbox"
@@ -331,6 +352,8 @@ export function SettingsTab({
               />
             )}
           </Field>
+          </>
+          ) : null}
         </Section>
       ) : (
         <Section title="Source" description="The image every deploy pulls.">

@@ -129,7 +129,7 @@ export interface InstanceSummary {
   latestDeploymentId: string | null;
   latestDeploymentStatus: DeploymentStatus | null;
   domain: string | null;
-  sourceType: "image" | "repo" | null;
+  sourceType: "image" | "repo" | "local" | null;
   repo: string | null;
   image?: string | null;
   /** Detected framework/runtime (e.g. "nextjs", "postgres"), used for the card icon. */
@@ -171,7 +171,10 @@ export interface ActivityGroup {
 }
 export type ActivityKind = "deployment" | "variable" | "config";
 export type RestartPolicy = "on_failure" | "always" | "never";
-export type ServiceSource = { type: "image"; image: string } | { type: "repo"; repo: string; branch: string; rootDir?: string };
+export type ServiceSource =
+  | { type: "image"; image: string }
+  | { type: "repo"; repo: string; branch: string; rootDir?: string }
+  | { type: "local"; rootDir?: string };
 export type Builder = "railpack" | "dockerfile";
 export interface ServiceConfig {
   source: ServiceSource;

@@ -178,7 +178,7 @@ impl Ctx {
         self.target_with(project, service)
     }
 
-    fn target_with(&self, project: ProjectDetail, service: Service) -> anyhow::Result<Target> {
+    pub fn target_with(&self, project: ProjectDetail, service: Service) -> anyhow::Result<Target> {
         let environment = self.environment(&project)?.clone();
         let instance = resolve::instance_id(&project, &service, &environment)?;
         Ok(Target {

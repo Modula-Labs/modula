@@ -176,7 +176,7 @@ modula server create --provider hetzner \
 | `--provider hetzner` | The only provider so far (default). |
 | `--location`, `--type` | From `server options`. |
 | `--name` | Server name, a DNS label (default `modula-main`). |
-| `--domain`, `--email` | Dashboard hostname; email for TLS and the admin. |
+| `--domain`, `--email` | Dashboard hostname (or `auto`: an instant `https://<ip>.sslip.io`, no DNS, apps get `<name>.<ip>.sslip.io`); email for TLS and the admin. |
 | `--ssh-key-file PATH` / `--ssh-key-id ID` / `--no-ssh-key` | Exactly one is required without a terminal. A file's key is reused if Hetzner has it. |
 | `--cloudflare-dns` [`--replace-dns`] | Create the A record with Cloudflare; replace existing A/AAAA/CNAME records for the domain (otherwise their presence is an error). |
 | `--admin-name` | The admin's display name (default `Admin`). |
@@ -196,6 +196,10 @@ Everything is checked before anything is created: all missing flags and
 variables are reported together (exit 2), and so are an unknown location or
 type, an SSH key id that doesn't exist, a Cloudflare zone the token can't
 see or conflicting DNS records.
+
+**No domain yet?** `--domain auto` gives the dashboard `https://<ip>.sslip.io`
+and every app a generated `<name>.<ip>.sslip.io` with real certificates;
+nothing to set up. Add your own domain later.
 
 **Without `--cloudflare-dns`** you (or the agent) must add the A record once
 the IP is known: watch for the `dns_waiting` event, which carries the

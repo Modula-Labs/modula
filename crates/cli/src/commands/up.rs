@@ -8,6 +8,10 @@
 //! SHA-256, then deployed: the service builds it with its usual settings
 //! (Railpack or Dockerfile, root directory, config file) without changing
 //! the service's configured source.
+//!
+//! With no app service to deploy to, `up` creates one (source: local files,
+//! the Dockerfile builder when the directory has a Dockerfile), named after
+//! `--service` or the directory, and links this directory to it.
 
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -45,7 +49,7 @@ pub struct Packed {
     pub sha256: String,
 }
 
-pub async fn run(ctx: &Ctx, args: UpArgs) -> anyhow::Result<i32> {
+pub async fn run(ctx: &mut Ctx, args: UpArgs) -> anyhow::Result<i32> {
     let dir = match &args.path {
         Some(p) => ctx.session.cwd.join(p),
         None => ctx.session.cwd.clone(),
@@ -54,7 +58,7 @@ pub async fn run(ctx: &Ctx, args: UpArgs) -> anyhow::Result<i32> {
         return Err(usage(format!("{} is not a directory", dir.display())));
     }
     let dir = dir.canonicalize()?;
-    let t = ctx.target().await?;
+    let t = target(ctx, &dir).await?;
 
     ctx.out.note(format!("Packing {}…", dir.display()));
     let archive = std::env::temp_dir().join(format!(
@@ -98,6 +102,96 @@ pub async fn run(ctx: &Ctx, args: UpArgs) -> anyhow::Result<i32> {
     ctx.out
         .either(&d, |o| o.line(format!("{} {}", d.id, o.status(&d.status))))?;
     Ok(code)
+}
+
+/// The service to deploy to: the named or linked one, else the project's
+/// only app service (never a database). Creates a local-files service when
+/// the named one doesn't exist or the project has no app service yet.
+async fn target(ctx: &mut Ctx, dir: &Path) -> anyhow::Result<crate::context::Target> {
+    let project = ctx.project().await?;
+    let wanted = ctx.wanted_service(&project).map(str::to_owned);
+    let existing = match wanted.as_deref() {
+        Some(w) => project
+            .services
+            .iter()
+            .find(|s| s.id == w || s.name.eq_ignore_ascii_case(w))
+            .cloned(),
+        None => {
+            let apps: Vec<_> = project
+                .services
+                .iter()
+                .filter(|s| s.template.is_none())
+                .collect();
+            match apps[..] {
+                [only] => Some(only.clone()),
+                [] => None,
+                _ => {
+                    return Err(usage(format!(
+                        "pass --service or run `modula service <name>` (app services: {})",
+                        apps.iter()
+                            .map(|s| s.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+            }
+        }
+    };
+    if let Some(service) = existing {
+        if service.template.is_some() {
+            return Err(usage(format!(
+                "{} is a database; `up` deploys app code. Pass --service <name> to create an app service",
+                service.name
+            )));
+        }
+        return ctx.target_with(project, service);
+    }
+    // A wanted name that is an id of nothing can't be a new service's name.
+    let name = match wanted.as_deref() {
+        Some(w) if crate::commands::service::service_name(w) == w => w.to_owned(),
+        Some(w) => return Err(usage(format!("no service named {w}"))),
+        None => crate::commands::service::service_name(
+            dir.file_name().and_then(|n| n.to_str()).unwrap_or("app"),
+        ),
+    };
+    let dockerfile = dir.join("Dockerfile").is_file();
+    let config = serde_json::json!({
+        "source": { "type": "local" },
+        "builder": if dockerfile { "dockerfile" } else { "railpack" },
+    });
+    let api = ctx.api()?;
+    api.create_service(
+        &project.id,
+        &crate::api::NewService {
+            name: name.clone(),
+            template: None,
+            config: Some(config),
+        },
+    )
+    .await
+    .with_context(|| format!("creating the service {name}"))?;
+    ctx.out.note(format!(
+        "Created the service {name} in {} ({})",
+        project.name,
+        if dockerfile {
+            "builds with your Dockerfile"
+        } else {
+            "Railpack detects how to build it"
+        }
+    ));
+    let project = ctx.project().await?;
+    let service = project
+        .services
+        .iter()
+        .find(|s| s.name == name)
+        .cloned()
+        .context("the new service isn't listed")?;
+    if let Some(mut link) = ctx.linked().filter(|l| l.project == project.id).cloned() {
+        link.service = Some(service.id.clone());
+        link.service_name = Some(service.name.clone());
+        ctx.save_link(link)?;
+    }
+    ctx.target_with(project, service)
 }
 
 async fn upload_and_deploy(

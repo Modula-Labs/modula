@@ -25,6 +25,13 @@ pub enum Source {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root_dir: Option<String>,
     },
+    /// Deployed from local files with `modula up` (like `railway up`): a
+    /// service with no repository or image of its own. Deploying it without
+    /// an upload redeploys the latest kept upload.
+    Local {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root_dir: Option<String>,
+    },
     /// Files uploaded with `modula up` (a `source_uploads` row). Only
     /// ever in a deployment's snapshot: an instance can't be configured with it.
     Upload {
@@ -135,6 +142,7 @@ impl ServiceConfig {
             Source::Image { image } => image.clone(),
             Source::Repo { repo, branch, .. } => format!("{repo}@{branch}"),
             Source::Upload { .. } => "Uploaded via CLI".into(),
+            Source::Local { .. } => "Local files (modula up)".into(),
         }
     }
 
@@ -145,7 +153,7 @@ impl ServiceConfig {
                 branch,
                 root_dir,
             } => Some((repo, branch, root_dir.as_deref())),
-            Source::Image { .. } | Source::Upload { .. } => None,
+            Source::Image { .. } | Source::Upload { .. } | Source::Local { .. } => None,
         }
     }
 
@@ -165,7 +173,9 @@ impl ServiceConfig {
     /// The directory to build from, for sources that are built.
     pub fn root_dir(&self) -> Option<&str> {
         match &self.source {
-            Source::Repo { root_dir, .. } | Source::Upload { root_dir, .. } => root_dir.as_deref(),
+            Source::Repo { root_dir, .. }
+            | Source::Upload { root_dir, .. }
+            | Source::Local { root_dir } => root_dir.as_deref(),
             Source::Image { .. } => None,
         }
     }
@@ -175,7 +185,7 @@ impl ServiceConfig {
     pub fn validate_for_instance(&self) -> AppResult<()> {
         if matches!(self.source, Source::Upload { .. }) {
             return Err(AppError::bad_request(
-                "a service's source must be an image or a repository; upload files with `modula up`",
+                "a service's source must be an image, a repository or local files (`modula up`)",
             ));
         }
         self.validate()
@@ -184,7 +194,7 @@ impl ServiceConfig {
     pub fn validate(&self) -> AppResult<()> {
         match &self.source {
             Source::Image { image } => validate_image_ref(image)?,
-            Source::Upload { root_dir, .. } => {
+            Source::Upload { root_dir, .. } | Source::Local { root_dir } => {
                 if let Some(d) = root_dir {
                     validate_rel_path(d, "root directory")?;
                 }

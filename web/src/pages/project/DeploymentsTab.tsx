@@ -203,10 +203,16 @@ function EmptyActive({
   onDeploy: () => void;
 }) {
   const source = instance?.config.source;
-  const target = source ? (source.type === "repo" ? source.repo : source.image) : null;
+  const target =
+    source?.type === "repo" ? source.repo : source?.type === "image" ? source.image : null;
   return (
     <div className="flex min-h-20 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-border px-4 py-5 text-center text-sm text-muted-foreground">
       <p>There is no active deployment for this service.</p>
+      {source?.type === "local" ? (
+        <p>
+          Deploy it from its directory with <code className="font-mono text-foreground">modula up</code>.
+        </p>
+      ) : null}
       {canDeploy && target ? (
         <button
           onClick={onDeploy}

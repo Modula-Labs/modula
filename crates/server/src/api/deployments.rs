@@ -290,7 +290,48 @@ pub async fn deploy_instance(
             .bind(instance)
             .fetch_one(&state.db)
             .await?;
-    let cfg: ServiceConfig = serde_json::from_value(config).map_err(anyhow::Error::from)?;
+    let mut cfg: ServiceConfig = serde_json::from_value(config).map_err(anyhow::Error::from)?;
+    // A local-files service deploys its latest kept upload (new variables or
+    // settings, same files), like Railway's redeploy of a `railway up`.
+    let mut local_git = None;
+    if matches!(cfg.source, Source::Local { .. }) {
+        #[derive(sqlx::FromRow)]
+        struct Latest {
+            id: Id,
+            commit_sha: Option<String>,
+            commit_message: Option<String>,
+            source_branch: Option<String>,
+            source_dirty: Option<bool>,
+        }
+        let latest: Option<Latest> = sqlx::query_as(
+            "SELECT u.id, d.commit_sha, d.commit_message, d.source_branch, d.source_dirty
+                 FROM source_uploads u
+                 LEFT JOIN LATERAL (
+                     SELECT commit_sha, commit_message, source_branch, source_dirty
+                     FROM deployments WHERE upload_id = u.id ORDER BY created_at DESC LIMIT 1
+                 ) d ON true
+                 WHERE u.service_instance_id = $1 AND u.purged_at IS NULL
+                 ORDER BY u.created_at DESC LIMIT 1",
+        )
+        .bind(instance)
+        .fetch_optional(&state.db)
+        .await?;
+        let Some(latest) = latest else {
+            return Err(AppError::Conflict(
+                "this service deploys local files and has none uploaded yet; run `modula up` in its directory".into(),
+            ));
+        };
+        cfg.source = Source::Upload {
+            upload: latest.id,
+            root_dir: cfg.root_dir().map(str::to_owned),
+        };
+        local_git = Some(LocalGit {
+            commit: latest.commit_sha,
+            message: latest.commit_message,
+            branch: latest.source_branch,
+            dirty: latest.source_dirty,
+        });
+    }
     // Resolve the branch head before taking any locks: it is a network call.
     let commit = match cfg.repo() {
         Some((repo, branch, _)) => {
@@ -310,7 +351,7 @@ pub async fn deploy_instance(
             trigger: Trigger::Manual,
             created_by: Some(actor.user_id),
             commit: commit.clone(),
-            local_git: None,
+            local_git,
             prebuilt: None,
             source_deployment: None,
         },
