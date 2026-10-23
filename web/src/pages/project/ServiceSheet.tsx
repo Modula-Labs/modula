@@ -74,7 +74,7 @@ export function ServiceSheet({
       }
     >
       {deploy.error ? (
-        <div className="px-6 pb-3">
+        <div className="px-6 pb-3 md:px-10">
           <Alert>{deploy.error.message}</Alert>
         </div>
       ) : null}

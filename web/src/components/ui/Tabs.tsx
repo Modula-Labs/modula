@@ -15,7 +15,7 @@ export function Tabs<V extends string>({
 }) {
   return (
     <T.Root value={value} onValueChange={(v) => onChange(v as V)} className="flex min-h-0 flex-1 flex-col">
-      <T.List className="flex gap-5 border-b border-border px-6">
+      <T.List className="flex gap-5 border-b border-border px-6 md:px-10">
         {tabs.map((t) => (
           <T.Trigger
             key={t.value}
@@ -33,7 +33,7 @@ export function Tabs<V extends string>({
 
 export function TabPanel({ value, children }: { value: string; children: ReactNode }) {
   return (
-    <T.Content value={value} className="min-h-0 flex-1 overflow-auto px-6 py-5 focus-visible:outline-none">
+    <T.Content value={value} className="min-h-0 flex-1 overflow-auto px-6 py-6 focus-visible:outline-none md:px-10">
       {children}
     </T.Content>
   );

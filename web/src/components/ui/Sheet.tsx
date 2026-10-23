@@ -55,10 +55,13 @@ export function Sheet({
         leaving ? "anim-sheet-out" : "anim-sheet",
         // Floats inside the canvas, clear of the navbar and edges (like Railway's panel).
         "absolute top-3 right-3 bottom-3 flex flex-col overflow-hidden rounded-xl border border-border bg-card shadow-modal",
-        stacked ? "z-30 w-[min(960px,calc(60%-24px))] min-w-[616px]" : "z-20 w-[min(960px,60%)] min-w-[640px]",
+        // Wide enough to work in, never flush with the canvas's left edge.
+        stacked
+          ? "z-30 w-[min(960px,max(616px,calc(60%_-_24px)),calc(100%_-_48px))]"
+          : "z-20 w-[min(960px,max(640px,60%),calc(100%_-_24px))]",
       )}
     >
-      <header className="flex items-start justify-between gap-4 px-6 pt-5 pb-4">
+      <header className="flex items-start justify-between gap-4 px-6 pt-6 pb-4 md:px-10">
         <div className="min-w-0 flex-1">{header}</div>
         <button
           onClick={onClose}
