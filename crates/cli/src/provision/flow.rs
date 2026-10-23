@@ -265,6 +265,7 @@ pub async fn provision(
         name: &plan.name,
         setup_token: setup_token.expose_secret(),
         progress_token: &progress_token,
+        key_only_ssh: !ssh_keys.is_empty(),
     }
     .render();
     let req = CreateServer {

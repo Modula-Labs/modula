@@ -21,6 +21,9 @@ pub struct MainBootstrap<'a> {
     pub setup_token: &'a str,
     /// Names the installer's progress file (see `install_progress`).
     pub progress_token: &'a str,
+    /// An SSH key was installed for root: turn password and keyboard-
+    /// interactive logins off (nothing can be locked out).
+    pub key_only_ssh: bool,
 }
 
 impl MainBootstrap<'_> {
@@ -34,7 +37,7 @@ impl MainBootstrap<'_> {
 # single use: the modula CLI finishes setup with it as soon as the dashboard
 # answers. Progress: /var/log/cloud-init-output.log
 set -euo pipefail
-{domain_setup}installer=$(mktemp)
+{ssh_setup}{domain_setup}installer=$(mktemp)
 curl -fsSL --retry 10 --retry-delay 3 --retry-connrefused --retry-all-errors -o "$installer" {url}
 bash "$installer" {domain_args} --email {email} --name {name} --setup-token {token} --progress-token {progress}
 rm -f "$installer"
@@ -42,6 +45,7 @@ rm -f "$installer"
 rm -f /var/lib/cloud/instance/user-data.txt /var/lib/cloud/instance/user-data.txt.i /var/lib/cloud/instance/scripts/part-* || true
 "#,
             url = q(self.install_url),
+            ssh_setup = if self.key_only_ssh { KEY_ONLY_SSH } else { "" },
             domain_setup = match self.domain {
                 Some(_) => String::new(),
                 None => INSTANT_DOMAIN.to_owned(),
@@ -57,6 +61,12 @@ rm -f /var/lib/cloud/instance/user-data.txt /var/lib/cloud/instance/user-data.tx
         )
     }
 }
+
+/// Key-only SSH, first in sshd_config.d so it wins over cloud-init's
+/// `50-cloud-init.conf` (sshd keeps the first value it reads).
+const KEY_ONLY_SSH: &str = r#"printf "PasswordAuthentication no\nKbdInteractiveAuthentication no\nX11Forwarding no\n" > /etc/ssh/sshd_config.d/01-modula-key-only.conf
+sshd -t && { systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true; }
+"#;
 
 /// The public IPv4 from Hetzner's metadata service, as `1-2-3-4.sslip.io`
 /// (`flow::instant_domain` derives the same name).
@@ -84,6 +94,7 @@ mod tests {
             name: "modula-main",
             setup_token: TOKEN,
             progress_token: "PrOgReSs0123456789abcdefghijklmnopqrstuvwxy",
+            key_only_ssh: true,
         }
     }
 
@@ -119,6 +130,16 @@ mod tests {
         for word in ["password", "mdt_", "HCLOUD", "hcloud", "Bearer", "BEGIN"] {
             assert!(!s.contains(word), "{word} in user data");
         }
+    }
+
+    #[test]
+    fn key_only_ssh_only_with_a_key() {
+        let s = sample().render();
+        assert!(s.contains("PasswordAuthentication no"));
+        assert!(s.contains("sshd -t &&"));
+        let mut b = sample();
+        b.key_only_ssh = false;
+        assert!(!b.render().contains("sshd_config.d"));
     }
 
     #[test]
