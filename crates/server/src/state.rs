@@ -5,7 +5,10 @@ use sqlx::PgPool;
 use tokio::sync::Notify;
 
 use crate::config::Config;
+use crate::error::AppResult;
 use crate::keyring::Keyring;
+use crate::nodes::Hub;
+use crate::pki::Pki;
 use crate::ratelimit::RateLimiter;
 
 #[derive(Clone)]
@@ -18,6 +21,9 @@ pub struct Inner {
     pub limiter: RateLimiter,
     /// Wakes the in-process job worker right after an enqueue.
     pub jobs_notify: Notify,
+    /// Attached nodes.
+    pub hub: Hub,
+    pki: tokio::sync::OnceCell<Pki>,
 }
 
 impl AppState {
@@ -28,7 +34,17 @@ impl AppState {
             keys,
             limiter,
             jobs_notify: Notify::new(),
+            hub: Hub::default(),
+            pki: tokio::sync::OnceCell::new(),
         }))
+    }
+
+    /// The internal CA, created on first use.
+    pub async fn pki(&self) -> AppResult<&Pki> {
+        self.0
+            .pki
+            .get_or_try_init(|| async { Ok(Pki::load_or_init(&self.db, &self.keys).await?) })
+            .await
     }
 }
 

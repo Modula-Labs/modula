@@ -1,0 +1,216 @@
+// Control plane <-> node daemon (modula-node) protocol, version 1.
+//
+// Transport: gRPC over TLS on the dedicated node port (never the browser API).
+//  * Discovery/Enroll: server-auth TLS only; Enroll is gated by a single-use join
+//    token, and the node pins the CA fingerprint from the join command.
+//  * Attach: mutual TLS; the node identity comes from the client certificate.
+//
+// The server pushes full desired-state snapshots with a monotonically increasing
+// generation; the node reconciles to the newest one it has seen. There is no
+// "run arbitrary command" message by design.
+
+syntax = "proto3";
+
+package modula.node.v1;
+
+service Node {
+  // Returns the CA chain so a joining node can check it against the pinned
+  // fingerprint before trusting the server. Unauthenticated, read-only.
+  rpc GetCaBundle(GetCaBundleRequest) returns (CaBundle);
+  // Exchange a join token + CSR for a node certificate.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  // Long-lived bidirectional stream. Requires the node's client certificate.
+  rpc Attach(stream NodeMessage) returns (stream ServerMessage);
+}
+
+message GetCaBundleRequest {}
+
+message CaBundle {
+  bytes root_der = 1;
+  bytes intermediate_der = 2;
+}
+
+message EnrollRequest {
+  string join_token = 1;
+  bytes csr_der = 2;
+  string hostname = 3;
+  string node_version = 4;
+}
+
+message EnrollResponse {
+  string node_id = 1;
+  bytes cert_der = 2;
+  bytes intermediate_der = 3;
+  bytes root_der = 4;
+}
+
+// ---------------------------------------------------------------- node → server
+
+message NodeMessage {
+  oneof msg {
+    Hello hello = 1;
+    StateReport report = 2;
+    DeploymentEvent event = 3;
+    LogChunk log = 4;
+    RenewRequest renew = 5;
+    Heartbeat heartbeat = 6;
+  }
+}
+
+message Hello {
+  uint32 protocol = 1;
+  string node_version = 2;
+  repeated string capabilities = 3;
+  // Highest desired-state generation the node has applied (0 = none).
+  uint64 applied_generation = 4;
+  NodeInfo info = 5;
+}
+
+message NodeInfo {
+  string hostname = 1;
+  string os = 2;
+  string arch = 3;
+  uint32 cpus = 4;
+  uint64 memory_bytes = 5;
+  string runtime_version = 6;
+}
+
+message Heartbeat {
+  int64 at_unix_ms = 1;
+}
+
+enum DeploymentPhase {
+  PHASE_UNSPECIFIED = 0;
+  PULLING = 1;
+  CREATING = 2;
+  STARTING = 3;
+  HEALTHCHECKING = 4;
+  ACTIVE = 5;
+  FAILED = 6;
+  CRASHED = 7;
+  STOPPED = 8;
+}
+
+message DeploymentEvent {
+  string deployment_id = 1;
+  DeploymentPhase phase = 2;
+  string message = 3;
+  int64 at_unix_ms = 4;
+  uint64 generation = 5;
+}
+
+message StateReport {
+  uint64 generation = 1;
+  repeated WorkloadStatus workloads = 2;
+}
+
+message WorkloadStatus {
+  string deployment_id = 1;
+  string container_id = 2;
+  bool running = 3;
+  bool healthy = 4;
+  int32 exit_code = 5;
+  uint32 restart_count = 6;
+}
+
+message LogChunk {
+  string request_id = 1;
+  repeated LogLine lines = 2;
+  // True on the final chunk (tail complete, follow cancelled, or container gone).
+  bool done = 3;
+  string error = 4;
+}
+
+message LogLine {
+  int64 ts_unix_ms = 1;
+  bool stderr = 2;
+  string text = 3;
+}
+
+message RenewRequest {
+  bytes csr_der = 1;
+}
+
+// ---------------------------------------------------------------- server → node
+
+message ServerMessage {
+  oneof msg {
+    HelloAck hello_ack = 1;
+    DesiredState desired = 2;
+    LogRequest logs = 3;
+    LogCancel log_cancel = 4;
+    RenewResponse renewed = 5;
+  }
+}
+
+message HelloAck {
+  uint32 protocol = 1;
+  string node_id = 2;
+}
+
+message DesiredState {
+  uint64 generation = 1;
+  repeated Network networks = 2;
+  repeated Workload workloads = 3;
+}
+
+// One isolated bridge network per environment.
+message Network {
+  string environment_id = 1;
+}
+
+message Workload {
+  string deployment_id = 1;
+  string service_id = 2;
+  string environment_id = 3;
+  // DNS name of the service inside its environment network.
+  string service_name = 4;
+  string image = 5;
+  // Start command override as argv (empty = image default). Never a shell string.
+  repeated string command = 6;
+  repeated EnvVar env = 7;
+  // Port the app listens on (also injected as PORT).
+  uint32 port = 8;
+  HealthCheck health = 9;
+  Limits limits = 10;
+  RestartPolicy restart = 11;
+}
+
+message EnvVar {
+  string name = 1;
+  string value = 2;
+}
+
+message HealthCheck {
+  // Empty path = no HTTP check (container running is enough).
+  string path = 1;
+  uint32 timeout_secs = 2;
+}
+
+message Limits {
+  uint64 memory_bytes = 1;
+  uint64 nano_cpus = 2;
+  int64 pids = 3;
+}
+
+enum RestartPolicy {
+  RESTART_UNSPECIFIED = 0;
+  ON_FAILURE = 1;
+  ALWAYS = 2;
+  NEVER = 3;
+}
+
+message LogRequest {
+  string request_id = 1;
+  string deployment_id = 2;
+  uint32 tail = 3;
+  bool follow = 4;
+}
+
+message LogCancel {
+  string request_id = 1;
+}
+
+message RenewResponse {
+  bytes cert_der = 1;
+}

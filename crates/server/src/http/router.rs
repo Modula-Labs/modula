@@ -30,13 +30,16 @@ pub enum Access {
     /// Authenticated + `authorize(action, <the single {x_id} param>)`, plus sudo
     /// when `action.requires_sudo()`.
     Resource(Action),
+    /// Instance admins only, for instance-level actions without a path
+    /// parameter (`action.kind() == None`), plus sudo when required.
+    Instance(Action),
 }
 
 impl Access {
     pub fn requires_sudo(self) -> bool {
         match self {
             Self::Sudo => true,
-            Self::Resource(a) => a.requires_sudo(),
+            Self::Resource(a) | Self::Instance(a) => a.requires_sudo(),
             Self::Public | Self::MfaPending | Self::Authenticated => false,
         }
     }
@@ -148,8 +151,19 @@ fn validate(path: &str, access: Access) -> Result<(), String> {
                 return Err("Access::Resource routes need exactly one {x_id} param".into());
             };
             let kind = ResourceKind::from_param(param).expect("checked above");
-            if kind.owner() != action.owner() {
+            if action.kind() != Some(kind) {
                 return Err(format!("{action:?} does not apply to {kind:?}"));
+            }
+            Ok(())
+        }
+        Access::Instance(action) => {
+            if action.kind().is_some() {
+                return Err(format!(
+                    "{action:?} is resource-scoped; use Access::Resource"
+                ));
+            }
+            if !params.is_empty() {
+                return Err("Access::Instance routes take no path params".into());
             }
             Ok(())
         }
@@ -197,6 +211,9 @@ async fn authorize_request(
         .await?
         .ok_or(AppError::Unauthorized)?;
 
+    if matches!(access, Access::Instance(_)) && !actor.is_instance_admin {
+        return Err(AppError::Forbidden);
+    }
     let (mut parts, body) = req.into_parts();
     if let Access::Resource(action) = access {
         let params = RawPathParams::from_request_parts(&mut parts, state)
@@ -265,6 +282,18 @@ mod tests {
                 Access::Resource(Action::SessionRevoke)
             )
             .is_ok()
+        );
+        assert!(validate("/api/nodes", Access::Instance(Action::NodeList)).is_ok());
+        assert!(validate("/api/nodes/{node_id}", Access::Instance(Action::NodeRevoke)).is_err());
+        assert!(validate("/api/nodes", Access::Instance(Action::WorkspaceRead)).is_err());
+        assert!(validate("/api/nodes/{node_id}", Access::Resource(Action::NodeRevoke)).is_ok());
+        // A same-owner but different kind (deployment action on a project) is rejected.
+        assert!(
+            validate(
+                "/api/projects/{project_id}",
+                Access::Resource(Action::DeploymentRemove)
+            )
+            .is_err()
         );
         assert!(validate("/api/x/{session_id}", Access::Sudo).is_err());
         assert!(validate("/api/x/{session_id}", Access::MfaPending).is_err());

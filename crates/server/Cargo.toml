@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 modula-crypto.workspace = true
+modula-proto.workspace = true
 
 anyhow.workspace = true
 axum.workspace = true
@@ -19,6 +20,14 @@ clap.workspace = true
 futures.workspace = true
 http.workspace = true
 redis.workspace = true
+rcgen.workspace = true
+base64.workspace = true
+rustls.workspace = true
+x509-parser.workspace = true
+tonic.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
+sha2.workspace = true
+hex.workspace = true
 rust-embed.workspace = true
 secrecy.workspace = true
 serde.workspace = true
@@ -37,6 +46,7 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+modula-node.workspace = true
 http-body-util = "0.1"
 data-encoding.workspace = true
 tower = { workspace = true }

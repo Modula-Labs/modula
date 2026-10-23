@@ -19,6 +19,7 @@ pub mod prefix {
     pub const MFA_PENDING: &str = "mcm";
     pub const SETUP: &str = "mcsetup";
     pub const API: &str = "mcp";
+    pub const NODE_JOIN: &str = "mcj";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

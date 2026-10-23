@@ -32,6 +32,8 @@ pub fn config() -> Config {
         listen: "127.0.0.1:0".parse().unwrap(),
         master_key_file: PathBuf::new(),
         trusted_proxies: vec!["127.0.0.1".parse().unwrap()],
+        node_listen: "127.0.0.1:0".parse().unwrap(),
+        node_url: "https://localhost:7101".parse().unwrap(),
     }
 }
 
@@ -101,6 +103,19 @@ impl TestApp {
             headers,
             json,
         }
+    }
+
+    /// GET a non-JSON response (e.g. an SSE stream that ends) as text.
+    pub async fn get_text(&self, path: &str, cookie: &str) -> (StatusCode, String) {
+        let req = Request::builder()
+            .uri(path)
+            .header(header::COOKIE, format!("{COOKIE}={cookie}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = self.router.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// Complete first-run setup and return the admin's session cookie value.
@@ -246,5 +261,91 @@ impl Resp {
 
     pub fn code(&self) -> &str {
         self.json["error"]["code"].as_str().unwrap_or("")
+    }
+}
+
+/// One of every resource, owned by `workspace`, inserted directly.
+#[derive(Debug, Clone, Copy)]
+pub struct Chain {
+    pub project: Uuid,
+    pub environment: Uuid,
+    pub service: Uuid,
+    pub instance: Uuid,
+    pub variable: Uuid,
+    pub deployment: Uuid,
+    pub node: Uuid,
+}
+
+impl TestApp {
+    pub async fn seed_chain(&self, workspace: Uuid) -> Chain {
+        let c = Chain {
+            project: Uuid::now_v7(),
+            environment: Uuid::now_v7(),
+            service: Uuid::now_v7(),
+            instance: Uuid::now_v7(),
+            variable: Uuid::now_v7(),
+            deployment: Uuid::now_v7(),
+            node: Uuid::now_v7(),
+        };
+        let db = self.db();
+        sqlx::query("INSERT INTO projects (id, workspace_id, name) VALUES ($1, $2, 'p')")
+            .bind(c.project)
+            .bind(workspace)
+            .execute(db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO environments (id, project_id, name) VALUES ($1, $2, 'production')",
+        )
+        .bind(c.environment)
+        .bind(c.project)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO services (id, project_id, name) VALUES ($1, $2, 'web')")
+            .bind(c.service)
+            .bind(c.project)
+            .execute(db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO nodes (id, name, cert_serial, cert_expires_at)
+             VALUES ($1, 'n', $1::text, now() + interval '1 day')",
+        )
+        .bind(c.node)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO service_instances (id, service_id, environment_id, node_id, config)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(c.instance)
+        .bind(c.service)
+        .bind(c.environment)
+        .bind(c.node)
+        .bind(json!({ "source": { "type": "image", "image": "nginx:alpine" }, "port": 80 }))
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO variables (id, service_instance_id, name, value_sealed) VALUES ($1, $2, 'X', '\\x00')",
+        )
+        .bind(c.variable)
+        .bind(c.instance)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO deployments (id, service_instance_id, node_id, status, image, config)
+             VALUES ($1, $2, $3, 'active', 'nginx:alpine', '{}'::jsonb)",
+        )
+        .bind(c.deployment)
+        .bind(c.instance)
+        .bind(c.node)
+        .execute(db)
+        .await
+        .unwrap();
+        c
     }
 }

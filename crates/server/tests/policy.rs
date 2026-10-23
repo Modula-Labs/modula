@@ -30,8 +30,14 @@ fn fill(path: &str, id: Uuid) -> String {
     out
 }
 
-/// A resource of `kind` owned by `workspace`.
-async fn fixture(app: &TestApp, kind: ResourceKind, workspace: Uuid, victim: Uuid) -> Uuid {
+/// A resource of `kind` owned by `workspace` (or by `victim`, for account kinds).
+async fn fixture(
+    app: &TestApp,
+    kind: ResourceKind,
+    workspace: Uuid,
+    victim: Uuid,
+    chain: &Chain,
+) -> Uuid {
     match kind {
         ResourceKind::Workspace => workspace,
         ResourceKind::Session => {
@@ -41,6 +47,13 @@ async fn fixture(app: &TestApp, kind: ResourceKind, workspace: Uuid, victim: Uui
                 .await
                 .unwrap()
         }
+        ResourceKind::Project => chain.project,
+        ResourceKind::Environment => chain.environment,
+        ResourceKind::Service => chain.service,
+        ResourceKind::ServiceInstance => chain.instance,
+        ResourceKind::Variable => chain.variable,
+        ResourceKind::Deployment => chain.deployment,
+        ResourceKind::Node => chain.node,
     }
 }
 
@@ -103,6 +116,7 @@ async fn resource_routes_hide_other_workspaces(pool: PgPool) {
         .await
         .unwrap();
     let (_, attacker) = app.user("attacker@example.com").await;
+    let chain = app.seed_chain(victim_ws).await;
 
     let specs = route_specs(app.state.clone());
     let resource_routes: Vec<_> = specs
@@ -113,7 +127,7 @@ async fn resource_routes_hide_other_workspaces(pool: PgPool) {
     for spec in resource_routes {
         let param = modula_server::http::router::path_params(spec.path)[0];
         let kind = ResourceKind::from_param(param).unwrap();
-        let id = fixture(&app, kind, victim_ws, victim).await;
+        let id = fixture(&app, kind, victim_ws, victim, &chain).await;
         // Body is valid-shaped but irrelevant: authz must run before extraction.
         let r = app
             .call(
@@ -156,10 +170,45 @@ async fn resource_routes_hide_other_workspaces(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn instance_routes_are_admin_only(pool: PgPool) {
+    let app = TestApp::new(pool);
+    app.setup_admin().await;
+    let (_, user) = app.user("user@example.com").await;
+    let specs = route_specs(app.state.clone());
+    let instance_routes: Vec<_> = specs
+        .iter()
+        .filter(|s| matches!(s.access, Access::Instance(_)))
+        .collect();
+    assert!(!instance_routes.is_empty());
+    for spec in instance_routes {
+        let r = app
+            .call(
+                spec.method.clone(),
+                spec.path,
+                Some(&user),
+                Some(serde_json::json!({})),
+            )
+            .await;
+        assert_eq!(
+            r.status,
+            StatusCode::FORBIDDEN,
+            "{} {}",
+            spec.method,
+            spec.path
+        );
+    }
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
 async fn sudo_routes_require_recent_reauthentication(pool: PgPool) {
     let app = TestApp::new(pool);
     let admin = app.setup_admin().await;
     let ws = app.create_workspace(&admin, "team").await;
+    let me: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email = 'admin@example.com'")
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    let chain = app.seed_chain(ws).await;
     app.drop_sudo().await;
     let specs = route_specs(app.state.clone());
     let sudo_routes: Vec<_> = specs.iter().filter(|s| s.access.requires_sudo()).collect();
@@ -169,10 +218,17 @@ async fn sudo_routes_require_recent_reauthentication(pool: PgPool) {
         sudo_routes.len()
     );
     for spec in sudo_routes {
+        let path = match modula_server::http::router::path_params(spec.path).first() {
+            Some(p) => {
+                let kind = ResourceKind::from_param(p).unwrap();
+                fill(spec.path, fixture(&app, kind, ws, me, &chain).await)
+            }
+            None => spec.path.to_owned(),
+        };
         let r = app
             .call(
                 spec.method.clone(),
-                &fill(spec.path, ws),
+                &path,
                 Some(&admin),
                 Some(serde_json::json!({})),
             )

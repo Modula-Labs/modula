@@ -41,11 +41,13 @@ impl Role {
     }
 }
 
-/// Who owns a resource: a workspace (role-based) or a single user account.
+/// Who owns a resource: a workspace (role-based), a single user account, or the
+/// instance itself (instance admins only, e.g. nodes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OwnerKind {
     Workspace,
     Account,
+    Instance,
 }
 
 /// Every protected operation. Adding a variant forces decisions in the matches below.
@@ -56,32 +58,113 @@ pub enum Action {
     WorkspaceDelete,
     /// Revoke one of the caller's own sessions.
     SessionRevoke,
+    ProjectCreate,
+    ProjectRead,
+    ProjectUpdate,
+    ProjectDelete,
+    EnvironmentCreate,
+    EnvironmentDelete,
+    ServiceCreate,
+    ServiceDelete,
+    InstanceRead,
+    InstanceUpdate,
+    /// Variable names and metadata (never values).
+    VariablesRead,
+    /// Set or delete variables (write-only: no read-back).
+    VariablesWrite,
+    VariableReveal,
+    DeploymentCreate,
+    DeploymentRead,
+    DeploymentRemove,
+    /// Instance-level, no path parameter.
+    NodeList,
+    /// Instance-level, no path parameter.
+    NodeJoinTokenCreate,
+    NodeRevoke,
 }
 
 impl Action {
-    pub fn owner(self) -> OwnerKind {
-        match self {
-            Self::WorkspaceRead | Self::WorkspaceUpdate | Self::WorkspaceDelete => {
-                OwnerKind::Workspace
+    /// The resource kind this action is authorized against; `None` = an
+    /// instance-level action with no path parameter (instance admins only).
+    pub fn kind(self) -> Option<ResourceKind> {
+        use ResourceKind as K;
+        Some(match self {
+            Self::WorkspaceRead | Self::WorkspaceUpdate | Self::WorkspaceDelete => K::Workspace,
+            Self::ProjectCreate => K::Workspace,
+            Self::SessionRevoke => K::Session,
+            Self::ProjectRead | Self::ProjectUpdate | Self::ProjectDelete => K::Project,
+            Self::EnvironmentCreate | Self::ServiceCreate => K::Project,
+            Self::EnvironmentDelete => K::Environment,
+            Self::ServiceDelete => K::Service,
+            Self::InstanceRead | Self::InstanceUpdate => K::ServiceInstance,
+            Self::VariablesRead | Self::VariablesWrite | Self::DeploymentCreate => {
+                K::ServiceInstance
             }
-            Self::SessionRevoke => OwnerKind::Account,
-        }
+            Self::VariableReveal => K::Variable,
+            Self::DeploymentRead | Self::DeploymentRemove => K::Deployment,
+            Self::NodeRevoke => K::Node,
+            Self::NodeList | Self::NodeJoinTokenCreate => return None,
+        })
+    }
+
+    pub fn owner(self) -> OwnerKind {
+        self.kind().map_or(OwnerKind::Instance, ResourceKind::owner)
     }
 
     /// Minimum workspace role (only meaningful for workspace-owned actions).
     pub fn min_role(self) -> Role {
         match self {
-            Self::WorkspaceRead => Role::Viewer,
-            Self::WorkspaceUpdate | Self::WorkspaceDelete => Role::Admin,
-            Self::SessionRevoke => Role::Admin,
+            Self::WorkspaceRead
+            | Self::ProjectRead
+            | Self::InstanceRead
+            | Self::VariablesRead
+            | Self::DeploymentRead => Role::Viewer,
+            Self::VariablesWrite | Self::DeploymentCreate | Self::DeploymentRemove => {
+                Role::Deployer
+            }
+            Self::ProjectCreate
+            | Self::ProjectUpdate
+            | Self::EnvironmentCreate
+            | Self::ServiceCreate
+            | Self::ServiceDelete
+            | Self::InstanceUpdate
+            | Self::VariableReveal => Role::Member,
+            Self::WorkspaceUpdate
+            | Self::WorkspaceDelete
+            | Self::ProjectDelete
+            | Self::EnvironmentDelete => Role::Admin,
+            Self::SessionRevoke | Self::NodeList | Self::NodeJoinTokenCreate | Self::NodeRevoke => {
+                Role::Admin
+            }
         }
     }
 
     /// Destructive or secret-revealing actions need a recent re-authentication.
     pub fn requires_sudo(self) -> bool {
         match self {
-            Self::WorkspaceDelete => true,
-            Self::WorkspaceRead | Self::WorkspaceUpdate | Self::SessionRevoke => false,
+            Self::WorkspaceDelete
+            | Self::ProjectDelete
+            | Self::EnvironmentDelete
+            | Self::ServiceDelete
+            | Self::VariableReveal
+            | Self::NodeJoinTokenCreate
+            | Self::NodeRevoke => true,
+            Self::WorkspaceRead
+            | Self::WorkspaceUpdate
+            | Self::SessionRevoke
+            | Self::ProjectCreate
+            | Self::ProjectRead
+            | Self::ProjectUpdate
+            | Self::EnvironmentCreate
+            | Self::ServiceCreate
+            | Self::InstanceRead
+            | Self::InstanceUpdate
+            | Self::VariablesRead
+            | Self::VariablesWrite
+            | Self::DeploymentCreate
+            | Self::DeploymentRead
+            | Self::DeploymentRemove
+            | Self::NodeList => false,
         }
     }
 }
@@ -92,22 +175,53 @@ impl Action {
 pub enum ResourceKind {
     Workspace,
     Session,
+    Project,
+    Environment,
+    Service,
+    ServiceInstance,
+    Variable,
+    Deployment,
+    Node,
 }
 
 impl ResourceKind {
-    pub const ALL: &'static [ResourceKind] = &[ResourceKind::Workspace, ResourceKind::Session];
+    pub const ALL: &'static [ResourceKind] = &[
+        ResourceKind::Workspace,
+        ResourceKind::Session,
+        ResourceKind::Project,
+        ResourceKind::Environment,
+        ResourceKind::Service,
+        ResourceKind::ServiceInstance,
+        ResourceKind::Variable,
+        ResourceKind::Deployment,
+        ResourceKind::Node,
+    ];
 
     pub fn param(self) -> &'static str {
         match self {
             Self::Workspace => "workspace_id",
             Self::Session => "session_id",
+            Self::Project => "project_id",
+            Self::Environment => "environment_id",
+            Self::Service => "service_id",
+            Self::ServiceInstance => "instance_id",
+            Self::Variable => "variable_id",
+            Self::Deployment => "deployment_id",
+            Self::Node => "node_id",
         }
     }
 
     pub fn owner(self) -> OwnerKind {
         match self {
-            Self::Workspace => OwnerKind::Workspace,
             Self::Session => OwnerKind::Account,
+            Self::Node => OwnerKind::Instance,
+            Self::Workspace
+            | Self::Project
+            | Self::Environment
+            | Self::Service
+            | Self::ServiceInstance
+            | Self::Variable
+            | Self::Deployment => OwnerKind::Workspace,
         }
     }
 
@@ -116,10 +230,40 @@ impl ResourceKind {
     }
 
     /// The id of the workspace or user that owns resource `id`, if it exists.
+    /// Instance-owned resources return the nil uuid.
     async fn owner_id(self, db: &PgPool, id: Uuid) -> AppResult<Option<Uuid>> {
         let sql = match self {
             Self::Workspace => "SELECT id FROM workspaces WHERE id = $1",
             Self::Session => "SELECT user_id FROM sessions WHERE id = $1 AND kind = 'full'",
+            Self::Project => "SELECT workspace_id FROM projects WHERE id = $1",
+            Self::Environment => {
+                "SELECT p.workspace_id FROM environments e
+                 JOIN projects p ON p.id = e.project_id WHERE e.id = $1"
+            }
+            Self::Service => {
+                "SELECT p.workspace_id FROM services s
+                 JOIN projects p ON p.id = s.project_id WHERE s.id = $1"
+            }
+            Self::ServiceInstance => {
+                "SELECT p.workspace_id FROM service_instances i
+                 JOIN services s ON s.id = i.service_id
+                 JOIN projects p ON p.id = s.project_id WHERE i.id = $1"
+            }
+            Self::Variable => {
+                "SELECT p.workspace_id FROM variables v
+                 JOIN service_instances i ON i.id = v.service_instance_id
+                 JOIN services s ON s.id = i.service_id
+                 JOIN projects p ON p.id = s.project_id WHERE v.id = $1"
+            }
+            Self::Deployment => {
+                "SELECT p.workspace_id FROM deployments d
+                 JOIN service_instances i ON i.id = d.service_instance_id
+                 JOIN services s ON s.id = i.service_id
+                 JOIN projects p ON p.id = s.project_id WHERE d.id = $1"
+            }
+            Self::Node => {
+                "SELECT '00000000-0000-0000-0000-000000000000'::uuid FROM nodes WHERE id = $1"
+            }
         };
         Ok(sqlx::query_scalar(sql).bind(id).fetch_optional(db).await?)
     }
@@ -135,6 +279,7 @@ pub struct Resource {
 pub enum Scope {
     Workspace { id: Uuid, role: Role },
     Account { user_id: Uuid },
+    Instance,
 }
 
 /// Proof that the actor may perform the route's action on `resource`.
@@ -145,10 +290,15 @@ pub struct Grant {
 }
 
 impl Grant {
+    /// The id from the route's path parameter.
+    pub fn id(&self) -> Uuid {
+        self.resource.id
+    }
+
     pub fn workspace_id(&self) -> AppResult<Uuid> {
         match self.scope {
             Scope::Workspace { id, .. } => Ok(id),
-            Scope::Account { .. } => {
+            Scope::Account { .. } | Scope::Instance => {
                 Err(AppError::Internal(anyhow::anyhow!("not a workspace grant")))
             }
         }
@@ -163,7 +313,7 @@ pub async fn authorize(
     action: Action,
     resource: Resource,
 ) -> AppResult<Grant> {
-    if action.owner() != resource.kind.owner() {
+    if action.kind() != Some(resource.kind) {
         return Err(AppError::Internal(anyhow::anyhow!(
             "{action:?} cannot apply to {:?}",
             resource.kind
@@ -175,6 +325,9 @@ pub async fn authorize(
     let scope = match action.owner() {
         OwnerKind::Account if owner == actor.user_id => Scope::Account { user_id: owner },
         OwnerKind::Account => return Err(AppError::NotFound),
+        // Instance-owned resources are invisible to everyone but instance admins.
+        OwnerKind::Instance if actor.is_instance_admin => Scope::Instance,
+        OwnerKind::Instance => return Err(AppError::NotFound),
         OwnerKind::Workspace => {
             let role: Option<String> = sqlx::query_scalar(
                 "SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
@@ -208,6 +361,21 @@ mod tests {
             assert_eq!(Role::parse(r.as_str()), Some(r));
         }
         assert_eq!(Role::parse("owner"), None);
+    }
+
+    #[test]
+    fn every_action_targets_a_matching_kind() {
+        for k in ResourceKind::ALL {
+            assert_eq!(ResourceKind::from_param(k.param()), Some(*k));
+        }
+        // Instance-level actions are admin-only.
+        for a in [
+            Action::NodeList,
+            Action::NodeJoinTokenCreate,
+            Action::NodeRevoke,
+        ] {
+            assert_eq!(a.owner(), OwnerKind::Instance);
+        }
     }
 
     #[test]

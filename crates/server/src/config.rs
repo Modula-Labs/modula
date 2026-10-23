@@ -16,6 +16,10 @@ pub struct Config {
     pub master_key_file: PathBuf,
     /// Peers whose `X-Forwarded-For` is trusted (the local Caddy).
     pub trusted_proxies: Vec<IpAddr>,
+    /// gRPC listener for nodes (mTLS). Never the browser API port.
+    pub node_listen: SocketAddr,
+    /// The address nodes dial, embedded in join commands and the server cert.
+    pub node_url: Url,
 }
 
 impl Config {
@@ -44,6 +48,16 @@ impl Config {
                 .context("invalid MODULA_LISTEN")?,
             master_key_file: get("MODULA_MASTER_KEY_FILE")?.into(),
             trusted_proxies,
+            node_listen: std::env::var("MODULA_NODE_LISTEN")
+                .unwrap_or_else(|_| "127.0.0.1:7101".into())
+                .parse()
+                .context("invalid MODULA_NODE_LISTEN")?,
+            node_url: Url::parse("https://placeholder.invalid").expect("static url"),
+        };
+        let mut cfg = cfg;
+        cfg.node_url = match std::env::var("MODULA_NODE_URL") {
+            Ok(u) => u.parse().context("invalid MODULA_NODE_URL")?,
+            Err(_) => default_node_url(&cfg.public_url, cfg.node_listen.port())?,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -81,9 +95,26 @@ impl Config {
         self.public_url.origin().ascii_serialization()
     }
 
+    /// Names the node listener's certificate is valid for.
+    pub fn node_hosts(&self) -> Vec<String> {
+        let mut hosts = vec!["localhost".to_owned(), "127.0.0.1".to_owned()];
+        if let Some(h) = self.node_url.host_str() {
+            let h = h.trim_start_matches('[').trim_end_matches(']').to_owned();
+            if !hosts.contains(&h) {
+                hosts.insert(0, h);
+            }
+        }
+        hosts
+    }
+
     pub fn load_master_key(&self) -> anyhow::Result<MasterKey> {
         load_master_key(&self.master_key_file)
     }
+}
+
+fn default_node_url(public: &Url, port: u16) -> anyhow::Result<Url> {
+    let host = public.host_str().context("MODULA_PUBLIC_URL has no host")?;
+    Ok(format!("https://{host}:{port}").parse()?)
 }
 
 pub fn load_master_key(path: &Path) -> anyhow::Result<MasterKey> {
@@ -141,6 +172,8 @@ mod tests {
             listen: "127.0.0.1:0".parse().unwrap(),
             master_key_file: PathBuf::new(),
             trusted_proxies: vec![],
+            node_listen: "127.0.0.1:7101".parse().unwrap(),
+            node_url: "https://localhost:7101".parse().unwrap(),
         }
     }
 

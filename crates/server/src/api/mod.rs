@@ -1,6 +1,10 @@
 pub mod account;
 pub mod auth;
+pub mod deployments;
 pub mod instance;
+pub mod nodes;
+pub mod projects;
+pub mod services;
 pub mod workspaces;
 
 use crate::authz::Action;
@@ -11,7 +15,7 @@ use crate::state::AppState;
 /// the security review surface.
 #[rustfmt::skip]
 pub fn routes(state: AppState) -> ApiRouter {
-    use Access::{Authenticated, MfaPending, Public, Resource, Sudo};
+    use Access::{Authenticated, Instance, MfaPending, Public, Resource, Sudo};
     ApiRouter::new(state)
         .get("/api/health", Public, instance::health)
         .get("/api/instance", Public, instance::status)
@@ -37,4 +41,30 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/workspaces/{workspace_id}", Resource(Action::WorkspaceRead), workspaces::get)
         .patch("/api/workspaces/{workspace_id}", Resource(Action::WorkspaceUpdate), workspaces::update)
         .delete("/api/workspaces/{workspace_id}", Resource(Action::WorkspaceDelete), workspaces::delete)
+        // Projects and environments
+        .get("/api/workspaces/{workspace_id}/projects", Resource(Action::WorkspaceRead), projects::list)
+        .post("/api/workspaces/{workspace_id}/projects", Resource(Action::ProjectCreate), projects::create)
+        .get("/api/projects/{project_id}", Resource(Action::ProjectRead), projects::get)
+        .patch("/api/projects/{project_id}", Resource(Action::ProjectUpdate), projects::update)
+        .delete("/api/projects/{project_id}", Resource(Action::ProjectDelete), projects::delete)
+        .post("/api/projects/{project_id}/environments", Resource(Action::EnvironmentCreate), projects::create_environment)
+        .delete("/api/environments/{environment_id}", Resource(Action::EnvironmentDelete), projects::delete_environment)
+        // Services, per-environment config, variables
+        .post("/api/projects/{project_id}/services", Resource(Action::ServiceCreate), services::create)
+        .delete("/api/services/{service_id}", Resource(Action::ServiceDelete), services::delete)
+        .get("/api/service-instances/{instance_id}", Resource(Action::InstanceRead), services::get_instance)
+        .patch("/api/service-instances/{instance_id}", Resource(Action::InstanceUpdate), services::update_instance)
+        .get("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesRead), services::variables)
+        .patch("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesWrite), services::update_variables)
+        .post("/api/variables/{variable_id}/reveal", Resource(Action::VariableReveal), services::reveal_variable)
+        // Deployments
+        .post("/api/service-instances/{instance_id}/deployments", Resource(Action::DeploymentCreate), deployments::create)
+        .get("/api/service-instances/{instance_id}/deployments", Resource(Action::InstanceRead), deployments::list)
+        .get("/api/deployments/{deployment_id}", Resource(Action::DeploymentRead), deployments::get)
+        .delete("/api/deployments/{deployment_id}", Resource(Action::DeploymentRemove), deployments::remove)
+        .get("/api/deployments/{deployment_id}/logs", Resource(Action::DeploymentRead), deployments::logs)
+        // Servers (instance admins)
+        .get("/api/nodes", Instance(Action::NodeList), nodes::list)
+        .post("/api/nodes/join-tokens", Instance(Action::NodeJoinTokenCreate), nodes::create_join_token)
+        .delete("/api/nodes/{node_id}", Resource(Action::NodeRevoke), nodes::revoke)
 }

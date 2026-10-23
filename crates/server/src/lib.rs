@@ -1,4 +1,4 @@
-//! modula-server: the Modula Cloud control plane.
+//! modula-server: the Modula Deploy control plane.
 
 pub mod api;
 pub mod audit;
@@ -6,10 +6,13 @@ pub mod auth;
 pub mod authz;
 pub mod config;
 pub mod db;
+pub mod deploy;
 pub mod error;
 pub mod http;
 pub mod jobs;
 pub mod keyring;
+pub mod nodes;
+pub mod pki;
 pub mod ratelimit;
 pub mod state;
 pub mod validate;
@@ -40,7 +43,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     if let Some(token) = auth::setup::issue_if_pending(&db).await? {
         // Printed to stderr only; the hash is all that is stored.
         eprintln!(
-            "\n  Modula Cloud is not set up yet.\n  Open {} and use this one-time setup token:\n\n    {}\n\n  It expires in 24 hours and is replaced on every restart.\n",
+            "\n  Modula Deploy is not set up yet.\n  Open {} and use this one-time setup token:\n\n    {}\n\n  It expires in 24 hours and is replaced on every restart.\n",
             cfg.public_url,
             token.expose_secret()
         );
@@ -61,6 +64,27 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     ));
     let cleanup = tokio::spawn(schedule_cleanup(state.clone(), stop.clone()));
 
+    // Create the CA before accepting traffic so every replica sees the same one.
+    let fingerprint = state
+        .pki()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?
+        .fingerprint();
+    tracing::info!(%fingerprint, "node CA ready");
+    let node_listen = state.cfg.node_listen;
+    let node_listener = tokio::net::TcpListener::bind(node_listen)
+        .await
+        .with_context(|| format!("cannot bind node endpoint {node_listen}"))?;
+    let node_endpoint = tokio::spawn({
+        let (state, stop) = (state.clone(), stop.clone());
+        async move {
+            if let Err(e) = nodes::serve(state, node_listener, stop.clone()).await {
+                tracing::error!(error = ?e, "node endpoint stopped");
+                stop.cancel();
+            }
+        }
+    });
+
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("cannot bind {listen}"))?;
@@ -76,6 +100,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let _ = tokio::time::timeout(Duration::from_secs(10), async {
         let _ = worker.await;
         let _ = cleanup.await;
+        let _ = node_endpoint.await;
     })
     .await;
     Ok(())

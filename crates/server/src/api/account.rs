@@ -135,9 +135,11 @@ pub async fn sessions(
     let mut rows: Vec<SessionInfo> = sqlx::query_as(
         "SELECT id, ip, user_agent, created_at, last_seen_at FROM sessions
          WHERE user_id = $1 AND kind = 'full' AND expires_at > now()
+           AND last_seen_at > $2
          ORDER BY last_seen_at DESC",
     )
     .bind(actor.user_id)
+    .bind(OffsetDateTime::now_utc() - session::IDLE_TTL)
     .fetch_all(&state.db)
     .await?;
     for r in &mut rows {
