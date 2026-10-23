@@ -12,7 +12,7 @@ export function LogoMark({ size = 24 }: { size?: number }) {
 
 export function Logo() {
   return (
-    <span className="inline-flex items-center gap-2 text-fg" aria-label="Modula Cloud">
+    <span className="inline-flex items-center gap-2 text-fg" aria-label="Modula Deploy">
       <LogoMark />
       <span className="text-[15px] font-semibold tracking-[-0.02em]">
         modula <span className="font-normal text-fg-muted">cloud</span>

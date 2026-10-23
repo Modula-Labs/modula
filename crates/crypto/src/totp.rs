@@ -194,9 +194,9 @@ mod tests {
     #[test]
     fn otpauth_url_shape() {
         let s = generate_secret().unwrap();
-        let url = otpauth_url(&s, "Modula Cloud", "ada@example.com");
-        assert!(url.starts_with("otpauth://totp/Modula%20Cloud:ada%40example.com?secret="));
-        assert!(url.contains("&issuer=Modula%20Cloud&algorithm=SHA1&digits=6&period=30"));
+        let url = otpauth_url(&s, "Modula Deploy", "ada@example.com");
+        assert!(url.starts_with("otpauth://totp/Modula%20Deploy:ada%40example.com?secret="));
+        assert!(url.contains("&issuer=Modula%20Deploy&algorithm=SHA1&digits=6&period=30"));
         assert_eq!(secret_base32(&s).len(), 32);
     }
 

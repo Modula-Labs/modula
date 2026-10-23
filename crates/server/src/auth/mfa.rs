@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-pub const ISSUER: &str = "Modula Cloud";
+pub const ISSUER: &str = "Modula Deploy";
 /// An unconfirmed enrollment must be confirmed within this window.
 const ENROLL_TTL: Duration = Duration::minutes(15);
 

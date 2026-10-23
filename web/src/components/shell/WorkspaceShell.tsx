@@ -98,7 +98,7 @@ export function WorkspaceShell() {
   return (
     <div className="grid h-full grid-cols-[224px_1fr] grid-rows-[56px_1fr]">
       <header className="col-span-2 flex items-center justify-between px-4">
-        <Link to="/projects" aria-label="Modula Cloud home"><Logo /></Link>
+        <Link to="/projects" aria-label="Modula Deploy home"><Logo /></Link>
       </header>
 
       <aside className="flex min-h-0 flex-col px-2 pb-2">

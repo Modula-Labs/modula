@@ -1,8 +1,8 @@
-# Modula Cloud
+# Modula Deploy
 
 Self-hostable PaaS with a Railway-style workflow: project canvas, environments,
 staged changes, GitHub auto-deploys, variables, domains, database backups, and
-the `modula` CLI. Rust control plane + a Rust agent per node; Docker runtime,
+the `modula-deploy` CLI. Rust control plane + `modula-node` on each server; Docker runtime,
 Caddy edge, Railpack builds.
 
 Status: **C0b — auth** (C0a foundations plus TOTP 2FA, recovery codes, sudo

@@ -25,7 +25,7 @@ export function SetupPage() {
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, [k]: e.target.value });
 
   return (
-    <AuthCard title="Set up Modula Cloud" subtitle="Create the first admin account. The setup token is printed in the server log.">
+    <AuthCard title="Set up Modula Deploy" subtitle="Create the first admin account. The setup token is printed in the server log.">
       <form
         className="flex flex-col gap-4"
         onSubmit={async (e) => {

@@ -5,7 +5,7 @@ use modula_server::config::{self, Config};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "modula-server", version, about = "Modula Cloud control plane")]
+#[command(name = "modula-server", version, about = "Modula Deploy control plane")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,

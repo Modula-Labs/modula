@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* Modula Cloud tokens (docs/ui-spec.md §8). HSL triplets so alpha works:
+/* Modula Deploy tokens (docs/ui-spec.md §8). HSL triplets so alpha works:
    bg-surface-3/50 → hsl(var(--surface-3) / 0.5). Dark is the default. */
 :root {
   --bg: 222 22% 7%;

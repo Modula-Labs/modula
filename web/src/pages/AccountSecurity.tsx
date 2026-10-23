@@ -53,7 +53,7 @@ export function RecoveryCodes({ codes }: { codes: string[] }) {
             const url = URL.createObjectURL(new Blob([text + "\n"], { type: "text/plain" }));
             const a = document.createElement("a");
             a.href = url;
-            a.download = "modula-cloud-recovery-codes.txt";
+            a.download = "modula-deploy-recovery-codes.txt";
             a.click();
             URL.revokeObjectURL(url);
           }}

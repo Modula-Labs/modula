@@ -1,4 +1,4 @@
-//! Cryptographic primitives for Modula Cloud.
+//! Cryptographic primitives for Modula Deploy.
 //!
 //! - [`envelope`]: a master key (KEK) wraps per-scope data keys (DEKs); DEKs seal
 //!   individual fields with AAD bound to `(scope, table, column, row)`.

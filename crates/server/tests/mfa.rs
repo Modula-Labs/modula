@@ -18,7 +18,7 @@ async fn enroll(app: &TestApp) -> (Vec<u8>, Vec<String>, String) {
         .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     let url = r.json["otpauthUrl"].as_str().unwrap();
-    assert!(url.starts_with("otpauth://totp/Modula%20Cloud:admin%40example.com?secret="));
+    assert!(url.starts_with("otpauth://totp/Modula%20Deploy:admin%40example.com?secret="));
     let secret = data_encoding::BASE32_NOPAD
         .decode(r.json["secret"].as_str().unwrap().as_bytes())
         .unwrap();
