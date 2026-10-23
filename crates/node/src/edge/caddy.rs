@@ -135,6 +135,27 @@ impl CaddyEdge {
 }
 
 /// The full Caddy JSON config for `cfg`.
+/// Plain-HTTP routes: every known hostname redirects to HTTPS (308 keeps
+/// the method and body); anything else is the usual 404.
+fn https_redirects(hosts: &[&String]) -> Value {
+    let mut routes = Vec::new();
+    if !hosts.is_empty() {
+        routes.push(json!({
+            "match": [{ "host": hosts }],
+            "handle": [{
+                "handler": "static_response",
+                "status_code": 308,
+                "headers": { "Location": ["https://{http.request.host}{http.request.uri}"] }
+            }],
+            "terminal": true
+        }));
+    }
+    routes.push(json!({
+        "handle": [{ "handler": "static_response", "status_code": 404, "body": NOT_FOUND }]
+    }));
+    Value::Array(routes)
+}
+
 pub fn render(cfg: &EdgeConfig, listeners: Listeners, admin_listen: &str, ask_url: &str) -> Value {
     // One route per hostname; several upstreams if several replicas serve it.
     let mut by_host: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -183,12 +204,14 @@ pub fn render(cfg: &EdgeConfig, listeners: Listeners, admin_listen: &str, ask_ur
         (_, Listeners::Ports) => server["listen"] = json!([":80", ":443"]),
         (_, Listeners::SystemdSockets) => {
             // Caddy can't tell which descriptor is the HTTP port, so plain
-            // HTTP gets a server of its own with the same routes (as on :80
-            // today), and HTTP/3 is bound to the UDP socket explicitly.
+            // HTTP gets a server of its own, and HTTP/3 is bound to the UDP
+            // socket explicitly. That server only redirects to HTTPS (what
+            // automatic HTTPS does on :80): nothing is served in clear text.
             server["listen"] = json!(["fd/4", "fdgram/5"]);
             server["listen_protocols"] = json!([["h1", "h2"], ["h3"]]);
             server["automatic_https"] = json!({ "disable_redirects": true });
             let mut plain = server.clone();
+            plain["routes"] = https_redirects(&hosts);
             plain["listen"] = json!(["fd/3"]);
             plain["listen_protocols"] = json!([["h1"]]);
             // ACME HTTP-01 challenges are still answered here (every server does).
@@ -417,9 +440,21 @@ mod tests {
         );
         assert_eq!(servers["modula_http"]["listen"], json!(["fd/3"]));
         assert_eq!(servers["modula_http"]["automatic_https"]["disable"], true);
+        // Plain HTTP never proxies: known hosts redirect to HTTPS.
+        let plain = servers["modula_http"]["routes"].as_array().unwrap();
+        assert_eq!(plain[0]["handle"][0]["status_code"], 308);
         assert_eq!(
-            servers["modula_http"]["routes"],
-            servers["modula"]["routes"]
+            plain[0]["handle"][0]["headers"]["Location"][0],
+            "https://{http.request.host}{http.request.uri}"
+        );
+        assert_eq!(
+            plain[0]["match"][0]["host"],
+            servers["modula"]["routes"][0]["match"][0]["host"]
+        );
+        assert!(
+            !plain
+                .iter()
+                .any(|r| r["handle"][0]["handler"] == "reverse_proxy")
         );
         assert_eq!(c["apps"]["http"]["grace_period"], GRACE_PERIOD);
 
