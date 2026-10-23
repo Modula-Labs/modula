@@ -6,6 +6,7 @@ pub mod config;
 pub mod desired;
 pub mod env;
 pub mod placement;
+pub mod refs;
 pub mod start;
 pub mod state;
 

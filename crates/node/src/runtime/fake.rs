@@ -59,6 +59,17 @@ impl FakeRuntime {
         }
     }
 
+    /// The environment a deployment's container was created with.
+    pub fn env_of(&self, deployment_id: &str) -> BTreeMap<String, String> {
+        let s = self.state.lock().expect("fake lock");
+        s.containers
+            .iter()
+            .find(|(_, c)| c.deployment_id == deployment_id)
+            .and_then(|(id, _)| s.env.get(id))
+            .map(|e| e.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn running_deployments(&self) -> BTreeSet<String> {
         let s = self.state.lock().expect("fake lock");
         s.containers

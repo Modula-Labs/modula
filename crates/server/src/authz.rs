@@ -75,6 +75,12 @@ pub enum Action {
     /// Set or delete variables (write-only: no read-back).
     VariablesWrite,
     VariableReveal,
+    /// An environment's shared variables (names and metadata) and the names
+    /// references can point at.
+    SharedVariablesRead,
+    SharedVariablesWrite,
+    /// Deploy the services with pending changes in an environment.
+    EnvironmentDeploy,
     DeploymentCreate,
     DeploymentRead,
     DeploymentRemove,
@@ -108,7 +114,11 @@ impl Action {
             Self::SessionRevoke => K::Session,
             Self::ProjectRead | Self::ProjectUpdate | Self::ProjectDelete => K::Project,
             Self::EnvironmentCreate | Self::ServiceCreate => K::Project,
-            Self::EnvironmentDelete | Self::EnvironmentSync => K::Environment,
+            Self::EnvironmentDelete
+            | Self::EnvironmentSync
+            | Self::SharedVariablesRead
+            | Self::SharedVariablesWrite
+            | Self::EnvironmentDeploy => K::Environment,
             Self::ServiceDelete => K::Service,
             Self::InstanceRead | Self::InstanceUpdate => K::ServiceInstance,
             Self::VariablesRead | Self::VariablesWrite | Self::DeploymentCreate => {
@@ -137,8 +147,11 @@ impl Action {
             | Self::ProjectRead
             | Self::InstanceRead
             | Self::VariablesRead
+            | Self::SharedVariablesRead
             | Self::DeploymentRead => Role::Viewer,
             Self::VariablesWrite
+            | Self::SharedVariablesWrite
+            | Self::EnvironmentDeploy
             | Self::DeploymentCreate
             | Self::DeploymentRemove
             | Self::DeploymentRollout => Role::Deployer,
@@ -191,6 +204,9 @@ impl Action {
             | Self::InstanceUpdate
             | Self::VariablesRead
             | Self::VariablesWrite
+            | Self::SharedVariablesRead
+            | Self::SharedVariablesWrite
+            | Self::EnvironmentDeploy
             | Self::DeploymentCreate
             | Self::DeploymentRead
             | Self::DeploymentRemove
@@ -291,9 +307,8 @@ impl ResourceKind {
             }
             Self::Variable => {
                 "SELECT p.workspace_id FROM variables v
-                 JOIN service_instances i ON i.id = v.service_instance_id
-                 JOIN services s ON s.id = i.service_id
-                 JOIN projects p ON p.id = s.project_id WHERE v.id = $1"
+                 JOIN environments e ON e.id = v.environment_id
+                 JOIN projects p ON p.id = e.project_id WHERE v.id = $1"
             }
             Self::Deployment => {
                 "SELECT p.workspace_id FROM deployments d

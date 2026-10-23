@@ -58,6 +58,9 @@ pub struct InstanceSummary {
     pub image: Option<String>,
     /// Detected by the last build (e.g. `nextjs`), for the card icon.
     pub stack: Option<String>,
+    /// Services this one references (`${{service.NAME}}`, directly or through
+    /// a shared variable): the canvas draws an edge to each.
+    pub depends_on: Vec<Id>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -177,7 +180,20 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
                 i.config->'source'->>'type' AS source_type,
                 i.config->'source'->>'repo' AS repo,
                 i.config->'source'->>'image' AS image,
-                i.stack
+                i.stack,
+                ARRAY(
+                    WITH own AS (
+                        SELECT unnest(refs) AS r FROM variables WHERE service_instance_id = i.id
+                    ), via_shared AS (
+                        SELECT unnest(v.refs) AS r FROM variables v
+                        WHERE v.environment_id = i.environment_id AND v.service_instance_id IS NULL
+                          AND 'shared.' || v.name IN (SELECT r FROM own)
+                    )
+                    SELECT DISTINCT d.id::text FROM (SELECT r FROM own UNION SELECT r FROM via_shared) x
+                    JOIN services d ON d.project_id = s.project_id AND d.id <> s.id
+                                   AND d.name = split_part(x.r, '.', 1)
+                    WHERE position('.' in x.r) > 0 AND x.r NOT LIKE 'shared.%'
+                ) AS depends_on
          FROM service_instances i
          JOIN services s ON s.id = i.service_id
          LEFT JOIN LATERAL (
@@ -284,9 +300,15 @@ pub async fn delete(
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateEnvironment {
     pub name: String,
+    /// The environment to copy service configs from (default: the first).
+    #[serde(default)]
+    pub clone_from: Option<Id>,
+    /// Also copy its variables (sealed ones excepted).
+    #[serde(default)]
+    pub copy_variables: bool,
 }
 
 pub async fn create_environment(
@@ -315,16 +337,26 @@ pub async fn create_environment(
         )));
     }
     // Every service exists in every environment. New environments start from
-    // the configuration of the project's first environment (not its variables).
-    sqlx::query(
-        "INSERT INTO service_instances (id, service_id, environment_id, config)
-         SELECT new_id(), i.service_id, $2, i.config
-         FROM service_instances i
-         WHERE i.environment_id = (
-             SELECT id FROM environments WHERE project_id = $1 AND id <> $2 ORDER BY created_at LIMIT 1
-         )",
+    // the configuration of another (by default the project's first).
+    let source: Option<Id> = sqlx::query_scalar(
+        "SELECT id FROM environments WHERE project_id = $1 AND id <> $2 AND ($3::text IS NULL OR id = $3)
+         ORDER BY created_at LIMIT 1",
     )
     .bind(project)
+    .bind(id)
+    .bind(req.clone_from)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if req.clone_from.is_some() && source.is_none() {
+        return Err(AppError::bad_request(
+            "cloneFrom must be an environment of this project",
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO service_instances (id, service_id, environment_id, config)
+         SELECT new_id(), i.service_id, $2, i.config FROM service_instances i WHERE i.environment_id = $1",
+    )
+    .bind(source)
     .bind(id)
     .execute(&mut *tx)
     .await?;
@@ -336,6 +368,9 @@ pub async fn create_environment(
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
+    if let (true, Some(from)) = (req.copy_variables, source) {
+        copy_environment(&state, actor.user_id, id, from).await?;
+    }
     Ok(Json(
         sqlx::query_as("SELECT id, name, created_at FROM environments WHERE id = $1")
             .bind(id)
@@ -416,27 +451,50 @@ pub async fn sync_environment(
             "pick another environment of the same project",
         ));
     }
+    let (created, updated) = copy_environment(&state, actor.user_id, target, from).await?;
+    Entry::new("environment.sync", &meta)
+        .actor(&actor)
+        .workspace(grant.workspace_id()?)
+        .target("environment", target)
+        .metadata(json!({ "from": from, "updatedServices": updated, "addedVariables": created }))
+        .record(&state.db)
+        .await?;
+    Ok(Json(json!({ "created": created, "updated": updated })))
+}
 
+/// Copy `from`'s service configs into `target` and add the (non-sealed)
+/// variables `target` lacks; returns (variables added, services updated).
+/// Both environments must belong to the same project.
+async fn copy_environment(
+    state: &AppState,
+    user: Id,
+    target: Id,
+    from: Id,
+) -> AppResult<(u32, u32)> {
     // Copy variables first (sealing needs the keyring, outside the transaction).
-    let missing: Vec<(Id, Id, String, Vec<u8>)> = sqlx::query_as(
-        "SELECT ti.id, v.id, v.name, v.value_sealed
+    // (target instance or None for shared, source variable, name, value, refs)
+    #[allow(clippy::type_complexity)]
+    let missing: Vec<(Option<Id>, Id, String, Vec<u8>, Vec<String>)> = sqlx::query_as(
+        "SELECT ti.id, v.id, v.name, v.value_sealed, v.refs
          FROM variables v
-         JOIN service_instances si ON si.id = v.service_instance_id AND si.environment_id = $2
-         JOIN service_instances ti ON ti.service_id = si.service_id AND ti.environment_id = $1
-         WHERE NOT v.sealed
-           AND NOT EXISTS (SELECT 1 FROM variables t WHERE t.service_instance_id = ti.id AND t.name = v.name)",
+         LEFT JOIN service_instances si ON si.id = v.service_instance_id
+         LEFT JOIN service_instances ti ON ti.service_id = si.service_id AND ti.environment_id = $1
+         WHERE v.environment_id = $2 AND NOT v.sealed
+           AND (v.service_instance_id IS NULL OR ti.id IS NOT NULL)
+           AND NOT EXISTS (SELECT 1 FROM variables t WHERE t.environment_id = $1
+                           AND t.service_instance_id IS NOT DISTINCT FROM ti.id AND t.name = v.name)",
     )
     .bind(target)
     .bind(from)
     .fetch_all(&state.db)
     .await?;
     let mut copies = Vec::with_capacity(missing.len());
-    for (instance, var, name, sealed) in missing {
+    for (instance, var, name, sealed, refs) in missing {
         let value = env::open_variable(&state.keys, &state.db, from, var, &sealed).await?;
         let id = Id::new();
         let resealed =
             env::seal_variable(&state.keys, &state.db, target, id, value.expose_secret()).await?;
-        copies.push((instance, id, name, resealed));
+        copies.push((instance, id, name, resealed, refs));
     }
 
     let mut tx = state.db.begin().await?;
@@ -451,7 +509,7 @@ pub async fn sync_environment(
     .bind(from)
     .fetch_all(&mut *tx)
     .await?;
-    let mut changes: BTreeMap<Id, Vec<Change>> = BTreeMap::new();
+    let mut changes: BTreeMap<Option<Id>, Vec<Change>> = BTreeMap::new();
     let mut updated = 0;
     for (instance, service, old, new) in pairs {
         let diff = activity::config_changes(&old, &new);
@@ -464,27 +522,34 @@ pub async fn sync_environment(
             .execute(&mut *tx)
             .await?;
         updated += 1;
-        changes.entry(service).or_default().extend(diff);
+        changes.entry(Some(service)).or_default().extend(diff);
     }
     let mut created = 0;
-    for (instance, id, name, sealed) in &copies {
+    for (instance, id, name, sealed, refs) in &copies {
         let r = sqlx::query(
-            "INSERT INTO variables (id, service_instance_id, name, value_sealed)
-             VALUES ($1, $2, $3, $4) ON CONFLICT (service_instance_id, name) DO NOTHING",
+            "INSERT INTO variables (id, environment_id, service_instance_id, name, value_sealed, refs)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (environment_id, service_instance_id, name) DO NOTHING",
         )
         .bind(id)
+        .bind(target)
         .bind(instance)
         .bind(name)
         .bind(sealed)
+        .bind(refs)
         .execute(&mut *tx)
         .await?;
         if r.rows_affected() == 1 {
             created += 1;
-            let service: Id =
-                sqlx::query_scalar("SELECT service_id FROM service_instances WHERE id = $1")
-                    .bind(instance)
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let service: Option<Id> = match instance {
+                Some(i) => Some(
+                    sqlx::query_scalar("SELECT service_id FROM service_instances WHERE id = $1")
+                        .bind(i)
+                        .fetch_one(&mut *tx)
+                        .await?,
+                ),
+                None => None,
+            };
             changes.entry(service).or_default().push(Change::new(
                 "variable",
                 "added",
@@ -493,15 +558,8 @@ pub async fn sync_environment(
         }
     }
     for (service, list) in &changes {
-        activity::record(&mut tx, target, Some(*service), Some(actor.user_id), list).await?;
+        activity::record(&mut tx, target, *service, Some(user), list).await?;
     }
-    Entry::new("environment.sync", &meta)
-        .actor(&actor)
-        .workspace(grant.workspace_id()?)
-        .target("environment", target)
-        .metadata(json!({ "from": from, "updatedServices": updated, "addedVariables": created }))
-        .record(&mut *tx)
-        .await?;
     tx.commit().await?;
-    Ok(Json(json!({ "created": created, "updated": updated })))
+    Ok((created, updated))
 }

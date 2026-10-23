@@ -1,52 +1,129 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { CopyButton } from "@/components/ui/CopyButton";
 import { DotsVertical, Eye, EyeOff, FileText, Lock, Plus, Trash, Variable } from "@/components/ui/icons";
 import { Input, Textarea } from "@/components/ui/Input";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { Alert, Badge, EmptyState, Skeleton } from "@/components/ui/misc";
-import { api, type VariableInfo } from "@/lib/api";
-import { parseDotenv } from "@/lib/dotenv";
+import { ApiError, api, type VariableInfo, type VariableNames, type VariablePatch } from "@/lib/api";
+import { diffEnv, envTemplate, parseDotenv } from "@/lib/dotenv";
 import { relativeTime } from "@/lib/format";
+import { referenceOptions, type ReferenceOption } from "@/lib/references";
+import { ReferenceInput } from "./ReferenceInput";
+
+/** Where a variables list lives: one service instance, or the environment's shared set. */
+export interface VariablesScope {
+  /** Query key of the list. */
+  key: unknown[];
+  environmentId: string;
+  /** The service whose own names complete without a prefix; none for shared. */
+  serviceId?: string;
+  load: () => Promise<VariableInfo[]>;
+  save: (b: VariablePatch) => Promise<VariableInfo[]>;
+}
+
+export function VariablesTab({
+  instanceId,
+  environmentId,
+  serviceId,
+  canEdit,
+}: {
+  instanceId: string;
+  environmentId: string;
+  serviceId: string;
+  canEdit: boolean;
+}) {
+  const scope: VariablesScope = {
+    key: ["variables", instanceId],
+    environmentId,
+    serviceId,
+    load: () => api.variables(instanceId),
+    save: (b) => api.updateVariables(instanceId, b),
+  };
+  return <VariablesEditor scope={scope} canEdit={canEdit} noun="service" />;
+}
 
 /** Write-only variables: values never come back from the API except through
- *  an audited, sudo-gated reveal, and sealed ones not even then. */
-export function VariablesTab({ instanceId, canEdit }: { instanceId: string; canEdit: boolean }) {
+ *  an audited, sudo-gated reveal, and sealed ones not even then. Used for a
+ *  service's variables and for an environment's shared variables. */
+export function VariablesEditor({ scope, canEdit, noun }: { scope: VariablesScope; canEdit: boolean; noun: "service" | "shared" }) {
   const qc = useQueryClient();
-  const key = ["variables", instanceId];
-  const vars = useQuery({ queryKey: key, queryFn: () => api.variables(instanceId) });
+  const vars = useQuery({ queryKey: scope.key, queryFn: scope.load });
+  const names = useQuery({
+    queryKey: ["variable-names", scope.environmentId],
+    queryFn: async (): Promise<VariableNames> => {
+      try {
+        return await api.variableNames(scope.environmentId);
+      } catch (e) {
+        // Older servers have no autocomplete endpoint.
+        if (e instanceof ApiError && e.status === 404) return { shared: [], services: [] };
+        throw e;
+      }
+    },
+    staleTime: 30_000,
+    retry: false,
+  });
+  const options = useMemo(() => (names.data ? referenceOptions(names.data, scope.serviceId) : []), [names.data, scope.serviceId]);
   const [adding, setAdding] = useState(false);
   const [raw, setRaw] = useState(false);
   const update = useMutation({
-    mutationFn: (b: Parameters<typeof api.updateVariables>[1]) => api.updateVariables(instanceId, b),
-    onSuccess: (list) => qc.setQueryData(key, list),
+    mutationFn: scope.save,
+    onSuccess: (list) => {
+      qc.setQueryData(scope.key, list);
+      // Edits are saved at once but only apply on the next deploy; references also change the canvas edges.
+      void qc.invalidateQueries({ queryKey: ["pending", scope.environmentId] });
+      void qc.invalidateQueries({ queryKey: ["variable-names", scope.environmentId] });
+      void qc.invalidateQueries({ queryKey: ["project"] });
+    },
   });
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <div className="text-sm text-muted-foreground">
-          {vars.data ? `${vars.data.length} service variable${vars.data.length === 1 ? "" : "s"}` : " "}
+          {vars.data ? `${vars.data.length} ${noun} variable${vars.data.length === 1 ? "" : "s"}` : " "}
         </div>
         {canEdit ? (
           <div className="flex gap-2">
-            <Button variant="ghost" size="sm" icon={<FileText />} onClick={() => setRaw((r) => !r)}>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<FileText />}
+              aria-pressed={raw}
+              disabled={!vars.data}
+              onClick={() => {
+                setRaw((r) => !r);
+                setAdding(false);
+              }}
+            >
               Raw editor
             </Button>
-            <Button variant="secondary" size="sm" icon={<Plus />} onClick={() => setAdding(true)}>
+            <Button variant="secondary" size="sm" icon={<Plus />} disabled={raw} onClick={() => setAdding(true)}>
               New variable
             </Button>
           </div>
         ) : null}
       </div>
-      <p className="text-xs text-muted-foreground">Changes apply on the next deploy.</p>
+      <p className="text-xs text-muted-foreground">
+        {noun === "shared" ? "Available to every service in this environment as " : "Changes apply on the next deploy. Reference other variables with "}
+        <span className="font-mono">{noun === "shared" ? "${{shared.NAME}}" : "${{service.NAME}}"}</span>
+        {noun === "shared" ? ". Changes apply on the next deploy." : "."}
+      </p>
 
       {update.error ? <Alert>{update.error.message}</Alert> : null}
-      {raw ? <RawEditor busy={update.isPending} onSubmit={(set) => update.mutateAsync({ set }).then(() => setRaw(false))} /> : null}
-      {adding ? (
+      {raw && vars.data ? (
+        <RawEditor
+          variables={vars.data}
+          busy={update.isPending}
+          onSubmit={(patch) => update.mutateAsync(patch).then(() => setRaw(false))}
+          onCancel={() => setRaw(false)}
+        />
+      ) : null}
+      {adding && !raw ? (
         <NewVariableRow
           busy={update.isPending}
+          options={options}
           onCancel={() => setAdding(false)}
           onSubmit={(name, value, sealed) =>
             update.mutateAsync({ set: { [name]: value }, sealed: sealed ? [name] : [] }).then(() => setAdding(false))
@@ -54,12 +131,12 @@ export function VariablesTab({ instanceId, canEdit }: { instanceId: string; canE
         />
       ) : null}
 
-      {vars.isPending ? (
+      {raw ? null : vars.isPending ? (
         <Skeleton className="h-32" />
-      ) : vars.data && vars.data.length === 0 && !adding && !raw ? (
+      ) : vars.data && vars.data.length === 0 && !adding ? (
         <EmptyState
           icon={<Variable />}
-          title="No variables yet"
+          title={noun === "shared" ? "No shared variables yet" : "No variables yet"}
           body="Variables are encrypted at rest and injected into the container on deploy."
         />
       ) : (
@@ -69,6 +146,7 @@ export function VariablesTab({ instanceId, canEdit }: { instanceId: string; canE
               key={v.id}
               v={v}
               canEdit={canEdit}
+              options={options}
               onSet={(value) => update.mutateAsync({ set: { [v.name]: value } })}
               onDelete={() => update.mutate({ delete: [v.name] })}
             />
@@ -82,11 +160,13 @@ export function VariablesTab({ instanceId, canEdit }: { instanceId: string; canE
 function VariableRow({
   v,
   canEdit,
+  options,
   onSet,
   onDelete,
 }: {
   v: VariableInfo;
   canEdit: boolean;
+  options: ReferenceOption[];
   onSet: (value: string) => Promise<unknown>;
   onDelete: () => void;
 }) {
@@ -106,12 +186,23 @@ function VariableRow({
 
   return (
     <div className="group flex min-h-12 items-center gap-3 px-4 py-2">
-      <div className="flex w-[38%] min-w-0 items-center gap-2">
-        <span className="truncate font-mono text-[13px]">{v.name}</span>
-        {v.sealed ? (
-          <span title="Sealed: write-only, can never be revealed">
-            <Lock className="size-3.5 shrink-0 text-muted-foreground" />
-          </span>
+      <div className="flex w-[38%] min-w-0 flex-col gap-1">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate font-mono text-[13px]">{v.name}</span>
+          {v.sealed ? (
+            <span title="Sealed: write-only, can never be revealed">
+              <Lock className="size-3.5 shrink-0 text-muted-foreground" />
+            </span>
+          ) : null}
+        </div>
+        {v.references?.length ? (
+          <div className="flex flex-wrap gap-1" aria-label="References">
+            {v.references.map((r) => (
+              <span key={r} title={`Refers to ${r}`} className="rounded-xs bg-muted px-1.5 font-mono text-[11px] leading-[18px] text-muted-foreground">
+                {r}
+              </span>
+            ))}
+          </div>
         ) : null}
       </div>
       <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -126,7 +217,7 @@ function VariableRow({
               setValue("");
             }}
           >
-            <Input mono autoFocus placeholder="New value" value={value} onChange={(e) => setValue(e.target.value)} />
+            <ReferenceInput mono autoFocus placeholder="New value" aria-label={`New value for ${v.name}`} value={value} onValueChange={setValue} options={options} />
             <Button type="submit" size="sm" variant="secondary">
               Save
             </Button>
@@ -177,10 +268,12 @@ function VariableRow({
 
 function NewVariableRow({
   busy,
+  options,
   onCancel,
   onSubmit,
 }: {
   busy: boolean;
+  options: ReferenceOption[];
   onCancel: () => void;
   onSubmit: (name: string, value: string, sealed: boolean) => Promise<unknown>;
 }) {
@@ -197,7 +290,7 @@ function NewVariableRow({
     >
       <div className="grid grid-cols-[38%_1fr] gap-3">
         <Input mono autoFocus required aria-label="Variable name" placeholder="VARIABLE_NAME" value={name} onChange={(e) => setName(e.target.value.replace(/\s/g, "_"))} />
-        <Input mono aria-label="Value" placeholder="value" value={value} onChange={(e) => setValue(e.target.value)} />
+        <ReferenceInput mono aria-label="Value" placeholder="value, or ${{service.NAME}}" value={value} onValueChange={setValue} options={options} />
       </div>
       <div className="flex items-center justify-between">
         <label className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -217,27 +310,65 @@ function NewVariableRow({
   );
 }
 
-function RawEditor({ busy, onSubmit }: { busy: boolean; onSubmit: (set: Record<string, string>) => Promise<unknown> }) {
-  const [text, setText] = useState("");
+/** `.env` view of the whole list. Values are write-only (the API never returns
+ *  them), so it starts from bare `NAME=` lines and works as a diff: an existing
+ *  name with an empty value is left untouched, a new name or a typed value is
+ *  sent, and a deleted line deletes the variable. Sealed variables look the
+ *  same as the others and are only ever replaced, never shown. */
+function RawEditor({
+  variables,
+  busy,
+  onSubmit,
+  onCancel,
+}: {
+  variables: VariableInfo[];
+  busy: boolean;
+  onSubmit: (patch: VariablePatch) => Promise<unknown>;
+  onCancel: () => void;
+}) {
+  const existing = variables.map((v) => v.name);
+  const sealed = variables.filter((v) => v.sealed).length;
+  const [text, setText] = useState(() => envTemplate(existing));
   const parsed = parseDotenv(text);
-  const count = Object.keys(parsed.vars).length;
+  const diff = diffEnv(existing, parsed.vars);
+  const total = Object.keys(diff.set).length + diff.delete.length;
+  const summary = [
+    diff.added.length ? `${diff.added.length} added` : "",
+    diff.changed.length ? `${diff.changed.length} updated` : "",
+    diff.delete.length ? `${diff.delete.length} removed` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border p-4">
       <p className="text-sm text-muted-foreground">
-        Paste <span className="font-mono">.env</span> contents. Existing values stay hidden; names you list here are added or overwritten.
+        Existing values stay hidden. Leave a <span className="font-mono">NAME=</span> line empty to keep its value, type one to replace it, add lines for
+        new variables, or delete a line to remove the variable.
+        {sealed ? ` ${sealed} sealed variable${sealed === 1 ? " is" : "s are"} listed the same way and can only be replaced.` : ""}
       </p>
-      <Textarea
-        aria-label="Raw variables"
-        className="min-h-40"
-        spellCheck={false}
-        placeholder={"DATABASE_URL=postgres://…\nAPI_KEY=…"}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-      />
+      <Textarea aria-label="Raw variables" className="min-h-48" spellCheck={false} value={text} onChange={(e) => setText(e.target.value)} />
       {parsed.errors.length ? <Alert tone="warn">{parsed.errors.slice(0, 5).join(" · ")}</Alert> : null}
-      <div className="flex justify-end">
-        <Button size="sm" variant="secondary" loading={busy} disabled={count === 0 || parsed.errors.length > 0} onClick={() => void onSubmit(parsed.vars)}>
-          {count ? `Update ${count} variable${count === 1 ? "" : "s"}` : "Update variables"}
+      {diff.delete.length ? (
+        <Alert tone="warn">
+          Removes {diff.delete.slice(0, 6).join(", ")}
+          {diff.delete.length > 6 ? ` and ${diff.delete.length - 6} more` : ""}.
+        </Alert>
+      ) : null}
+      <div className="flex items-center justify-end gap-2">
+        <span className="mr-auto text-xs text-muted-foreground">{summary}</span>
+        <Button size="sm" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          loading={busy}
+          disabled={total === 0 || parsed.errors.length > 0}
+          onClick={() =>
+            void onSubmit({ set: Object.keys(diff.set).length ? diff.set : undefined, delete: diff.delete.length ? diff.delete : undefined })
+          }
+        >
+          {total ? `Apply ${total} change${total === 1 ? "" : "s"}` : "No changes"}
         </Button>
       </div>
     </div>

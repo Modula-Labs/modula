@@ -9,6 +9,7 @@ pub mod instance;
 pub mod nodes;
 pub mod projects;
 pub mod services;
+pub mod variables;
 pub mod workspaces;
 
 use crate::authz::Action;
@@ -58,14 +59,19 @@ pub fn routes(state: AppState) -> ApiRouter {
         .delete("/api/environments/{environment_id}", Resource(Action::EnvironmentDelete), projects::delete_environment)
         .post("/api/environments/{environment_id}/sync", Resource(Action::EnvironmentSync), projects::sync_environment)
         .get("/api/projects/{project_id}/activity", Resource(Action::ProjectRead), activity::list)
+        .get("/api/environments/{environment_id}/pending", Resource(Action::SharedVariablesRead), activity::pending)
+        .post("/api/environments/{environment_id}/deploy", Resource(Action::EnvironmentDeploy), activity::deploy)
         // Services, per-environment config, variables
         .post("/api/projects/{project_id}/services", Resource(Action::ServiceCreate), services::create)
         .delete("/api/services/{service_id}", Resource(Action::ServiceDelete), services::delete)
         .get("/api/service-instances/{instance_id}", Resource(Action::InstanceRead), services::get_instance)
         .patch("/api/service-instances/{instance_id}", Resource(Action::InstanceUpdate), services::update_instance)
-        .get("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesRead), services::variables)
-        .patch("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesWrite), services::update_variables)
-        .post("/api/variables/{variable_id}/reveal", Resource(Action::VariableReveal), services::reveal_variable)
+        .get("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesRead), variables::instance_variables)
+        .patch("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesWrite), variables::update_instance_variables)
+        .get("/api/environments/{environment_id}/variables", Resource(Action::SharedVariablesRead), variables::shared_variables)
+        .patch("/api/environments/{environment_id}/variables", Resource(Action::SharedVariablesWrite), variables::update_shared_variables)
+        .get("/api/environments/{environment_id}/variable-names", Resource(Action::SharedVariablesRead), variables::names)
+        .post("/api/variables/{variable_id}/reveal", Resource(Action::VariableReveal), variables::reveal)
         // Deployments
         .post("/api/service-instances/{instance_id}/deployments", Resource(Action::DeploymentCreate), deployments::create)
         .get("/api/service-instances/{instance_id}/deployments", Resource(Action::InstanceRead), deployments::list)

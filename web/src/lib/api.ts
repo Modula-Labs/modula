@@ -121,6 +121,8 @@ export interface InstanceSummary {
   image?: string | null;
   /** Detected framework/runtime (e.g. "nextjs", "postgres"), used for the card icon. */
   stack?: string | null;
+  /** Ids of the services this instance references through `${{service.NAME}}`. */
+  dependsOn?: string[];
 }
 export interface ProjectDetail extends Project {
   environments: Environment[];
@@ -202,6 +204,22 @@ export interface VariableInfo {
   name: string;
   sealed: boolean;
   updatedAt: string;
+  /** What the value points at, e.g. `postgres.DATABASE_URL`, `shared.API_KEY`. */
+  references?: string[];
+}
+export interface VariablePatch {
+  set?: Record<string, string>;
+  sealed?: string[];
+  delete?: string[];
+}
+/** Names only, for `${{` autocomplete. */
+export interface VariableNames {
+  shared: string[];
+  services: { serviceId: string; serviceName: string; names: string[]; platform: string[] }[];
+}
+export interface PendingChanges {
+  count: number;
+  services: { serviceId: string; serviceName: string; instanceId: string; changes: ActivityChange[] }[];
 }
 export interface Deployment {
   id: string;
@@ -298,8 +316,8 @@ export const api = {
   project: (id: string) => get<ProjectDetail>(`/api/projects/${enc(id)}`),
   updateProject: (id: string, b: { name?: string; description?: string }) => patch<Project>(`/api/projects/${enc(id)}`, b),
   deleteProject: (id: string) => del<{ ok: true }>(`/api/projects/${enc(id)}`),
-  createEnvironment: (project: string, name: string) =>
-    post<Environment>(`/api/projects/${enc(project)}/environments`, { name }),
+  createEnvironment: (project: string, b: { name: string; cloneFrom?: string; copyVariables?: boolean }) =>
+    post<Environment>(`/api/projects/${enc(project)}/environments`, b),
   syncEnvironment: (target: string, fromEnvironmentId: string) =>
     post<SyncResult>(`/api/environments/${enc(target)}/sync`, { fromEnvironmentId }),
   activity: (project: string, q: { environmentId?: string; serviceId?: string; kind?: ActivityKind }) => {
@@ -318,8 +336,17 @@ export const api = {
   updateInstance: (id: string, config: ServiceConfig) => patch<Instance>(`/api/service-instances/${enc(id)}`, { config }),
 
   variables: (instance: string) => get<VariableInfo[]>(`/api/service-instances/${enc(instance)}/variables`),
-  updateVariables: (instance: string, b: { set?: Record<string, string>; sealed?: string[]; delete?: string[] }) =>
+  updateVariables: (instance: string, b: VariablePatch) =>
     patch<VariableInfo[]>(`/api/service-instances/${enc(instance)}/variables`, b),
+  sharedVariables: (environment: string) => get<VariableInfo[]>(`/api/environments/${enc(environment)}/variables`),
+  updateSharedVariables: (environment: string, b: VariablePatch) =>
+    patch<VariableInfo[]>(`/api/environments/${enc(environment)}/variables`, b),
+  variableNames: (environment: string) => get<VariableNames>(`/api/environments/${enc(environment)}/variable-names`),
+  pending: (environment: string) => get<PendingChanges>(`/api/environments/${enc(environment)}/pending`),
+  deployPending: (environment: string, serviceIds?: string[]) =>
+    post<{ deployments: { serviceId: string; deploymentId: string }[] }>(`/api/environments/${enc(environment)}/deploy`, {
+      serviceIds,
+    }),
   revealVariable: (id: string) => post<{ name: string; value: string }>(`/api/variables/${enc(id)}/reveal`),
 
   deployments: (instance: string) => get<Deployment[]>(`/api/service-instances/${enc(instance)}/deployments`),

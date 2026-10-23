@@ -594,3 +594,54 @@ async fn activity_records_names_and_sync_copies_config(pool: PgPool) {
     assert_eq!(r.json, json!({ "created": 0, "updated": 0 }));
     assert_eq!(sync(staging.clone()).await.status, StatusCode::BAD_REQUEST);
 }
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn environments_clone_config_and_optionally_variables(pool: PgPool) {
+    let f = fixture(pool).await;
+    f.set_vars(
+        &f.admin,
+        json!({ "set": { "PLAIN": "1", "SECRET": "2" }, "sealed": ["SECRET"] }),
+    )
+    .await;
+    let prod: String =
+        sqlx::query_scalar("SELECT environment_id FROM service_instances WHERE id = $1")
+            .bind(&f.instance)
+            .fetch_one(&f.app.state.db)
+            .await
+            .unwrap();
+    let create = |body: Value| {
+        let (app, admin, project) = (&f.app, f.admin.clone(), f.project.clone());
+        async move {
+            let r = app
+                .call(
+                    Method::POST,
+                    &format!("/api/projects/{project}/environments"),
+                    Some(&admin),
+                    Some(body),
+                )
+                .await;
+            assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+            r.json["id"].as_str().unwrap().to_owned()
+        }
+    };
+    let names = |env: String| {
+        let db = f.app.state.db.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT name FROM variables WHERE environment_id = $1 ORDER BY name",
+            )
+            .bind(env)
+            .fetch_all(&db)
+            .await
+            .unwrap()
+        }
+    };
+    let bare = create(json!({ "name": "bare", "cloneFrom": prod })).await;
+    assert!(names(bare).await.is_empty());
+    let copy = create(json!({ "name": "copy", "cloneFrom": prod, "copyVariables": true })).await;
+    assert_eq!(
+        names(copy).await,
+        ["PLAIN"],
+        "sealed variables are never copied"
+    );
+}

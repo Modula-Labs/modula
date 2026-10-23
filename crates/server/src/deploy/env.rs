@@ -90,19 +90,95 @@ pub async fn open_variable(
     Ok(SecretString::from(s))
 }
 
-/// Decrypt every variable of a service instance.
-pub async fn resolve(keys: &Keyring, db: &PgPool, env: Id, instance: Id) -> AppResult<EnvMap> {
-    let rows: Vec<(Id, String, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, name, value_sealed FROM variables WHERE service_instance_id = $1",
+/// A service instance's variables with every `${{…}}` reference expanded.
+pub struct Resolved {
+    pub vars: EnvMap,
+    /// References to variables that don't exist (expanded to "").
+    pub missing: Vec<String>,
+}
+
+/// Resolve a service instance's variables for a new deployment. Decrypts the
+/// environment's variables (references can reach any of them) and adds each
+/// service's platform variables (`PORT`, `MODULA_PRIVATE_DOMAIN`, …) so they
+/// can be referenced too; only the instance's own variables are returned.
+pub async fn resolve(keys: &Keyring, db: &PgPool, env: Id, instance: Id) -> AppResult<Resolved> {
+    use super::refs::{Expander, VarKey};
+
+    // (instance, service, service name, environment name, project, config, public domain)
+    #[allow(clippy::type_complexity)]
+    let services: Vec<(Id, Id, String, String, Id, serde_json::Value, Option<String>)> = sqlx::query_as(
+        "SELECT i.id, s.id, s.name, e.name, s.project_id, i.config,
+                (SELECT hostname FROM domains WHERE service_instance_id = i.id ORDER BY created_at LIMIT 1)
+         FROM service_instances i
+         JOIN services s ON s.id = i.service_id
+         JOIN environments e ON e.id = i.environment_id
+         WHERE i.environment_id = $1",
     )
-    .bind(instance)
+    .bind(env)
     .fetch_all(db)
     .await?;
-    let mut out = EnvMap::new();
-    for (id, name, sealed) in rows {
-        out.insert(name, open_variable(keys, db, env, id, &sealed).await?);
+    let rows: Vec<(Id, Option<String>, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT v.id, s.name, v.name, v.value_sealed FROM variables v
+         LEFT JOIN service_instances i ON i.id = v.service_instance_id
+         LEFT JOIN services s ON s.id = i.service_id
+         WHERE v.environment_id = $1",
+    )
+    .bind(env)
+    .fetch_all(db)
+    .await?;
+
+    let mut raw: BTreeMap<VarKey, String> = BTreeMap::new();
+    let mut user: Vec<VarKey> = Vec::new();
+    for (id, owner, name, sealed) in rows {
+        user.push((owner.clone(), name.clone()));
+        let value = open_variable(keys, db, env, id, &sealed).await?;
+        raw.insert((owner, name), value.expose_secret().to_owned());
     }
-    Ok(out)
+    let mut own = None;
+    for (inst, service_id, service, env_name, project, config, domain) in services {
+        let port = config.get("port").and_then(|p| p.as_u64()).unwrap_or(8080);
+        let platform = [
+            ("PORT", port.to_string()),
+            (
+                "MODULA_PRIVATE_DOMAIN",
+                format!("{service}.modula.internal"),
+            ),
+            ("MODULA_PUBLIC_DOMAIN", domain.unwrap_or_default()),
+            ("MODULA_SERVICE_NAME", service.clone()),
+            ("MODULA_SERVICE_ID", service_id.to_string()),
+            ("MODULA_ENVIRONMENT_NAME", env_name),
+            ("MODULA_ENVIRONMENT_ID", env.to_string()),
+            ("MODULA_PROJECT_ID", project.to_string()),
+        ];
+        for (k, v) in platform {
+            // A user PORT overrides the platform one.
+            raw.entry((Some(service.clone()), k.to_owned()))
+                .or_insert(v);
+        }
+        if inst == instance {
+            own = Some(service);
+        }
+    }
+    let own = own.ok_or(AppError::NotFound)?;
+
+    // Only the instance's own user variables; desired state adds platform ones.
+    let names: Vec<VarKey> = user
+        .into_iter()
+        .filter(|(owner, _)| owner.as_deref() == Some(own.as_str()))
+        .collect();
+    let mut expander = Expander::new(&raw);
+    let mut vars = EnvMap::new();
+    for key in names {
+        let value = expander
+            .value(&key)
+            .map_err(|e| AppError::bad_request(e.to_string()))?
+            .unwrap_or_default();
+        vars.insert(key.1, SecretString::from(value));
+    }
+    Ok(Resolved {
+        vars,
+        missing: expander.missing,
+    })
 }
 
 pub async fn seal_snapshot(

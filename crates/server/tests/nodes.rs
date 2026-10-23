@@ -644,3 +644,185 @@ async fn rollback_rebuilds_the_commit_and_restart_is_in_place(pool: PgPool) {
     assert_eq!(r.json["trigger"], "redeploy");
     assert_eq!(r.json["sourceKind"], "image");
 }
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn references_resolve_across_services_and_edges_follow(pool: PgPool) {
+    let c = cluster(pool).await;
+    let (_node, rt, _stop) = c.start_node().await;
+    // `service_with` makes a project per call; build two services in one.
+    let api_instance = c
+        .service_with(json!({ "source": { "type": "image", "image": "app:1" }, "port": 3000 }))
+        .await;
+    let call = |m: Method, path: String, body: Option<Value>| {
+        let app = &c.app;
+        let admin = c.admin.clone();
+        async move { app.call(m, &path, Some(&admin), body).await }
+    };
+    let inst = call(
+        Method::GET,
+        format!("/api/service-instances/{api_instance}"),
+        None,
+    )
+    .await;
+    let (project, env) = (
+        inst.json["projectId"].as_str().unwrap().to_owned(),
+        inst.json["environmentId"].as_str().unwrap().to_owned(),
+    );
+    let db = call(
+        Method::POST,
+        format!("/api/projects/{project}/services"),
+        Some(json!({ "name": "db", "config": { "source": { "type": "image", "image": "postgres:17" }, "port": 5432 } })),
+    )
+    .await;
+    let db_id = db.json["id"].as_str().unwrap().to_owned();
+    let db_instance = db.json["instances"][0]["id"].as_str().unwrap().to_owned();
+
+    let r = call(
+        Method::PATCH,
+        format!("/api/service-instances/{db_instance}/variables"),
+        Some(json!({ "set": { "PASSWORD": "s3cret-pw" } })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let r = call(
+        Method::PATCH,
+        format!("/api/environments/{env}/variables"),
+        Some(json!({ "set": { "DB": "shop" } })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let url = "postgres://app:${{db.PASSWORD}}@${{db.MODULA_PRIVATE_DOMAIN}}:${{db.PORT}}/${{shared.DB}}?x=${{nope.X}}";
+    let r = call(
+        Method::PATCH,
+        format!("/api/service-instances/{api_instance}/variables"),
+        Some(json!({ "set": { "DATABASE_URL": url, "SELF": "${{PORT}}" } })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let refs: Vec<&str> = r
+        .json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "DATABASE_URL")
+        .unwrap()["references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        refs,
+        [
+            "db.PASSWORD",
+            "db.MODULA_PRIVATE_DOMAIN",
+            "db.PORT",
+            "shared.DB",
+            "nope.X"
+        ]
+    );
+
+    // A loop through two services is refused.
+    let r = call(
+        Method::PATCH,
+        format!("/api/service-instances/{db_instance}/variables"),
+        Some(json!({ "set": { "BACK": "${{api.LOOP}}" } })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    let r = call(
+        Method::PATCH,
+        format!("/api/service-instances/{api_instance}/variables"),
+        Some(json!({ "set": { "LOOP": "${{db.BACK}}" } })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+    assert!(
+        r.json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("api.LOOP → db.BACK → api.LOOP")
+    );
+
+    // The canvas edge: api depends on db.
+    let p = call(Method::GET, format!("/api/projects/{project}"), None).await;
+    assert_eq!(p.status, StatusCode::OK, "{:?}", p.json);
+    let api_summary = p.json["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == api_instance.to_string())
+        .unwrap();
+    assert_eq!(api_summary["dependsOn"], json!([db_id]));
+
+    // Everything is pending; deploying the environment deploys both.
+    let pending = call(
+        Method::GET,
+        format!("/api/environments/{env}/pending"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        pending.json["services"].as_array().unwrap().len(),
+        2,
+        "{:?}",
+        pending.json
+    );
+    let r = call(
+        Method::POST,
+        format!("/api/environments/{env}/deploy"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let deployed = r.json["deployments"].as_array().unwrap().clone();
+    assert_eq!(deployed.len(), 2);
+    let api_dep = deployed
+        .iter()
+        .find(|d| d["serviceId"] != db_id.as_str())
+        .unwrap()["deploymentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    c.wait_status(api_dep.parse().unwrap(), "active").await;
+    let env_vars = rt.env_of(&api_dep);
+    assert_eq!(
+        env_vars["DATABASE_URL"],
+        "postgres://app:s3cret-pw@db.modula.internal:5432/shop?x="
+    );
+    assert_eq!(env_vars["SELF"], "3000");
+    assert_eq!(env_vars["PORT"], "3000");
+    let d = call(Method::GET, format!("/api/deployments/{api_dep}"), None).await;
+    assert!(
+        d.json["events"].to_string().contains("nope.X"),
+        "missing references are reported"
+    );
+    let pending = call(
+        Method::GET,
+        format!("/api/environments/{env}/pending"),
+        None,
+    )
+    .await;
+    assert_eq!(pending.json["count"], 0);
+
+    // A shared variable change is pending for the services that use it.
+    call(
+        Method::PATCH,
+        format!("/api/environments/{env}/variables"),
+        Some(json!({ "set": { "DB": "shop2" } })),
+    )
+    .await;
+    let pending = call(
+        Method::GET,
+        format!("/api/environments/{env}/pending"),
+        None,
+    )
+    .await;
+    let names: Vec<&str> = pending.json["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["serviceName"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["api"]);
+}

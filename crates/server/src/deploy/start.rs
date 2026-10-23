@@ -69,8 +69,8 @@ pub async fn start(
 ) -> AppResult<Started> {
     d.config.validate()?;
     let id = Id::new();
-    let vars = env::resolve(&state.keys, &state.db, env_id, d.instance).await?;
-    let env_sealed = env::seal_snapshot(&state.keys, &state.db, env_id, id, &vars).await?;
+    let resolved = env::resolve(&state.keys, &state.db, env_id, d.instance).await?;
+    let env_sealed = env::seal_snapshot(&state.keys, &state.db, env_id, id, &resolved.vars).await?;
     let service_id: Id =
         sqlx::query_scalar("SELECT service_id FROM service_instances WHERE id = $1 FOR UPDATE")
             .bind(d.instance)
@@ -128,6 +128,18 @@ pub async fn start(
     .bind(what)
     .execute(&mut *tx)
     .await?;
+    if !resolved.missing.is_empty() {
+        sqlx::query(
+            "INSERT INTO deployment_events (deployment_id, phase, message) VALUES ($1, 'warning', $2)",
+        )
+        .bind(id)
+        .bind(format!(
+            "These referenced variables don't exist and were left empty: {}",
+            resolved.missing.join(", ")
+        ))
+        .execute(&mut *tx)
+        .await?;
+    }
     let mut kick: Vec<Id> = superseded.into_iter().flatten().collect();
     kick.push(node);
     kick.sort();

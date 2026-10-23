@@ -344,9 +344,10 @@ impl TestApp {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO variables (id, service_instance_id, name, value_sealed) VALUES ($1, $2, 'X', '\\x00')",
+            "INSERT INTO variables (id, environment_id, service_instance_id, name, value_sealed) VALUES ($1, $2, $3, 'X', '\\x00')",
         )
         .bind(c.variable)
+        .bind(c.environment)
         .bind(c.instance)
         .execute(db)
         .await

@@ -3,14 +3,14 @@ import { Link } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
-import { Activity, Check, ChevronDown, LayoutGrid, Plus, Refresh, Server, Settings } from "@/components/ui/icons";
-import { Field, Input } from "@/components/ui/Input";
+import { Activity, Check, ChevronDown, LayoutGrid, Plus, Refresh, Server, Settings, Trash, Variable } from "@/components/ui/icons";
+import { Field, Input, Select } from "@/components/ui/Input";
 import { LogoMark } from "@/components/ui/Logo";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { Modal } from "@/components/ui/Modal";
 import { useLingering } from "@/components/ui/Sheet";
 import { Alert, Skeleton } from "@/components/ui/misc";
-import { ApiError, api, type DeploymentStatus } from "@/lib/api";
+import { ApiError, api, type DeploymentStatus, type Environment } from "@/lib/api";
 import { atLeast } from "@/lib/roles";
 import { isLive } from "@/lib/status";
 import { useMe } from "@/lib/workspace";
@@ -18,7 +18,9 @@ import { ActivityPanel } from "./ActivityPanel";
 import { Canvas, type CanvasService } from "./Canvas";
 import { DeploymentSheet } from "./DeploymentSheet";
 import { NewServiceDialog } from "./NewServiceDialog";
+import { PendingBar, usePending } from "./PendingBar";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
+import { SharedVariablesSheet } from "./SharedVariablesSheet";
 import { SyncDialog } from "./SyncDialog";
 import { ServiceSheet, type ServiceTab } from "./ServiceSheet";
 
@@ -46,6 +48,8 @@ export function ProjectPage({
   const [settings, setSettings] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [sharedOpen, setSharedOpen] = useState(false);
+  const [deletingEnv, setDeletingEnv] = useState<Environment>();
   const project = useQuery({
     queryKey: ["project", projectId],
     queryFn: () => api.project(projectId),
@@ -68,6 +72,7 @@ export function ProjectPage({
         status: (i?.latestDeploymentStatus ?? null) as DeploymentStatus | null,
         stack: i?.stack,
         image: i?.sourceType === "image" ? i.image : undefined,
+        dependsOn: i?.dependsOn,
       };
     });
   }, [p, env]);
@@ -76,6 +81,10 @@ export function ProjectPage({
   const { value: instanceId, leaving: sheetLeaving } = useLingering(currentInstanceId);
   const { value: deploymentId, leaving: deploymentLeaving } = useLingering(currentInstanceId ? search.deployment : undefined);
   const canEdit = atLeast(role, "member");
+  const canDeploy = atLeast(role, "deployer");
+  const { value: sharedMounted, leaving: sharedLeaving } = useLingering(sharedOpen ? true : undefined);
+  // While the "Deploy N changes" bar is up it owns the screen's primary button.
+  const hasPending = (usePending(canDeploy ? env?.id : undefined).data?.count ?? 0) > 0;
 
   if (project.error) {
     const missing = project.error instanceof ApiError && project.error.status === 404;
@@ -119,13 +128,25 @@ export function ProjectPage({
                 {e.name}
               </MenuItem>
             ))}
-            {atLeast(role, "member") ? (
-              <>
-                <MenuSeparator />
-                <MenuItem icon={<Plus />} onSelect={() => setNewEnv(true)}>
-                  New environment
-                </MenuItem>
-              </>
+            <MenuSeparator />
+            <MenuItem
+              icon={<Variable />}
+              onSelect={() => {
+                setSearch({ env: search.env });
+                setSharedOpen(true);
+              }}
+            >
+              Shared variables
+            </MenuItem>
+            {canEdit ? (
+              <MenuItem icon={<Plus />} onSelect={() => setNewEnv(true)}>
+                New environment
+              </MenuItem>
+            ) : null}
+            {atLeast(role, "admin") && env.id !== p.environments[0]?.id ? (
+              <MenuItem danger icon={<Trash />} onSelect={() => setDeletingEnv(env)}>
+                Delete {env.name}
+              </MenuItem>
             ) : null}
           </Menu>
         ) : null}
@@ -152,7 +173,10 @@ export function ProjectPage({
             projectId={projectId}
             services={services}
             selected={search.service}
-            onSelect={(id) => setSearch({ env: search.env, service: id, tab: id ? search.tab : undefined })}
+            onSelect={(id) => {
+              if (id) setSharedOpen(false);
+              setSearch({ env: search.env, service: id, tab: id ? search.tab : undefined });
+            }}
           />
         ) : (
           <div className="dotgrid h-full" />
@@ -180,13 +204,14 @@ export function ProjectPage({
                 >
                   Sync
                 </Button>
-                <Button variant="primary" size="sm" icon={<Plus />} onClick={() => setAdding(true)}>
+                <Button variant={hasPending ? "secondary" : "primary"} size="sm" icon={<Plus />} onClick={() => setAdding(true)}>
                   Add
                 </Button>
               </>
             ) : null}
           </div>
         ) : null}
+        {p && env && canDeploy ? <PendingBar projectId={projectId} environmentId={env.id} /> : null}
         {p && env && activityOpen ? (
           <ActivityPanel
             projectId={projectId}
@@ -213,6 +238,16 @@ export function ProjectPage({
           </div>
         ) : null}
 
+        {sharedMounted && env ? (
+          <SharedVariablesSheet
+            key={env.id}
+            environmentId={env.id}
+            environmentName={env.name}
+            canEdit={canDeploy}
+            leaving={sharedLeaving}
+            onClose={() => setSharedOpen(false)}
+          />
+        ) : null}
         {instanceId ? (
           <ServiceSheet
             key={instanceId}
@@ -258,11 +293,21 @@ export function ProjectPage({
           onEnvironmentDeleted={() => setSearch({})}
         />
       ) : null}
-      <NewEnvironmentDialog
-        open={newEnv}
-        onOpenChange={setNewEnv}
+      {p ? (
+        <NewEnvironmentDialog
+          open={newEnv}
+          onOpenChange={setNewEnv}
+          projectId={projectId}
+          environments={p.environments}
+          current={env}
+          onCreated={(id) => setSearch({ env: id })}
+        />
+      ) : null}
+      <DeleteEnvironmentDialog
+        environment={deletingEnv}
+        onClose={() => setDeletingEnv(undefined)}
         projectId={projectId}
-        onCreated={(id) => setSearch({ env: id })}
+        onDeleted={() => setSearch({})}
       />
     </div>
   );
@@ -285,24 +330,39 @@ function NewEnvironmentDialog({
   open,
   onOpenChange,
   projectId,
+  environments,
+  current,
   onCreated,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   projectId: string;
+  environments: Environment[];
+  /** Offered first when duplicating. */
+  current?: Environment;
   onCreated: (id: string) => void;
 }) {
   const qc = useQueryClient();
   const [name, setName] = useState("");
+  // "" = empty: the server's default of the first environment's config, no variables.
+  const [from, setFrom] = useState("");
+  const [copyVariables, setCopyVariables] = useState(false);
   const create = useMutation({
-    mutationFn: () => api.createEnvironment(projectId, name.trim()),
+    mutationFn: () =>
+      api.createEnvironment(projectId, {
+        name: name.trim(),
+        ...(from ? { cloneFrom: from, copyVariables } : {}),
+      }),
     onSuccess: async (e) => {
       await qc.invalidateQueries({ queryKey: ["project", projectId] });
       onCreated(e.id);
       setName("");
+      setFrom("");
+      setCopyVariables(false);
       onOpenChange(false);
     },
   });
+  const ordered = current ? [current, ...environments.filter((e) => e.id !== current.id)] : environments;
   return (
     <Modal open={open} onOpenChange={onOpenChange} title="New environment" description="Each environment gets its own copy of every service, with its own variables and domains.">
       <form
@@ -316,6 +376,24 @@ function NewEnvironmentDialog({
         <Field label="Name">
           {(p) => <Input {...p} autoFocus required maxLength={32} placeholder="staging" value={name} onChange={(e) => setName(e.target.value)} />}
         </Field>
+        <Field label="Start from" hint={from ? undefined : "Services get the first environment's configuration, without variables."}>
+          {(p) => (
+            <Select {...p} value={from} onChange={(e) => setFrom(e.target.value)}>
+              <option value="">Empty</option>
+              {ordered.map((e) => (
+                <option key={e.id} value={e.id}>
+                  Duplicate {e.name}
+                </option>
+              ))}
+            </Select>
+          )}
+        </Field>
+        {from ? (
+          <label className="flex items-center gap-2 text-sm text-muted-foreground">
+            <input type="checkbox" className="size-4 accent-foreground" checked={copyVariables} onChange={(e) => setCopyVariables(e.target.checked)} />
+            Copy variables (sealed ones are not copied)
+          </label>
+        ) : null}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
@@ -325,6 +403,57 @@ function NewEnvironmentDialog({
           </Button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+/** Deleting needs sudo; the API client opens the re-auth dialog and retries. */
+function DeleteEnvironmentDialog({
+  environment,
+  onClose,
+  projectId,
+  onDeleted,
+}: {
+  environment?: Environment;
+  onClose: () => void;
+  projectId: string;
+  onDeleted: () => void;
+}) {
+  const qc = useQueryClient();
+  // Keep the name on screen while the dialog fades out.
+  const [last, setLast] = useState(environment);
+  if (environment && environment !== last) setLast(environment);
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteEnvironment(id),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["project", projectId] });
+      onDeleted();
+      onClose();
+    },
+  });
+  return (
+    <Modal
+      open={!!environment}
+      onOpenChange={(o) => {
+        if (!o) {
+          remove.reset();
+          onClose();
+        }
+      }}
+      title={`Delete ${last?.name ?? "environment"}?`}
+      description="Removes its services, variables and deployments, and stops their containers. This can't be undone."
+    >
+      <div className="flex flex-col gap-4">
+        {remove.error ? <Alert>{remove.error.message}</Alert> : null}
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="danger" loading={remove.isPending} onClick={() => last && remove.mutate(last.id)}>
+            Delete environment
+          </Button>
+        </div>
+      </div>
     </Modal>
   );
 }

@@ -81,7 +81,7 @@ macro_rules! select_deployments {
         concat!(
             "SELECT id, service_instance_id, node_id, status, image, image_digest, trigger,
                     commit_sha, commit_message, commit_author,
-                    'https://github.com/' || commit_author_login || '.png?size=64' AS commit_author_avatar,
+                    'https://avatars.githubusercontent.com/' || commit_author_login || '?s=64' AS commit_author_avatar,
                     CASE WHEN config->'source'->>'type' = 'repo'
                          THEN (config->'source'->>'repo') || '@' || (config->'source'->>'branch')
                          ELSE config->'source'->>'image' END AS source,
@@ -116,7 +116,18 @@ pub async fn create(
     grant: Grant,
     meta: RequestMeta,
 ) -> AppResult<Json<DeploymentDetail>> {
-    let instance = grant.id();
+    let id = deploy_instance(&state, &actor, grant.workspace_id()?, &meta, grant.id()).await?;
+    load(&state, id).await.map(Json)
+}
+
+/// Deploy an instance's current config and variables (a manual deploy).
+pub async fn deploy_instance(
+    state: &AppState,
+    actor: &Actor,
+    workspace: Id,
+    meta: &RequestMeta,
+    instance: Id,
+) -> AppResult<Id> {
     let (env_id, config): (Id, serde_json::Value) =
         sqlx::query_as("SELECT environment_id, config FROM service_instances WHERE id = $1")
             .bind(instance)
@@ -125,15 +136,15 @@ pub async fn create(
     let cfg: ServiceConfig = serde_json::from_value(config).map_err(anyhow::Error::from)?;
     // Resolve the branch head before taking any locks: it is a network call.
     let commit = match cfg.repo() {
-        Some((repo, branch, _)) => Some(
-            crate::github::app::branch_head(&state, grant.workspace_id()?, repo, branch).await?,
-        ),
+        Some((repo, branch, _)) => {
+            Some(crate::github::app::branch_head(state, workspace, repo, branch).await?)
+        }
         None => None,
     };
     let source = cfg.source_label();
     let mut tx = state.db.begin().await?;
     let started = start(
-        &state,
+        state,
         &mut tx,
         env_id,
         NewDeployment {
@@ -147,9 +158,9 @@ pub async fn create(
         },
     )
     .await?;
-    Entry::new("deployment.create", &meta)
-        .actor(&actor)
-        .workspace(grant.workspace_id()?)
+    Entry::new("deployment.create", meta)
+        .actor(actor)
+        .workspace(workspace)
         .target("deployment", started.id)
         .metadata(json!({
             "serviceInstance": instance,
@@ -161,7 +172,7 @@ pub async fn create(
         .await?;
     tx.commit().await?;
     state.hub.kick_all(&started.kick);
-    load(&state, started.id).await.map(Json)
+    Ok(started.id)
 }
 
 /// Deploy the same source again: the same image, or the same commit rebuilt

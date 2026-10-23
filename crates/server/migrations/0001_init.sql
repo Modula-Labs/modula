@@ -249,17 +249,24 @@ CREATE INDEX service_instances_node_idx ON service_instances (node_id);
 
 -- Values sealed with the *environment's* data key (data_keys.scope = environment id;
 -- AAD: variables/value/<id>), so environments never share a key.
+-- service_instance_id NULL = a shared variable of the environment, used
+-- through ${{shared.NAME}} references.
 CREATE TABLE variables (
     id                  id PRIMARY KEY,
-    service_instance_id id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    environment_id      id NOT NULL REFERENCES environments (id) ON DELETE CASCADE,
+    service_instance_id id REFERENCES service_instances (id) ON DELETE CASCADE,
     name                text NOT NULL CHECK (name ~ '^[A-Za-z_][A-Za-z0-9_]{0,254}$'),
     value_sealed        bytea NOT NULL,
     -- Sealed variables are write-only: never returned by the API.
     sealed              boolean NOT NULL DEFAULT false,
+    -- The ${{…}} references in the value (`service.NAME`, `shared.NAME` or
+    -- `NAME`), kept in clear so dependencies and cycles need no decryption.
+    refs                text[] NOT NULL DEFAULT '{}',
     created_at          timestamptz NOT NULL DEFAULT now(),
     updated_at          timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (service_instance_id, name)
+    UNIQUE NULLS NOT DISTINCT (environment_id, service_instance_id, name)
 );
+CREATE INDEX variables_instance_idx ON variables (service_instance_id);
 
 -- Public hostnames for service instances. Generated domains live under the
 -- instance's apps domain; custom domains (with ownership verification) are C5.

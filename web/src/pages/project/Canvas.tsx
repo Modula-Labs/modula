@@ -5,20 +5,26 @@ import {
   Position,
   ReactFlow,
   ReactFlowProvider,
+  getBezierPath,
+  useInternalNode,
   useNodesState,
   useReactFlow,
+  type Edge,
+  type EdgeProps,
+  type InternalNode,
   type Node,
   type NodeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/base.css";
 import { clsx } from "clsx";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Maximize, Minus, Plus } from "@/components/ui/icons";
 import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { StatusDot } from "@/components/ui/misc";
 import type { DeploymentStatus } from "@/lib/api";
 import { serviceState } from "@/lib/status";
 import { load, save } from "@/lib/storage";
+import { dependencyPairs, edgeAnchors, layeredLayout, type Rect, type Side } from "./edges";
 
 export interface CanvasService {
   id: string;
@@ -31,6 +37,8 @@ export interface CanvasService {
   status: DeploymentStatus | null;
   /** Detected framework/runtime, if known. */
   stack?: string | null;
+  /** Ids of the services this one references; drawn as edges pointing at them. */
+  dependsOn?: string[];
 }
 
 type ServiceNode = Node<{ service: CanvasService; selected: boolean }, "service">;
@@ -61,6 +69,61 @@ function ServiceCard({ data }: NodeProps<ServiceNode>) {
 
 const nodeTypes = { service: ServiceCard };
 
+type DependencyEdge = Edge<{ active: boolean }, "dependency">;
+const sidePosition: Record<Side, Position> = {
+  left: Position.Left,
+  right: Position.Right,
+  top: Position.Top,
+  bottom: Position.Bottom,
+};
+
+const rectOf = (n: InternalNode): Rect => ({
+  x: n.internals.positionAbsolute.x,
+  y: n.internals.positionAbsolute.y,
+  w: n.measured.width ?? 288,
+  h: n.measured.height ?? 144,
+});
+
+/** Consumer -> dependency: a thin dashed curve with an arrowhead on the
+ *  dependency. Endpoints are derived from the live node rects, so it follows
+ *  cards while they are dragged, panned and zoomed. */
+function DependencyEdgeView({ id, source, target, data }: EdgeProps<DependencyEdge>) {
+  const a = useInternalNode(source);
+  const b = useInternalNode(target);
+  if (!a || !b) return null;
+  const { source: s, target: t } = edgeAnchors(rectOf(a), rectOf(b));
+  const [path] = getBezierPath({
+    sourceX: s.x,
+    sourceY: s.y,
+    sourcePosition: sidePosition[s.side],
+    targetX: t.x,
+    targetY: t.y,
+    targetPosition: sidePosition[t.side],
+  });
+  const active = data?.active ?? false;
+  const color = active ? "var(--foreground)" : "var(--muted-foreground)";
+  const marker = `dep-arrow-${id}`;
+  return (
+    <>
+      <defs>
+        <marker id={marker} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" markerUnits="userSpaceOnUse" orient="auto">
+          <path d="M1 1.5 L9 5 L1 8.5" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ stroke: color }} />
+        </marker>
+      </defs>
+      <path
+        d={path}
+        fill="none"
+        strokeDasharray="5 4"
+        strokeWidth={active ? 1.75 : 1.25}
+        markerEnd={`url(#${marker})`}
+        style={{ stroke: color, opacity: active ? 0.9 : 0.5, transition: "opacity 120ms, stroke 120ms" }}
+      />
+    </>
+  );
+}
+
+const edgeTypes = { dependency: DependencyEdgeView };
+
 /** Card positions are kept per project in this browser until the server stores layouts. */
 function savedPositions(projectId: string): Record<string, { x: number; y: number }> {
   try {
@@ -68,10 +131,6 @@ function savedPositions(projectId: string): Record<string, { x: number; y: numbe
   } catch {
     return {};
   }
-}
-
-function defaultPosition(i: number) {
-  return { x: (i % 3) * 340, y: Math.floor(i / 3) * 200 };
 }
 
 function CanvasInner({
@@ -88,6 +147,21 @@ function CanvasInner({
   const [nodes, setNodes, onNodesChange] = useNodesState<ServiceNode>([]);
   const flow = useReactFlow();
   const box = useRef<HTMLDivElement>(null);
+  const [hovered, setHovered] = useState<string>();
+
+  const edges = useMemo<DependencyEdge[]>(
+    () =>
+      dependencyPairs(services).map(([from, to]) => ({
+        id: `${from}>${to}`,
+        type: "dependency" as const,
+        source: from,
+        target: to,
+        selectable: false,
+        focusable: false,
+        data: { active: [hovered, selected].some((x) => x !== undefined && (x === from || x === to)) },
+      })),
+    [services, hovered, selected],
+  );
 
   // The service sheet covers the right ~60%: keep the selected card in view
   // to its left, like Railway, without changing the zoom.
@@ -111,11 +185,12 @@ function CanvasInner({
 
   useEffect(() => {
     const saved = savedPositions(projectId);
+    const layout = layeredLayout(services);
     setNodes((prev) =>
-      services.map((s, i) => ({
+      services.map((s) => ({
         id: s.id,
         type: "service" as const,
-        position: prev.find((n) => n.id === s.id)?.position ?? saved[s.id] ?? defaultPosition(i),
+        position: prev.find((n) => n.id === s.id)?.position ?? saved[s.id] ?? layout[s.id] ?? { x: 0, y: 0 },
         data: { service: s, selected: s.id === selected },
       })),
     );
@@ -125,8 +200,11 @@ function CanvasInner({
     <div ref={box} className="h-full w-full">
       <ReactFlow
         nodes={nodes}
-        edges={[]}
+        edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
+        onNodeMouseEnter={(_, n) => setHovered(n.id)}
+        onNodeMouseLeave={() => setHovered(undefined)}
         onNodesChange={onNodesChange}
         onNodeClick={(_, n) => onSelect(n.id)}
         onPaneClick={() => onSelect(undefined)}

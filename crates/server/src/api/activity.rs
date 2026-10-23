@@ -6,8 +6,11 @@ use modula_id::Id;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::api::deployments::deploy_instance;
+use crate::auth::session::Actor as Caller;
 use crate::authz::Grant;
 use crate::error::{AppError, AppResult};
+use crate::http::meta::RequestMeta;
 use crate::state::AppState;
 
 const MAX_GROUPS: usize = 50;
@@ -156,7 +159,7 @@ pub async fn list(
             "SELECT d.id, s.id AS service_id, s.name AS service_name,
                     coalesce(u.name, nullif(d.commit_author, '')) AS actor,
                     CASE WHEN d.created_by IS NULL AND d.commit_author_login IS NOT NULL
-                         THEN 'https://github.com/' || d.commit_author_login || '.png?size=64' END AS avatar_url,
+                         THEN 'https://avatars.githubusercontent.com/' || d.commit_author_login || '?s=64' END AS avatar_url,
                     d.status, d.commit_message, d.updated_at AS at
              FROM deployments d
              JOIN service_instances i ON i.id = d.service_instance_id
@@ -197,4 +200,145 @@ pub async fn list(
     items.sort_by_key(|g| std::cmp::Reverse(g.at));
     items.truncate(MAX_GROUPS);
     Ok(Json(Activity { items }))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pending {
+    pub count: usize,
+    pub services: Vec<PendingService>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingService {
+    pub service_id: Id,
+    pub service_name: String,
+    pub instance_id: Id,
+    pub changes: Vec<Change>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingRow {
+    service_id: Id,
+    service_name: String,
+    instance_id: Id,
+    kind: String,
+    op: String,
+    key: Option<String>,
+    at: OffsetDateTime,
+}
+
+/// Changes since each service's last deployment in an environment: they take
+/// effect on its next deploy. A shared variable's change counts for every
+/// service that references it.
+pub async fn pending_changes(state: &AppState, environment: Id) -> AppResult<Pending> {
+    let rows: Vec<PendingRow> = sqlx::query_as(
+        "WITH last AS (
+             SELECT i.id AS instance_id, i.service_id, s.name AS service_name,
+                    (SELECT max(created_at) FROM deployments d WHERE d.service_instance_id = i.id) AS deployed_at
+             FROM service_instances i JOIN services s ON s.id = i.service_id
+             WHERE i.environment_id = $1
+         )
+         SELECT l.service_id, l.service_name, l.instance_id, c.kind, c.op, c.key, c.created_at AS at
+         FROM last l
+         JOIN change_sets cs ON cs.environment_id = $1 AND cs.status = 'applied'
+         JOIN changes c ON c.change_set_id = cs.id
+         WHERE (c.service_id = l.service_id
+                OR (c.service_id IS NULL AND c.kind = 'variable' AND EXISTS (
+                     SELECT 1 FROM variables v
+                     WHERE v.service_instance_id = l.instance_id AND 'shared.' || c.key = ANY(v.refs))))
+           AND (l.deployed_at IS NULL OR c.created_at > l.deployed_at)
+         ORDER BY l.service_name, c.created_at, c.id",
+    )
+    .bind(environment)
+    .fetch_all(&state.db)
+    .await?;
+    let count = rows.len();
+    let mut services: Vec<PendingService> = Vec::new();
+    for r in rows {
+        let change = Change {
+            kind: r.kind,
+            op: r.op,
+            key: r.key,
+            status: None,
+            deployment_id: None,
+            message: None,
+            at: r.at,
+        };
+        match services.last_mut() {
+            Some(s) if s.service_id == r.service_id => s.changes.push(change),
+            _ => services.push(PendingService {
+                service_id: r.service_id,
+                service_name: r.service_name,
+                instance_id: r.instance_id,
+                changes: vec![change],
+            }),
+        }
+    }
+    Ok(Pending { count, services })
+}
+
+pub async fn pending(State(state): State<AppState>, grant: Grant) -> AppResult<Json<Pending>> {
+    pending_changes(&state, grant.id()).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeployPending {
+    /// Services to deploy; default: every service with pending changes.
+    pub service_ids: Option<Vec<Id>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Deployed {
+    pub service_id: Id,
+    pub deployment_id: Option<Id>,
+    pub error: Option<String>,
+}
+
+/// "Deploy N changes": deploy each service's current config. Services deploy
+/// independently; one failing to start (e.g. GitHub unreachable) doesn't stop
+/// the others.
+pub async fn deploy(
+    State(state): State<AppState>,
+    actor: Caller,
+    grant: Grant,
+    meta: RequestMeta,
+    Json(req): Json<DeployPending>,
+) -> AppResult<Json<serde_json::Value>> {
+    let environment = grant.id();
+    let targets: Vec<(Id, Id)> = match &req.service_ids {
+        Some(ids) => sqlx::query_as(
+            "SELECT service_id, id FROM service_instances WHERE environment_id = $1 AND service_id = ANY($2)",
+        )
+        .bind(environment)
+        .bind(ids)
+        .fetch_all(&state.db)
+        .await?,
+        None => pending_changes(&state, environment)
+            .await?
+            .services
+            .into_iter()
+            .map(|s| (s.service_id, s.instance_id))
+            .collect(),
+    };
+    let workspace = grant.workspace_id()?;
+    let mut out = Vec::with_capacity(targets.len());
+    for (service, instance) in targets {
+        match deploy_instance(&state, &actor, workspace, &meta, instance).await {
+            Ok(id) => out.push(Deployed {
+                service_id: service,
+                deployment_id: Some(id),
+                error: None,
+            }),
+            Err(e) => out.push(Deployed {
+                service_id: service,
+                deployment_id: None,
+                error: Some(e.public_message()),
+            }),
+        }
+    }
+    Ok(Json(serde_json::json!({ "deployments": out })))
 }

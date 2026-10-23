@@ -39,6 +39,7 @@ export function ServiceSheet({
     onSuccess: (d) => {
       void qc.invalidateQueries({ queryKey: ["deployments", instanceId] });
       void qc.invalidateQueries({ queryKey: ["project"] });
+      void qc.invalidateQueries({ queryKey: ["pending"] });
       onTab("deployments");
       onOpenDeployment(d.id);
     },
@@ -90,7 +91,11 @@ export function ServiceSheet({
           <DeploymentsTab instanceId={instanceId} selected={deploymentId} canDeploy={canDeploy} onOpen={onOpenDeployment} />
         </TabPanel>
         <TabPanel value="variables">
-          <VariablesTab instanceId={instanceId} canEdit={canDeploy} />
+          {i ? (
+            <VariablesTab instanceId={instanceId} environmentId={i.environmentId} serviceId={i.serviceId} canEdit={canDeploy} />
+          ) : (
+            <Skeleton className="h-32" />
+          )}
         </TabPanel>
         <TabPanel value="settings">
           {i ? (

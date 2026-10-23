@@ -64,16 +64,23 @@ impl From<modula_crypto::Error> for AppError {
     }
 }
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, code) = self.status_and_code();
-        let message = match &self {
+impl AppError {
+    /// What a client may see: internal details are logged, never returned.
+    pub fn public_message(&self) -> String {
+        match self {
             Self::Internal(e) => {
                 tracing::error!(error = ?e, "internal error");
                 "internal server error".to_owned()
             }
             other => other.to_string(),
-        };
+        }
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, code) = self.status_and_code();
+        let message = self.public_message();
         let mut res = (
             status,
             Json(json!({ "error": { "code": code, "message": message } })),

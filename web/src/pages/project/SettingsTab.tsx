@@ -122,11 +122,18 @@ export function SettingsTab({
 
   const save = useMutation({
     mutationFn: () => api.updateInstance(instance.id, toConfig(form)),
-    onSuccess: (i) => qc.setQueryData(["instance", instance.id], i),
+    onSuccess: (i) => {
+      qc.setQueryData(["instance", instance.id], i);
+      // The edit only takes effect on the next deploy.
+      void qc.invalidateQueries({ queryKey: ["pending", instance.environmentId] });
+    },
   });
   const deploy = useMutation({
     mutationFn: () => api.deploy(instance.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["deployments", instance.id] }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["pending", instance.environmentId] });
+      return qc.invalidateQueries({ queryKey: ["deployments", instance.id] });
+    },
   });
   const remove = useMutation({
     mutationFn: () => api.deleteService(instance.serviceId),

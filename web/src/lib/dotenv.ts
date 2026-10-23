@@ -43,3 +43,40 @@ function unquote(v: string): string {
   const hash = v.search(/\s#/);
   return hash === -1 ? v : v.slice(0, hash).trimEnd();
 }
+
+/** Starting text for the raw editor. Values are write-only, so existing
+ *  variables show up as bare `NAME=` lines (sealed ones included). */
+export function envTemplate(names: string[]): string {
+  return names.map((n) => `${n}=`).join("\n");
+}
+
+export interface EnvDiff {
+  /** Payload for the PATCH `set`. */
+  set: Record<string, string>;
+  /** Existing names whose line was removed. */
+  delete: string[];
+  added: string[];
+  changed: string[];
+}
+
+/** What the raw editor sends. The editor can't know current values, so a line
+ *  is a change only when it names a new variable or gives an existing one a
+ *  non-empty value; an existing `NAME=` is "leave as is" (that is also why an
+ *  existing variable can't be blanked here, use its row). Existing names whose
+ *  line is gone are deleted. */
+export function diffEnv(existing: string[], parsed: Record<string, string>): EnvDiff {
+  const have = new Set(existing);
+  const set: Record<string, string> = {};
+  const added: string[] = [];
+  const changed: string[] = [];
+  for (const [name, value] of Object.entries(parsed)) {
+    if (!have.has(name)) {
+      set[name] = value;
+      added.push(name);
+    } else if (value !== "") {
+      set[name] = value;
+      changed.push(name);
+    }
+  }
+  return { set, delete: existing.filter((n) => !(n in parsed)), added, changed };
+}
