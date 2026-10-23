@@ -64,8 +64,8 @@ server's public address at a port from 20000–29999.
 - Host: the instance's `MODULA_TCP_PROXY_HOST` if set, else the server's public
   IP. Port: the allocated one. Both are in `MODULA_TCP_PROXY_DOMAIN` and
   `MODULA_TCP_PROXY_PORT`, and the template's `*_PUBLIC_URL` uses them.
-- One TCP proxy per service instance. Open the 20000–29999 range in the
-  server's firewall.
+- One TCP proxy per service instance. The installer's firewall already allows
+  20000–29999; open the range in any cloud firewall in front of the server.
 - Services that reference the public URL (`${{postgres.DATABASE_PUBLIC_URL}}`)
   show a pending change: deploy them to pick up the proxy's host and port.
 - Anyone who can reach the port can try passwords. Prefer `modula

@@ -19,6 +19,10 @@
 # Redis and (if missing) Docker come from the distribution's own packages.
 # Every step is idempotent; re-running resumes where a failed run stopped.
 #
+# Installs (not upgrades) also set up the host: a firewall (ufw), automatic
+# security updates, log caps, swap on small machines, clock sync and a few
+# kernel limits. --no-harden skips all of that, --no-firewall just the firewall.
+#
 # MODULA_INSTALL_DRY_RUN=1 stops after the questions and root check, before
 # anything is changed (for testing the installer itself).
 set -euo pipefail
@@ -97,6 +101,7 @@ step() {
   rm -f "$STEP_LOG"
   STEP_LOG=""
 }
+skipped() { printf '  %s–%s %-40s %sskipped (%s)%s\n' "$D" "$N" "$1" "$D" "$2" "$N"; }
 on_exit() {
   local rc=$?
   if [[ $rc -ne 0 && -n $STEP_LOG ]]; then
@@ -121,12 +126,17 @@ Options (main server; asked for interactively when missing):
   --version X.Y.Z      install this version instead of the latest
 Options (join):
   --server URL --token TOKEN --ca FINGERPRINT [--name NAME]
+Host setup (main and join; upgrade never touches it):
+  --no-harden          skip all host setup below
+  --no-firewall        skip the firewall (ufw) only
+  --auto-reboot        let security updates reboot at 04:00 when they need to
 EOF
 }
 
 # ---------------------------------------------------------------- arguments
 
 MODE=main DOMAIN="" EMAIL="" APPS_DOMAIN="" JOIN_SERVER="" JOIN_TOKEN="" JOIN_CA="" NODE_NAME=""
+HARDEN=1 FIREWALL=1 AUTO_REBOOT=0 HARDEN_ASKED=0 HARDEN_WHY=""
 case "${1:-}" in
   join | upgrade) MODE=$1; shift ;;
   main) shift ;;
@@ -141,6 +151,9 @@ while [[ $# -gt 0 ]]; do
     --token) JOIN_TOKEN=${2:?}; shift 2 ;;
     --ca) JOIN_CA=${2:?}; shift 2 ;;
     --name) NODE_NAME=${2:?}; shift 2 ;;
+    --no-harden) HARDEN=0; HARDEN_ASKED=1; shift ;;
+    --no-firewall) FIREWALL=0; shift ;;
+    --auto-reboot) AUTO_REBOOT=1; shift ;;
     -h | --help) usage; exit 0 ;;
     *) usage >&2; die "unknown option $1" "The options are listed above; --help shows them again." ;;
   esac
@@ -204,7 +217,8 @@ elevate() {
     self=$tmp
   fi
   # sudo starts with a clean environment; carry over what this run was given.
-  for v in MODULA_RELEASE_URL MODULA_RELEASE_PUBKEY MODULA_INSTALL_DRY_RUN NO_COLOR COLORTERM TERM; do
+  # SSH_CONNECTION names the port this session came in on (kept open by the firewall).
+  for v in MODULA_RELEASE_URL MODULA_RELEASE_PUBKEY MODULA_INSTALL_DRY_RUN NO_COLOR COLORTERM TERM SSH_CONNECTION; do
     [[ -n ${!v:-} ]] && keep+=("$v=${!v}")
   done
   keep+=("MODULA_INSTALL_URL=$INSTALL_URL")
@@ -237,15 +251,12 @@ preflight() {
 # ---------------------------------------------------------------- packages
 
 need_docker() { ! command -v docker >/dev/null; }
+installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "ok installed"; }
 
-packages() {
-  local want=(ca-certificates curl openssl)
-  [[ $MODE == main ]] && want+=(postgresql redis-server)
-  need_docker && want+=(docker.io)
-  local missing=()
-  for p in "${want[@]}"; do
-    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "ok installed" || missing+=("$p")
-  done
+# apt_install PKG… — installs whichever of them are missing.
+apt_install() {
+  local missing=() p
+  for p in "$@"; do installed "$p" || missing+=("$p"); done
   [[ ${#missing[@]} -eq 0 ]] && return 0
   export DEBIAN_FRONTEND=noninteractive
   # Only refresh package lists when they are missing or older than a day.
@@ -253,7 +264,259 @@ packages() {
     apt-get update -qq
   fi
   apt-get install -y -qq --no-install-recommends "${missing[@]}"
+}
+
+DOCKER_FRESH=0 # Docker was installed by this run, so nothing runs on it yet
+packages() {
+  local want=(ca-certificates curl openssl)
+  [[ $MODE == main ]] && want+=(postgresql redis-server)
+  if need_docker; then want+=(docker.io); DOCKER_FRESH=1; fi
+  apt_install "${want[@]}"
   systemctl enable --now docker >/dev/null 2>&1 || true
+}
+
+# ---------------------------------------------------------------- host setup
+# Optional (--no-harden), idempotent, and never touches sshd's configuration.
+# Each step adds a phrase to SECURITY for the closing card and may queue
+# a line in TIPS to print after it (step output itself is hidden).
+
+SECURITY=() TIPS=()
+NODE_PORT=7101 # MODULA_NODE_LISTEN in server_config
+
+# The ports sshd listens on: its effective configuration, what it (or
+# systemd's ssh.socket, Ubuntu 24.04+) listens on, and the port this session
+# came in on. Never empty: 22 when nothing says otherwise.
+ssh_ports() {
+  local ports=() p
+  if command -v sshd >/dev/null; then
+    while read -r p; do ports+=("$p"); done < <(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}')
+  fi
+  while read -r p; do ports+=("$p"); done < <(
+    ss -Hltnp 2>/dev/null | awk '/"sshd"/ {sub(/.*:/, "", $4); print $4}'
+    systemctl show -p Listen ssh.socket 2>/dev/null | grep -oE ':[0-9]+ \(Stream\)' | tr -dc '0-9\n'
+  )
+  # SSH_CONNECTION="client_ip client_port server_ip server_port"
+  p=$(awk '{print $4}' <<<"${SSH_CONNECTION:-}")
+  [[ -n $p ]] && ports+=("$p")
+  [[ ${#ports[@]} -eq 0 ]] && ports=(22)
+  printf '%s\n' "${ports[@]}" | grep -E '^[0-9]{1,5}$' | sort -nu
+}
+
+# (grep -q on a pipe would stop reading early: SIGPIPE fails it under pipefail.)
+ufw_active() { command -v ufw >/dev/null && [[ $(ufw status 2>/dev/null) == "Status: active"* ]]; }
+
+# What another firewall manager already in charge is called, or nothing.
+# nftables counts when its service loads rules that drop or reject something
+# (Debian's stock /etc/nftables.conf accepts everything).
+other_firewall() {
+  if systemctl is-active --quiet firewalld 2>/dev/null; then
+    echo firewalld
+  elif systemctl is-active --quiet nftables 2>/dev/null \
+    && grep -qE '^[^#]*\<(drop|reject)\>' /etc/nftables.conf /etc/nftables.d/*.nft 2>/dev/null \
+    && ! ufw_active; then
+    echo nftables
+  fi
+  return 0
+}
+
+# Open ports for this kind of server, as ufw rules.
+firewall_rules() {
+  local p
+  for p in $(ssh_ports); do echo "$p/tcp"; done
+  echo 80/tcp 443/tcp 443/udp 20000:29999/tcp | tr ' ' '\n'
+  [[ $MODE == main ]] && echo "$NODE_PORT/tcp"
+  return 0
+}
+
+# Deny incoming except SSH (first, so this session survives) and Modula's
+# ports. An active ufw keeps its rules and defaults; ours are only added.
+# Docker containers here publish no ports (Caddy and modula-node's TCP proxies
+# listen on the host), so Docker's own iptables chains don't bypass this.
+# Docker also accepts its containers' forwarded traffic ahead of ufw, so
+# ufw's FORWARD policy (DROP) stays as it is.
+firewall() {
+  local other; other=$(other_firewall)
+  if [[ -n $other ]]; then
+    TIPS+=("Firewall: $other is managing this server, so ufw was left alone. Allow $(firewall_rules | sed 's/:/-/' | paste -sd' ' | sed 's/ /, /g').")
+    SECURITY+=("firewall left to $other")
+    return 0
+  fi
+  apt_install ufw
+  local active=0 rule ports=()
+  ufw_active && active=1
+  if [[ $active == 0 ]]; then
+    ufw default deny incoming
+    ufw default allow outgoing
+  fi
+  while read -r rule; do
+    ufw allow "$rule" comment modula
+    ports+=("${rule/:/-}")
+  done < <(firewall_rules)
+  [[ $active == 1 ]] || ufw --force enable
+  ufw_active
+  SECURITY+=("firewall on (${ports[*]})")
+}
+
+# Security updates only, installed daily; no reboots unless --auto-reboot.
+# A host that already runs unattended-upgrades keeps its own settings.
+UU_CONF=/etc/apt/apt.conf.d/52modula-unattended-upgrades
+security_updates() {
+  if installed unattended-upgrades && [[ ! -f $UU_CONF ]] \
+    && grep -q '^APT::Periodic::Unattended-Upgrade "1"' <<<"$(apt-config dump 2>/dev/null)"; then
+    SECURITY+=("automatic updates (already set up)")
+    return 0
+  fi
+  apt_install unattended-upgrades
+  cat >/etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+  local reboot=false
+  [[ $AUTO_REBOOT == 1 ]] && reboot=true
+  cat >"$UU_CONF" <<EOF
+// Written by the Modula Deploy installer: security updates only.
+#clear Unattended-Upgrade::Allowed-Origins;
+#clear Unattended-Upgrade::Origins-Pattern;
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=\${distro_codename}-security,label=Debian-Security";
+        "origin=Debian,codename=\${distro_codename},label=Debian-Security";
+        "origin=Ubuntu,archive=\${distro_codename}-security";
+        "origin=UbuntuESMApps,archive=\${distro_codename}-apps-security";
+        "origin=UbuntuESM,archive=\${distro_codename}-infra-security";
+};
+Unattended-Upgrade::Automatic-Reboot "$reboot";
+Unattended-Upgrade::Automatic-Reboot-Time "04:00";
+EOF
+  systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
+  if [[ $reboot == true ]]; then SECURITY+=("security updates (reboots at 04:00 if needed)"); else SECURITY+=("security updates"); fi
+}
+
+# Journald keeps at most 500 MB; Docker's own logs rotate at 3 × 10 MB.
+# daemon.json is only ever written when absent, or merged with jq, and Docker
+# restarts for it only when it was installed just now (nothing runs yet).
+DOCKER_DAEMON=/etc/docker/daemon.json
+docker_log_config() {
+  local logcfg='{"log-driver":"json-file","log-opts":{"max-size":"10m","max-file":"3"}}'
+  if [[ ! -s $DOCKER_DAEMON ]]; then
+    install -d -m 0755 /etc/docker
+    jq -n "$logcfg" >"$DOCKER_DAEMON" 2>/dev/null || printf '%s\n' "$logcfg" >"$DOCKER_DAEMON"
+  elif command -v jq >/dev/null && jq -e 'type == "object" and (has("log-driver") or has("log-opts") | not)' "$DOCKER_DAEMON" >/dev/null 2>&1; then
+    local tmp; tmp=$(mktemp "$DOCKER_DAEMON.XXXXXX")
+    jq ". + $logcfg" "$DOCKER_DAEMON" >"$tmp" && chmod 0644 "$tmp" && mv "$tmp" "$DOCKER_DAEMON"
+  else
+    return 1 # left as it is (its own log settings, or no jq to merge safely)
+  fi
+}
+
+logs() {
+  local j=/etc/systemd/journald.conf.d/90-modula.conf
+  local logcfg=$'[Journal]\nSystemMaxUse=500M'
+  if [[ ! -f $j || $(cat "$j") != "$logcfg" ]]; then
+    install -d -m 0755 "${j%/*}"
+    printf '%s\n' "$logcfg" >"$j"
+    systemctl restart systemd-journald
+  fi
+  if docker_log_config; then
+    if [[ $DOCKER_FRESH == 1 ]]; then
+      systemctl restart docker
+    else
+      # Modula's own containers rotate their logs already; this covers the rest.
+      TIPS+=("Docker log rotation was added to $DOCKER_DAEMON for containers Modula doesn't manage; it applies from Docker's next restart.")
+    fi
+  fi
+  SECURITY+=("logs capped")
+}
+
+# swap_wanted MEM_KB SWAP_KB — a 2 GiB swap file helps machines with less than
+# 2 GiB of memory through builds; never when some swap is already on.
+swap_wanted() { (( $1 < 2 * 1024 * 1024 && $2 == 0 )); }
+
+swap() {
+  local mem swp
+  mem=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+  swp=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo)
+  swap_wanted "$mem" "$swp" || return 0
+  if [[ ! -f /swapfile ]]; then
+    local free; free=$(df -Pk / | awk 'NR == 2 {print $4}')
+    if (( free < 4 * 1024 * 1024 )); then
+      TIPS+=("This server has under 2 GiB of memory and no swap, and too little disk for a swap file; builds may run out of memory.")
+      return 0
+    fi
+    # fallocate makes holes some filesystems (btrfs, some XFS) can't swap to.
+    fallocate -l 2G /swapfile.new 2>/dev/null || dd if=/dev/zero of=/swapfile.new bs=1M count=2048 status=none
+    chmod 0600 /swapfile.new
+    mkswap /swapfile.new >/dev/null
+    mv /swapfile.new /swapfile
+  fi
+  swapon /swapfile
+  grep -qE '^/swapfile[[:space:]]' /etc/fstab || echo '/swapfile none swap sw 0 0' >>/etc/fstab
+  echo 'vm.swappiness = 10' >/etc/sysctl.d/90-modula-swap.conf
+  sysctl -q -w vm.swappiness=10
+  SECURITY+=("2 GiB swap")
+}
+
+# TLS and the nodes' mutual TLS both need a correct clock.
+time_sync() {
+  local s
+  for s in chrony chronyd ntp ntpsec systemd-timesyncd; do
+    systemctl is-active --quiet "$s" 2>/dev/null && return 0
+  done
+  if ! systemctl cat systemd-timesyncd >/dev/null 2>&1; then
+    # Debian splits it out; any other NTP daemon installed but stopped wins.
+    installed chrony || installed ntpsec || installed ntp || apt_install systemd-timesyncd
+  fi
+  timedatectl set-ntp true 2>/dev/null || systemctl enable --now systemd-timesyncd
+}
+
+kernel() {
+  cat >/etc/sysctl.d/90-modula.conf <<'EOF'
+# Written by the Modula Deploy installer.
+net.core.somaxconn = 4096
+fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_instances = 1024
+# Containers reach the internet through this host.
+net.ipv4.ip_forward = 1
+EOF
+  sysctl --system >/dev/null
+}
+
+# Postgres and Redis must never listen beyond this machine.
+local_only() {
+  [[ $MODE == main ]] || return 0
+  local exposed
+  exposed=$(ss -Hltnp 2>/dev/null | awk '/"(postgres|redis-server)"/ && $4 !~ /^(127\.|\[::1\]|\[::ffff:127\.)/ {print $4}' | paste -sd' ' || true)
+  [[ -z $exposed ]] && return 0
+  TIPS+=("Postgres or Redis listens on $exposed, beyond this machine. Modula only needs them on localhost; check listen_addresses in postgresql.conf and bind in /etc/redis/redis.conf.")
+}
+
+# Never applied, only suggested: key-only SSH.
+ssh_tip() {
+  command -v sshd >/dev/null || return 0
+  grep -qi '^passwordauthentication yes' <<<"$(sshd -T 2>/dev/null)" || return 0
+  TIPS+=("SSH accepts passwords. Once your key works (ssh-copy-id), consider key-only logins:
+      printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' | sudo tee /etc/ssh/sshd_config.d/10-key-only.conf
+      sudo systemctl reload ssh")
+}
+
+harden() {
+  if [[ $HARDEN == 0 ]]; then
+    skipped "Host setup" "${HARDEN_WHY:---no-harden}"
+    return 0
+  fi
+  if [[ $FIREWALL == 1 ]]; then step "Setting up the firewall" firewall; else skipped "Firewall" "--no-firewall"; fi
+  step "Turning on security updates" security_updates
+  step "Capping logs" logs
+  step "Checking memory and swap" swap
+  step "Syncing the clock" time_sync
+  step "Tuning kernel limits" kernel
+}
+
+# Printed after the closing card.
+print_tips() {
+  local t
+  [[ ${#TIPS[@]} -eq 0 ]] && return 0
+  for t in "${TIPS[@]}"; do printf '  %s!%s %s\n' "$A" "$N" "$t"; done
+  printf '\n'
 }
 
 # ---------------------------------------------------------------- release files
@@ -371,7 +634,7 @@ MODULA_PUBLIC_URL=https://$DOMAIN
 MODULA_LISTEN=127.0.0.1:7100
 MODULA_MASTER_KEY_FILE=$STATE/master.key
 MODULA_TRUSTED_PROXIES=127.0.0.1,::1
-MODULA_NODE_LISTEN=0.0.0.0:7101
+MODULA_NODE_LISTEN=0.0.0.0:$NODE_PORT
 MODULA_EDGE_TLS=acme
 MODULA_ACME_EMAIL=$EMAIL
 MODULA_APPS_DOMAIN=$APPS_DOMAIN
@@ -637,6 +900,13 @@ questions() {
     ask NODE_NAME "Server name" "$def" valid_name "Letters, digits, . _ - only, up to 63 characters, e.g. web-1."
     printf '\n'
   fi
+  if [[ $HARDEN_ASKED == 0 ]]; then
+    local harden
+    note "A firewall (SSH, 80, 443 and Modula's ports), security updates, log caps, swap if small."
+    ask harden "Set up the firewall and basic hardening? ${D}[Y/n]${N}" "" valid_yes_no "Please answer y or n."
+    [[ ${harden,,} == y* ]] || { HARDEN=0; HARDEN_WHY="as you asked"; }
+    printf '\n'
+  fi
   local yes
   ask yes "Install Modula Deploy on $(this_host) as $NODE_NAME for $DOMAIN? ${D}[Y/n]${N}" "" valid_yes_no "Please answer y or n."
   if [[ ${yes,,} != y* ]]; then
@@ -663,11 +933,13 @@ install_main() {
     card_kv "Server name" "${NODE_NAME:-$(short_host)}"
     card_kv "Apps domain" "${APPS_DOMAIN:-none}"
     card_kv "Version" "$VERSION"
+    card_kv "Host setup" "$(dry_harden)"
     card_end "Bye!"
     exit 0
   fi
   step "Checking this server" preflight
   step "Installing packages" packages
+  harden
   step "Downloading release ($VERSION)" fetch_release
   step "Creating users and directories" accounts
   step "Setting up Postgres" database
@@ -679,6 +951,8 @@ install_main() {
   step "Joining this server" join_local
   step "Starting the node and edge" start_node
   step "Writing the recovery kit" recovery_kit
+  local_only
+  ssh_tip
   local setup; setup=$(server_cli setup-token 2>/dev/null || true)
   card_top "All set! Modula is up and running  ${D}($(fmt_ms "$(ms_since "$T0")"))${N}"
   card ""
@@ -692,29 +966,52 @@ install_main() {
   card ""
   card "${B}Next:${N} open ${A}https://$DOMAIN/setup${N}${setup:+ and paste the setup token}."
   card "${D}Create your admin account there, e.g. as $EMAIL.${N}"
-  card "${D}Point DNS for $DOMAIN${APPS_DOMAIN:+ and *.$APPS_DOMAIN} at this server, and open${N}"
-  card "${D}ports 80 and 443 (plus 7101 for servers joining later).${N}"
+  security_card
+  card "${D}Point DNS for $DOMAIN${APPS_DOMAIN:+ and *.$APPS_DOMAIN} at this server. A cloud${N}"
+  card "${D}firewall in front of it needs 80, 443 (tcp+udp) and $NODE_PORT open.${N}"
   card ""
   card_end "Have fun shipping things!"
+  print_tips
+}
+
+# The Security line of the closing card.
+security_card() {
+  [[ ${#SECURITY[@]} -eq 0 ]] && return 0
+  local first=1 s
+  for s in "${SECURITY[@]}"; do
+    if [[ $first == 1 ]]; then card_kv "Security" "$s"; first=0; else card_kv "" "$s"; fi
+  done
+  card ""
+}
+
+dry_harden() {
+  if [[ $HARDEN == 0 ]]; then echo "skipped"
+  elif [[ $FIREWALL == 0 ]]; then echo "updates, logs, swap, clock, kernel (no firewall)"
+  else echo "firewall ($(firewall_rules | sed 's/:/-/' | paste -sd' ')), updates, logs, swap, clock, kernel"
+  fi
 }
 
 install_join() {
   header "Joining $JOIN_SERVER as a new node…"
   step "Checking this server" preflight
   step "Installing packages" packages
+  harden
   step "Downloading release ($VERSION)" fetch_release
   step "Creating users and directories" accounts
   step "Writing services" units
   step "Joining" join_remote
   step "Starting the node and edge" start_node
+  ssh_tip
   card_top "Welcome aboard!  ${D}($(fmt_ms "$(ms_since "$T0")"))${N}"
   card ""
   card "$(this_host) is now part of ${A}$JOIN_SERVER${N}."
   card "It'll show up on the Servers page in a moment, ready for apps."
   card ""
-  card "${D}Open ports 80 and 443 for apps; the dashboard needs no inbound port.${N}"
+  security_card
+  card "${D}Apps need 80 and 443 (tcp+udp) open; the dashboard needs no inbound port.${N}"
   card ""
   card_end "Happy shipping!"
+  print_tips
 }
 
 upgrade() {

@@ -150,7 +150,9 @@ usage. Disconnecting is refused while servers created through it exist.
    The caps are checked first. The server boots Ubuntu 24.04 with cloud-init
    that installs Docker, Caddy and `modula-node` and joins your instance with a
    single-use, 30-minute join token and the CA pin. A Hetzner firewall allows
-   only 80/tcp, 443/tcp and 443/udp (plus 22/tcp with `"ssh": true`).
+   only 80/tcp, 443/tcp, 443/udp, the TCP proxy range 20000–29999/tcp and ping
+   (plus 22/tcp with `"ssh": true`); the installer also sets up ufw on the
+   server itself ([host setup](install.md#host-setup)).
 3. Follow it: `GET /api/servers/{id}` → `status` goes `creating` → `booting`
    → `joining` → `ready` (or `failed`, with `error`). It then shows up under
    **Servers**.
@@ -166,6 +168,6 @@ or the cheapest server type that fits.
 from the instance. It's refused while services run on it; move them first, or
 pass `?force=true`.
 
-The Hetzner firewall doesn't open the TCP proxy range (20000–29999), so
-[TCP proxies](databases.md#public-access-tcp-proxy) on these servers aren't
-reachable unless you open it in the Hetzner console.
+The Hetzner firewall opens the TCP proxy range (20000–29999), so
+[TCP proxies](databases.md#public-access-tcp-proxy) on these servers are
+reachable without changes in the Hetzner console.

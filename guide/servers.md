@@ -11,7 +11,9 @@ Servers are managed by **instance admins** under **Servers**.
 
 Requirements are the same as for the [main server](install.md#requirements):
 Ubuntu 22.04+ or Debian 12+, amd64 or arm64, systemd, root. Open ports 80 and
-443 for apps (and 20000–29999 if it will host TCP proxies). The server must
+443 for apps (and 20000–29999 if it will host TCP proxies) in any cloud
+firewall; the installer sets up the server's own firewall the same way (see
+[host setup](install.md#host-setup); `--no-harden` skips it). The server must
 reach the main server on port 7101.
 
 1. **Servers → Add server** (asks you to re-authenticate). It shows a one-line
