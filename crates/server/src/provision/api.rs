@@ -158,6 +158,13 @@ pub async fn provision(
             AppError::bad_request("that server type is not available in this location")
         })?;
     let ca = state.pki().await?.fingerprint();
+    // The boot script would have to carry the servers' Access service token
+    // through the provider's user data; not done (yet).
+    if crate::private::api::join_access(&state).await?.is_some() {
+        return Err(AppError::Conflict(
+            "servers can't be created from here while the dashboard is private; add one by hand (Servers → Add server)".into(),
+        ));
+    }
 
     let id = Id::new();
     let join = token::generate(prefix::NODE_JOIN)?;

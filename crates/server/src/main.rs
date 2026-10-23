@@ -39,6 +39,8 @@ enum Command {
         #[arg(long)]
         decrypt_only: bool,
     },
+    /// List what this build supports (the installer checks before using it).
+    Features,
     /// Print a single-use command that joins a new server to this instance.
     JoinToken {
         /// Minutes until the token expires.
@@ -104,12 +106,27 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Features => {
+            for f in modula_server::FEATURES {
+                println!("{f}");
+            }
+            Ok(())
+        }
         Command::SetupToken => {
             use secrecy::ExposeSecret;
             let cfg = Config::from_env()?;
             let db = modula_server::db::connect(&cfg.database_url).await?;
             match modula_server::auth::setup::issue_if_pending(&db).await? {
-                Some(t) => println!("{}", t.expose_secret()),
+                Some(t) => {
+                    if modula_server::auth::setup::preseeded_from_env()?.is_some() {
+                        eprintln!(
+                            "note: this replaces the preseeded setup token until modula-server restarts \
+                             (remove {} from its environment to keep this one)",
+                            modula_server::auth::setup::PRESEEDED_HASH_ENV
+                        );
+                    }
+                    println!("{}", t.expose_secret())
+                }
                 None => eprintln!("setup already completed"),
             }
             Ok(())

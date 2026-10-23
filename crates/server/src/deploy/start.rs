@@ -97,6 +97,8 @@ pub async fn start(
     )
     .await?;
     let env_sealed = env::seal_snapshot(&state.keys, &state.db, env_id, id, &resolved.vars).await?;
+    let raw = env::raw_variables(&state.keys, &state.db, env_id, d.instance).await?;
+    let vars_sealed = env::seal_vars_snapshot(&state.keys, &state.db, env_id, id, &raw).await?;
     let service_id: Id =
         sqlx::query_scalar("SELECT service_id FROM service_instances WHERE id = $1 FOR UPDATE")
             .bind(d.instance)
@@ -133,8 +135,8 @@ pub async fn start(
         "INSERT INTO deployments (id, service_instance_id, node_id, status, image, image_digest, config,
                                   env_sealed, trigger, created_by, commit_sha, commit_message, commit_author,
                                   commit_author_login, source_deployment_id, upload_id, source_branch,
-                                  source_dirty)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+                                  source_dirty, vars_sealed)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
     )
     .bind(id)
     .bind(d.instance)
@@ -154,6 +156,7 @@ pub async fn start(
     .bind(d.config.upload())
     .bind(local.and_then(|g| g.branch.as_ref()))
     .bind(local.and_then(|g| g.dirty))
+    .bind(&vars_sealed)
     .execute(&mut *tx)
     .await?;
     let what = match (commit, d.config.upload()) {

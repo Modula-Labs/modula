@@ -7,6 +7,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import { ApiError } from "@/lib/api";
 import { cloudflare, type CloudflarePreview, type CloudflareStatus } from "@/lib/integrations";
+import { GithubIntegration } from "./IntegrationsGithub";
 import { HetznerIntegration } from "./IntegrationsHetzner";
 
 const statusKey = (ws: string) => ["cloudflare", ws];
@@ -54,6 +55,7 @@ export function IntegrationsSection({ workspaceId, isAdmin }: { workspaceId: str
             onConnect={() => setConnecting(true)}
           />
         )}
+        <GithubIntegration workspaceId={workspaceId} isAdmin={isAdmin} />
         <HetznerIntegration workspaceId={workspaceId} canEdit={isAdmin} />
       </div>
       <ConnectCloudflareDialog

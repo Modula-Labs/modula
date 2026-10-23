@@ -1,5 +1,5 @@
 import * as Popover from "@radix-ui/react-popover";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { Check, ChevronDown, DotsVertical, LayoutGrid, Logout, Moon, Plus, Server, Settings, ShieldLock, Sun } from "@/components/ui/icons";
@@ -25,7 +25,7 @@ function Avatar({ name, size = 24, round }: { name: string; size?: number; round
   );
 }
 
-function NavItem({ to, icon, children }: { to: string; icon: ReactNode; children: ReactNode }) {
+function NavItem({ to, icon, children, badge }: { to: string; icon: ReactNode; children: ReactNode; badge?: ReactNode }) {
   return (
     <Link
       to={to}
@@ -34,6 +34,7 @@ function NavItem({ to, icon, children }: { to: string; icon: ReactNode; children
     >
       {icon}
       {children}
+      {badge}
     </Link>
   );
 }
@@ -87,6 +88,15 @@ export function WorkspaceShell() {
   const [wsOpen, setWsOpen] = useState(false);
   const [acctOpen, setAcctOpen] = useState(false);
 
+  const updates = useQuery({
+    queryKey: ["instance-updates"],
+    queryFn: api.updates,
+    enabled: !!me?.user.isInstanceAdmin,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const updateBadge = me?.user.isInstanceAdmin && updates.data?.updateAvailable ? <span className="text-caps ml-auto text-info">Update</span> : null;
+
   if (!me || !current) return null;
 
   const logout = async () => {
@@ -131,7 +141,7 @@ export function WorkspaceShell() {
         <div className="my-2 h-px bg-border" />
         <nav className="flex flex-col gap-0.5" aria-label="Workspace">
           <NavItem to="/projects" icon={<LayoutGrid />}>Projects</NavItem>
-          <NavItem to="/settings" icon={<Settings />}>Settings</NavItem>
+          <NavItem to="/settings" icon={<Settings />} badge={updateBadge}>Settings</NavItem>
         </nav>
         {me.user.isInstanceAdmin ? (
           <>

@@ -35,6 +35,16 @@ impl AdminAddr {
         }
     }
 
+    /// Identifies the admin socket file (device, inode): Caddy creates it
+    /// anew on every start. None for TCP or while it doesn't exist.
+    pub fn socket_identity(&self) -> Option<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        match self {
+            Self::Unix(p) => std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino())),
+            Self::Tcp(_) => None,
+        }
+    }
+
     fn host_header(&self) -> &str {
         match self {
             Self::Unix(_) => "localhost",

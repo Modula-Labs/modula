@@ -16,17 +16,19 @@ pub mod http;
 pub mod integrations;
 pub mod jobs;
 pub mod keyring;
+pub mod listen;
 pub mod locations;
 pub mod nodes;
 pub mod pki;
+pub mod private;
 pub mod provision;
 pub mod ratelimit;
 pub mod state;
 pub mod templates;
 pub mod tunnel;
+pub mod updates;
 pub mod validate;
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -37,6 +39,14 @@ use crate::config::Config;
 use crate::keyring::Keyring;
 use crate::ratelimit::RateLimiter;
 use crate::state::AppState;
+
+/// What `modula-server features` prints. install.sh writes units that rely
+/// on a feature only when the release it installs has it, so upgrading to (or
+/// rolling back to) an older release keeps working.
+///
+/// * `socket-activation`: takes its listeners from systemd (modula-server.socket).
+/// * `upgrade-requests`: hands upgrades to modula-upgrade.path (`MODULA_UPGRADE_DIR`).
+pub const FEATURES: &[&str] = &["socket-activation", "upgrade-requests"];
 
 pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let kek = cfg.load_master_key()?;
@@ -49,7 +59,17 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         .await
         .context("cannot connect to Redis")?;
 
-    if let Some(token) = auth::setup::issue_if_pending(&db).await? {
+    if let Some(hash) = auth::setup::preseeded_from_env()? {
+        // Chosen by whoever installed this server (`modula server create`);
+        // nothing to print, they finish setup with it.
+        if auth::setup::preseed_if_pending(&db, hash).await? {
+            eprintln!(
+                "\n  Modula Deploy is not set up yet. It was installed with a preseeded setup token\n  ({}); finish setup with it at {}/setup.\n",
+                auth::setup::PRESEEDED_HASH_ENV,
+                cfg.public_url.as_str().trim_end_matches('/')
+            );
+        }
+    } else if let Some(token) = auth::setup::issue_if_pending(&db).await? {
         // Printed to stderr only; the hash is all that is stored.
         eprintln!(
             "\n  Modula Deploy is not set up yet.\n  Open {} and use this one-time setup token:\n\n    {}\n\n  It expires in 24 hours and is replaced on every restart.\n",
@@ -59,6 +79,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     }
 
     let listen = cfg.listen;
+    // Sockets systemd holds across restarts (modula-server.socket), if any.
+    let mut inherited = listen::Inherited::from_env()?;
     let state = AppState::new(db, cfg, Keyring::new(kek), RateLimiter::Redis(redis));
     let stop = state.shutdown.clone();
     let worker = tokio::spawn(jobs::run_worker(
@@ -80,6 +102,13 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let cleanup = tokio::spawn(schedule_cleanup(state.clone(), stop.clone()));
     let backups = tokio::spawn(backup::schedule_loop(state.clone(), stop.clone()));
     let domain_checks = tokio::spawn(domains::verify_loop(state.clone(), stop.clone()));
+    let updates = tokio::spawn(updates::run(state.clone(), stop.clone()));
+    tokio::spawn(private::startup(state.clone()));
+    let rollout = tokio::spawn(updates::rollout::run(
+        state.clone(),
+        stop.clone(),
+        updates::rollout::TICK,
+    ));
 
     // Create the CA before accepting traffic so every replica sees the same one.
     let fingerprint = state
@@ -89,9 +118,10 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         .fingerprint();
     tracing::info!(%fingerprint, "node CA ready");
     let node_listen = state.cfg.node_listen;
-    let node_listener = tokio::net::TcpListener::bind(node_listen)
+    let node_listener = inherited
+        .listener(node_listen)
         .await
-        .with_context(|| format!("cannot bind node endpoint {node_listen}"))?;
+        .context("node endpoint")?;
     let node_endpoint = tokio::spawn({
         let (state, stop) = (state.clone(), stop.clone());
         async move {
@@ -102,16 +132,13 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         }
     });
 
-    let listener = tokio::net::TcpListener::bind(listen)
-        .await
-        .with_context(|| format!("cannot bind {listen}"))?;
+    let listener = inherited.listener(listen).await?;
+    if !inherited.is_empty() {
+        tracing::warn!("systemd passed sockets this configuration doesn't use");
+    }
     tracing::info!(%listen, "modula-server listening");
-    axum::serve(
-        listener,
-        http::app(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal(stop.clone()))
-    .await?;
+    tokio::spawn(shutdown_signal(stop.clone()));
+    listen::serve_http(listener, http::app(state), stop.clone(), listen::DRAIN).await?;
 
     stop.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), async {
@@ -119,6 +146,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         let _ = cleanup.await;
         let _ = backups.await;
         let _ = domain_checks.await;
+        let _ = updates.await;
+        let _ = rollout.await;
         let _ = node_endpoint.await;
     })
     .await;

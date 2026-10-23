@@ -69,6 +69,11 @@ impl pb::node_server::Node for NodeService {
         &self,
         req: Request<pb::EnrollRequest>,
     ) -> Result<Response<pb::EnrollResponse>, Status> {
+        if !self.state.private.node_peer_allowed(req.remote_addr()) {
+            return Err(Status::permission_denied(
+                "this instance only accepts servers through its Cloudflare Tunnel",
+            ));
+        }
         let ip = peer_ip(req.remote_addr());
         if self
             .state
@@ -150,6 +155,11 @@ impl pb::node_server::Node for NodeService {
         req: Request<Streaming<pb::NodeMessage>>,
     ) -> Result<Response<AttachStream>, Status> {
         let state = self.state.clone();
+        if !state.private.node_peer_allowed(req.remote_addr()) {
+            return Err(Status::permission_denied(
+                "this instance only accepts servers through its Cloudflare Tunnel",
+            ));
+        }
         let certs = req
             .peer_certs()
             .ok_or_else(|| Status::unauthenticated("client certificate required"))?;
@@ -339,6 +349,8 @@ async fn handle(
         }
         In::BackupResult(r) => crate::backup::on_result(state, node, r).await?,
         In::DbResult(r) => state.hub.deliver_db(node, r),
+        In::UpgradeStatus(s) => crate::updates::rollout::on_status(state, node, s).await?,
+        In::AccessStatus(s) => state.private.deliver(node, s),
         // Never waits: see crate::tunnel on flow control.
         m @ (In::TunnelOpened(_) | In::TunnelData(_) | In::TunnelClose(_)) => {
             if let Some(reply) = state.tunnels.from_node(node, m) {

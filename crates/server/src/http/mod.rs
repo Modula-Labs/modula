@@ -25,6 +25,11 @@ pub fn app(state: AppState) -> Router {
             state.clone(),
             middleware::require_same_origin,
         ))
+        // Outside the CSRF check and the routes, so it covers the SPA too.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::private::gate::require_access,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::security_headers,

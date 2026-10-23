@@ -16,16 +16,38 @@ use super::{EdgeConfig, EdgeSink, ResolvedRoute, normalize_host};
 /// Re-load even an unchanged config this often: it restores our routes after
 /// Caddy restarts, and Caddy skips identical configs without a reload.
 const REFRESH_EVERY: Duration = Duration::from_secs(30);
-/// How often the watchdog checks that Caddy still has our config.
-const WATCH_EVERY: Duration = Duration::from_secs(3);
+/// How often the watchdog asks Caddy whether it still has our config (each
+/// question is a line in Caddy's log).
+const CHECK_EVERY: Duration = Duration::from_secs(3);
+/// How often it looks at the admin socket: Caddy creates it anew when it
+/// starts, so a restart is noticed (and the config restored) within this,
+/// while connections wait in the kernel's backlog (socket activation).
+const WATCH_EVERY: Duration = Duration::from_millis(100);
+/// How long Caddy lets in-flight requests finish when it stops or reloads.
+const GRACE_PERIOD: &str = "10s";
 const NOT_FOUND: &str = "No service is deployed at this address.";
+
+/// Where Caddy's HTTP servers listen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Listeners {
+    /// Caddy binds :80 and :443 itself (development, or no socket unit).
+    #[default]
+    Ports,
+    /// systemd holds the sockets (modula-caddy.socket) and passes them in this
+    /// order: fd 3 = TCP 80, fd 4 = TCP 443, fd 5 = UDP 443 (HTTP/3). The ports
+    /// stay open while Caddy restarts; connections wait in the backlog.
+    SystemdSockets,
+}
 
 pub struct CaddyEdge {
     admin: AdminAddr,
+    listeners: Listeners,
     ask_url: String,
     allowlist: Allowlist,
     /// Routes this node serves on its own, e.g. the dashboard on the main server.
     local_routes: Vec<ResolvedRoute>,
+    /// Local routes not to serve (private mode hides the dashboard).
+    hidden: Mutex<Vec<String>>,
     last: Mutex<Option<(Value, Instant)>>,
 }
 
@@ -35,12 +57,15 @@ impl CaddyEdge {
         ask_url: String,
         allowlist: Allowlist,
         local_routes: Vec<ResolvedRoute>,
+        listeners: Listeners,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             admin: AdminAddr::parse(admin)?,
+            listeners,
             ask_url,
             allowlist,
             local_routes,
+            hidden: Mutex::new(Vec::new()),
             last: Mutex::new(None),
         })
     }
@@ -49,13 +74,21 @@ impl CaddyEdge {
     /// nothing across restarts: `persist: false`), instead of waiting for the
     /// next reconcile.
     pub async fn watch(self: std::sync::Arc<Self>, stop: tokio_util::sync::CancellationToken) {
-        let mut tick = tokio::time::interval(WATCH_EVERY);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut socket = self.admin.socket_identity();
+        let mut checked = Instant::now();
+        let mut down = false;
         loop {
             tokio::select! {
                 _ = stop.cancelled() => return,
-                _ = tick.tick() => {}
+                _ = tokio::time::sleep(WATCH_EVERY) => {}
             }
+            let now = self.admin.socket_identity();
+            let restarted = now != socket;
+            socket = now;
+            if !restarted && !down && checked.elapsed() < CHECK_EVERY {
+                continue;
+            }
+            checked = Instant::now();
             let Some(config) = self
                 .last
                 .lock()
@@ -67,8 +100,13 @@ impl CaddyEdge {
             };
             let missing = match http::get(&self.admin, "/config/apps/http/servers/modula").await {
                 Ok(r) => r.status != 200 || r.body.trim() == "null",
-                Err(_) => continue, // Caddy is down; check again once it's up
+                Err(_) => {
+                    // Caddy is down; check again soon and reload once it's up.
+                    down = true;
+                    continue;
+                }
             };
+            down = false;
             if missing {
                 match self.load(&config).await {
                     Ok(()) => tracing::info!("restored the edge config after a Caddy restart"),
@@ -97,7 +135,7 @@ impl CaddyEdge {
 }
 
 /// The full Caddy JSON config for `cfg`.
-pub fn render(cfg: &EdgeConfig, admin_listen: &str, ask_url: &str) -> Value {
+pub fn render(cfg: &EdgeConfig, listeners: Listeners, admin_listen: &str, ask_url: &str) -> Value {
     // One route per hostname; several upstreams if several replicas serve it.
     let mut by_host: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for r in &cfg.routes {
@@ -130,21 +168,43 @@ pub fn render(cfg: &EdgeConfig, admin_listen: &str, ask_url: &str) -> Value {
 
     let hosts: Vec<&String> = by_host.keys().collect();
     let mut server = json!({ "routes": routes });
+    let mut servers = serde_json::Map::new();
     let mut apps = serde_json::Map::new();
-    match cfg.tls {
-        TlsMode::TlsOff => {
+    match (cfg.tls, listeners) {
+        (TlsMode::TlsOff, Listeners::Ports) => {
             server["listen"] = json!([":80"]);
             server["automatic_https"] = json!({ "disable": true });
         }
+        (TlsMode::TlsOff, Listeners::SystemdSockets) => {
+            server["listen"] = json!(["fd/3"]);
+            server["listen_protocols"] = json!([["h1"]]);
+            server["automatic_https"] = json!({ "disable": true });
+        }
+        (_, Listeners::Ports) => server["listen"] = json!([":80", ":443"]),
+        (_, Listeners::SystemdSockets) => {
+            // Caddy can't tell which descriptor is the HTTP port, so plain
+            // HTTP gets a server of its own with the same routes (as on :80
+            // today), and HTTP/3 is bound to the UDP socket explicitly.
+            server["listen"] = json!(["fd/4", "fdgram/5"]);
+            server["listen_protocols"] = json!([["h1", "h2"], ["h3"]]);
+            server["automatic_https"] = json!({ "disable_redirects": true });
+            let mut plain = server.clone();
+            plain["listen"] = json!(["fd/3"]);
+            plain["listen_protocols"] = json!([["h1"]]);
+            // ACME HTTP-01 challenges are still answered here (every server does).
+            plain["automatic_https"] = json!({ "disable": true });
+            servers.insert("modula_http".into(), plain);
+        }
+    }
+    match cfg.tls {
+        TlsMode::TlsOff => {}
         TlsMode::TlsInternal => {
-            server["listen"] = json!([":80", ":443"]);
             apps.insert(
                 "tls".into(),
                 json!({ "automation": { "policies": [{ "subjects": hosts, "issuers": [{ "module": "internal" }] }] } }),
             );
         }
         TlsMode::TlsAcme | TlsMode::TlsUnspecified => {
-            server["listen"] = json!([":80", ":443"]);
             let mut issuer = json!({ "module": "acme" });
             if !cfg.acme_email.is_empty() {
                 issuer["email"] = json!(cfg.acme_email);
@@ -160,7 +220,11 @@ pub fn render(cfg: &EdgeConfig, admin_listen: &str, ask_url: &str) -> Value {
             );
         }
     }
-    apps.insert("http".into(), json!({ "servers": { "modula": server } }));
+    servers.insert("modula".into(), server);
+    apps.insert(
+        "http".into(),
+        json!({ "grace_period": GRACE_PERIOD, "servers": servers }),
+    );
     json!({
         // Re-declared on every load so Caddy never falls back to localhost:2019.
         "admin": { "listen": admin_listen, "config": { "persist": false } },
@@ -170,9 +234,19 @@ pub fn render(cfg: &EdgeConfig, admin_listen: &str, ask_url: &str) -> Value {
 
 #[async_trait]
 impl EdgeSink for CaddyEdge {
+    fn set_hidden(&self, hosts: Vec<String>) {
+        *self.hidden.lock().expect("edge lock") = hosts;
+    }
+
     async fn apply(&self, cfg: &EdgeConfig) -> anyhow::Result<()> {
         let mut cfg = cfg.clone();
-        cfg.routes.extend(self.local_routes.iter().cloned());
+        let hidden = self.hidden.lock().expect("edge lock").clone();
+        cfg.routes.extend(
+            self.local_routes
+                .iter()
+                .filter(|r| !hidden.contains(&r.hostname))
+                .cloned(),
+        );
         let cfg = &cfg;
         let hosts: HashSet<String> = cfg
             .routes
@@ -181,7 +255,12 @@ impl EdgeSink for CaddyEdge {
             .collect();
         *self.allowlist.write().expect("allowlist lock") = hosts;
 
-        let rendered = render(cfg, &self.admin.caddy_listen(), &self.ask_url);
+        let rendered = render(
+            cfg,
+            self.listeners,
+            &self.admin.caddy_listen(),
+            &self.ask_url,
+        );
         let fresh = {
             let last = self.last.lock().expect("edge lock");
             match &*last {
@@ -226,6 +305,7 @@ mod tests {
     fn acme_config_is_gated_by_ask() {
         let c = render(
             &cfg(TlsMode::TlsAcme),
+            Listeners::Ports,
             "unix//run/caddy/admin.sock",
             "http://127.0.0.1:7102/ask",
         );
@@ -258,13 +338,23 @@ mod tests {
 
     #[test]
     fn local_modes() {
-        let off = render(&cfg(TlsMode::TlsOff), "localhost:2019", "x");
+        let off = render(
+            &cfg(TlsMode::TlsOff),
+            Listeners::Ports,
+            "localhost:2019",
+            "x",
+        );
         assert_eq!(
             off["apps"]["http"]["servers"]["modula"]["listen"],
             json!([":80"])
         );
         assert!(off["apps"].get("tls").is_none());
-        let internal = render(&cfg(TlsMode::TlsInternal), "localhost:2019", "x");
+        let internal = render(
+            &cfg(TlsMode::TlsInternal),
+            Listeners::Ports,
+            "localhost:2019",
+            "x",
+        );
         assert_eq!(
             internal["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]["module"],
             "internal"
@@ -294,10 +384,54 @@ mod tests {
             }
         }
         for tls in [TlsMode::TlsAcme, TlsMode::TlsInternal, TlsMode::TlsOff] {
-            let c = render(&cfg(tls), "localhost:2019", "x");
-            let mut proxies = 0;
-            walk(&c["apps"]["http"], &mut proxies);
-            assert!(proxies > 0);
+            for listeners in [Listeners::Ports, Listeners::SystemdSockets] {
+                let c = render(&cfg(tls), listeners, "localhost:2019", "x");
+                let mut proxies = 0;
+                walk(&c["apps"]["http"], &mut proxies);
+                assert!(proxies > 0);
+            }
         }
+    }
+
+    /// With socket activation (verified against Caddy 2.10.2), HTTPS and
+    /// HTTP/3 take fds 4 and 5 and plain HTTP gets its own server on fd 3 with
+    /// the same routes: Caddy can't tell an fd's port, and would otherwise
+    /// treat fd 3 as TLS and try HTTP/3 on it.
+    #[test]
+    fn socket_activation_uses_the_systemd_descriptors() {
+        let c = render(
+            &cfg(TlsMode::TlsAcme),
+            Listeners::SystemdSockets,
+            "unix//run/caddy/admin.sock",
+            "http://127.0.0.1:7102/ask",
+        );
+        let servers = &c["apps"]["http"]["servers"];
+        assert_eq!(servers["modula"]["listen"], json!(["fd/4", "fdgram/5"]));
+        assert_eq!(
+            servers["modula"]["listen_protocols"],
+            json!([["h1", "h2"], ["h3"]])
+        );
+        assert_eq!(
+            servers["modula"]["automatic_https"]["disable_redirects"],
+            true
+        );
+        assert_eq!(servers["modula_http"]["listen"], json!(["fd/3"]));
+        assert_eq!(servers["modula_http"]["automatic_https"]["disable"], true);
+        assert_eq!(
+            servers["modula_http"]["routes"],
+            servers["modula"]["routes"]
+        );
+        assert_eq!(c["apps"]["http"]["grace_period"], GRACE_PERIOD);
+
+        let off = render(&cfg(TlsMode::TlsOff), Listeners::SystemdSockets, "x", "x");
+        let servers = off["apps"]["http"]["servers"].as_object().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers["modula"]["listen"], json!(["fd/3"]));
+
+        // Without sockets nothing changes: one server on :80 and :443.
+        let ports = render(&cfg(TlsMode::TlsAcme), Listeners::Ports, "x", "x");
+        let servers = ports["apps"]["http"]["servers"].as_object().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers["modula"]["listen"], json!([":80", ":443"]));
     }
 }

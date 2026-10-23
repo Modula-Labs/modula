@@ -32,6 +32,9 @@ pub struct EdgeConfig {
 #[async_trait]
 pub trait EdgeSink: Send + Sync + 'static {
     async fn apply(&self, config: &EdgeConfig) -> anyhow::Result<()>;
+    /// Hostnames of this node's own routes (`--route`) to stop serving, e.g.
+    /// the dashboard in private mode. Applied from the next `apply`.
+    fn set_hidden(&self, _hosts: Vec<String>) {}
 }
 
 /// Records the last config instead of serving it (tests).

@@ -9,7 +9,7 @@ use modula_node::build::buildkit::BuildkitBuilder;
 use modula_node::build::{BuildLogs, BuildSupport};
 use modula_node::edge::EdgeSink;
 use modula_node::edge::ask::{self, Allowlist};
-use modula_node::edge::caddy::CaddyEdge;
+use modula_node::edge::caddy::{CaddyEdge, Listeners};
 use modula_node::identity::Identity;
 use modula_node::join::{JoinArgs, join};
 use modula_node::reconcile::Capabilities;
@@ -52,6 +52,16 @@ enum Command {
         /// Display name for this server (defaults to the hostname).
         #[arg(long)]
         name: Option<String>,
+        /// Private mode: reach the node endpoint through Cloudflare Access at
+        /// this hostname (a local `cloudflared access tcp` on --server's port).
+        #[arg(long, requires_all = ["access_id", "access_secret"])]
+        access_host: Option<String>,
+        /// The Access service token's client id.
+        #[arg(long)]
+        access_id: Option<String>,
+        /// The Access service token's client secret (or MODULA_ACCESS_SECRET).
+        #[arg(long, env = "MODULA_ACCESS_SECRET", hide_env_values = true)]
+        access_secret: Option<String>,
     },
     /// Connect to the control plane and run workloads.
     Run {
@@ -84,7 +94,17 @@ enum Command {
         /// Directory for BuildKit's socket (shared with its container).
         #[arg(long, default_value = "/run/modula-buildkit")]
         buildkit_dir: PathBuf,
+        /// Caddy runs socket-activated (modula-caddy.socket passes TCP 80,
+        /// TCP 443 and UDP 443 as fds 3–5), so its ports stay open across restarts.
+        #[arg(long, env = "MODULA_CADDY_SOCKETS")]
+        caddy_sockets: bool,
+        /// Where upgrade requests for the modula-upgrade unit go. Upgrades on
+        /// the control plane's request are offered only when it exists.
+        #[arg(long, default_value = "/var/lib/modula-upgrade")]
+        upgrade_dir: PathBuf,
     },
+    /// List what this build supports (the installer checks before using it).
+    Features,
     /// Show this server's identity.
     Status,
 }
@@ -104,7 +124,17 @@ async fn main() -> anyhow::Result<()> {
             token,
             ca,
             name,
+            access_host,
+            access_id,
+            access_secret,
         } => {
+            if let (Some(host), Some(id), Some(secret)) = (&access_host, &access_id, &access_secret)
+            {
+                let port = modula_node::access::local_port(&server)?;
+                std::fs::create_dir_all(&cli.data_dir)?;
+                modula_node::access::setup_access_proxy(&cli.data_dir, host, port, id, secret)
+                    .await?;
+            }
             let hostname = name.unwrap_or_else(|| {
                 std::fs::read_to_string("/etc/hostname")
                     .map(|s| s.trim().to_owned())
@@ -132,8 +162,12 @@ async fn main() -> anyhow::Result<()> {
             buildctl,
             railpack,
             buildkit_dir,
+            caddy_sockets,
+            upgrade_dir,
         } => {
             let runtime = Arc::new(DockerRuntime::connect()?);
+            // Only the main server serves routes of its own (the dashboard).
+            let serves_dashboard = !routes.is_empty();
             let stop = CancellationToken::new();
             let edge: Option<Arc<dyn EdgeSink>> = if no_edge {
                 None
@@ -152,6 +186,11 @@ async fn main() -> anyhow::Result<()> {
                     format!("http://{ask_listen}/ask"),
                     allowlist,
                     routes,
+                    if caddy_sockets {
+                        Listeners::SystemdSockets
+                    } else {
+                        Listeners::Ports
+                    },
                 )?);
                 tokio::spawn(caddy.clone().watch(stop.clone()));
                 Some(caddy)
@@ -175,12 +214,25 @@ async fn main() -> anyhow::Result<()> {
                 })
             };
             let db: Arc<dyn modula_node::db::Executor> = Arc::new(modula_node::db::pg::Postgres);
+            let upgrade = modula_node::upgrade::SystemdUpgrader::detect(&upgrade_dir)
+                .map(|u| Arc::new(u) as Arc<dyn modula_node::upgrade::Upgrader>);
+            modula_node::access::register(Arc::new(modula_node::access::SystemdAccess::new(
+                cli.data_dir.clone(),
+                edge.clone(),
+                serves_dashboard,
+            )));
             let caps = Capabilities {
                 edge,
                 build,
                 db: Some(db),
+                upgrade,
             };
             session::run(cli.data_dir, runtime, caps, stop).await?;
+        }
+        Command::Features => {
+            for f in modula_node::FEATURES {
+                println!("{f}");
+            }
         }
         Command::Status => {
             let id = Identity::load(&cli.data_dir)?;

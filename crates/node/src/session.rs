@@ -50,6 +50,9 @@ pub async fn run(
     let has_edge = caps.edge.is_some();
     let build_logs = caps.build.as_ref().map(|b| b.logs.clone());
     let db = caps.db.clone();
+    let upgrade = caps.upgrade.clone();
+    // Set by a finished upgrade (tests' fake one): reconnect to say Hello again.
+    let reconnect = Arc::new(tokio::sync::Notify::new());
     // Backup results also go through the outbox, to survive reconnects.
     let results = out_tx.clone();
     let reconciler = Reconciler::new(runtime.clone(), caps, out_tx);
@@ -75,6 +78,8 @@ pub async fn run(
             results: &results,
             location: &location,
             db: db.as_ref(),
+            upgrade: upgrade.as_ref(),
+            reconnect: &reconnect,
         };
         match ctx.session().await {
             Ok(()) => break,
@@ -110,6 +115,8 @@ struct Ctx<'a> {
     location: &'a crate::location::Hints,
     /// Runs Database-tab operations; None = this node doesn't offer them.
     db: Option<&'a Arc<dyn crate::db::Executor>>,
+    upgrade: Option<&'a Arc<dyn crate::upgrade::Upgrader>>,
+    reconnect: &'a Arc<tokio::sync::Notify>,
 }
 
 fn msg(m: Out) -> pb::NodeMessage {
@@ -153,6 +160,7 @@ impl Ctx<'_> {
         let result = loop {
             tokio::select! {
                 _ = self.stop.cancelled() => break Ok(()),
+                _ = self.reconnect.notified() => break Err(anyhow::anyhow!("reconnecting after an upgrade")),
                 incoming = inbound.message() => match incoming {
                     Ok(Some(pb::ServerMessage { msg: Some(m) })) => {
                         if let Err(e) = self.handle(m, &tx, &mut logs, &tunnels, &mut pending_key).await {
@@ -268,6 +276,16 @@ impl Ctx<'_> {
                     tx.send(msg(Out::DbResult(r))).await?;
                 }
             },
+            In::Upgrade(req) => self.upgrade(req, tx).await?,
+            // Can take minutes (installing cloudflared); answered through the
+            // outbox, since applying it may move this very connection.
+            In::Access(cfg) => {
+                let results = self.results.clone();
+                tokio::spawn(async move {
+                    let status = crate::access::handle(cfg).await;
+                    let _ = results.send(msg(Out::AccessStatus(status))).await;
+                });
+            }
             In::TunnelOpen(req) => tunnels.open(req),
             In::TunnelData(d) => tunnels.data(d),
             In::TunnelClose(c) => tunnels.close(c),
@@ -299,6 +317,44 @@ impl Ctx<'_> {
         Ok(())
     }
 
+    /// Start an upgrade in the background; only failures (and a fake's
+    /// success) are reported, since a real success restarts this process.
+    async fn upgrade(
+        &self,
+        req: pb::UpgradeRequest,
+        tx: &mpsc::Sender<pb::NodeMessage>,
+    ) -> anyhow::Result<()> {
+        let request_id = req.request_id.clone();
+        let status = move |ok: bool, error: String| {
+            msg(Out::UpgradeStatus(pb::UpgradeStatus {
+                request_id: request_id.clone(),
+                ok,
+                error,
+            }))
+        };
+        let Some(upgrader) = self.upgrade.cloned() else {
+            tx.send(status(false, "this server can't upgrade itself".into()))
+                .await?;
+            return Ok(());
+        };
+        tracing::info!(version = %req.version, "upgrading on the control plane's request");
+        // Results go through the outbox: the session may be gone by then.
+        let (results, reconnect) = (self.results.clone(), self.reconnect.clone());
+        tokio::spawn(async move {
+            match upgrader.upgrade(&req.version).await {
+                Ok(()) => {
+                    let _ = results.send(status(true, String::new())).await;
+                    reconnect.notify_one();
+                }
+                Err(e) => {
+                    tracing::warn!(error = format!("{e:#}"), "upgrade failed");
+                    let _ = results.send(status(false, format!("{e:#}"))).await;
+                }
+            }
+        });
+        Ok(())
+    }
+
     fn needs_renewal(&self) -> bool {
         match self.identity.cert_not_after() {
             Ok(t) => t
@@ -311,12 +367,21 @@ impl Ctx<'_> {
     async fn hello(&self) -> pb::Hello {
         pb::Hello {
             protocol: pb::PROTOCOL,
-            node_version: crate::VERSION.to_owned(),
+            node_version: self
+                .upgrade
+                .map_or_else(|| crate::VERSION.to_owned(), |u| u.version()),
             capabilities: ["logs", "renew", "backup", "tunnel"]
                 .into_iter()
                 .chain(self.has_edge.then_some("edge"))
                 .chain(self.build_logs.is_some().then_some("build"))
                 .chain(self.db.is_some().then_some("db"))
+                .chain(self.upgrade.is_some().then_some("upgrade"))
+                .chain(crate::access::applier().map(|_| "cf-access"))
+                .chain(
+                    crate::access::applier()
+                        .filter(|a| a.dashboard())
+                        .map(|_| "dashboard"),
+                )
                 .map(String::from)
                 .collect(),
             applied_generation: self.reconciler.applied_generation(),

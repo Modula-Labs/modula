@@ -121,6 +121,7 @@ impl Cluster {
                 logs: modula_node::build::BuildLogs::new(dir.join("build-logs")).unwrap(),
             }),
             db: None,
+            upgrade: None,
         };
         tokio::spawn(modula_node::session::run(
             dir,

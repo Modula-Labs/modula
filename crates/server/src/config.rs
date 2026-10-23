@@ -48,6 +48,58 @@ pub struct Config {
     /// The URL nodes use to reach this server's HTTP API (to download uploaded
     /// sources). None = `public_url`.
     pub internal_url: Option<Url>,
+    /// Where releases are published and how this instance upgrades itself.
+    pub releases: Releases,
+}
+
+/// Published releases (update checks) and the hand-off to the root-owned
+/// `modula-upgrade` unit (see `crate::updates`).
+#[derive(Debug, Clone)]
+pub struct Releases {
+    /// `MODULA_RELEASE_URL`: `<url>/latest/download/<file>`, `<url>/download/v<version>/<file>`.
+    pub url: Url,
+    /// Ed25519 key that signs `SHA256SUMS` (`MODULA_RELEASE_PUBKEY`, base64
+    /// SubjectPublicKeyInfo as in install.sh; default: deploy/release.pub.pem).
+    pub pubkey: [u8; 32],
+    /// `MODULA_UPGRADE_DIR`: where upgrade requests for modula-upgrade.path go
+    /// and its results come back. None = upgrades from the dashboard are off.
+    pub upgrade_dir: Option<PathBuf>,
+}
+
+pub const DEFAULT_RELEASE_URL: &str = "https://downloads.usemodula.org/releases";
+
+impl Default for Releases {
+    /// The public releases; no upgrade hand-off (tests, development).
+    fn default() -> Self {
+        Self {
+            url: DEFAULT_RELEASE_URL.parse().expect("static url"),
+            pubkey: crate::updates::release::embedded_pubkey(),
+            upgrade_dir: None,
+        }
+    }
+}
+
+impl Releases {
+    fn from_env() -> anyhow::Result<Self> {
+        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        Ok(Self {
+            url: var("MODULA_RELEASE_URL")
+                .as_deref()
+                .unwrap_or(DEFAULT_RELEASE_URL)
+                .trim()
+                .parse()
+                .context("invalid MODULA_RELEASE_URL")?,
+            pubkey: match var("MODULA_RELEASE_PUBKEY") {
+                Some(k) => crate::updates::release::pubkey_from_spki(k.trim())
+                    .context("invalid MODULA_RELEASE_PUBKEY")?,
+                None => crate::updates::release::embedded_pubkey(),
+            },
+            upgrade_dir: Some(
+                var("MODULA_UPGRADE_DIR")
+                    .map_or_else(|| PathBuf::from("/var/lib/modula-upgrade"), PathBuf::from),
+            ),
+        })
+    }
 }
 
 /// Default for `MODULA_UPLOAD_MAX_MB`.
@@ -143,6 +195,7 @@ impl Config {
                 .map(|u| u.trim().parse())
                 .transpose()
                 .context("invalid MODULA_INTERNAL_URL")?,
+            releases: Releases::from_env()?,
         };
         let mut cfg = cfg;
         cfg.uploads_dir = match std::env::var("MODULA_UPLOADS_DIR") {
@@ -323,6 +376,7 @@ impl Config {
             uploads_dir: std::env::temp_dir().join("modula-uploads-unit"),
             upload_max_bytes: DEFAULT_UPLOAD_MAX_MB * 1024 * 1024,
             internal_url: None,
+            releases: Releases::default(),
         }
     }
 }

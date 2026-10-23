@@ -11,25 +11,67 @@ token](security.md#api-tokens)).
 ## GitHub
 
 Deploying from repositories uses a GitHub App that belongs to your instance.
+Connecting it is one click: **Connect GitHub**, in **Workspace Settings →
+Integrations → GitHub** or under the Repository field of **New service →
+GitHub repo** (workspace admins).
 
-1. An instance admin creates the App once through GitHub's manifest flow
-   (`POST /api/github/app/manifest`, sudo; the browser then posts the returned
-   manifest to GitHub, which redirects back to `/api/github/app/callback`).
-   Its credentials are stored encrypted. `GET /api/github/app` shows whether
-   it exists.
-2. A workspace admin installs it on the GitHub accounts or organizations whose
-   repositories the workspace should use
-   (`POST /api/workspaces/{id}/github/install` returns the GitHub URL to open).
-3. In **New service → GitHub repo**, enter `owner/name`, the branch and an
-   optional root directory. `GET /api/workspaces/{id}/github/repos` lists the
-   repositories the installation can reach.
+- **First time on the instance** (instance admins, with a recent
+  re-authentication): GitHub shows the App it is about to create; confirm it.
+  The App is named `Modula Deploy (<your host>)` (with a short suffix when
+  another instance already took that name; GitHub lets you edit it on that
+  page too), is private, asks only for **contents** and **metadata** (read)
+  and **commit statuses** (write), and sends **push** events to
+  `/api/github/webhook` on the instance's public URL. GitHub hands its keys
+  back to the server, which stores them encrypted, and goes straight on to
+  installing it. In Settings, **Create the GitHub App under an organization**
+  makes the organization own it: a private App can only be installed on the
+  account that owns it.
+- **Every time**: pick the account or organization and the repositories on
+  GitHub's installation page. You land back where you started: in Settings,
+  or in the New Service dialog on the GitHub step with the repository search
+  ready and "GitHub connected — pick a repo". Clicking **Add account** later
+  installs on another account the same way.
+- **Organization approval**: if an organization owner has to approve the
+  installation, you're told so. Once they approve it on GitHub, click
+  **Connect GitHub** again to finish binding it to the workspace.
+- Workspace admins on an instance without an App are asked to get an instance
+  admin to connect GitHub; other roles are asked to get a workspace admin.
 
-Dashboard screens for steps 1 and 2 are coming soon.
+The installation is bound to the workspace that started it and can't be moved
+to another. Installed accounts show with their avatar and a **Configure** link
+to change repository access on GitHub. Every hop through GitHub carries a
+single-use `state` (stored hashed, bound to the user who started it, and
+expiring after 15 minutes for App creation, an hour for installing), so a
+link can't be replayed or completed by someone else; the return path must be
+a path on this instance.
+
+In **New service → GitHub repo**, the Repository field searches the
+repositories your installations reach (most recently pushed first, private
+ones marked with a lock). Picking one fills the branch with its default
+branch and the service name, and the Branch field then suggests branches.
+`owner/name` or a GitHub URL of any public repository works without
+connecting anything.
+
+Listing repositories and branches needs the **Member** role. The listings are
+cached for a minute per workspace and GitHub calls are rate limited, so typing
+in the pickers doesn't spend GitHub's API quota. Installation tokens never
+leave the server.
+
+| Endpoint | Who | What |
+|---|---|---|
+| `GET /api/github/app` | Signed in | Whether the App exists, its slug, owner and webhook URL |
+| `POST /api/github/app/manifest` | Instance admin, sudo | Manifest and GitHub URL to post it to. With `workspaceId` (an admin of it) the callback goes on to installing it there; `returnTo` is the path to come back to |
+| `POST /api/workspaces/{id}/github/install` | Admin | The GitHub URL that installs the App for this workspace; `returnTo` as above |
+| `GET /api/workspaces/{id}/github/installations` | Member | Installed accounts (`accountLogin`, `avatarUrl`, `configureUrl`) |
+| `GET /api/workspaces/{id}/github/repos?q=&page=&perPage=` | Member | `fullName`, `private`, `defaultBranch`, `updatedAt` (last push), `ownerAvatar` |
+| `GET /api/workspaces/{id}/github/branches?repo=owner/name&q=` | Member | `name`, `protected` |
 
 Pushes arrive on `POST /api/github/webhook`, verified by HMAC signature. A push
 deploys every service instance whose `source.branch` matches, has
 `autoDeploy` on, and whose `watchPaths` (if any) match a changed file.
-Deployments report their status on the commit in GitHub.
+Deployments report their status on the commit in GitHub. Creating the App,
+installing, uninstalling and changes to an installation's repositories are
+recorded in the audit log.
 
 ## Cloudflare
 
@@ -53,6 +95,8 @@ Create a Cloudflare **user API token** with:
 | Zone · DNS · Edit | Create and remove records for your domains | Yes |
 | Zone · Zone Settings · Read | Warn when the SSL mode breaks proxied domains | Yes |
 | Account · Workers R2 Storage · Edit | Create backup buckets | Only for R2 |
+| Account · Cloudflare Tunnel · Edit | Run the dashboard through a tunnel | Only for private mode |
+| Account · Access: Apps and Policies · Edit | Put Cloudflare Access in front of the dashboard (and create its service token) | Only for private mode |
 
 Limit **Zone Resources** to the zones you'll use, and **Account Resources** to
 your account. `GET /api/workspaces/{id}/integrations/cloudflare` returns
@@ -90,9 +134,9 @@ created **DNS only**. Then:
    mode isn't **Full (strict)**.
 3. Set the zone's **SSL/TLS** mode to **Full (strict)** if the warning says so.
 
-Not yet: locking the origin to Cloudflare's IP ranges, Authenticated Origin
-Pulls, Cloudflare Tunnel ingress, and wildcard custom domains (DNS-01
-certificates).
+Not yet: locking app origins to Cloudflare's IP ranges, Authenticated Origin
+Pulls, Cloudflare Tunnel ingress for apps, and wildcard custom domains (DNS-01
+certificates). The dashboard itself can go through a tunnel: see below.
 
 ### R2 backups
 
@@ -108,6 +152,82 @@ POST /api/workspaces/{id}/integrations/cloudflare/r2-targets
 creates the bucket if it's missing and adds a normal `r2` backup target (Admin).
 You can also add R2 by hand without connecting Cloudflare; see
 [backups](backups.md#1-add-a-backup-target).
+
+### Private dashboard (Cloudflare Tunnel)
+
+One switch hides the dashboard, the API, the CLI endpoint and the servers'
+node endpoint from the public internet behind **Cloudflare Tunnel** and
+**Cloudflare Access**. Apps stay public on their own domains (Caddy keeps
+serving them on 80/443).
+
+**Settings → Private dashboard** (instance admin, workspace admin, sudo) shows
+a readiness checklist, who may sign in (default: the workspace's admins; one
+email or `@domain` per line) and the server hostname. It uses the workspace's
+Cloudflare connection, whose token needs the two "private mode" permissions
+above; the checklist asks Cloudflare (a harmless list call) and tells you to
+replace the token when they are missing. Zero Trust must be set up once in
+the account (one.dash.cloudflare.com, pick a team name; the free plan is
+enough).
+
+Turning it on, step by step (the dashboard shows each one):
+
+1. A service token **Modula servers** and a tunnel `modula-<host>`, configured
+   at Cloudflare: `<dashboard host> → http://127.0.0.1:7100`,
+   `<server host> → tcp://127.0.0.1:7101`, anything else 404.
+2. Three Access applications: the dashboard (your emails/domains, plus *any
+   service token* for the CLI and CI), a **bypass** for the endpoints that
+   authenticate themselves (`/api/install.sh`, `/api/releases`,
+   `/api/build-source`, `/api/github/webhook`), and the server hostname (only
+   the Modula service token).
+3. A proxied CNAME for the server hostname (default `<first label>-nodes.<rest>`,
+   e.g. `deploy-nodes.example.com`, which Cloudflare's free certificate covers).
+4. The main server installs `cloudflared` and runs the tunnel
+   (`modula-cloudflared.service`); Modula waits until Cloudflare reports it
+   healthy.
+5. Every other server moves its connection to a local
+   `cloudflared access tcp` listener on 127.0.0.1:7101
+   (`modula-cloudflared-access.service`) after a connection through it
+   worked. All servers must be online and up to date, or enabling is refused.
+6. The dashboard's DNS records are replaced by a proxied CNAME to the tunnel
+   (the old records are kept and restored when you turn it off), and Modula
+   waits until the dashboard answers with the Access sign-in.
+7. Only then: every request must carry a valid `Cf-Access-Jwt-Assertion`
+   (signature against the team's keys, audience, issuer, expiry), the node
+   endpoint accepts only connections from the tunnel, and the main server
+   stops serving the dashboard on its public edge and closes port 7101 in ufw.
+
+If a step fails, everything done so far is undone and the error is shown.
+Turning it off reverses it all: the edge serves the dashboard again, DNS is
+restored, servers dial directly, cloudflared stops, and the tunnel, Access
+apps and service token are deleted.
+
+**cloudflared** is Cloudflare's `.deb` from its GitHub release, pinned to one
+version and checked against the SHA-256 sums from the release notes before
+`dpkg -i` (an existing `/usr/bin/cloudflared` is used as is).
+
+**New servers** in private mode get a join command that dials
+`https://127.0.0.1:7101` and carries `--access-host/--access-id/--access-secret`:
+`modula-node join` sets up the access listener before enrolling. The command
+contains the servers' service token; treat it like the join token.
+
+**CLI and CI**: `modula login` notices the Access sign-in. With
+[cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+installed it opens your browser (`cloudflared access login`) and saves the
+app token next to the API token (mode 0600), sent as `cf-access-token` and
+renewed through `cloudflared access token` when it expires. For CI, create a
+service token in Zero Trust (Access → Service credentials) and set
+`MODULA_CF_ACCESS_CLIENT_ID` and `MODULA_CF_ACCESS_CLIENT_SECRET`; both are
+sent on every request, tunnels (`modula connect`) included.
+
+**Break glass** when Cloudflare is unreachable: `ssh -L 7100:127.0.0.1:7100
+<main server>`, then open http://localhost:7100. Direct local connections are
+the only ones allowed without Access.
+
+**Stranded servers**: a server that was offline while private mode was
+turned off still dials the tunnel. On it: set `"server"` in
+`/var/lib/modula-node/node.json` back to `https://<dashboard host>:7101`, run
+`systemctl disable --now modula-cloudflared-access` and restart
+`modula-node`.
 
 ## Hetzner
 

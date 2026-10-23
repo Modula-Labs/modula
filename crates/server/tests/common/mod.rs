@@ -45,6 +45,7 @@ pub fn config() -> Config {
         uploads_dir: std::env::temp_dir().join(format!("modula-uploads-{}", Id::new())),
         upload_max_bytes: 200 * 1024 * 1024,
         internal_url: None,
+        releases: Default::default(),
     }
 }
 

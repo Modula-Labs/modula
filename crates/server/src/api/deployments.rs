@@ -37,6 +37,8 @@ pub struct Deployment {
     pub trigger: String,
     pub commit_sha: Option<String>,
     pub commit_message: Option<String>,
+    /// What the person deploying wrote when applying pending changes.
+    pub message: Option<String>,
     pub commit_author: Option<String>,
     pub commit_author_avatar: Option<String>,
     /// `owner/repo@branch`, the image, or `Uploaded via CLI`, from the config snapshot.
@@ -86,7 +88,7 @@ macro_rules! select_deployments {
     ($rest:literal) => {
         concat!(
             "SELECT d.id, d.service_instance_id, d.node_id, d.status, d.image, d.image_digest, d.trigger,
-                    d.commit_sha, d.commit_message, d.commit_author,
+                    d.commit_sha, d.commit_message, d.message, d.commit_author,
                     'https://avatars.githubusercontent.com/' || d.commit_author_login || '?s=64' AS commit_author_avatar,
                     CASE d.config->'source'->>'type'
                          WHEN 'repo' THEN (d.config->'source'->>'repo') || '@' || (d.config->'source'->>'branch')
@@ -169,7 +171,7 @@ pub async fn create(
                 "message and git only apply to uploaded sources",
             ));
         }
-        None => deploy_instance(&state, &actor, workspace, &meta, grant.id()).await?,
+        None => deploy_instance(&state, &actor, workspace, &meta, grant.id(), None).await?,
     };
     load(&state, id).await.map(Json)
 }
@@ -281,6 +283,7 @@ pub async fn deploy_instance(
     workspace: Id,
     meta: &RequestMeta,
     instance: Id,
+    message: Option<&str>,
 ) -> AppResult<Id> {
     let (env_id, config): (Id, serde_json::Value) =
         sqlx::query_as("SELECT environment_id, config FROM service_instances WHERE id = $1")
@@ -313,6 +316,13 @@ pub async fn deploy_instance(
         },
     )
     .await?;
+    if let Some(m) = message {
+        sqlx::query("UPDATE deployments SET message = $2 WHERE id = $1")
+            .bind(started.id)
+            .bind(m)
+            .execute(&mut *tx)
+            .await?;
+    }
     Entry::new("deployment.create", meta)
         .actor(actor)
         .workspace(workspace)
@@ -644,6 +654,21 @@ pub async fn logs(
             }
         },
     );
-    let stream = stream.take_until(state.shutdown.clone().cancelled_owned());
+    // On shutdown (an upgrade or restart) the stream ends with a `restart`
+    // event, so the viewer reconnects in a moment to whichever process is up.
+    let restarting = state.shutdown.clone();
+    let restart_hint = futures::stream::once(async move { restarting.is_cancelled() }).filter_map(
+        |cancelled| async move {
+            cancelled.then(|| {
+                Ok(Event::default()
+                    .event("restart")
+                    .retry(Duration::from_secs(1))
+                    .data("{}"))
+            })
+        },
+    );
+    let stream = stream
+        .take_until(state.shutdown.clone().cancelled_owned())
+        .chain(restart_hint);
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }

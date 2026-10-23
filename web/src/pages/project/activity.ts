@@ -1,7 +1,7 @@
 import type { ActivityChange, ActivityGroup } from "@/lib/api";
 
 /** `startCommand` -> `start command`. */
-function words(key: string): string {
+export function words(key: string): string {
   return key
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/[_-]+/g, " ")

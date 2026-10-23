@@ -284,6 +284,87 @@ pub async fn open_snapshot(
         .collect())
 }
 
+fn vars_aad(env: Id, row: &str) -> FieldAad<'_> {
+    FieldAad {
+        scope: env,
+        table: "deployments",
+        column: "vars",
+        row,
+    }
+}
+
+/// One of an instance's variables as written (references unexpanded).
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
+pub struct RawVar {
+    pub value: String,
+    pub sealed: bool,
+}
+
+impl std::fmt::Debug for RawVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawVar")
+            .field("sealed", &self.sealed)
+            .finish_non_exhaustive()
+    }
+}
+
+/// An instance's own variables by name, decrypted. Secrets: never logged.
+pub type RawVars = BTreeMap<String, RawVar>;
+
+/// The instance's own variables, decrypted (for snapshots and diffs).
+pub async fn raw_variables(
+    keys: &Keyring,
+    db: &PgPool,
+    env: Id,
+    instance: Id,
+) -> AppResult<RawVars> {
+    let rows: Vec<(Id, String, Vec<u8>, bool)> = sqlx::query_as(
+        "SELECT id, name, value_sealed, sealed FROM variables WHERE service_instance_id = $1",
+    )
+    .bind(instance)
+    .fetch_all(db)
+    .await?;
+    let mut out = RawVars::new();
+    for (id, name, sealed_value, sealed) in rows {
+        let value = open_variable(keys, db, env, id, &sealed_value).await?;
+        out.insert(
+            name,
+            RawVar {
+                value: value.expose_secret().to_owned(),
+                sealed,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Seal a deployment's copy of its instance's variables as written, so a
+/// pending change can later be discarded back to what was deployed.
+pub async fn seal_vars_snapshot(
+    keys: &Keyring,
+    db: &PgPool,
+    env: Id,
+    deployment: Id,
+    vars: &RawVars,
+) -> AppResult<Vec<u8>> {
+    let json = zeroize::Zeroizing::new(serde_json::to_vec(vars).map_err(anyhow::Error::from)?);
+    keys.seal(db, &json, vars_aad(env, &deployment.to_string()))
+        .await
+}
+
+pub async fn open_vars_snapshot(
+    keys: &Keyring,
+    db: &PgPool,
+    env: Id,
+    deployment: Id,
+    sealed: &[u8],
+) -> AppResult<RawVars> {
+    let plain = keys
+        .open(db, sealed, vars_aad(env, &deployment.to_string()))
+        .await?;
+    Ok(serde_json::from_slice(&plain).map_err(anyhow::Error::from)?)
+}
+
 /// Hides secret values in text shown to users (logs). Matches the raw value
 /// and its base64 / URL-encoded forms; very short values are skipped because
 /// masking them would destroy unrelated text.

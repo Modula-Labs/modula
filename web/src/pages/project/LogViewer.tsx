@@ -23,8 +23,11 @@ export function LogViewer({ url, downloadName = "logs.log" }: { url: string; dow
   const [wrap, setWrap] = useState(true);
   const box = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
+  // Bumped to reconnect after the server restarted (an upgrade).
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
+    let retry: ReturnType<typeof setTimeout> | undefined;
     setLines([]);
     setState("connecting");
     setMessage(null);
@@ -42,13 +45,22 @@ export function LogViewer({ url, downloadName = "logs.log" }: { url: string; dow
       setState("ended");
       es.close();
     });
+    // The server is restarting (an upgrade): reconnect to the new one shortly.
+    es.addEventListener("restart", () => {
+      es.close();
+      setState("connecting");
+      retry = setTimeout(() => setAttempt((n) => n + 1), 1000);
+    });
     es.onerror = () => {
       // A closed stream on a finished deployment is normal; anything else is shown.
-      setState((s) => (s === "ended" ? s : "error"));
+      setState((s) => (s === "ended" || s === "connecting" ? s : "error"));
       es.close();
     };
-    return () => es.close();
-  }, [url]);
+    return () => {
+      clearTimeout(retry);
+      es.close();
+    };
+  }, [url, attempt]);
 
   useEffect(() => {
     if (pinned.current && box.current) box.current.scrollTop = box.current.scrollHeight;

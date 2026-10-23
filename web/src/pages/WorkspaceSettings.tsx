@@ -10,6 +10,8 @@ import { api, type Membership } from "@/lib/api";
 import { useCurrentWorkspace, useMe } from "@/lib/workspace";
 import { BackupStorage } from "./BackupStorage";
 import { IntegrationsSection } from "./settings/Integrations";
+import { PrivateAccessSection } from "./settings/PrivateAccess";
+import { UpdatesSection } from "./settings/Updates";
 
 function Section({
   title,
@@ -61,6 +63,7 @@ export function WorkspaceSettingsPage() {
 
 function Settings({ workspace }: { workspace: Membership }) {
   const qc = useQueryClient();
+  const { data: me } = useMe();
   const isAdmin = workspace.role === "admin";
   const [name, setName] = useState(workspace.name);
   const [deleting, setDeleting] = useState(false);
@@ -143,6 +146,21 @@ function Settings({ workspace }: { workspace: Membership }) {
       >
         <IntegrationsSection workspaceId={workspace.id} isAdmin={isAdmin} />
       </Section>
+
+      {me?.user.isInstanceAdmin && isAdmin ? (
+        <Section
+          title="Private dashboard"
+          description="Cloudflare Tunnel + Access in front of the dashboard, using this workspace's Cloudflare connection. Instance admins only."
+        >
+          <PrivateAccessSection workspaceId={workspace.id} />
+        </Section>
+      ) : null}
+
+      {me?.user.isInstanceAdmin ? (
+        <Section title="Updates" description="Modula Deploy versions for this instance. Instance admins only.">
+          <UpdatesSection />
+        </Section>
+      ) : null}
 
       {isAdmin ? (
         <Section title="Danger zone">

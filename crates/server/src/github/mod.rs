@@ -24,6 +24,9 @@ pub struct Client {
     api: Url,
     /// Installation tokens, reused until shortly before they expire.
     tokens: Arc<Mutex<HashMap<app::TokenKey, app::CachedToken>>>,
+    /// Repository and branch listings for the pickers, kept briefly so typing
+    /// in a combobox doesn't spend GitHub's rate limit.
+    lists: Arc<Mutex<app::ListCache>>,
 }
 
 /// The head of a branch, as recorded on a deployment.
@@ -57,6 +60,7 @@ impl Client {
             http,
             api,
             tokens: Arc::default(),
+            lists: Arc::default(),
         })
     }
 

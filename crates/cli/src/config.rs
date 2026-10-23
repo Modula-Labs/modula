@@ -22,6 +22,9 @@ pub struct Config {
     pub url: Option<String>,
     /// An API token (`mdt_…`).
     pub token: Option<String>,
+    /// Cloudflare Access credentials, for instances in private mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<crate::access::CfAccess>,
 }
 
 /// What every API call needs.
@@ -29,6 +32,8 @@ pub struct Config {
 pub struct Login {
     pub url: Url,
     pub token: String,
+    /// Cloudflare Access credentials (private mode), sent with every request.
+    pub access: Option<crate::access::CfAccess>,
 }
 
 /// `$XDG_CONFIG_HOME/modula/config.toml`, else `~/.config/…`.
@@ -119,6 +124,8 @@ pub fn login(
     Ok(Login {
         url: parse_url(&url)?,
         token,
+        // A service token in the environment (CI) wins over the saved login.
+        access: crate::access::CfAccess::from_process_env().or_else(|| cfg.access.clone()),
     })
 }
 
@@ -323,6 +330,7 @@ mod tests {
         let cfg = Config {
             url: Some("https://cloud.example.com/".into()),
             token: Some("mdt_x".into()),
+            ..Default::default()
         };
         save(&path, &cfg).unwrap();
         assert_eq!(load(&path).unwrap(), cfg);
@@ -339,6 +347,7 @@ mod tests {
         let cfg = Config {
             url: Some("cloud.example.com".into()),
             token: Some("mdt_file".into()),
+            ..Default::default()
         };
         let l = login(&cfg, None, None).unwrap();
         assert_eq!(l.url.as_str(), "https://cloud.example.com/");
@@ -452,6 +461,7 @@ mod tests {
         let cfg = Config {
             url: Some("https://cloud.example.com/".into()),
             token: Some("mdt_local".into()),
+            ..Default::default()
         };
         let path = save_local_login(&root, &cfg).unwrap();
         assert_eq!(path, root.join(".modula/token"));

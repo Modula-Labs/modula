@@ -16,11 +16,13 @@
 //!
 //! TODO(C5): proxied mode does not lock the origin yet. Still to build:
 //! firewalling the edge to Cloudflare's IP ranges, Authenticated Origin Pulls
-//! (mTLS from Cloudflare to Caddy) and the Cloudflare Tunnel ingress mode.
+//! (mTLS from Cloudflare to Caddy) and Cloudflare Tunnel ingress for apps. The
+//! dashboard itself can go through a tunnel: see `crate::private`.
 
 pub mod api;
 pub mod client;
 pub mod dns;
+pub mod zero_trust;
 
 use modula_crypto::envelope::FieldAad;
 use modula_id::Id;
@@ -57,12 +59,22 @@ pub const PERMISSIONS: &[(&str, &str, bool)] = &[
         "create backup buckets (optional)",
         false,
     ),
+    (
+        "Account · Cloudflare Tunnel · Edit",
+        "run the dashboard through a tunnel (for private mode)",
+        false,
+    ),
+    (
+        "Account · Access: Apps and Policies · Edit",
+        "put Cloudflare Access in front of the dashboard (for private mode)",
+        false,
+    ),
 ];
 
 /// Cloudflare's dashboard with a new user API token pre-filled with exactly
 /// [`PERMISSIONS`] for all zones and accounts (the user can narrow both).
 pub fn token_template_url() -> String {
-    let keys = r#"[{"key":"zone","type":"read"},{"key":"dns","type":"edit"},{"key":"zone_settings","type":"read"},{"key":"workers_r2","type":"edit"}]"#;
+    let keys = r#"[{"key":"zone","type":"read"},{"key":"dns","type":"edit"},{"key":"zone_settings","type":"read"},{"key":"workers_r2","type":"edit"},{"key":"argotunnel","type":"edit"},{"key":"access","type":"edit"}]"#;
     let mut url =
         url::Url::parse("https://dash.cloudflare.com/profile/api-tokens").expect("static");
     url.query_pairs_mut()
@@ -191,7 +203,9 @@ mod tests {
                 "zone:read",
                 "dns:edit",
                 "zone_settings:read",
-                "workers_r2:edit"
+                "workers_r2:edit",
+                "argotunnel:edit",
+                "access:edit"
             ]
         );
         assert_eq!(q["accountId"], "*");

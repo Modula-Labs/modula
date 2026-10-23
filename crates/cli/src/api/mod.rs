@@ -31,6 +31,7 @@ pub struct ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.status, self.code.as_str()) {
+            (_, "access_required") => write!(f, "{}", self.message),
             (401, _) => write!(
                 f,
                 "the API token was rejected (expired or revoked?); run `modula login`"
@@ -91,6 +92,8 @@ pub fn install_crypto() {
 
 pub struct Api {
     pub login: Login,
+    /// Cloudflare Access credentials in use (an app token is renewed here).
+    access: std::sync::Mutex<Option<crate::access::CfAccess>>,
     http: reqwest::Client,
     /// Without an overall timeout, for log streams that stay open.
     streaming: reqwest::Client,
@@ -99,10 +102,13 @@ pub struct Api {
 impl Api {
     pub fn new(login: Login) -> anyhow::Result<Self> {
         install_crypto();
+        // Redirects are never followed: the API doesn't redirect, and
+        // Cloudflare Access's sign-in redirect must be seen, not followed.
         let builder = || {
             reqwest::Client::builder()
                 .user_agent(USER_AGENT)
                 .connect_timeout(Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
         };
         let http = builder()
             .timeout(Duration::from_secs(60))
@@ -110,10 +116,78 @@ impl Api {
             .context("cannot set up the HTTP client")?;
         let streaming = builder().build().context("cannot set up the HTTP client")?;
         Ok(Self {
+            access: std::sync::Mutex::new(login.access.clone()),
             login,
             http,
             streaming,
         })
+    }
+
+    /// The Cloudflare Access credentials currently in use.
+    pub fn access(&self) -> Option<crate::access::CfAccess> {
+        self.access.lock().expect("access lock").clone()
+    }
+
+    /// API token and Access headers.
+    fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let mut req = req.bearer_auth(&self.login.token);
+        if let Some(a) = self.access() {
+            for (k, v) in a.headers() {
+                req = req.header(k, v);
+            }
+        }
+        req
+    }
+
+    /// Send, renewing an expired Access app token once (when the request can
+    /// be repeated). An Access challenge becomes an `access_required` error.
+    async fn execute(&self, req: reqwest::RequestBuilder) -> anyhow::Result<reqwest::Response> {
+        let retry = req.try_clone();
+        let res = self
+            .authed(req)
+            .send()
+            .await
+            .with_context(|| format!("cannot reach {}", self.login.url))?;
+        if !self.is_challenge(&res) {
+            return Ok(res);
+        }
+        let renewable = matches!(
+            self.access(),
+            Some(crate::access::CfAccess::AppToken { .. })
+        );
+        if let (true, Some(retry)) = (renewable, retry)
+            && let Ok(fresh) = crate::access::app_token(&self.login.url)
+        {
+            *self.access.lock().expect("access lock") = Some(fresh);
+            let res = self
+                .authed(retry)
+                .send()
+                .await
+                .with_context(|| format!("cannot reach {}", self.login.url))?;
+            if !self.is_challenge(&res) {
+                return Ok(res);
+            }
+        }
+        Err(self.access_error(res.status().as_u16()).into())
+    }
+
+    fn is_challenge(&self, res: &reqwest::Response) -> bool {
+        let status = res.status().as_u16();
+        let location = res
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok());
+        // A 403 is only Access's when the body says so; checked in `send`.
+        (300..400).contains(&status) && crate::access::is_access_challenge(status, location, b"")
+    }
+
+    fn access_error(&self, status: u16) -> ApiError {
+        ApiError {
+            status,
+            code: "access_required".into(),
+            message: crate::access::help(&self.login.url),
+            retry_after: None,
+        }
     }
 
     pub fn url(&self, path: &str) -> anyhow::Result<Url> {
@@ -168,13 +242,12 @@ impl Api {
     /// A GET whose body is read incrementally (Server-Sent Events).
     pub async fn stream(&self, path: &str) -> anyhow::Result<reqwest::Response> {
         let res = self
-            .streaming
-            .get(self.url(path)?)
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .bearer_auth(&self.login.token)
-            .send()
-            .await
-            .with_context(|| format!("cannot reach {}", self.login.url))?;
+            .execute(
+                self.streaming
+                    .get(self.url(path)?)
+                    .header(reqwest::header::ACCEPT, "text/event-stream"),
+            )
+            .await?;
         if res.status().is_success() {
             return Ok(res);
         }
@@ -188,11 +261,7 @@ impl Api {
         req: reqwest::RequestBuilder,
         path: &str,
     ) -> anyhow::Result<T> {
-        let res = req
-            .bearer_auth(&self.login.token)
-            .send()
-            .await
-            .with_context(|| format!("cannot reach {}", self.login.url))?;
+        let res = self.execute(req).await?;
         let status = res.status();
         let retry_after = res
             .headers()
@@ -200,6 +269,9 @@ impl Api {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse().ok());
         let body = res.bytes().await.context("reading the response failed")?;
+        if crate::access::is_access_challenge(status.as_u16(), None, &body) {
+            return Err(self.access_error(status.as_u16()).into());
+        }
         if !status.is_success() {
             let mut e = ApiError::from_body(status.as_u16(), &body);
             e.retry_after = retry_after;

@@ -24,19 +24,8 @@ use crate::locations::Location;
 /// How long a provisioned server has to join.
 pub const JOIN_TOKEN_TTL: time::Duration = time::Duration::minutes(30);
 
-#[derive(Debug, thiserror::Error)]
-pub enum ProviderError {
-    #[error("the provider rejected the API token")]
-    Unauthorized,
-    #[error("the API token lacks permission (it needs Read & Write)")]
-    Forbidden,
-    #[error("not found at the provider")]
-    NotFound,
-    #[error("{message} ({code})")]
-    Api { code: String, message: String },
-    #[error("could not reach the provider: {0}")]
-    Transport(String),
-}
+/// Shared with the CLI's Hetzner client (`modula-hetzner`).
+pub use modula_hetzner::ProviderError;
 
 impl From<ProviderError> for AppError {
     fn from(e: ProviderError) -> Self {

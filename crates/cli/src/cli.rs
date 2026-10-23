@@ -198,6 +198,15 @@ pub enum Command {
     },
     /// Print the full command reference (Markdown).
     Docs,
+    /// Print the guide for people and AI agents: install, create a server,
+    /// log in, deploy, non-interactive use, troubleshooting (Markdown).
+    Guide,
+    /// Create a new Modula server at a cloud provider (Hetzner), or list
+    /// what can be created.
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
     /// Config as code: plan and apply modula.toml (see `config --help`).
     Config {
         #[command(subcommand)]
@@ -484,6 +493,170 @@ pub enum DbCommand {
     Tables,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum ServerCommand {
+    /// Create a Modula server on Hetzner from here: a guided wizard, or
+    /// fully from flags for scripts and agents.
+    #[command(
+        visible_alias = "new",
+        long_about = SERVER_CREATE_ABOUT,
+        after_help = SERVER_CREATE_EXAMPLES
+    )]
+    Create(Box<ServerCreateArgs>),
+    /// List locations, server types and monthly prices you can create
+    /// (read-only; needs HCLOUD_TOKEN).
+    #[command(long_about = SERVER_OPTIONS_ABOUT, after_help = SERVER_OPTIONS_EXAMPLES)]
+    Options(ServerOptionsArgs),
+}
+
+const SERVER_CREATE_ABOUT: &str = "\
+Create a Modula server on Hetzner Cloud from your laptop, end to end: a
+firewall and an Ubuntu server that installs Modula on first boot, the DNS
+record for the dashboard (optionally through Cloudflare), then the admin
+account. You end up logged in, ready for `modula init` and `modula up`.
+
+Without flags it's a guided wizard (Esc goes back a step). Every answer can
+also be a flag, and with all of them plus --yes nothing is asked: that's how
+scripts and AI agents use it (see `modula guide`).
+
+Secrets never go in flags (they'd end up in shell history and process
+lists). They come from the environment, or the Hetzner token from stdin:
+  HCLOUD_TOKEN           Hetzner Cloud API token (Read & Write), or --token-stdin
+  CLOUDFLARE_API_TOKEN   with --cloudflare-dns: Zone → DNS → Edit
+  MODULA_ADMIN_PASSWORD  the admin's password (at least 10 characters)
+Tokens are only kept in memory while the command runs; nothing but the new
+instance's API token (like `modula login`) is written to disk.
+
+If something fails after the server exists, it is deleted with its
+firewall (asked first in the wizard; see --on-failure), so nothing keeps
+billing.";
+
+const SERVER_CREATE_EXAMPLES: &str = "\
+Examples:
+  # Guided
+  modula server create
+
+  # Scripts and agents: no prompts, JSON progress events on stdout
+  export HCLOUD_TOKEN=… MODULA_ADMIN_PASSWORD=…
+  modula server options --location fsn1 --json      # pick a type
+  modula server create --location fsn1 --type cx33 --name modula-main \\
+    --domain deploy.example.com --email you@example.com \\
+    --ssh-key-file ~/.ssh/id_ed25519.pub --admin-name 'Ada Lovelace' --yes --json
+
+  # Let Cloudflare create the DNS record (CLOUDFLARE_API_TOKEN set)
+  modula server create … --cloudflare-dns --yes
+
+Exit codes: 0 ready and logged in; 1 failed, nothing left running (or it
+was deleted); 2 usage: missing or invalid flags, nothing created; 3 a
+server exists but isn't fully set up (see the result's hint).";
+
+const SERVER_OPTIONS_ABOUT: &str = "\
+List the Hetzner locations where a Modula server can be created right now,
+each with the server types in stock there (vCPU, RAM, disk, architecture,
+gross monthly price) and the one we recommend. Read-only: nothing is
+created. Needs HCLOUD_TOKEN (or --token-stdin).";
+
+const SERVER_OPTIONS_EXAMPLES: &str = "\
+Examples:
+  HCLOUD_TOKEN=… modula server options
+  HCLOUD_TOKEN=… modula server options --location fsn1 --json";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum Provider {
+    #[default]
+    Hetzner,
+}
+
+/// What to do with a server that was created when a later step fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OnFailure {
+    /// Ask (the default with a terminal).
+    Ask,
+    /// Delete the server and its firewall (the default without a terminal).
+    Delete,
+    /// Keep them (e.g. to look at the install log over SSH).
+    Keep,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+#[command(group(clap::ArgGroup::new("ssh").args(["ssh_key_file", "ssh_key_id", "no_ssh_key"])))]
+pub struct ServerCreateArgs {
+    /// The cloud provider.
+    #[arg(long, value_enum, default_value_t)]
+    pub provider: Provider,
+    /// Location, e.g. fsn1, nbg1, hel1, ash, hil, sin (see `server options`).
+    #[arg(long, value_name = "LOCATION")]
+    pub location: Option<String>,
+    /// Server type, e.g. cx33 or cax21 (see `server options`).
+    #[arg(long = "type", value_name = "TYPE")]
+    pub server_type: Option<String>,
+    /// The server's name (a DNS label). Default: modula-main.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// The dashboard's hostname, e.g. deploy.example.com.
+    #[arg(long, value_name = "HOST")]
+    pub domain: Option<String>,
+    /// For TLS certificates (Let's Encrypt) and the admin account.
+    #[arg(long)]
+    pub email: Option<String>,
+    /// Upload this public key (or reuse it if Hetzner has it) for root SSH.
+    #[arg(long, value_name = "PATH")]
+    pub ssh_key_file: Option<std::path::PathBuf>,
+    /// Use this SSH key already in the Hetzner project (its id).
+    #[arg(long, value_name = "ID")]
+    pub ssh_key_id: Option<i64>,
+    /// No SSH key: Hetzner emails you a root password instead.
+    #[arg(long)]
+    pub no_ssh_key: bool,
+    /// Create the dashboard's A record with Cloudflare (CLOUDFLARE_API_TOKEN).
+    #[arg(long)]
+    pub cloudflare_dns: bool,
+    /// With --cloudflare-dns: replace existing A/AAAA/CNAME records for the domain.
+    #[arg(long, requires = "cloudflare_dns")]
+    pub replace_dns: bool,
+    /// The admin's display name. Default: Admin.
+    #[arg(long, value_name = "NAME")]
+    pub admin_name: Option<String>,
+    /// Read the Hetzner API token from the first line of stdin.
+    #[arg(long)]
+    pub token_stdin: bool,
+    /// When a step fails after the server was created. Default: ask with a
+    /// terminal, else delete.
+    #[arg(long, value_enum, value_name = "WHAT")]
+    pub on_failure: Option<OnFailure>,
+    /// Minutes to wait for the domain to point at the server.
+    #[arg(long, value_name = "MINUTES", default_value_t = 30)]
+    pub dns_timeout: u64,
+    /// Minutes to wait for the install to finish.
+    #[arg(long, value_name = "MINUTES", default_value_t = 20)]
+    pub install_timeout: u64,
+    /// Where the server downloads install.sh (testing the installer).
+    #[arg(long, hide = true, value_name = "URL")]
+    pub install_url: Option<String>,
+    /// Rejected: secrets go in HCLOUD_TOKEN or --token-stdin.
+    #[arg(long, hide = true, value_name = "TOKEN")]
+    pub hcloud_token: Option<String>,
+    /// Rejected: secrets go in CLOUDFLARE_API_TOKEN.
+    #[arg(long, hide = true, value_name = "TOKEN")]
+    pub cloudflare_token: Option<String>,
+    /// Rejected: secrets go in MODULA_ADMIN_PASSWORD.
+    #[arg(long, hide = true, value_name = "PASSWORD")]
+    pub admin_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+pub struct ServerOptionsArgs {
+    /// The cloud provider.
+    #[arg(long, value_enum, default_value_t)]
+    pub provider: Provider,
+    /// Only this location, e.g. fsn1.
+    #[arg(long, value_name = "LOCATION")]
+    pub location: Option<String>,
+    /// Read the Hetzner API token from the first line of stdin.
+    #[arg(long)]
+    pub token_stdin: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,6 +669,41 @@ mod tests {
     #[test]
     fn the_command_tree_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn server_create_flags() {
+        let cli = parse(&[
+            "server",
+            "create",
+            "--location",
+            "fsn1",
+            "--type",
+            "cx33",
+            "--domain",
+            "d.example.com",
+            "--email",
+            "a@b.co",
+            "--ssh-key-id",
+            "42",
+            "--yes",
+            "--json",
+        ])
+        .unwrap();
+        assert!(cli.global.yes && cli.global.json);
+        let Command::Server {
+            command: ServerCommand::Create(a),
+        } = cli.command
+        else {
+            panic!()
+        };
+        assert_eq!(a.server_type.as_deref(), Some("cx33"));
+        assert_eq!(a.ssh_key_id, Some(42));
+        assert_eq!((a.dns_timeout, a.install_timeout), (30, 20));
+        // One SSH choice at most; --replace-dns only with --cloudflare-dns.
+        assert!(parse(&["server", "create", "--ssh-key-id", "1", "--no-ssh-key"]).is_err());
+        assert!(parse(&["server", "create", "--replace-dns"]).is_err());
+        assert!(parse(&["server", "options", "--location", "hel1"]).is_ok());
     }
 
     #[test]

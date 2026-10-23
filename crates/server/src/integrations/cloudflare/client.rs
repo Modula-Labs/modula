@@ -125,7 +125,7 @@ struct ApiMessage {
 }
 
 #[derive(Deserialize, Default, Clone, Copy)]
-struct ResultInfo {
+pub(super) struct ResultInfo {
     #[serde(default)]
     total_pages: u32,
 }
@@ -179,7 +179,7 @@ impl Client {
     }
 
     /// One request; returns the envelope's `result` and `result_info`.
-    async fn call<T: DeserializeOwned>(
+    pub(super) async fn call<T: DeserializeOwned>(
         &self,
         method: Method,
         path: &str,
@@ -230,7 +230,7 @@ impl Client {
         }
     }
 
-    async fn get_one<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub(super) async fn get_one<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.call(Method::GET, path, &[], None)
             .await?
             .0
@@ -238,7 +238,7 @@ impl Client {
     }
 
     /// Every page of a list endpoint.
-    async fn list<T: DeserializeOwned>(
+    pub(super) async fn list<T: DeserializeOwned>(
         &self,
         path: &str,
         query: &[(&str, String)],

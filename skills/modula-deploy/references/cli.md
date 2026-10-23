@@ -1,9 +1,11 @@
 # `modula` CLI reference
 
 Binary `modula` (crate `crates/cli`; install with
-`cargo install --path crates/cli`; no prebuilt release yet).
-`modula docs` prints this reference generated from the binary itself;
-trust it over this file if they differ.
+`curl -fsSL https://usemodula.org/install-cli.sh | bash`, or
+`cargo install --path crates/cli`). `modula docs` prints the guide and this
+reference generated from the binary itself (`modula guide`: the guide only,
+incl. `server create` and every non-interactive flag, env var, `--json`
+event and exit code); trust them over this file if they differ.
 
 ## Environment
 

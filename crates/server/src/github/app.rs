@@ -3,6 +3,10 @@
 //! mint installation tokens scoped to one repository and one permission.
 //! Tokens are cached in memory and never logged.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use modula_crypto::envelope::{FieldAad, INSTANCE_SCOPE};
 use modula_id::Id;
@@ -13,9 +17,10 @@ use serde_json::json;
 use time::{Duration, OffsetDateTime};
 
 use super::Commit;
-use crate::deploy::config::ServiceConfig;
+use crate::deploy::config::{ServiceConfig, validate_repo};
 use crate::error::{AppError, AppResult};
 use crate::jobs::Job;
+use crate::ratelimit::Limit;
 use crate::state::AppState;
 
 /// Cached tokens are replaced this long before GitHub expires them.
@@ -304,6 +309,42 @@ pub async fn convert_manifest(state: &AppState, code: &str) -> AppResult<Convers
     }
 }
 
+/// GitHub's slug for an App name: lowercased, runs of other characters
+/// turned into single hyphens ("Modula Deploy (a.io)" → "modula-deploy-a-io").
+pub fn app_slug(name: &str) -> String {
+    let mut slug = String::new();
+    for c in name.chars().map(|c| c.to_ascii_lowercase()) {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_end_matches('-').to_owned()
+}
+
+/// Whether a public App already has this name's slug (App names are global
+/// on GitHub). Best effort: if GitHub can't tell us, assume it's free and let
+/// GitHub's own form report a clash.
+pub async fn app_name_taken(state: &AppState, name: &str) -> bool {
+    let slug = app_slug(name);
+    if slug.is_empty() {
+        return false;
+    }
+    match state
+        .github
+        .request(Method::GET, &format!("/apps/{slug}"))
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().as_u16() == 200,
+        Err(e) => {
+            tracing::debug!(error = %e, "could not check the GitHub App name");
+            false
+        }
+    }
+}
+
 pub struct Installation {
     pub account_login: String,
     pub account_type: String,
@@ -341,22 +382,79 @@ pub async fn installation(state: &AppState, id: i64) -> AppResult<Installation> 
     })
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// How long the pickers' repository and branch listings are reused.
+const LIST_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// GitHub calls the pickers may make per workspace (cache misses only).
+const LIST_RATE: Limit = Limit::per_minute(30);
+
+/// A listing and when it was fetched.
+type Cached<T> = (Instant, Arc<Vec<T>>);
+
+/// Recent listings per workspace (see `Client::lists`).
+#[derive(Default)]
+pub struct ListCache {
+    repos: HashMap<Id, Cached<Repo>>,
+    /// Keyed by workspace and lowercased `owner/name`.
+    branches: HashMap<(Id, String), Cached<Branch>>,
+}
+
+/// Drop every cached listing: installations or their repositories changed.
+pub fn forget_lists(state: &AppState) {
+    *state.github.lists.lock().expect("list cache") = ListCache::default();
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Repo {
     pub full_name: String,
     pub private: bool,
     pub default_branch: String,
+    /// When something was last pushed (GitHub's `pushed_at`).
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub updated_at: Option<OffsetDateTime>,
+    pub owner_avatar: Option<String>,
 }
 
-/// Repositories reachable through every installation of `workspace`.
-pub async fn workspace_repos(state: &AppState, workspace: Id) -> AppResult<Vec<Repo>> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Branch {
+    pub name: String,
+    #[serde(default)]
+    pub protected: bool,
+}
+
+/// Only GitHub's avatar host is allowed by the dashboard's CSP.
+fn avatar(url: Option<String>) -> Option<String> {
+    url.filter(|u| u.starts_with("https://avatars.githubusercontent.com/"))
+}
+
+/// Repositories reachable through every installation of `workspace`, most
+/// recently pushed first. Cached for a minute; an installation GitHub won't
+/// mint a token for (suspended, removed) is skipped rather than failing all.
+pub async fn workspace_repos(state: &AppState, workspace: Id) -> AppResult<Arc<Vec<Repo>>> {
+    if let Some((at, repos)) = state
+        .github
+        .lists
+        .lock()
+        .expect("list cache")
+        .repos
+        .get(&workspace)
+        && at.elapsed() < LIST_TTL
+    {
+        return Ok(repos.clone());
+    }
     let installations: Vec<i64> = sqlx::query_scalar(
         "SELECT id FROM github_installations WHERE workspace_id = $1 ORDER BY created_at",
     )
     .bind(workspace)
     .fetch_all(&state.db)
     .await?;
+    if installations.is_empty() {
+        return Ok(Arc::default());
+    }
+    state
+        .limiter
+        .check("github_lists", &workspace.to_string(), LIST_RATE)
+        .await?;
     #[derive(Deserialize)]
     struct Page {
         repositories: Vec<GhRepo>,
@@ -366,10 +464,30 @@ pub async fn workspace_repos(state: &AppState, workspace: Id) -> AppResult<Vec<R
         full_name: String,
         private: bool,
         default_branch: String,
+        #[serde(default, with = "time::serde::rfc3339::option")]
+        pushed_at: Option<OffsetDateTime>,
+        #[serde(default, with = "time::serde::rfc3339::option")]
+        updated_at: Option<OffsetDateTime>,
+        owner: Option<GhOwner>,
     }
-    let mut out = Vec::new();
+    #[derive(Deserialize)]
+    struct GhOwner {
+        avatar_url: Option<String>,
+    }
+    let mut out: Vec<Repo> = Vec::new();
+    let mut last_err = None;
+    let mut reached = 0;
     for id in installations {
-        let token = installation_token(state, id, TokenScope::Repos).await?;
+        let token = match installation_token(state, id, TokenScope::Repos).await {
+            Ok(t) => t,
+            Err(e @ AppError::Internal(_)) => return Err(e),
+            Err(e) => {
+                tracing::warn!(error = %e, installation = id, "skipping installation in the repo list");
+                last_err = Some(e);
+                continue;
+            }
+        };
+        reached += 1;
         for page in 1..=MAX_REPO_PAGES {
             let resp = state
                 .github
@@ -393,14 +511,102 @@ pub async fn workspace_repos(state: &AppState, workspace: Id) -> AppResult<Vec<R
                 full_name: r.full_name,
                 private: r.private,
                 default_branch: r.default_branch,
+                updated_at: r.pushed_at.or(r.updated_at),
+                owner_avatar: avatar(r.owner.and_then(|o| o.avatar_url)),
             }));
             if n < 100 {
                 break;
             }
         }
     }
-    out.sort_by_key(|r| r.full_name.to_lowercase());
-    out.dedup_by(|a, b| a.full_name.eq_ignore_ascii_case(&b.full_name));
+    if reached == 0
+        && let Some(e) = last_err
+    {
+        return Err(e);
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|r| seen.insert(r.full_name.to_lowercase()));
+    // Most recently pushed first, then by name.
+    out.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.full_name.to_lowercase().cmp(&b.full_name.to_lowercase()))
+    });
+    let out = Arc::new(out);
+    state
+        .github
+        .lists
+        .lock()
+        .expect("list cache")
+        .repos
+        .insert(workspace, (Instant::now(), out.clone()));
+    Ok(out)
+}
+
+/// Branches of `repo`, which must be reachable through one of the
+/// workspace's installations (a repository of another workspace's, or one no
+/// installation covers, is `NotFound`). Cached for a minute.
+pub async fn workspace_branches(
+    state: &AppState,
+    workspace: Id,
+    repo: &str,
+) -> AppResult<Arc<Vec<Branch>>> {
+    validate_repo(repo)?;
+    let key = (workspace, repo.to_lowercase());
+    if let Some((at, branches)) = state
+        .github
+        .lists
+        .lock()
+        .expect("list cache")
+        .branches
+        .get(&key)
+        && at.elapsed() < LIST_TTL
+    {
+        return Ok(branches.clone());
+    }
+    let Some(installation) = installation_for(state, workspace, repo).await? else {
+        return Err(AppError::NotFound);
+    };
+    state
+        .limiter
+        .check("github_lists", &workspace.to_string(), LIST_RATE)
+        .await?;
+    // Scoped to this one repository: GitHub refuses (422) when the
+    // installation can't reach it.
+    let token = installation_token(state, installation, TokenScope::Contents(repo.to_owned()))
+        .await
+        .map_err(|e| match e {
+            AppError::BadRequest(_) => AppError::NotFound,
+            e => e,
+        })?;
+    let mut out = Vec::new();
+    for page in 1..=MAX_REPO_PAGES {
+        let resp = state
+            .github
+            .request(
+                Method::GET,
+                &format!("/repos/{repo}/branches?per_page=100&page={page}"),
+            )
+            .bearer_auth(token.expose_secret())
+            .send()
+            .await
+            .map_err(unreachable)?;
+        match resp.status().as_u16() {
+            200 => {}
+            404 => return Err(AppError::NotFound),
+            s => return Err(unexpected(s, "branches")),
+        }
+        let p: Vec<Branch> = resp.json().await.map_err(anyhow::Error::from)?;
+        let n = p.len();
+        out.extend(p);
+        if n < 100 {
+            break;
+        }
+    }
+    let out = Arc::new(out);
+    let mut cache = state.github.lists.lock().expect("list cache");
+    cache.branches.retain(|_, (at, _)| at.elapsed() < LIST_TTL);
+    cache.branches.insert(key, (Instant::now(), out.clone()));
     Ok(out)
 }
 

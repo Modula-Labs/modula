@@ -48,6 +48,8 @@ pub struct Capabilities {
     pub build: Option<BuildSupport>,
     /// The Database tab ([`crate::db`]).
     pub db: Option<Arc<dyn crate::db::Executor>>,
+    /// Upgrades on the control plane's request ([`crate::upgrade`]).
+    pub upgrade: Option<Arc<dyn crate::upgrade::Upgrader>>,
 }
 
 pub struct Reconciler {

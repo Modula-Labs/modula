@@ -30,6 +30,8 @@ type Ws = WebSocketStream<Box<dyn Io>>;
 pub struct Target {
     url: Url,
     token: String,
+    /// Cloudflare Access headers (private mode).
+    access: Vec<(&'static str, String)>,
     tls: Option<Arc<rustls::ClientConfig>>,
 }
 
@@ -65,6 +67,11 @@ impl Target {
         Ok(Self {
             url,
             token: login.token.clone(),
+            access: login
+                .access
+                .as_ref()
+                .map(|a| a.headers())
+                .unwrap_or_default(),
             tls,
         })
     }
@@ -104,6 +111,13 @@ impl Target {
             http::header::USER_AGENT,
             http::HeaderValue::from_static(USER_AGENT),
         );
+        for (k, v) in &self.access {
+            h.insert(
+                *k,
+                v.parse()
+                    .context("the Cloudflare Access credentials contain invalid characters")?,
+            );
+        }
         match tokio_tungstenite::client_async(req, io).await {
             Ok((ws, _)) => Ok(ws),
             // The API's own error (no running deployment, not allowed, …).

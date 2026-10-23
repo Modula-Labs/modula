@@ -36,12 +36,60 @@ fn app_jwt_ok(h: &axum::http::HeaderMap) -> bool {
     jsonwebtoken::decode::<Value>(jwt, &key, &v).is_ok()
 }
 
-/// GitHub's App endpoints: manifest conversion, installations, tokens, repos.
+fn installation_auth_ok(h: &axum::http::HeaderMap) -> bool {
+    let auth = h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    auth == Some(&format!("Bearer {INSTALL_TOKEN}"))
+}
+
+/// `/installation/repositories`: 120 repositories over two pages, so the
+/// server has to follow pagination. `acme/secret` was pushed most recently.
+fn repo_page(page: usize) -> Value {
+    let all: Vec<Value> = (0..120)
+        .map(|i| {
+            let (name, pushed) = match i {
+                0 => ("secret".to_owned(), "2026-10-01T00:00:00Z".to_owned()),
+                1 => ("web-app".to_owned(), "2026-09-01T00:00:00Z".to_owned()),
+                _ => (format!("lib-{i:03}"), format!("2025-01-01T00:{:02}:00Z", i % 60)),
+            };
+            json!({
+                "full_name": format!("acme/{name}"), "private": i == 0, "default_branch": if i == 1 { "trunk" } else { "main" },
+                "pushed_at": pushed, "updated_at": "2024-01-01T00:00:00Z",
+                "owner": { "login": "acme", "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4" }
+            })
+        })
+        .collect();
+    let chunk: Vec<Value> = all.into_iter().skip((page - 1) * 100).take(100).collect();
+    json!({ "total_count": 120, "repositories": chunk })
+}
+
+type Counter = std::sync::Arc<std::sync::atomic::AtomicUsize>;
+
 async fn mock_github() -> url::Url {
-    use axum::extract::Path;
+    mock_github_counted().await.0
+}
+
+/// GitHub's App endpoints: manifest conversion, installations, tokens, repos,
+/// branches. The counter tracks calls to the listing endpoints.
+async fn mock_github_counted() -> (url::Url, Counter) {
+    use axum::extract::{Path, Query};
     use axum::routing::{get, post};
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
+    let calls = Counter::default();
+    let (c1, c2) = (calls.clone(), calls.clone());
     let unauthorized = || (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
     let app = axum::Router::new()
+        // Public App lookup: another instance already has the plain name.
+        .route(
+            "/apps/{slug}",
+            get(|Path(slug): Path<String>| async move {
+                if slug == "modula-deploy-cloud-test" {
+                    (StatusCode::OK, axum::Json(json!({ "slug": slug })))
+                } else {
+                    (StatusCode::NOT_FOUND, axum::Json(json!({})))
+                }
+            }),
+        )
         .route(
             "/app-manifests/{code}/conversions",
             post(|Path(code): Path<String>| async move {
@@ -85,19 +133,37 @@ async fn mock_github() -> url::Url {
         )
         .route(
             "/installation/repositories",
-            get(move |h: axum::http::HeaderMap| async move {
-                let auth = h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
-                if auth != Some(&format!("Bearer {INSTALL_TOKEN}")) {
+            get(move |h: axum::http::HeaderMap, Query(q): Query<HashMap<String, String>>| async move {
+                if !installation_auth_ok(&h) {
                     return unauthorized();
                 }
-                let repo = json!({ "full_name": "acme/secret", "private": true, "default_branch": "main" });
-                (StatusCode::OK, axum::Json(json!({ "total_count": 1, "repositories": [repo] })))
+                c1.fetch_add(1, Ordering::SeqCst);
+                let page = q.get("page").and_then(|p| p.parse().ok()).unwrap_or(1);
+                (StatusCode::OK, axum::Json(repo_page(page)))
+            }),
+        )
+        .route(
+            "/repos/{owner}/{name}/branches",
+            get(move |h: axum::http::HeaderMap, Path((owner, name)): Path<(String, String)>| async move {
+                if !installation_auth_ok(&h) {
+                    return unauthorized();
+                }
+                if (owner.as_str(), name.as_str()) != ("acme", "secret") {
+                    return (StatusCode::NOT_FOUND, axum::Json(json!({})));
+                }
+                c2.fetch_add(1, Ordering::SeqCst);
+                let branches = json!([
+                    { "name": "main", "protected": true, "commit": { "sha": SHA } },
+                    { "name": "feature/login", "protected": false, "commit": { "sha": SHA } },
+                    { "name": "release/1.2", "protected": false, "commit": { "sha": SHA } },
+                ]);
+                (StatusCode::OK, axum::Json(branches))
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://{addr}").parse().unwrap()
+    (format!("http://{addr}").parse().unwrap(), calls)
 }
 
 async fn app_with_github(pool: PgPool) -> (TestApp, String) {
@@ -124,6 +190,31 @@ async fn manifest_state(app: &TestApp, admin: &str) -> String {
     );
     assert_eq!(r.json["manifest"]["public"], false);
     r.json["state"].as_str().unwrap().to_owned()
+}
+
+/// The `Location` of a redirect.
+fn location(r: &Resp) -> String {
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{:?}", r.json);
+    r.headers[header::LOCATION].to_str().unwrap().to_owned()
+}
+
+fn state_param(url: &str) -> String {
+    let url: url::Url = url.parse().unwrap();
+    url.query_pairs()
+        .find(|(k, _)| k == "state")
+        .unwrap()
+        .1
+        .into_owned()
+}
+
+async fn install_callback(app: &TestApp, cookie: &str, query: &str) -> Resp {
+    app.call(
+        Method::GET,
+        &format!("/api/github/install/callback?{query}"),
+        Some(cookie),
+        None,
+    )
+    .await
 }
 
 async fn callback(app: &TestApp, cookie: &str, code: &str, state: &str) -> Resp {
@@ -226,6 +317,179 @@ async fn manifest_callback_state_is_single_use_and_bound(pool: PgPool) {
         )
         .await;
     assert_eq!(r.status, StatusCode::CONFLICT);
+}
+
+/// "Connect GitHub" on an instance without an App: creating it carries
+/// straight on to installing it, and the user ends up where they started.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn connect_creates_installs_and_returns(pool: PgPool) {
+    let (app, admin) = app_with_github(pool).await;
+    let ws = app.create_workspace(&admin, "team").await;
+    let back = "/projects/p1?env=e1&add=repo";
+    let r = app
+        .call(
+            Method::POST,
+            "/api/github/app/manifest",
+            Some(&admin),
+            Some(json!({ "workspaceId": ws, "returnTo": back })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    // Least privilege, push events, and a fresh name (the plain one is taken).
+    let m = &r.json["manifest"];
+    assert_eq!(
+        m["default_permissions"],
+        json!({ "contents": "read", "metadata": "read", "statuses": "write" })
+    );
+    assert_eq!(m["default_events"], json!(["push"]));
+    let name = m["name"].as_str().unwrap();
+    let suffix = name.strip_prefix("Modula Deploy (cloud.test) ").unwrap();
+    assert!(suffix.len() == 4 && suffix.bytes().all(|b| b.is_ascii_hexdigit()));
+    let st = r.json["state"].as_str().unwrap().to_owned();
+
+    // The manifest callback goes straight on to GitHub's installation page.
+    let to = location(&callback(&app, &admin, "goodcode", &st).await);
+    assert!(
+        to.starts_with("https://github.com/apps/modula-deploy-test/installations/new?state=mcgh_"),
+        "{to}"
+    );
+    let st = state_param(&to);
+
+    // And the installation lands back where the user started.
+    let r = install_callback(
+        &app,
+        &admin,
+        &format!("installation_id={INSTALLATION}&setup_action=install&state={st}"),
+    )
+    .await;
+    assert_eq!(location(&r), format!("{back}&github=installed"));
+    let bound: Id =
+        sqlx::query_scalar("SELECT workspace_id FROM github_installations WHERE id = $1")
+            .bind(INSTALLATION)
+            .fetch_one(app.db())
+            .await
+            .unwrap();
+    assert_eq!(bound, ws);
+
+    // With the App in place, Connect goes straight to the installation page.
+    let r = app
+        .call(
+            Method::POST,
+            &format!("/api/workspaces/{ws}/github/install"),
+            Some(&admin),
+            Some(json!({ "returnTo": "/settings#integrations-github" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let st = state_param(r.json["url"].as_str().unwrap());
+    // An organization owner has to approve: say so, back where they started.
+    let r = install_callback(&app, &admin, &format!("setup_action=request&state={st}")).await;
+    assert_eq!(
+        location(&r),
+        "/settings?github=requested#integrations-github"
+    );
+}
+
+/// States are single-use, expire, can't be tampered with, and only send the
+/// browser back to this site; only instance admins create the App.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn connect_states_and_permissions(pool: PgPool) {
+    let (app, admin) = app_with_github(pool).await;
+    let ws = app.create_workspace(&admin, "team").await;
+    let manifest = |cookie: String, body: Value| {
+        let app = &app;
+        async move {
+            app.call(
+                Method::POST,
+                "/api/github/app/manifest",
+                Some(&cookie),
+                Some(body),
+            )
+            .await
+        }
+    };
+
+    // Workspace admins who aren't instance admins can't create the App.
+    let (member_id, member) = app.user("wsadmin@example.com").await;
+    app.add_member(ws, member_id, "admin").await;
+    let r = manifest(member.clone(), json!({ "workspaceId": ws })).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{:?}", r.json);
+    // Nor can an instance admin target a workspace they don't administer.
+    let elsewhere = app.create_workspace(&member, "elsewhere").await;
+    let r = manifest(admin.clone(), json!({ "workspaceId": elsewhere })).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{:?}", r.json);
+
+    // Only paths on this site to come back to.
+    for evil in [
+        "//evil.example",
+        "https://evil.example/",
+        "/\\evil.example",
+        "settings",
+    ] {
+        let r = manifest(
+            admin.clone(),
+            json!({ "workspaceId": ws, "returnTo": evil }),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{evil}: {:?}", r.json);
+    }
+
+    // A tampered state is rejected, and so is an expired one.
+    let r = manifest(
+        admin.clone(),
+        json!({ "workspaceId": ws, "returnTo": "/settings" }),
+    )
+    .await;
+    let st = r.json["state"].as_str().unwrap().to_owned();
+    let mut tampered = st.clone().into_bytes();
+    let last = tampered.last_mut().unwrap();
+    *last = if *last == b'A' { b'B' } else { b'A' };
+    let tampered = String::from_utf8(tampered).unwrap();
+    assert_eq!(
+        callback(&app, &admin, "goodcode", &tampered).await.status,
+        StatusCode::BAD_REQUEST
+    );
+    sqlx::query("UPDATE github_flow_states SET expires_at = now() - interval '1 second'")
+        .execute(app.db())
+        .await
+        .unwrap();
+    assert_eq!(
+        callback(&app, &admin, "goodcode", &st).await.status,
+        StatusCode::BAD_REQUEST
+    );
+    let apps: i64 = sqlx::query_scalar("SELECT count(*) FROM github_app")
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    assert_eq!(apps, 0);
+
+    // The same holds for the installation leg.
+    create_app(&app, &admin).await;
+    let r = app
+        .call(
+            Method::POST,
+            &format!("/api/workspaces/{ws}/github/install"),
+            Some(&admin),
+            Some(json!({ "returnTo": "/settings" })),
+        )
+        .await;
+    let st = state_param(r.json["url"].as_str().unwrap());
+    sqlx::query("UPDATE github_flow_states SET expires_at = now() - interval '1 second'")
+        .execute(app.db())
+        .await
+        .unwrap();
+    let r = install_callback(
+        &app,
+        &admin,
+        &format!("installation_id={INSTALLATION}&setup_action=install&state={st}"),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+    let installs: i64 = sqlx::query_scalar("SELECT count(*) FROM github_installations")
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    assert_eq!(installs, 0);
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
@@ -466,7 +730,7 @@ async fn installation_binds_to_the_workspace_that_started_it(pool: PgPool) {
             Method::POST,
             &format!("/api/workspaces/{ws}/github/install"),
             Some(&admin),
-            None,
+            Some(json!({})),
         )
         .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
@@ -509,7 +773,7 @@ async fn installation_binds_to_the_workspace_that_started_it(pool: PgPool) {
             Method::POST,
             &format!("/api/workspaces/{other}/github/install"),
             Some(&admin),
-            None,
+            Some(json!({})),
         )
         .await;
     let url: url::Url = r.json["url"].as_str().unwrap().parse().unwrap();
@@ -528,7 +792,7 @@ async fn installation_binds_to_the_workspace_that_started_it(pool: PgPool) {
     let r = app
         .call(
             Method::GET,
-            &format!("/api/workspaces/{ws}/github/repos"),
+            &format!("/api/workspaces/{ws}/github/repos?q=secret"),
             Some(&admin),
             None,
         )
@@ -536,8 +800,173 @@ async fn installation_binds_to_the_workspace_that_started_it(pool: PgPool) {
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     assert_eq!(
         r.json,
-        json!([{ "fullName": "acme/secret", "private": true, "defaultBranch": "main" }])
+        json!([{
+            "fullName": "acme/secret", "private": true, "defaultBranch": "main",
+            "updatedAt": "2026-10-01T00:00:00Z",
+            "ownerAvatar": "https://avatars.githubusercontent.com/u/1?v=4"
+        }])
     );
+    // The settings card shows the installation, with links but no secrets.
+    let r = app
+        .call(
+            Method::GET,
+            &format!("/api/workspaces/{ws}/github/installations"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let inst = &r.json[0];
+    assert_eq!(inst["id"], INSTALLATION);
+    assert_eq!(inst["accountLogin"], "acme");
+    assert_eq!(
+        inst["configureUrl"],
+        format!("https://github.com/organizations/acme/settings/installations/{INSTALLATION}")
+    );
+    assert_eq!(
+        inst["avatarUrl"],
+        "https://avatars.githubusercontent.com/acme?s=64"
+    );
+    // The App's status says where webhooks go: the instance's public URL.
+    let r = app
+        .call(Method::GET, "/api/github/app", Some(&admin), None)
+        .await;
+    assert_eq!(r.json["webhookUrl"], format!("{ORIGIN}/api/github/webhook"));
+    assert_eq!(r.json["ownerLogin"], "acme");
+    assert!(!r.json.to_string().contains(WEBHOOK_SECRET));
+}
+
+/// The repository and branch pickers: search, recency order, pagination,
+/// caching, and which workspaces and roles may use them.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn repo_and_branch_pickers(pool: PgPool) {
+    use std::sync::atomic::Ordering;
+    let mut cfg = config();
+    let (api, calls) = mock_github_counted().await;
+    cfg.github_api = api;
+    let app = TestApp::with_config(pool, cfg);
+    let admin = app.setup_admin().await;
+    create_app(&app, &admin).await;
+    seed(&app, &admin, &[]).await;
+    let ws: Id = sqlx::query_scalar("SELECT workspace_id FROM github_installations")
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    let get = |path: String, cookie: String| {
+        let app = &app;
+        async move { app.call(Method::GET, &path, Some(&cookie), None).await }
+    };
+    let repos = |q: &str| format!("/api/workspaces/{ws}/github/repos{q}");
+
+    // Both pages fetched; most recently pushed first; never a token.
+    let before = calls.load(Ordering::SeqCst);
+    let r = get(repos("?perPage=100"), admin.clone()).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let names: Vec<&str> = r
+        .json
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["fullName"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 100);
+    assert_eq!(&names[..2], ["acme/secret", "acme/web-app"]);
+    assert!(!r.json.to_string().contains(INSTALL_TOKEN));
+    let r = get(repos("?perPage=100&page=2"), admin.clone()).await;
+    assert_eq!(r.json.as_array().unwrap().len(), 20);
+    // Search is case-insensitive, and served from the cache.
+    let r = get(repos("?q=WEB"), admin.clone()).await;
+    assert_eq!(r.json[0]["fullName"], "acme/web-app");
+    assert_eq!(r.json[0]["defaultBranch"], "trunk");
+    assert_eq!(r.json.as_array().unwrap().len(), 1);
+    assert_eq!(
+        calls.load(Ordering::SeqCst) - before,
+        2,
+        "one listing, two pages"
+    );
+
+    // A webhook about repository access drops the cache.
+    let r = signed(
+        &app,
+        "installation_repositories",
+        json!({ "action": "added", "installation": { "id": INSTALLATION } }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    get(repos(""), admin.clone()).await;
+    assert_eq!(calls.load(Ordering::SeqCst) - before, 4);
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE action = 'github.install.repositories'",
+    )
+    .fetch_one(app.db())
+    .await
+    .unwrap();
+    assert_eq!(audited, 1);
+
+    // Branches of a repository the installation reaches.
+    let branches =
+        |repo: &str, q: &str| format!("/api/workspaces/{ws}/github/branches?repo={repo}{q}");
+    let r = get(branches("acme/secret", ""), admin.clone()).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json[0], json!({ "name": "main", "protected": true }));
+    let r = get(branches("acme/secret", "&perPage=1&page=2"), admin.clone()).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(
+        r.json,
+        json!([{ "name": "feature/login", "protected": false }])
+    );
+    let r = get(branches("acme/secret", "&q=release"), admin.clone()).await;
+    assert_eq!(
+        r.json,
+        json!([{ "name": "release/1.2", "protected": false }])
+    );
+    // No installation covers this owner; malformed names are rejected.
+    let r = get(branches("someone/else", ""), admin.clone()).await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let r = get(branches("acme/..", ""), admin.clone()).await;
+    assert_ne!(r.status, StatusCode::OK);
+
+    // Members may use the pickers; viewers may not.
+    let (member_id, member) = app.user("member@example.com").await;
+    app.add_member(ws, member_id, "member").await;
+    assert_eq!(get(repos(""), member.clone()).await.status, StatusCode::OK);
+    let (viewer_id, viewer) = app.user("viewer@example.com").await;
+    app.add_member(ws, viewer_id, "viewer").await;
+    assert_eq!(
+        get(repos(""), viewer.clone()).await.status,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        get(branches("acme/secret", ""), viewer.clone())
+            .await
+            .status,
+        StatusCode::FORBIDDEN
+    );
+
+    // Another workspace sees none of this workspace's repositories or branches.
+    let other = app.create_workspace(&member, "elsewhere").await;
+    let r = get(
+        format!("/api/workspaces/{other}/github/repos"),
+        member.clone(),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.json, json!([]));
+    let r = get(
+        format!("/api/workspaces/{other}/github/branches?repo=acme/secret"),
+        member.clone(),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND);
+    let r = get(
+        format!("/api/workspaces/{other}/github/installations"),
+        member.clone(),
+    )
+    .await;
+    assert_eq!(r.json, json!([]));
+    // And outsiders can't reach the workspace at all.
+    let (_, outsider) = app.user("outsider@example.com").await;
+    assert_ne!(get(repos(""), outsider).await.status, StatusCode::OK);
 }
 
 /// One service in two environments, each tracking its own branch (the

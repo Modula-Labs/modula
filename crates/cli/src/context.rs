@@ -91,6 +91,7 @@ impl Ctx {
             Some((_, local)) if local.token.is_some() => Config {
                 url: local.url.clone().or_else(|| self.cfg.url.clone()),
                 token: local.token.clone(),
+                access: local.access.clone().or_else(|| self.cfg.access.clone()),
             },
             _ => self.cfg.clone(),
         }
@@ -288,6 +289,7 @@ mod tests {
             &Config {
                 url: Some("https://global.example.com".into()),
                 token: Some("mdt_global".into()),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -300,6 +302,7 @@ mod tests {
             &Config {
                 url: None,
                 token: Some("mdt_local".into()),
+                ..Default::default()
             },
         )
         .unwrap();

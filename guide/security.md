@@ -100,6 +100,29 @@ creation…) is recorded in an append-only audit log with the actor, IP and
 target. Variable values and query results are never logged. A dashboard view
 of the audit log is coming soon.
 
+## Private dashboard
+
+Optional: put the dashboard, API, CLI endpoint and node endpoint behind
+Cloudflare Tunnel + Cloudflare Access (see
+[integrations](integrations.md#private-dashboard-cloudflare-tunnel)). In
+private mode:
+
+- every request must carry a `Cf-Access-Jwt-Assertion` signed by your Access
+  team's keys (fetched from `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`,
+  cached, refetched on an unknown key id) for the dashboard application's
+  audience; others get `403 access_required`, so the origin can't be reached
+  around Access;
+- exceptions: the installer, release files, build sources (own per-upload
+  token) and GitHub webhooks (HMAC), which Access also bypasses; and direct
+  connections from the server itself without any proxy headers (break glass
+  over SSH: `ssh -L 7100:127.0.0.1:7100 <server>`);
+- the node endpoint only accepts connections from loopback (cloudflared);
+  mutual TLS between servers is unchanged on top;
+- the tunnel token and the servers' service token secret are sealed like
+  other secrets.
+
+Modula's own sign-in still applies behind Access.
+
 ## Containers and servers
 
 - Containers run with all Linux capabilities dropped except a small allowlist,

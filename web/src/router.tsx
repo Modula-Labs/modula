@@ -105,6 +105,9 @@ const projectRoute = createRoute({
     service: str(s.service),
     tab: tabs.find((t) => t === s.tab),
     deployment: str(s.deployment),
+    // Back from "Connect GitHub" in the New Service dialog.
+    add: s.add === "repo" ? "repo" : undefined,
+    github: str(s.github),
   }),
   component: function Project() {
     const { projectId } = projectRoute.useParams();

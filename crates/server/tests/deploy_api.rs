@@ -858,3 +858,270 @@ async fn public_domain_variable_skips_unverified_custom_domains(pool: PgPool) {
     .unwrap();
     assert_eq!(public().await, "api-shop.modula.app");
 }
+
+impl Fixture {
+    /// A server to place deployments on (it never connects in these tests).
+    async fn add_node(&self) {
+        sqlx::query(
+            "INSERT INTO nodes (id, workspace_id, name, cert_serial, cert_expires_at)
+             VALUES ($1, $2, 'worker', $3, now() + interval '1 day')",
+        )
+        .bind(Id::new())
+        .bind(self.workspace)
+        .bind(Id::new().to_string())
+        .execute(&self.app.state.db)
+        .await
+        .unwrap();
+    }
+
+    async fn raw_vars(&self) -> modula_server::deploy::env::RawVars {
+        modula_server::deploy::env::raw_variables(
+            &self.app.state.keys,
+            &self.app.state.db,
+            self.production().await,
+            self.instance.parse().unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn pending(&self, cookie: &str, query: &str) -> Value {
+        let env = self.production().await;
+        let r = self
+            .app
+            .call(
+                Method::GET,
+                &format!("/api/environments/{env}/pending{query}"),
+                Some(cookie),
+                None,
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+        r.json
+    }
+
+    async fn discard(&self, cookie: &str, changes: Option<Value>) -> Resp {
+        let env = self.production().await;
+        let service: Id =
+            sqlx::query_scalar("SELECT service_id FROM service_instances WHERE id = $1")
+                .bind(&self.instance)
+                .fetch_one(&self.app.state.db)
+                .await
+                .unwrap();
+        let mut body = json!({ "serviceId": service });
+        if let Some(c) = changes {
+            body["changes"] = c;
+        }
+        self.app
+            .call(
+                Method::POST,
+                &format!("/api/environments/{env}/discard"),
+                Some(cookie),
+                Some(body),
+            )
+            .await
+    }
+}
+
+/// `kind op key` lines of a pending response.
+fn pending_lines(p: &Value) -> Vec<String> {
+    let mut lines: Vec<String> = p["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["changes"].as_array().unwrap().clone())
+        .map(|c| {
+            format!(
+                "{} {} {}",
+                c["kind"].as_str().unwrap(),
+                c["op"].as_str().unwrap(),
+                c["key"].as_str().unwrap()
+            )
+        })
+        .collect();
+    lines.sort();
+    lines
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn pending_changes_diff_against_the_deployment_and_can_be_discarded(pool: PgPool) {
+    let f = fixture(pool).await;
+    f.add_node().await;
+    f.set_vars(
+        &f.admin,
+        json!({ "set": { "KEEP": "1", "CHANGE": "old", "DROP": "gone", "REF": "${{KEEP}}-x", "SECRET": "s3cret-old" },
+                "sealed": ["SECRET"] }),
+    )
+    .await;
+    let env = f.production().await;
+    let r = f
+        .app
+        .call(
+            Method::POST,
+            &format!("/api/environments/{env}/deploy"),
+            Some(&f.admin),
+            Some(json!({ "message": "  first release  " })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let deployment = r.json["deployments"][0]["deploymentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let d = f
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/deployments/{deployment}"),
+            Some(&f.admin),
+            None,
+        )
+        .await;
+    assert_eq!(
+        d.json["message"], "first release",
+        "the deploy message is stored trimmed"
+    );
+    let feed = f
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/projects/{}/activity?kind=deployment", f.project),
+            Some(&f.admin),
+            None,
+        )
+        .await;
+    assert_eq!(
+        feed.json["items"][0]["changes"][0]["message"],
+        "first release"
+    );
+    assert_eq!(f.pending(&f.admin, "").await["count"], 0);
+
+    // Edit everything, including a key changed and changed back.
+    f.set_vars(
+        &f.admin,
+        json!({ "set": { "ADDED": "new", "CHANGE": "new", "REF": "plain", "SECRET": "s3cret-new", "KEEP": "2" },
+                "delete": ["DROP"] }),
+    )
+    .await;
+    f.set_vars(&f.admin, json!({ "set": { "KEEP": "1" } }))
+        .await;
+    let r = f
+        .app
+        .call(
+            Method::PATCH,
+            &format!("/api/service-instances/{}", f.instance),
+            Some(&f.admin),
+            Some(json!({ "config": { "source": { "type": "image", "image": "nginx:alpine" }, "port": 3000 } })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+
+    let p = f.pending(&f.admin, "?values=true").await;
+    assert_eq!(
+        pending_lines(&p),
+        [
+            "config updated port",
+            "variable added ADDED",
+            "variable removed DROP",
+            "variable updated CHANGE",
+            "variable updated REF",
+            "variable updated SECRET",
+        ],
+        "KEEP is back to its deployed value: {p:?}"
+    );
+    assert_eq!(p["count"], 6);
+    let find = |p: &Value, key: &str| {
+        p["services"][0]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["key"] == key)
+            .unwrap()
+            .clone()
+    };
+    let change = find(&p, "CHANGE");
+    assert_eq!(
+        (change["currentValue"].as_str(), change["newValue"].as_str()),
+        (Some("old"), Some("new"))
+    );
+    assert_eq!(
+        find(&p, "REF")["currentValue"],
+        "${{KEEP}}-x",
+        "values as written, not resolved"
+    );
+    let secret = find(&p, "SECRET");
+    assert_eq!(secret["sealed"], true);
+    assert!(secret["currentValue"].is_null() && secret["newValue"].is_null());
+    assert!(
+        !p.to_string().contains("s3cret"),
+        "sealed values never leave the server"
+    );
+    assert_eq!(find(&p, "port")["newValue"], "3000");
+
+    // Values are for Members and up; Deployers can't discard.
+    let (viewer_id, viewer) = f.app.user("viewer@example.com").await;
+    f.app.add_member(f.workspace, viewer_id, "viewer").await;
+    let (deployer_id, deployer) = f.app.user("deployer@example.com").await;
+    f.app.add_member(f.workspace, deployer_id, "deployer").await;
+    let seen = f.pending(&viewer, "?values=true").await;
+    assert_eq!(seen["count"], 6);
+    assert!(find(&seen, "CHANGE")["currentValue"].is_null());
+    assert_eq!(
+        f.discard(&deployer, None).await.status,
+        StatusCode::FORBIDDEN
+    );
+
+    // One change: CHANGE gets its deployed value back.
+    let r = f
+        .discard(
+            &f.admin,
+            Some(json!([{ "kind": "variable", "key": "CHANGE" }])),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["count"], 5);
+    assert_eq!(f.raw_vars().await["CHANGE"].value, "old");
+    let r = f
+        .discard(
+            &f.admin,
+            Some(json!([{ "kind": "variable", "key": "CHANGE" }])),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "nothing left to discard");
+
+    // The rest: added removed, deleted restored, sealed restored still sealed.
+    let r = f.discard(&f.admin, None).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["count"], 0, "{:?}", r.json);
+    assert!(!r.json.to_string().contains("s3cret"));
+    let vars = f.raw_vars().await;
+    assert!(!vars.contains_key("ADDED"));
+    assert_eq!(vars["DROP"].value, "gone");
+    assert_eq!(
+        vars["REF"].value, "${{KEEP}}-x",
+        "the reference itself is restored"
+    );
+    assert_eq!(vars["SECRET"].value, "s3cret-old");
+    assert!(vars["SECRET"].sealed);
+    let cfg: Value = sqlx::query_scalar("SELECT config FROM service_instances WHERE id = $1")
+        .bind(&f.instance)
+        .fetch_one(&f.app.state.db)
+        .await
+        .unwrap();
+    let deployed: Value = sqlx::query_scalar("SELECT config FROM deployments WHERE id = $1")
+        .bind(&deployment)
+        .fetch_one(&f.app.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        cfg.get("port"),
+        deployed.get("port"),
+        "the setting is restored"
+    );
+    let audited: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action = 'pending.discard'")
+            .fetch_one(&f.app.state.db)
+            .await
+            .unwrap();
+    assert_eq!(audited, 2);
+}

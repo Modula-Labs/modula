@@ -152,9 +152,16 @@ pub async fn create_join_token(
         .record(&state.db)
         .await?;
     let token = token.expose_secret().to_owned();
+    let mut command = crate::nodes::join_command(&state.cfg, &token, &fingerprint);
+    let mut node_command = crate::nodes::node_join_command(&state.cfg, &token, &fingerprint);
+    // Private mode: new servers reach the node endpoint through the tunnel.
+    if let Some(access) = crate::private::api::join_access(&state).await? {
+        command = access.apply(&command, &server);
+        node_command = access.apply(&node_command, &server);
+    }
     Ok(Json(JoinToken {
-        command: crate::nodes::join_command(&state.cfg, &token, &fingerprint),
-        node_command: crate::nodes::node_join_command(&state.cfg, &token, &fingerprint),
+        command,
+        node_command,
         token,
         expires_at,
         server,

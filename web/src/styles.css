@@ -142,11 +142,34 @@
   animation: mc-slide-out 200ms var(--ease-out) forwards;
   pointer-events: none;
 }
+/* Context menus grow from the cursor (Radix sets the origin) and shrink back. */
+@keyframes mc-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@keyframes mc-menu-out {
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+.anim-menu {
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin);
+}
+.anim-menu[data-state="open"] {
+  animation: mc-menu-in 120ms var(--ease-out);
+}
+.anim-menu[data-state="closed"] {
+  animation: mc-menu-out 100ms var(--ease-out) forwards;
+}
 @media (prefers-reduced-motion: reduce) {
   .anim-modal,
   .anim-pop,
   .anim-sheet,
-  .anim-sheet-out {
+  .anim-sheet-out,
+  .anim-menu[data-state] {
     animation: none;
   }
 }

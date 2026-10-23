@@ -124,6 +124,7 @@ async fn setup(pool: PgPool) -> Setup {
         edge: None,
         build: None,
         db: None,
+        upgrade: None,
     };
     tokio::spawn(modula_node::session::run(dir, rt, caps, stop.child_token()));
     let node = id.meta.node_id;
@@ -218,6 +219,7 @@ impl Setup {
         let login = Login {
             url: self.api_url.parse().unwrap(),
             token: token.to_owned(),
+            access: None,
         };
         Target::new(&login, &instance.to_string(), None).unwrap()
     }

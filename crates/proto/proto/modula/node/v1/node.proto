@@ -59,6 +59,8 @@ message NodeMessage {
     TunnelOpened tunnel_opened = 31;
     TunnelData tunnel_data = 32;
     TunnelClose tunnel_close = 33;
+    UpgradeStatus upgrade_status = 60;
+    AccessStatus access_status = 70;
   }
 }
 
@@ -182,6 +184,8 @@ message ServerMessage {
     TunnelOpen tunnel_open = 31;
     TunnelData tunnel_data = 32;
     TunnelClose tunnel_close = 33;
+    UpgradeRequest upgrade = 60;
+    AccessConfig access = 70;
   }
 }
 
@@ -478,4 +482,66 @@ message DbResponse {
   // The error is the request's fault (a Postgres error or bad arguments),
   // not the node's or the database's availability.
   bool bad_request = 4;
+}
+
+// ---------------------------------------------------------------- upgrades (60–69)
+//
+// Rolling upgrades: after the control plane itself was upgraded, it asks each
+// node that advertises the "upgrade" capability, one at a time, to install the
+// server's own version. The node never runs the upgrade itself: it hands the
+// version to the root-owned modula-upgrade unit, which runs the installer's
+// `upgrade` (fetched from this instance), verifies the signed release, switches
+// to it and restarts modula-node. Success is the node's next Hello with the new
+// version; UpgradeStatus reports only what happened before that.
+
+message UpgradeRequest {
+  string request_id = 1;
+  // The version to install (the server's own), e.g. "0.2.0".
+  string version = 2;
+}
+
+message UpgradeStatus {
+  string request_id = 1;
+  // True once the upgrade was handed over (a restart follows); false when it
+  // could not start or the installer failed (and rolled back).
+  bool ok = 2;
+  string error = 3;
+}
+
+// ---------------------------------------------------------------- private dashboard (70–79)
+//
+// Private mode puts the dashboard and the node endpoint behind Cloudflare
+// Tunnel + Access (see the server's crate::private). The main server runs
+// `cloudflared tunnel run` and stops serving the dashboard on its edge; the
+// other servers reach the node endpoint through a local
+// `cloudflared access tcp` listener. The node (root) installs cloudflared and
+// writes its systemd units; AccessStatus reports the outcome.
+
+message AccessConfig {
+  string request_id = 1;
+  // Which half applies: the main server (tunnel, edge, firewall) or another server.
+  bool main = 2;
+
+  // Main server: run the tunnel with this token; empty = stop and remove it.
+  string tunnel_token = 3;
+  // Main server: hostnames its edge stops serving (the dashboard).
+  repeated string hidden_routes = 4;
+  // Main server: close the public node port in ufw (reopened when false).
+  bool close_node_port = 5;
+  uint32 node_port = 6;
+
+  // Other servers: reach the node endpoint through Cloudflare Access at
+  // node_host with this service token; empty node_host = dial direct_server again.
+  string node_host = 7;
+  string client_id = 8;
+  string client_secret = 9;
+  // Where to dial without the tunnel, and through the local listener.
+  string direct_server = 10;
+  string tunneled_server = 11;
+}
+
+message AccessStatus {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
 }

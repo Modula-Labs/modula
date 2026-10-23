@@ -162,6 +162,10 @@ case ":$PATH:" in
   *":$DIR:"*) ;;
   *) on_path=0 ;;
 esac
+# Releases before `server create` don't have it (or `guide`): only offer
+# what this binary can do.
+has_server=0
+"$DIR/modula" server options --help >/dev/null 2>&1 && has_server=1
 say ""
 say "  ${A}╭─${N} ${B}You're all set!${N} ${D}The modula CLI is ready.${N}"
 say "  ${A}│${N}"
@@ -170,8 +174,58 @@ if [[ $on_path == 0 ]]; then
   say "  ${A}│${N}    export PATH=\"$export_dir:\$PATH\""
   say "  ${A}│${N}"
 fi
-say "  ${A}│${N}  Next, connect it to your instance:"
-say "  ${A}│${N}    ${A}modula login --url https://your-instance${N}"
-say "  ${A}│${N}"
+if [[ $has_server == 1 ]]; then
+  say "  ${A}│${N}  Next, either connect it to your Modula server:"
+  say "  ${A}│${N}    ${A}modula login --url https://your-instance${N}"
+  say "  ${A}│${N}  or create a new one on Hetzner Cloud from here:"
+  say "  ${A}│${N}    ${A}modula server create${N}"
+  say "  ${A}│${N}"
+  say "  ${A}│${N}  ${D}People and AI agents alike: ${N}${A}modula guide${N}"
+else
+  say "  ${A}│${N}  Next, connect it to your instance:"
+  say "  ${A}│${N}    ${A}modula login --url https://your-instance${N}"
+fi
 say "  ${A}╰─${N} ${D}Happy shipping!${N}"
 say ""
+
+# ---------------------------------------------------------------- what next
+# Only with someone to ask: piped into bash, stdin is this script, so the
+# answers come from the terminal itself. Without one (CI, agents), the card
+# above already said both commands.
+
+[[ $TTY == 1 && $has_server == 1 ]] || exit 0
+{ exec 5</dev/tty; } 2>/dev/null || exit 0
+modula=$DIR/modula
+say "  ${A}?${N} ${B}What next?${N}"
+say "    ${A}1${N}  Connect to an existing Modula server   ${D}(modula login)${N}"
+say "    ${A}2${N}  Create a new server on Hetzner         ${D}(modula server create)${N}"
+say "    ${A}3${N}  Later"
+choice=""
+while :; do
+  printf '  %s›%s Choose 1, 2 or 3 %s[3]%s ' "$A" "$N" "$D" "$N"
+  IFS= read -r -u 5 choice || { say ""; exit 0; }
+  case ${choice:-3} in
+    1 | 2 | 3) break ;;
+    *) say "    ${R}Please answer 1, 2 or 3.${N}" ;;
+  esac
+done
+case ${choice:-3} in
+  1)
+    url=""
+    while [[ -z $url ]]; do
+      printf '  %s?%s %sYour Modula server%s %s(e.g. https://deploy.example.com)%s ' "$A" "$N" "$B" "$N" "$D" "$N"
+      IFS= read -r -u 5 url || { say ""; exit 0; }
+    done
+    say ""
+    exec "$modula" login --url "$url" <&5
+    ;;
+  2)
+    say ""
+    exec "$modula" server create <&5
+    ;;
+  *)
+    say ""
+    say "  ${D}Whenever you're ready: modula login --url …  or  modula server create${N}"
+    say ""
+    ;;
+esac

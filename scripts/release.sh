@@ -7,7 +7,8 @@
 # Output (the layout install.sh downloads):
 #   modula-server-linux-<arch>  modula-node-linux-<arch>  caddy-linux-<arch>
 #   modula-linux-<arch>, modula-darwin-<arch> (the CLI; not installed on servers; install-cli.sh)
-#   SHA256SUMS  SHA256SUMS.sig  (Ed25519 over SHA256SUMS)
+#   VERSION     (the release's version; instances check it daily for updates)
+#   SHA256SUMS  SHA256SUMS.sig  (Ed25519 over SHA256SUMS, which lists VERSION too)
 #
 # The signing key never enters a container or the repo. Default location:
 # .dev/release-signing/release.key; its public half is deploy/release.pub.pem,
@@ -82,7 +83,9 @@ if [[ $(uname -s) == Darwin && -z ${SKIP_DARWIN:-} ]]; then
   done
 fi
 
-(cd "$OUT" && sha256sum modula-*-linux-* modula-linux-* $(ls modula-darwin-* 2>/dev/null) caddy-linux-* buildctl-linux-* railpack-linux-* >SHA256SUMS)
+sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1 >"$OUT/VERSION"
+[[ -s $OUT/VERSION ]] || { echo "no version in Cargo.toml" >&2; exit 1; }
+(cd "$OUT" && sha256sum VERSION modula-*-linux-* modula-linux-* $(ls modula-darwin-* 2>/dev/null) caddy-linux-* buildctl-linux-* railpack-linux-* >SHA256SUMS)
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$OUT/SHA256SUMS" -out "$OUT/SHA256SUMS.sig"
 openssl pkeyutl -verify -pubin -inkey deploy/release.pub.pem -rawin \
   -in "$OUT/SHA256SUMS" -sigfile "$OUT/SHA256SUMS.sig" >/dev/null

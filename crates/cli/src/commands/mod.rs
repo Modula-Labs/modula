@@ -67,6 +67,8 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
         } => return db::connect(ctx, service, tunnel_only, show_password, port).await,
         Command::Completion { shell } => meta::completion(ctx, shell),
         Command::Docs => meta::docs(ctx),
+        Command::Guide => meta::guide(ctx),
+        Command::Server { command } => return crate::provision::run(ctx, command).await,
         Command::Config { command } => return config::run(ctx, command).await,
     }
     Ok(0)

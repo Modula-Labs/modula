@@ -5,6 +5,7 @@
 //! command group) against the typed client in [`api`]; [`context`] resolves
 //! the project, environment and service to act on.
 
+pub mod access;
 pub mod api;
 pub mod cli;
 pub mod commands;
@@ -13,5 +14,6 @@ pub mod connect;
 pub mod context;
 pub mod iac;
 pub mod output;
+pub mod provision;
 pub mod resolve;
 pub mod tunnel;

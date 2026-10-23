@@ -96,6 +96,7 @@ existing settings alone where noted.
 | Firewall (ufw) | Denies incoming traffic except the ports above. Your SSH port (from `sshd -T`, systemd's `ssh.socket`, or the current SSH session; 22 otherwise) is allowed before the firewall is turned on. An already active ufw keeps its rules and defaults; Modula's rules are added (comment `modula`). Skipped, with a note, when firewalld or an nftables ruleset that drops traffic is in charge. |
 | Security updates | `unattended-upgrades`, daily, security pockets only (`/etc/apt/apt.conf.d/52modula-unattended-upgrades`), no reboots unless `--auto-reboot`. A server that already runs unattended-upgrades keeps its own settings. |
 | Logs | journald capped at 500 MB (`/etc/systemd/journald.conf.d/90-modula.conf`). Docker's default log driver rotates at 3 × 10 MB (`/etc/docker/daemon.json`: written when absent, merged with `jq` otherwise, never overwritten; Docker restarts for it only when the installer just installed it). Modula's own containers always rotate their logs. |
+| Docker restarts | `"live-restore": true` in `/etc/docker/daemon.json`, so containers keep running when Docker itself restarts (a security update of `docker.io`). Only when the file is absent or the installer wrote it (never into a file you manage, never on swarm nodes); applied with a reload, which leaves containers alone. Upgrades add it too, under the same rule. |
 | Swap | With less than 2 GiB of memory and no swap, a 2 GiB `/swapfile` (in `/etc/fstab`) and `vm.swappiness = 10`. |
 | Clock | Makes sure systemd-timesyncd (or chrony/ntp, if present) keeps the clock in sync; certificates and mutual TLS depend on it. |
 | Kernel | `/etc/sysctl.d/90-modula.conf`: `net.core.somaxconn = 4096`, `fs.inotify.max_user_watches = 524288`, `fs.inotify.max_user_instances = 1024`, `net.ipv4.ip_forward = 1` (containers reach the internet through the host). |
@@ -142,8 +143,13 @@ To restore onto a fresh install, write the key to
 | `/var/lib/modula/master.key` | Master key |
 | `/opt/modula/current` | The active release (the last 3 are kept) |
 | `/var/lib/modula-node`, `/var/lib/modula-caddy` | Node identity and edge state |
+| `/var/lib/modula-upgrade` | Upgrade requests and the last upgrade's report (see [Updates](#updates)) |
+| `/etc/modula/upgrade.env` | Where `modula-upgrade` fetches the installer from |
 
-Services: `modula-server`, `modula-node`, `modula-caddy` (systemd).
+Services: `modula-server`, `modula-node`, `modula-caddy` (systemd), with
+`modula-server.socket` and `modula-caddy.socket` holding their ports, and
+`modula-upgrade.path` / `modula-upgrade.service` for upgrades started from the
+dashboard.
 
 ### Server configuration
 
@@ -165,23 +171,73 @@ Set in `/etc/modula/server.env`; restart `modula-server` after a change.
 | `MODULA_DATABASE_URL`, `MODULA_REDIS_URL` | Control-plane Postgres and Redis. |
 | `MODULA_MASTER_KEY_FILE` | Path of the master key. |
 | `MODULA_TRUSTED_PROXIES` | Peers whose `X-Forwarded-For` is trusted (the local Caddy). |
+| `MODULA_RELEASE_URL` | Where releases are published, for update checks (default `https://downloads.usemodula.org/releases`). |
+| `MODULA_RELEASE_PUBKEY` | The release signing key (base64 SubjectPublicKeyInfo, default: the one the installer embeds). |
+| `MODULA_UPGRADE_DIR` | Where upgrade requests go (default `/var/lib/modula-upgrade`). |
 
 ## Upgrade
 
-Upgrade the main server first, from the release:
+The easy way is the dashboard: **Settings → Updates → Update now** (instance
+admins, re-authentication required). The same from a shell, on the main
+server:
 
 ```bash
 curl -fsSL https://usemodula.org/install.sh \
   | sudo bash -s -- upgrade [--version X.Y.Z]
 ```
 
-Then each other server, from your instance (its installer installs the
-instance's own version):
+Either way the release is downloaded, its signature checked, and switched
+atomically; if the new control plane doesn't become healthy within a minute,
+the previous release is switched back and restarted (the installer exits with
+status 3). Running apps keep running throughout.
+
+Once the main server runs the new version, it upgrades every other server to
+the same version, **one at a time**: it asks a server over its connection, the
+server's `modula-upgrade` unit runs the installer from your instance, and the
+next server is asked only after this one reconnected on the new version. A
+failure stops the rollout (the Updates section shows which server and why)
+until you press **Update now** again. Servers on releases from before this
+existed show as *Manual*; upgrade those once by hand, from your instance:
 
 ```bash
 curl -fsSL https://deploy.example.com/api/install.sh | sudo bash -s -- upgrade
 ```
 
-The release is switched atomically, and the main server rolls back
-automatically if the new version doesn't become healthy. Running apps keep
-running during the upgrade.
+An older server keeps working with a newer control plane in the meantime.
+
+### What an upgrade interrupts
+
+| Part | During an upgrade |
+|---|---|
+| Your apps' containers | Keep running; they are never restarted by an upgrade. |
+| Apps' HTTP(S) traffic (Caddy) | Not interrupted. Caddy restarts only when the release ships a different Caddy; even then systemd keeps ports 80/443 open (`modula-caddy.socket`), new connections wait a moment in the kernel's queue, and requests in flight get 10 s to finish. |
+| Dashboard and API (`modula-server`) | Not interrupted: `modula-server.socket` keeps `127.0.0.1:7100` and `7101` open while the process is replaced. Requests in flight get up to 20 s to finish; open log streams end with a `restart` event and the dashboard reconnects. |
+| Servers' connections to the control plane | Each server's stream drops when the control plane restarts and reconnects within 1–8 s (backoff); workloads aren't affected. |
+| TCP proxies (ports 20000–29999) and `modula connect` tunnels | Live in `modula-node`: connections through them drop when that server's node restarts, and new ones are refused for the 1–3 s it takes to come back. Database drivers reconnect; reconnect long-lived clients. |
+
+The very first upgrade to a release with socket activation moves the ports
+from the processes to systemd, which takes one restart of each with a gap of
+about a second; every upgrade after that is seamless as described.
+
+## Updates
+
+**Settings → Updates** (instance admins) shows this instance's version, the
+newest release, and every server's version.
+
+| Mode | What happens |
+|---|---|
+| Off | No checks. |
+| Notify only (default) | Checks once a day (`VERSION` from the release URL, trusted only with a valid signature over `SHA256SUMS`) and shows *Update available* in the dashboard. The audit log records each new version once. |
+| Automatic | Also upgrades in the **maintenance window**: the weekdays, start time and time zone you pick (default Sunday 03:00, the server's own time zone), for an hour. A version that failed or rolled back isn't tried again automatically. |
+
+Changing the mode or window and **Update now** need re-authentication; all
+of it is in the audit log, with each upgrade's result and the tail of the
+installer's output.
+
+`modula-server` runs as the unprivileged `modula` user and can't upgrade
+anything itself. It writes the requested version to
+`/var/lib/modula-upgrade/request`; the root-owned `modula-upgrade.path` unit
+runs the installer's `upgrade` for that version, which must be a release no
+older than the installed one, and writes the outcome to
+`/var/lib/modula-upgrade/result`. Follow along with
+`journalctl -u modula-upgrade -f`.

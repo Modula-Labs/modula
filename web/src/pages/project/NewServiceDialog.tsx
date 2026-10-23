@@ -1,13 +1,15 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { ArrowLeft, BrandDocker, BrandGithub, ChevronRight, Search } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/misc";
 import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { ApiError, api, type ProjectDetail, type Template } from "@/lib/api";
+import { projectReturnPath } from "@/lib/github";
 import { templateStack, uniqueName } from "@/lib/templates";
+import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
 
 /** `ghcr.io/acme/api:1.2` → `api`, made a valid service name. */
 export function serviceNameFromImage(image: string): string {
@@ -35,7 +37,8 @@ export function parseRepo(input: string): string | null {
 /** `acme/My_App` → `my-app`, made a valid service name. */
 export const serviceNameFromRepo = (repo: string) => serviceNameFromImage(repo.split("/").pop() ?? "");
 
-type Step = "root" | "image" | "repo";
+export type NewServiceStep = "root" | "image" | "repo" | "database";
+type Step = NewServiceStep;
 
 /** Command-style picker for adding a service (Docker image for now). */
 export function NewServiceDialog({
@@ -44,15 +47,24 @@ export function NewServiceDialog({
   projectId,
   environmentId,
   onCreated,
+  initialStep = "root",
+  githubNotice = null,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   projectId: string;
   environmentId: string;
   onCreated: (serviceId: string) => void;
+  /** Open straight at one source (the canvas menu), else the picker. */
+  initialStep?: Step;
+  /** How "Connect GitHub" went, shown on the GitHub step after coming back. */
+  githubNotice?: { tone: "success" | "info"; text: string } | null;
 }) {
   const qc = useQueryClient();
-  const [step, setStep] = useState<Step>("root");
+  const [step, setStep] = useState<Step>(initialStep);
+  useEffect(() => {
+    if (open) setStep(initialStep);
+  }, [open, initialStep]);
   const [image, setImage] = useState("");
   const [name, setName] = useState("");
   const [port, setPort] = useState("8080");
@@ -73,6 +85,17 @@ export function NewServiceDialog({
   };
 
   const repo = parseRepo(repoInput);
+  const workspaceId = qc.getQueryData<ProjectDetail>(["project", projectId])?.workspaceId;
+  const suggestions = useRepoSuggestions(
+    open && step === "repo" ? workspaceId : undefined,
+    repoInput,
+    repo,
+    branch,
+    // "Connect GitHub" comes back here, with this dialog on the GitHub step.
+    projectReturnPath(projectId, environmentId),
+  );
+  // The name picking a repository filled in; replaced on the next pick unless edited.
+  const autoName = useRef("");
 
   // Older servers have no templates endpoint: the Database section just doesn't show.
   const templates = useQuery({
@@ -156,7 +179,12 @@ export function NewServiceDialog({
     >
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/50" />
-        <Dialog.Content className="anim-modal fixed top-[16%] left-1/2 z-50 w-[480px] max-w-[calc(100vw-32px)] -translate-x-1/2 overflow-hidden rounded-xl bg-popover shadow-modal">
+        <Dialog.Content
+          // Esc closes an open suggestion list first, not the dialog.
+          onEscapeKeyDown={(e) => {
+            if (document.activeElement?.getAttribute("aria-expanded") === "true") e.preventDefault();
+          }}
+          className="anim-modal fixed top-[16%] left-1/2 z-50 w-[480px] max-w-[calc(100vw-32px)] -translate-x-1/2 overflow-hidden rounded-xl bg-popover shadow-modal">
           <Dialog.Title className="sr-only">Add a service</Dialog.Title>
           <Dialog.Description className="sr-only">Choose where the service comes from.</Dialog.Description>
           <div className="flex h-12 items-center gap-2 border-b border-border px-3 text-muted-foreground">
@@ -167,16 +195,22 @@ export function NewServiceDialog({
                 <ArrowLeft className="size-4" />
               </button>
             )}
-            <span className="text-sm text-foreground">{step === "root" ? "What would you like to add?" : step === "repo" ? "GitHub repo" : "Docker image"}</span>
+            <span className="text-sm text-foreground">
+              {step === "root" ? "What would you like to add?" : step === "repo" ? "GitHub repo" : step === "database" ? "Database" : "Docker image"}
+            </span>
           </div>
 
-          {step === "root" ? (
+          {step === "root" || step === "database" ? (
             <div className="p-1.5">
-              <PickerRow icon={<BrandGithub />} label="GitHub repo" onClick={() => setStep("repo")} />
-              <PickerRow icon={<BrandDocker />} label="Docker image" onClick={() => setStep("image")} />
+              {step === "root" ? (
+                <>
+                  <PickerRow icon={<BrandGithub />} label="GitHub repo" onClick={() => setStep("repo")} />
+                  <PickerRow icon={<BrandDocker />} label="Docker image" onClick={() => setStep("image")} />
+                </>
+              ) : null}
               {templates.data?.length ? (
                 <>
-                  <div className="text-caps px-3 pt-3 pb-1 text-muted-foreground">Database</div>
+                  {step === "root" ? <div className="text-caps px-3 pt-3 pb-1 text-muted-foreground">Database</div> : null}
                   {createDatabase.error ? (
                     <div className="px-1.5 pb-1.5">
                       <Alert>{createDatabase.error.message}</Alert>
@@ -208,27 +242,25 @@ export function NewServiceDialog({
                 create.mutate();
               }}
             >
+              {githubNotice ? <Alert tone={githubNotice.tone}>{githubNotice.text}</Alert> : null}
               {create.error ? <Alert>{create.error.message}</Alert> : null}
               {notice ? <Alert tone="warn">{notice}</Alert> : null}
-              <Field
-                label="Repository"
-                hint="Public repositories for now; connect GitHub for private ones (coming soon)"
-                error={repoInput.trim() && !repo ? "Use owner/name or a github.com URL" : null}
-              >
-                {(p) => (
-                  <Input
-                    {...p}
-                    mono
-                    autoFocus
-                    required
-                    placeholder="owner/name or https://github.com/owner/name"
-                    value={repoInput}
-                    onChange={(e) => setRepoInput(e.target.value)}
-                  />
-                )}
-              </Field>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Branch">{(p) => <Input {...p} mono value={branch} onChange={(e) => setBranch(e.target.value)} />}</Field>
+              <RepoField
+                s={suggestions}
+                repoInput={repoInput}
+                onRepoInput={setRepoInput}
+                repo={repo}
+                onPick={(r) => {
+                  setRepoInput(r.fullName);
+                  setBranch(r.defaultBranch);
+                  if (!name || name === autoName.current) {
+                    autoName.current = serviceNameFromRepo(r.fullName);
+                    setName(autoName.current);
+                  }
+                }}
+              />
+              <div className="grid grid-cols-2 items-start gap-3">
+                <BranchField s={suggestions} branch={branch} onBranch={setBranch} />
                 <Field label="Root directory" hint="For monorepos. Optional.">
                   {(p) => <Input {...p} mono placeholder="/" value={rootDir} onChange={(e) => setRootDir(e.target.value)} />}
                 </Field>

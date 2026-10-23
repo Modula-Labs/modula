@@ -10,7 +10,8 @@ Status       status  deployment list  logs
 Services     add  variables  environment  domain  volume  tcp-proxy
 Deploying    up  deploy  redeploy  restart  down  rollback
 Databases    db query  db tables  connect
-Shell        completion  docs
+Shell        completion  docs  guide
+Servers      server create  server options
 ```
 
 `modula --help`, `modula <command> --help`, `--version`, and
@@ -491,7 +492,33 @@ Prints a completion script for `bash`, `zsh`, `fish`, `elvish` or
 
 ### `docs`
 
-Prints every command and flag as Markdown, generated from the binary.
+Prints [the guide for people and agents](cli-for-humans-and-agents.md)
+followed by every command and flag as Markdown, generated from the binary.
+
+### `guide`
+
+Prints just [the guide for people and agents](cli-for-humans-and-agents.md):
+install, creating a server on Hetzner, logging in, deploying, non-interactive
+use (flags, env vars, `--json`, exit codes) and troubleshooting.
+
+## Servers
+
+### `server create` (alias `server new`)
+
+Creates a Modula server on Hetzner Cloud from your machine: a wizard, or
+fully from flags (`--location --type --name --domain --email`, one of
+`--ssh-key-file/--ssh-key-id/--no-ssh-key`, `--cloudflare-dns
+[--replace-dns]`, `--admin-name`, `--on-failure`, `--yes --json`). Secrets
+only from `HCLOUD_TOKEN` (or `--token-stdin`), `CLOUDFLARE_API_TOKEN` and
+`MODULA_ADMIN_PASSWORD`. Shows each step live (the installer's too), finishes
+setup and logs you in. Exit codes: 0 ready, 1 failed (nothing left running),
+2 usage, 3 a server exists but isn't fully set up. Details:
+[create a server on Hetzner](cli-for-humans-and-agents.md#create-a-server-on-hetzner).
+
+### `server options [--location <LOCATION>]`
+
+Locations with a suitable server type in stock, each type's vCPU, RAM,
+disk, architecture and monthly price, and the recommendation. Read-only.
 
 ## A typical session
 

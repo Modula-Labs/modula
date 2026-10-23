@@ -292,6 +292,76 @@ export interface SelfBackup {
   targetId: string | null;
   hourUtc: number;
 }
+export type UpdateMode = "off" | "notify" | "auto";
+export interface UpdateWindow {
+  days: number[]; // 0=Sunday … 6=Saturday
+  time: string; // "HH:MM" 24h
+  timezone: string; // IANA
+}
+export interface UpdateRun {
+  id: string;
+  fromVersion: string;
+  toVersion: string;
+  status: "requested" | "running" | "succeeded" | "failed" | "rolled_back";
+  trigger: "auto" | "manual";
+  requestedAt: string;
+  finishedAt: string | null;
+  log: string | null;
+}
+export interface UpdateServer {
+  nodeId: string;
+  name: string;
+  version: string | null;
+  status: "current" | "upgrading" | "failed" | "manual" | "offline" | "behind";
+  error: string | null;
+}
+/** Private dashboard (Cloudflare Tunnel + Access), instance-wide. */
+export type PrivateAccessPhase = "off" | "enabling" | "on" | "disabling";
+export interface PrivateAccessStep {
+  label: string;
+  status: "running" | "done" | "failed";
+  detail?: string;
+}
+export interface PrivateAccessStatus {
+  phase: PrivateAccessPhase;
+  dashboardHost: string | null;
+  nodeHost: string | null;
+  workspaceId: string | null;
+  teamDomain: string | null;
+  allowedEmails: string[];
+  allowedDomains: string[];
+  steps: PrivateAccessStep[];
+  error: string | null;
+  breakGlass: string;
+}
+export interface PrivateAccessCheck {
+  items: { label: string; ok: boolean; detail: string | null }[];
+  suggestedEmails: string[];
+  ready: boolean;
+}
+export interface PrivateAccessUpdate {
+  enabled: boolean;
+  workspaceId?: string;
+  nodeHost?: string;
+  allowedEmails?: string[];
+  allowedDomains?: string[];
+}
+
+export interface UpdateStatus {
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  releaseNotesUrl: string | null;
+  checkedAt: string | null;
+  checkError: string | null;
+  mode: UpdateMode;
+  channel: "stable";
+  window: UpdateWindow;
+  nextWindow: string | null;
+  canUpgrade: boolean;
+  lastRun: UpdateRun | null;
+  servers: UpdateServer[];
+}
 export interface VariableInfo {
   id: string;
   name: string;
@@ -310,9 +380,26 @@ export interface VariableNames {
   shared: string[];
   services: { serviceId: string; serviceName: string; names: string[]; platform: string[] }[];
 }
+/** A variable or setting that differs from the service's last deployment. */
+export interface PendingChange extends ActivityChange {
+  /** Deployed and new values: only when asked for (Members and up), never for sealed variables. */
+  currentValue?: string | null;
+  newValue?: string | null;
+  sealed?: boolean;
+  /** A shared variable the service references. */
+  shared?: boolean;
+  /** Can be reverted on its own (POST …/discard). */
+  discardable?: boolean;
+}
+export interface PendingService {
+  serviceId: string;
+  serviceName: string;
+  instanceId: string;
+  changes: PendingChange[];
+}
 export interface PendingChanges {
   count: number;
-  services: { serviceId: string; serviceName: string; instanceId: string; changes: ActivityChange[] }[];
+  services: PendingService[];
 }
 export interface Deployment {
   id: string;
@@ -323,6 +410,8 @@ export interface Deployment {
   imageDigest: string | null;
   commitSha: string | null;
   commitMessage: string | null;
+  /** What the person deploying wrote when applying changes. */
+  message?: string | null;
   commitAuthor: string | null;
   /** What was deployed: `owner/name@branch`, the image, or "Uploaded via CLI". */
   source: string;
@@ -545,11 +634,16 @@ export const api = {
   updateSharedVariables: (environment: string, b: VariablePatch) =>
     patch<VariableInfo[]>(`/api/environments/${enc(environment)}/variables`, b),
   variableNames: (environment: string) => get<VariableNames>(`/api/environments/${enc(environment)}/variable-names`),
-  pending: (environment: string) => get<PendingChanges>(`/api/environments/${enc(environment)}/pending`),
-  deployPending: (environment: string, serviceIds?: string[]) =>
-    post<{ deployments: { serviceId: string; deploymentId: string }[] }>(`/api/environments/${enc(environment)}/deploy`, {
-      serviceIds,
-    }),
+  pending: (environment: string, opts?: { values?: boolean }) =>
+    get<PendingChanges>(`/api/environments/${enc(environment)}/pending${opts?.values ? "?values=true" : ""}`),
+  deployPending: (environment: string, b: { serviceIds?: string[]; message?: string } = {}) =>
+    post<{ deployments: { serviceId: string; deploymentId: string | null; error: string | null }[] }>(
+      `/api/environments/${enc(environment)}/deploy`,
+      b,
+    ),
+  /** Revert a service's pending changes (all, or the given ones) to its last deployment. */
+  discardPending: (environment: string, serviceId: string, changes?: { kind: "variable" | "config"; key: string }[]) =>
+    post<PendingChanges>(`/api/environments/${enc(environment)}/discard`, { serviceId, changes }),
   revealVariable: (id: string) => post<{ name: string; value: string }>(`/api/variables/${enc(id)}/reveal`),
 
   deployments: (instance: string) => get<Deployment[]>(`/api/service-instances/${enc(instance)}/deployments`),
@@ -590,6 +684,14 @@ export const api = {
   deleteBackup: (id: string) => del<{ ok: true }>(`/api/backups/${enc(id)}`),
   selfBackup: () => get<SelfBackup>("/api/instance/self-backup"),
   saveSelfBackup: (b: SelfBackup) => request<SelfBackup>("PUT", "/api/instance/self-backup", b),
+  updates: () => get<UpdateStatus>("/api/instance/updates"),
+  saveUpdates: (b: { mode: UpdateMode; channel: "stable"; window: UpdateWindow }) => request<UpdateStatus>("PUT", "/api/instance/updates", b),
+  runUpdate: () => request<UpdateStatus>("POST", "/api/instance/updates/run", {}),
+  checkUpdates: () => request<UpdateStatus>("POST", "/api/instance/updates/check", {}),
+  privateAccess: () => get<PrivateAccessStatus>("/api/instance/private-access"),
+  privateAccessCheck: (workspaceId: string) =>
+    get<PrivateAccessCheck>(`/api/instance/private-access/check?workspaceId=${encodeURIComponent(workspaceId)}`),
+  setPrivateAccess: (b: PrivateAccessUpdate) => request<PrivateAccessStatus>("PUT", "/api/instance/private-access", b),
 
   dbTables: (i: string) => get<{ tables: DbTable[] }>(`/api/service-instances/${enc(i)}/database/tables`),
   dbRows: (i: string, q: DbRowsQuery) => {

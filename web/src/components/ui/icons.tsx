@@ -67,3 +67,5 @@ export const Puzzle = kobra(T.IconPuzzle);
 export const SortAsc = kobra(T.IconArrowUp);
 export const SortDesc = kobra(T.IconArrowDown);
 export const Table = kobra(T.IconTable);
+export const Dots = kobra(T.IconDots);
+export const Pencil = kobra(T.IconPencil);

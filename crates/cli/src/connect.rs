@@ -271,7 +271,12 @@ pub async fn run(api: &Api, link: Option<&Link>, args: ConnectArgs) -> anyhow::R
     let instance = resolve::instance_id(&project, service, env)?;
     let engine = service.template.as_deref().and_then(Engine::from_template);
 
-    let target = Target::new(&api.login, &instance, None)?;
+    // With the Access credentials as renewed by the API client.
+    let login = crate::config::Login {
+        access: api.access(),
+        ..api.login.clone()
+    };
+    let target = Target::new(&login, &instance, None)?;
     target.check().await.with_context(|| {
         format!(
             "cannot open a tunnel to {} in {}/{}",

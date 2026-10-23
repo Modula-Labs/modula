@@ -122,8 +122,23 @@ pub fn reference() -> String {
     out
 }
 
+/// The guide for people and AI agents (guide/cli-for-humans-and-agents.md).
+pub const GUIDE: &str = include_str!("../../../../guide/cli-for-humans-and-agents.md");
+
+/// `docs`: the guide, then the full command reference, as one document.
 pub fn docs(ctx: &Ctx) {
-    ctx.out.line(reference().trim_end());
+    ctx.out.line(GUIDE.trim_end());
+    ctx.out.line("");
+    ctx.out.line(
+        reference()
+            .replacen("# modula", "# Command reference: modula", 1)
+            .trim_end(),
+    );
+}
+
+/// `guide`: just the guide.
+pub fn guide(ctx: &Ctx) {
+    ctx.out.line(GUIDE.trim_end());
 }
 
 #[cfg(test)]
@@ -145,5 +160,25 @@ mod tests {
         }
         // Hidden compatibility flags stay out of the docs.
         assert!(!text.contains("skip-deploys"));
+        // Secret flags exist only to be refused; never documented.
+        assert!(!text.contains("--hcloud-token") && !text.contains("--admin-password"));
+        assert!(text.contains("### `modula server create`"));
+    }
+
+    #[test]
+    fn the_guide_covers_humans_and_agents() {
+        for section in [
+            "## Install",
+            "## Create a server on Hetzner",
+            "## Log in to an existing server",
+            "## Deploy an app",
+            "## Non-interactive / agent usage",
+            "## Troubleshooting",
+            "HCLOUD_TOKEN",
+            "--json",
+            "### Exit codes",
+        ] {
+            assert!(super::GUIDE.contains(section), "guide lacks {section}");
+        }
     }
 }

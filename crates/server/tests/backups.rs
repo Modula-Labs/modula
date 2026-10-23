@@ -199,6 +199,7 @@ impl Cluster {
             edge: None,
             build: None,
             db: None,
+            upgrade: None,
         };
         tokio::spawn(modula_node::session::run(
             dir,

@@ -367,6 +367,12 @@ CREATE TABLE deployments (
     -- Resolved variables at creation, sealed with the environment's data key
     -- (AAD: deployments/env/<id>).
     env_sealed          bytea,
+    -- The instance's own variables as written (references unexpanded) and
+    -- whether each was sealed, sealed with the environment's data key (AAD:
+    -- deployments/vars/<id>). Discarding a pending change restores from it.
+    vars_sealed         bytea,
+    -- What the person deploying wrote ("Apply N changes"); not a commit message.
+    message             text,
     trigger             text NOT NULL DEFAULT 'manual'
                         CHECK (trigger IN ('manual', 'push', 'redeploy', 'rollback', 'upload')),
     -- The deployment this one redeploys or rolls back to.
@@ -474,13 +480,16 @@ CREATE INDEX github_installations_login_idx ON github_installations (lower(accou
 
 -- Single-use, short-lived `state` values for the browser round trips through
 -- GitHub (App creation, installation), bound to the user who started them.
+-- An App creation started from a workspace carries on to installing it there;
+-- `return_to` is the dashboard path to come back to (validated, same origin).
 CREATE TABLE github_flow_states (
     state_hash    bytea PRIMARY KEY,
     kind          text NOT NULL CHECK (kind IN ('manifest', 'install')),
     user_id       id NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     workspace_id  id REFERENCES workspaces (id) ON DELETE CASCADE,
+    return_to     text CHECK (left(return_to, 1) = '/' AND length(return_to) <= 512),
     expires_at    timestamptz NOT NULL,
-    CHECK ((kind = 'install') = (workspace_id IS NOT NULL))
+    CHECK (kind = 'manifest' OR workspace_id IS NOT NULL)
 );
 
 -- Webhook deliveries already processed (replay protection), pruned after 7 days.
@@ -672,3 +681,111 @@ CREATE TABLE provisioned_servers (
     UNIQUE (provider, provider_id)
 );
 CREATE INDEX provisioned_servers_workspace_idx ON provisioned_servers (workspace_id, created_at);
+
+---------------------------------------------------------------------------
+-- Updates: new releases, upgrades of the control plane and of the servers
+---------------------------------------------------------------------------
+
+-- One row. mode: off = no checks; notify = check daily and show it; auto =
+-- also upgrade in the maintenance window. window_days is a bitmask of
+-- weekdays (bit 0 = Monday … bit 6 = Sunday); the window opens window_minute
+-- minutes after midnight in timezone (empty = the server's own) for an hour.
+CREATE TABLE instance_updates (
+    id                  boolean PRIMARY KEY DEFAULT true CHECK (id),
+    mode                text NOT NULL DEFAULT 'notify' CHECK (mode IN ('off', 'notify', 'auto')),
+    channel             text NOT NULL DEFAULT 'stable' CHECK (channel IN ('stable')),
+    window_days         smallint NOT NULL DEFAULT 64 CHECK (window_days BETWEEN 1 AND 127),
+    window_minute       smallint NOT NULL DEFAULT 180 CHECK (window_minute BETWEEN 0 AND 1439),
+    timezone            text NOT NULL DEFAULT '',
+    -- The newest release (signed VERSION file) and when it was last checked.
+    latest_version      text,
+    checked_at          timestamptz,
+    check_error         text,
+    -- The newest version the audit log announced (once per version).
+    notified_version    text,
+    -- Server upgrades that failed before this are retried (rollout resumed).
+    rollout_cleared_at  timestamptz,
+    updated_by          id REFERENCES users (id) ON DELETE SET NULL,
+    updated_at          timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO instance_updates (id) VALUES (true);
+
+-- Upgrades of the control plane requested from the dashboard ("Update now")
+-- or in the maintenance window. install.sh runs them (modula-upgrade unit)
+-- and reports back; log is the tail of its output.
+CREATE TABLE instance_upgrades (
+    id              id PRIMARY KEY,
+    from_version    text NOT NULL,
+    to_version      text NOT NULL,
+    trigger         text NOT NULL CHECK (trigger IN ('manual', 'auto')),
+    status          text NOT NULL DEFAULT 'requested'
+                    CHECK (status IN ('requested', 'succeeded', 'failed', 'rolled_back')),
+    log             text,
+    requested_by    id REFERENCES users (id) ON DELETE SET NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    finished_at     timestamptz
+);
+CREATE INDEX instance_upgrades_created_idx ON instance_upgrades (created_at);
+
+-- Rolling upgrades of the other servers to the control plane's version,
+-- one at a time (updates::rollout).
+CREATE TABLE node_upgrades (
+    id              id PRIMARY KEY,
+    node_id         id NOT NULL REFERENCES nodes (id) ON DELETE CASCADE,
+    from_version    text,
+    to_version      text NOT NULL,
+    status          text NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'succeeded', 'failed')),
+    error           text,
+    started_at      timestamptz NOT NULL DEFAULT now(),
+    finished_at     timestamptz
+);
+CREATE INDEX node_upgrades_node_idx ON node_upgrades (node_id, started_at);
+
+---------------------------------------------------------------------------
+-- Private dashboard: Cloudflare Tunnel + Access in front of the dashboard,
+-- the API and the node endpoint (crate::private)
+---------------------------------------------------------------------------
+
+-- One row. phase: off → enabling → on → disabling → off; a failed enable
+-- rolls back to off (error says why). Every Cloudflare object created is
+-- recorded as soon as it exists, so a rollback or a re-run finds it.
+-- Secrets are sealed with the data key of workspace_id (whose Cloudflare
+-- connection is used), AAD table "private_access".
+CREATE TABLE private_access (
+    id                      boolean PRIMARY KEY DEFAULT true CHECK (id),
+    phase                   text NOT NULL DEFAULT 'off'
+                            CHECK (phase IN ('off', 'enabling', 'on', 'disabling')),
+    workspace_id            id REFERENCES workspaces (id) ON DELETE SET NULL,
+    account_id              text,
+    zone_id                 text,
+    dashboard_host          text,
+    node_host               text,
+    -- Who may sign in at Cloudflare Access.
+    allowed_emails          text[] NOT NULL DEFAULT '{}',
+    allowed_domains         text[] NOT NULL DEFAULT '{}',
+    -- e.g. acme.cloudflareaccess.com (JWT issuer, signing keys).
+    team_domain             text,
+    tunnel_id               text,
+    tunnel_token_sealed     bytea,
+    dashboard_app_id        text,
+    dashboard_aud           text,
+    bypass_app_id           text,
+    node_app_id             text,
+    node_token_id           text,
+    node_token_client_id    text,
+    node_token_secret_sealed bytea,
+    -- The node that runs this control plane (it runs cloudflared).
+    main_node_id            id REFERENCES nodes (id) ON DELETE SET NULL,
+    -- The dashboard's DNS records before the switch, restored on disable.
+    previous_dns            jsonb,
+    dns_switched            boolean NOT NULL DEFAULT false,
+    node_dns_created        boolean NOT NULL DEFAULT false,
+    -- Servers were asked to change (cloudflared, routes); undone on teardown.
+    nodes_configured        boolean NOT NULL DEFAULT false,
+    -- Progress of the current enable/disable, for the dashboard.
+    steps                   jsonb NOT NULL DEFAULT '[]'::jsonb,
+    error                   text,
+    updated_by              id REFERENCES users (id) ON DELETE SET NULL,
+    updated_at              timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO private_access (id) VALUES (true);

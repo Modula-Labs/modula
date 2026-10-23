@@ -12,7 +12,10 @@ databases; always pass `--json` when you parse output), `modula.toml` config
 as code (`config plan`/`config apply`) for settings across services and
 environments, and the HTTP API for the rest. References:
 [cli](references/cli.md), [api](references/api.md),
-[variables](references/variables.md).
+[variables](references/variables.md). `modula guide` prints the guide for
+people and agents (install, create a server, log in, deploy, every
+non-interactive flag, env var, `--json` event and exit code,
+troubleshooting); `modula docs` adds the full command reference.
 
 ## Auth
 
@@ -45,12 +48,47 @@ the user in the dashboard; don't retry or look for workarounds:
   values through an audited Member route; never print them.
 - restoring or deleting a backup, deleting a backup target
 - rotating a database password, creating join tokens or tokens
-- connecting Cloudflare/Hetzner, creating or deleting Hetzner servers (these
-  also cost money: only ever suggest them, via `GET …/servers/suggest`)
+- connecting Cloudflare/Hetzner, creating or deleting Hetzner worker servers
+  from the instance (these also cost money: only ever suggest them, via
+  `GET …/servers/suggest`). Creating a *new main server* with the user's own
+  Hetzner token is a different thing: see above.
 
 Roles matter too (Viewer < Deployer < Member < Admin): variables and deploys
 need Deployer; settings, domains, tunnels and the Database API need Member.
 `403 forbidden` means the role is too low.
+
+## No instance yet: create one (only when the user asks)
+
+`modula server create` builds a whole Modula server on the user's Hetzner
+Cloud account from here: firewall, server, DNS (optionally via Cloudflare),
+install, admin account, and a saved login. **It costs money every month:
+only run it when the user explicitly asks, and confirm location, type and
+the monthly price with them first.** Secrets come from the environment the
+user sets (never ask them to paste tokens into chat, never put secrets in
+flags; the CLI refuses those):
+
+```bash
+# The user exports: HCLOUD_TOKEN (Read & Write), MODULA_ADMIN_PASSWORD (≥10 chars),
+# and CLOUDFLARE_API_TOKEN if the domain is on Cloudflare.
+modula server options --json                  # locations, types in stock, prices, .recommended
+modula server create --provider hetzner --location fsn1 --type cx33 \
+  --name modula-main --domain deploy.example.com --email you@example.com \
+  --ssh-key-file ~/.ssh/id_ed25519.pub --admin-name 'Ada' \
+  --cloudflare-dns --yes --json               # or without --cloudflare-dns: see below
+```
+
+- It never prompts without a terminal or with `--json`: anything missing
+  exits **2** listing every missing flag/variable, before anything is created.
+- `--json` streams one event per line (`step`, `server_created`,
+  `dns_waiting`, `install_failed`, …) and ends with a `result` line.
+- Without `--cloudflare-dns`, the user must add the A record: run it in the
+  background, read the `dns_waiting` event (`name`, `value`) and tell the
+  user right away; it waits up to `--dns-timeout` minutes (30).
+- Exit **0**: ready and logged in (`modula whoami` works). **1**: failed and
+  nothing is left running (by default it deletes the server on failure).
+  **3**: a server exists but isn't fully set up; relay the result's `hint`.
+- Takes ~5–10 minutes; don't kill it midway (that leaves a billing server
+  unless it gets to clean up).
 
 ## Orient first
 

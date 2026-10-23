@@ -769,10 +769,17 @@ pub async fn regenerate_password(
     let sealed =
         env::seal_snapshot(&state.keys, &state.db, environment, live.deployment, &vars).await?;
     drop(vars);
+    // And the variables as written, so the new password isn't a pending change
+    // (and discarding one can't bring the old password back).
+    let raw = env::raw_variables(&state.keys, &state.db, environment, instance).await?;
+    let vars_sealed =
+        env::seal_vars_snapshot(&state.keys, &state.db, environment, live.deployment, &raw).await?;
+    drop(raw);
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE deployments SET env_sealed = $2 WHERE id = $1")
+    sqlx::query("UPDATE deployments SET env_sealed = $2, vars_sealed = $3 WHERE id = $1")
         .bind(live.deployment)
         .bind(&sealed)
+        .bind(&vars_sealed)
         .execute(&mut *tx)
         .await?;
     deploy::bump(&mut *tx, live.node).await?;

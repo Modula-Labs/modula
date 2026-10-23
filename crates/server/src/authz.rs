@@ -85,6 +85,8 @@ pub enum Action {
     EnvironmentConfigRead,
     /// Deploy the services with pending changes in an environment.
     EnvironmentDeploy,
+    /// Revert pending changes to what was last deployed (variables and settings).
+    EnvironmentDiscard,
     DeploymentCreate,
     DeploymentRead,
     DeploymentRemove,
@@ -128,6 +130,18 @@ pub enum Action {
     /// Instance-level, no path parameter: the control plane's own backups.
     SelfBackupRead,
     SelfBackupUpdate,
+    /// Instance-level, no path parameter: versions, update settings and
+    /// upgrade history; check for a new release now.
+    UpdatesRead,
+    /// Change the update mode and maintenance window.
+    UpdatesUpdate,
+    /// Upgrade the instance now (or resume a paused server rollout).
+    UpdatesRun,
+    /// Instance-level, no path parameter: the private dashboard (Cloudflare
+    /// Tunnel + Access) status.
+    PrivateAccessRead,
+    /// Turn the private dashboard on or off.
+    PrivateAccessUpdate,
     /// Delete one of the caller's own API tokens.
     TokenRevoke,
     /// Open a private TCP tunnel to a service instance's running container.
@@ -178,7 +192,8 @@ impl Action {
             | Self::SharedVariablesRead
             | Self::SharedVariablesWrite
             | Self::EnvironmentConfigRead
-            | Self::EnvironmentDeploy => K::Environment,
+            | Self::EnvironmentDeploy
+            | Self::EnvironmentDiscard => K::Environment,
             Self::ServiceDelete => K::Service,
             Self::InstanceRead | Self::InstanceUpdate => K::ServiceInstance,
             Self::VariablesRead | Self::VariablesWrite | Self::DeploymentCreate => {
@@ -203,6 +218,8 @@ impl Action {
             }
             Self::BackupRestore | Self::BackupDelete => K::Backup,
             Self::SelfBackupRead | Self::SelfBackupUpdate => return None,
+            Self::UpdatesRead | Self::UpdatesUpdate | Self::UpdatesRun => return None,
+            Self::PrivateAccessRead | Self::PrivateAccessUpdate => return None,
             Self::TokenRevoke => K::ApiToken,
             Self::TunnelOpen => K::ServiceInstance,
             Self::CloudflareRead | Self::CloudflareConnect | Self::CloudflareDisconnect => {
@@ -248,6 +265,7 @@ impl Action {
             | Self::InstanceUpdate
             | Self::VariableReveal
             | Self::EnvironmentConfigRead
+            | Self::EnvironmentDiscard
             | Self::DomainCreate
             | Self::DomainUpdate
             | Self::DomainDelete
@@ -277,6 +295,8 @@ impl Action {
             | Self::BackupTargetDelete
             | Self::SelfBackupRead
             | Self::SelfBackupUpdate => Role::Admin,
+            Self::UpdatesRead | Self::UpdatesUpdate | Self::UpdatesRun => Role::Admin,
+            Self::PrivateAccessRead | Self::PrivateAccessUpdate => Role::Admin,
             // Account-owned: the role is not consulted.
             Self::TokenRevoke => Role::Admin,
             Self::TunnelOpen => Role::Member,
@@ -326,6 +346,7 @@ impl Action {
             // (never sudo) must be able to pull and plan.
             | Self::EnvironmentConfigRead
             | Self::EnvironmentDeploy
+            | Self::EnvironmentDiscard
             | Self::DeploymentCreate
             | Self::DeploymentRead
             | Self::DeploymentRemove
@@ -344,6 +365,10 @@ impl Action {
             | Self::BackupRestore
             | Self::BackupDelete
             | Self::SelfBackupUpdate => true,
+            Self::UpdatesUpdate | Self::UpdatesRun => true,
+            Self::UpdatesRead => false,
+            Self::PrivateAccessUpdate => true,
+            Self::PrivateAccessRead => false,
             Self::BackupTargetList
             | Self::BackupTargetCreate
             | Self::BackupRead
@@ -631,6 +656,11 @@ mod tests {
             Action::NodeJoinTokenCreate,
             Action::NodeRevoke,
             Action::GithubAppCreate,
+            Action::UpdatesRead,
+            Action::UpdatesUpdate,
+            Action::UpdatesRun,
+            Action::PrivateAccessRead,
+            Action::PrivateAccessUpdate,
         ] {
             assert_eq!(a.owner(), OwnerKind::Instance);
         }

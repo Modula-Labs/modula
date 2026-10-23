@@ -158,6 +158,21 @@ pub async fn update_shared_variables(
     .map(Json)
 }
 
+/// Set and delete an instance's variables as `actor`, exactly like
+/// `PATCH /api/service-instances/{id}/variables` (discarding pending changes).
+pub(crate) async fn apply_to_instance(
+    state: &AppState,
+    actor: &Actor,
+    grant: &Grant,
+    meta: &RequestMeta,
+    instance: Id,
+    req: UpdateVariables,
+) -> AppResult<()> {
+    let scope = Scope::of_instance(state, instance).await?;
+    update(state, actor, grant, meta, scope, req).await?;
+    Ok(())
+}
+
 fn validate(req: &UpdateVariables) -> AppResult<()> {
     for (k, v) in &req.set {
         env::validate_name(k)?;

@@ -282,8 +282,29 @@ pub async fn update_instance(
     Json(req): Json<UpdateInstance>,
 ) -> AppResult<Json<Instance>> {
     let id = grant.id();
-    req.config.validate_for_instance()?;
-    let config = serde_json::to_value(&req.config).map_err(anyhow::Error::from)?;
+    set_config(
+        &state,
+        &actor,
+        grant.workspace_id()?,
+        &meta,
+        id,
+        &req.config,
+    )
+    .await?;
+    load_instance(&state, id).await.map(Json)
+}
+
+/// Replace an instance's settings, recording which fields changed.
+pub(crate) async fn set_config(
+    state: &AppState,
+    actor: &Actor,
+    workspace: Id,
+    meta: &RequestMeta,
+    id: Id,
+    new: &ServiceConfig,
+) -> AppResult<()> {
+    new.validate_for_instance()?;
+    let config = serde_json::to_value(new).map_err(anyhow::Error::from)?;
     let mut tx = state.db.begin().await?;
     let (env, service, old): (Id, Id, serde_json::Value) = sqlx::query_as(
         "SELECT environment_id, service_id, config FROM service_instances WHERE id = $1 FOR UPDATE",
@@ -298,13 +319,13 @@ pub async fn update_instance(
         .await?;
     let changes = activity::config_changes(&old, &config);
     activity::record(&mut tx, env, Some(service), Some(actor.user_id), &changes).await?;
-    Entry::new("service_instance.update", &meta)
-        .actor(&actor)
-        .workspace(grant.workspace_id()?)
+    Entry::new("service_instance.update", meta)
+        .actor(actor)
+        .workspace(workspace)
         .target("service_instance", id)
-        .metadata(json!({ "source": req.config.source_label() }))
+        .metadata(json!({ "source": new.source_label() }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
-    load_instance(&state, id).await.map(Json)
+    Ok(())
 }

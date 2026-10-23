@@ -41,6 +41,14 @@ export interface CanvasService {
   dependsOn?: string[];
   /** Mount path of the attached volume. */
   volume?: string | null;
+  /** Variables and settings changed since the last deployment. */
+  pendingChanges?: number;
+}
+
+/** Where a right-click happened: viewport pixels and canvas coordinates. */
+export interface CanvasPoint {
+  screen: { x: number; y: number };
+  flow: { x: number; y: number };
 }
 
 type ServiceNode = Node<{ service: CanvasService; selected: boolean }, "service">;
@@ -48,6 +56,7 @@ type ServiceNode = Node<{ service: CanvasService; selected: boolean }, "service"
 function ServiceCard({ data }: NodeProps<ServiceNode>) {
   const { service, selected } = data;
   const state = serviceState(service.status);
+  const pending = service.pendingChanges ?? 0;
   return (
     <div
       className={clsx(
@@ -58,11 +67,21 @@ function ServiceCard({ data }: NodeProps<ServiceNode>) {
       <Handle type="target" position={Position.Left} className="!opacity-0" />
       <div className="flex items-center gap-2.5">
         <ServiceIcon stack={service.stack} image={service.image} repo={service.repo} />
-        <span className="truncate text-base font-semibold">{service.name}</span>
+        <span className="min-w-0 flex-1 truncate text-base font-semibold">{service.name}</span>
+        {pending > 0 ? (
+          <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground">Edited</span>
+        ) : null}
       </div>
       <div className="mt-1 truncate text-sm text-muted-foreground">{service.domain ?? service.repo ?? " "}</div>
       <div className="mt-auto flex items-center justify-between gap-2">
-        <StatusDot tone={state.tone}>{state.label}</StatusDot>
+        <span className="flex min-w-0 items-center gap-2 text-sm">
+          <StatusDot tone={state.tone}>{state.label}</StatusDot>
+          {pending > 0 ? (
+            <span className="truncate text-muted-foreground">
+              · {pending} {pending === 1 ? "Change" : "Changes"}
+            </span>
+          ) : null}
+        </span>
         {service.volume ? (
           <span
             title={`Volume mounted at ${service.volume}`}
@@ -149,16 +168,34 @@ function CanvasInner({
   services,
   selected,
   onSelect,
+  onPaneMenu,
+  onServiceMenu,
+  onViewportChange,
+  placeNew,
 }: {
   projectId: string;
   services: CanvasService[];
   selected?: string;
   onSelect: (id: string | undefined) => void;
+  /** Right-click on empty canvas. */
+  onPaneMenu?: (at: CanvasPoint) => void;
+  /** Right-click on a service card. */
+  onServiceMenu?: (id: string, at: CanvasPoint) => void;
+  /** Pan or zoom started (menus close). */
+  onViewportChange?: () => void;
+  /** Canvas point where the next new service's card goes (centered). */
+  placeNew?: { x: number; y: number } | null;
 }) {
   const [nodes, setNodes, onNodesChange] = useNodesState<ServiceNode>([]);
   const flow = useReactFlow();
   const box = useRef<HTMLDivElement>(null);
   const [hovered, setHovered] = useState<string>();
+  const placeRef = useRef(placeNew);
+  placeRef.current = placeNew;
+  const point = (e: { clientX: number; clientY: number }): CanvasPoint => ({
+    screen: { x: e.clientX, y: e.clientY },
+    flow: flow.screenToFlowPosition({ x: e.clientX, y: e.clientY }),
+  });
 
   const edges = useMemo<DependencyEdge[]>(
     () =>
@@ -197,14 +234,27 @@ function CanvasInner({
   useEffect(() => {
     const saved = savedPositions(projectId);
     const layout = layeredLayout(services);
-    setNodes((prev) =>
-      services.map((s) => ({
-        id: s.id,
-        type: "service" as const,
-        position: prev.find((n) => n.id === s.id)?.position ?? saved[s.id] ?? layout[s.id] ?? { x: 0, y: 0 },
-        data: { service: s, selected: s.id === selected },
-      })),
-    );
+    setNodes((prev) => {
+      // A service added from the canvas menu lands where it was asked for.
+      const place = placeRef.current;
+      let placed = false;
+      const next = services.map((s) => {
+        let position = prev.find((n) => n.id === s.id)?.position ?? saved[s.id];
+        if (!position && place && prev.length > 0) {
+          position = { x: place.x - 144, y: place.y - 72 };
+          saved[s.id] = position;
+          placed = true;
+        }
+        return {
+          id: s.id,
+          type: "service" as const,
+          position: position ?? layout[s.id] ?? { x: 0, y: 0 },
+          data: { service: s, selected: s.id === selected },
+        };
+      });
+      if (placed) save(`mc.canvas.${projectId}`, JSON.stringify(saved));
+      return next;
+    });
   }, [projectId, services, selected, setNodes]);
 
   return (
@@ -219,6 +269,17 @@ function CanvasInner({
         onNodesChange={onNodesChange}
         onNodeClick={(_, n) => onSelect(n.id)}
         onPaneClick={() => onSelect(undefined)}
+        onPaneContextMenu={(e) => {
+          if (!onPaneMenu) return;
+          e.preventDefault();
+          onPaneMenu(point(e));
+        }}
+        onNodeContextMenu={(e, n) => {
+          if (!onServiceMenu) return;
+          e.preventDefault();
+          onServiceMenu(n.id, point(e));
+        }}
+        onMoveStart={() => onViewportChange?.()}
         onNodeDragStop={() => {
           const map = Object.fromEntries(flow.getNodes().map((n) => [n.id, n.position]));
           save(`mc.canvas.${projectId}`, JSON.stringify(map));

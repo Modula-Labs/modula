@@ -394,7 +394,12 @@ async fn database_tab_runs_on_the_node(pool: PgPool) {
     .await;
     assert!(rt.running_deployments().contains(&deployment));
     // The app referencing the database has a pending change to deploy.
-    assert!(pending_services().await.contains(&"web".to_owned()));
+    let pending = pending_services().await;
+    assert!(pending.contains(&"web".to_owned()));
+    assert!(
+        !pending.iter().any(|s| s != "web"),
+        "the database's own password is part of what's deployed: {pending:?}"
+    );
     let audit: Vec<String> = sqlx::query_scalar(
         "SELECT action FROM audit_log WHERE action LIKE 'database.%' ORDER BY id",
     )

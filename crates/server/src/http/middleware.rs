@@ -67,7 +67,8 @@ pub async fn security_headers(State(state): State<AppState>, req: Request, next:
         "content-security-policy",
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: https://avatars.githubusercontent.com; font-src 'self'; \
-         connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; \
+         connect-src 'self'; object-src 'none'; base-uri 'none'; \
+         form-action 'self' https://github.com; \
          frame-ancestors 'none'",
     );
     set(h, "x-content-type-options", "nosniff");

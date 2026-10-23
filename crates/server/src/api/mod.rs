@@ -14,6 +14,7 @@ pub mod projects;
 pub mod services;
 pub mod storage;
 pub mod tokens;
+pub mod updates;
 pub mod uploads;
 pub mod variables;
 pub mod workspaces;
@@ -76,6 +77,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/environments/{environment_id}/config", Resource(Action::EnvironmentConfigRead), env_config::get)
         .get("/api/environments/{environment_id}/pending", Resource(Action::SharedVariablesRead), activity::pending)
         .post("/api/environments/{environment_id}/deploy", Resource(Action::EnvironmentDeploy), activity::deploy)
+        .post("/api/environments/{environment_id}/discard", Resource(Action::EnvironmentDiscard), activity::discard)
         // Services, per-environment config, variables
         .post("/api/projects/{project_id}/services", Resource(Action::ServiceCreate), services::create)
         .delete("/api/services/{service_id}", Resource(Action::ServiceDelete), services::delete)
@@ -128,6 +130,15 @@ pub fn routes(state: AppState) -> ApiRouter {
         .delete("/api/backups/{backup_id}", Resource(Action::BackupDelete), backups::delete)
         .get("/api/instance/self-backup", Instance(Action::SelfBackupRead), backups::get_self_backup)
         .put("/api/instance/self-backup", Instance(Action::SelfBackupUpdate), backups::put_self_backup)
+        // Updates: versions, mode and maintenance window; "Update now" hands the upgrade to install.sh (modula-upgrade unit)
+        .get("/api/instance/updates", Instance(Action::UpdatesRead), updates::get)
+        .put("/api/instance/updates", Instance(Action::UpdatesUpdate), updates::put)
+        .post("/api/instance/updates/check", Instance(Action::UpdatesRead), updates::check)
+        .post("/api/instance/updates/run", Instance(Action::UpdatesRun), updates::run)
+        // Private dashboard (Cloudflare Tunnel + Access); see crate::private
+        .get("/api/instance/private-access", Instance(Action::PrivateAccessRead), crate::private::api::get)
+        .get("/api/instance/private-access/check", Instance(Action::PrivateAccessRead), crate::private::api::check)
+        .put("/api/instance/private-access", Instance(Action::PrivateAccessUpdate), crate::private::api::put)
         // Cloudflare integration (token is write-only; see integrations/cloudflare)
         .get("/api/workspaces/{workspace_id}/integrations/cloudflare", Resource(Action::CloudflareRead), cloudflare::status)
         .post("/api/workspaces/{workspace_id}/integrations/cloudflare/verify", Resource(Action::CloudflareConnect), cloudflare::verify)
@@ -179,6 +190,8 @@ pub fn routes(state: AppState) -> ApiRouter {
         .post("/api/workspaces/{workspace_id}/github/install", Resource(Action::GithubInstall), github::install)
         .get("/api/github/install/callback", Authenticated, github::install_callback)
         .get("/api/workspaces/{workspace_id}/github/repos", Resource(Action::GithubRepoList), github::repos)
+        .get("/api/workspaces/{workspace_id}/github/branches", Resource(Action::GithubRepoList), github::branches)
+        .get("/api/workspaces/{workspace_id}/github/installations", Resource(Action::GithubRepoList), github::installations)
         // Authenticated by HMAC signature; the only path exempt from the Origin check.
         .post(github::WEBHOOK_PATH, Public, github::webhook)
 }
