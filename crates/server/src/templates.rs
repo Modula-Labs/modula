@@ -81,7 +81,7 @@ pub const CATALOG: &[Template] = &[
         connect: &urls("DATABASE_URL", "DATABASE_PUBLIC_URL"),
         port: 5432,
         mount_path: "/var/lib/postgresql/data",
-        start_command: Some(&["/bin/sh", "-c", POSTGRES_START]),
+        start_command: Some(&["/bin/sh", "-c", POSTGRES_START]), // no-shell: allow (fixed script, no user input)
         variables: &[
             ("POSTGRES_USER", "postgres"),
             ("POSTGRES_PASSWORD", SECRET),
@@ -143,7 +143,7 @@ pub const CATALOG: &[Template] = &[
         // The password comes from the environment, so a shell expands it.
         start_command: Some(&[
             "/bin/sh",
-            "-c",
+            "-c", // no-shell: allow (fixed script; the password comes from env)
             "exec redis-server --requirepass \"$REDIS_PASSWORD\" --appendonly yes --dir /data",
         ]),
         variables: &[
