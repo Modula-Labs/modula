@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::error::AppResult;
+use crate::github;
 use crate::keyring::Keyring;
 use crate::nodes::Hub;
 use crate::pki::Pki;
@@ -27,11 +28,13 @@ pub struct Inner {
     /// Cancelled when the server starts shutting down; long-lived streams
     /// (node sessions, log follows) end on it so shutdown stays fast.
     pub shutdown: CancellationToken,
+    pub github: github::Client,
     pki: tokio::sync::OnceCell<Pki>,
 }
 
 impl AppState {
     pub fn new(db: PgPool, cfg: Config, keys: Keyring, limiter: RateLimiter) -> Self {
+        let github = github::Client::new(cfg.github_api.clone()).expect("HTTP client");
         Self(Arc::new(Inner {
             db,
             cfg,
@@ -40,6 +43,7 @@ impl AppState {
             jobs_notify: Notify::new(),
             hub: Hub::default(),
             shutdown: CancellationToken::new(),
+            github,
             pki: tokio::sync::OnceCell::new(),
         }))
     }

@@ -3,7 +3,13 @@
 # then join the control plane once and run modula-node.
 set -eu
 
-dockerd-entrypoint.sh dockerd >/var/log/dockerd.log 2>&1 &
+# Nested containers must not exceed this container's MTU (Docker Desktop uses
+# less than 1500), and Docker Desktop's resolver hands out IPv6-only answers.
+mtu=$(cat /sys/class/net/eth0/mtu)
+host_ip=$(getent ahostsv4 host.docker.internal | awk 'NR==1{print $1}')
+[ -n "$host_ip" ] && echo "$host_ip host.docker.internal" >>/etc/hosts
+echo "nameserver 1.1.1.1" >/etc/resolv.conf
+dockerd-entrypoint.sh dockerd --mtu "$mtu" --dns 1.1.1.1 >/var/log/dockerd.log 2>&1 &
 i=0
 until docker info >/dev/null 2>&1; do
   i=$((i + 1))

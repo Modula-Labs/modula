@@ -52,6 +52,8 @@ pub trait Runtime: Send + Sync + 'static {
     /// Create (not start) a container for a workload; returns its id.
     async fn create(&self, workload: &Workload) -> anyhow::Result<String>;
     async fn start(&self, container_id: &str) -> anyhow::Result<()>;
+    /// Stop gracefully and start again (same container, same config).
+    async fn restart(&self, container_id: &str) -> anyhow::Result<()>;
     /// Stop gracefully (SIGTERM, then SIGKILL after a grace period) and delete.
     async fn remove(&self, container_id: &str) -> anyhow::Result<()>;
 

@@ -7,6 +7,7 @@
 
 use anyhow::{Context, anyhow, bail};
 use modula_crypto::envelope::{FieldAad, INSTANCE_SCOPE};
+use modula_id::Id;
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateSigningRequestParams, DistinguishedName,
     DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType, SerialNumber,
@@ -14,7 +15,6 @@ use rcgen::{
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
-use uuid::Uuid;
 
 use crate::keyring::Keyring;
 
@@ -160,7 +160,7 @@ impl Pki {
 
     /// Issue a node client certificate. Only the CSR's public key is used; every
     /// other field (names, usages, validity) is set here, never by the requester.
-    pub fn issue_node_cert(&self, node_id: Uuid, csr_der: &[u8]) -> anyhow::Result<Issued> {
+    pub fn issue_node_cert(&self, node_id: Id, csr_der: &[u8]) -> anyhow::Result<Issued> {
         let csr = CertificateSigningRequestParams::from_der(&csr_der.to_vec().into())
             .map_err(|e| anyhow!("invalid CSR: {e}"))?;
         let now = OffsetDateTime::now_utc();
@@ -239,7 +239,7 @@ pub fn pem(label: &str, der: &[u8]) -> String {
 }
 
 /// Node identity from a verified client certificate: (node id, serial hex).
-pub fn node_identity(leaf_der: &[u8]) -> anyhow::Result<(Uuid, String)> {
+pub fn node_identity(leaf_der: &[u8]) -> anyhow::Result<(Id, String)> {
     use x509_parser::prelude::*;
     let (_, cert) =
         X509Certificate::from_der(leaf_der).map_err(|e| anyhow!("bad client cert: {e}"))?;
@@ -258,7 +258,7 @@ pub fn node_identity(leaf_der: &[u8]) -> anyhow::Result<(Uuid, String)> {
     if ids.next().is_some() {
         bail!("client cert names more than one node");
     }
-    Ok((Uuid::parse_str(id)?, serial_hex))
+    Ok((id.parse::<Id>()?, serial_hex))
 }
 
 /// A throwaway CA for unit tests (no database).
@@ -300,14 +300,14 @@ mod tests {
     #[test]
     fn node_cert_ignores_requested_names() {
         let p = pki();
-        let id = Uuid::now_v7();
+        let id = Id::new();
         // The CSR asks for a server name and a different node URI; neither is honoured.
         let issued = p
             .issue_node_cert(
                 id,
                 &csr(vec![
                     "evil.example.com".into(),
-                    format!("{NODE_URI_PREFIX}{}", Uuid::nil()),
+                    format!("{NODE_URI_PREFIX}{}", Id::ZERO),
                 ]),
             )
             .unwrap();
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn rejects_garbage_csr_and_foreign_certs() {
         let p = pki();
-        assert!(p.issue_node_cert(Uuid::now_v7(), b"not a csr").is_err());
+        assert!(p.issue_node_cert(Id::new(), b"not a csr").is_err());
         let cert = p
             .issue_server_cert(&["localhost".into(), "127.0.0.1".into()])
             .unwrap();

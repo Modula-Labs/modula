@@ -6,11 +6,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use modula_id::Id;
 use modula_proto::node::v1 as pb;
 use pb::node_client::NodeClient;
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
-use uuid::Uuid;
 
 use crate::identity::{Identity, Meta, pem};
 use crate::tls::{Fingerprint, PinnedRoot};
@@ -84,7 +84,7 @@ pub async fn join(args: JoinArgs<'_>) -> anyhow::Result<Identity> {
     if Fingerprint::of(&resp.root_der) != pin {
         bail!("the server returned a different root certificate than the pinned one");
     }
-    let node_id: Uuid = resp
+    let node_id: Id = resp
         .node_id
         .parse()
         .context("server sent an invalid node id")?;

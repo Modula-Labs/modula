@@ -3,9 +3,10 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { CopyButton } from "@/components/ui/CopyButton";
 import { Plus, Trash, World } from "@/components/ui/icons";
-import { Field, Input, Select } from "@/components/ui/Input";
+import { Field, Input, Select, Textarea } from "@/components/ui/Input";
 import { Alert, Badge } from "@/components/ui/misc";
-import { api, type Instance, type RestartPolicy, type ServiceConfig } from "@/lib/api";
+import { Segmented } from "@/components/ui/Tabs";
+import { api, type Builder, type Instance, type RestartPolicy, type ServiceConfig } from "@/lib/api";
 
 function Section({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
   return (
@@ -33,7 +34,16 @@ export function joinArgs(a: string[] | undefined): string {
 }
 
 interface Form {
+  kind: "image" | "repo";
   image: string;
+  repo: string;
+  branch: string;
+  rootDir: string;
+  builder: Builder;
+  dockerfilePath: string;
+  buildCommand: string;
+  autoDeploy: boolean;
+  watchPaths: string;
   startCommand: string;
   port: string;
   healthcheckPath: string;
@@ -41,10 +51,20 @@ interface Form {
   restartPolicy: RestartPolicy;
   memoryMb: string;
   cpuMillis: string;
+  replicas: string;
 }
 
-const toForm = (c: ServiceConfig): Form => ({
-  image: c.source.image,
+export const toForm = (c: ServiceConfig): Form => ({
+  kind: c.source.type,
+  image: c.source.type === "image" ? c.source.image : "",
+  repo: c.source.type === "repo" ? c.source.repo : "",
+  branch: c.source.type === "repo" ? c.source.branch : "main",
+  rootDir: c.source.type === "repo" ? (c.source.rootDir ?? "") : "",
+  builder: c.builder ?? "railpack",
+  dockerfilePath: c.dockerfilePath ?? "",
+  buildCommand: c.buildCommand ?? "",
+  autoDeploy: c.autoDeploy ?? true,
+  watchPaths: (c.watchPaths ?? []).join("\n"),
   startCommand: joinArgs(c.startCommand),
   port: String(c.port),
   healthcheckPath: c.healthcheckPath ?? "",
@@ -52,20 +72,36 @@ const toForm = (c: ServiceConfig): Form => ({
   restartPolicy: c.restartPolicy,
   memoryMb: c.memoryMb ? String(c.memoryMb) : "",
   cpuMillis: c.cpuMillis ? String(c.cpuMillis) : "",
+  replicas: String(c.replicas ?? 1),
 });
 
 const optNum = (s: string) => (s.trim() ? Number(s) : undefined);
 
-const fromForm = (f: Form): ServiceConfig => ({
-  source: { type: "image", image: f.image.trim() },
-  startCommand: f.startCommand.trim() ? splitArgs(f.startCommand) : undefined,
-  port: Number(f.port),
-  healthcheckPath: f.healthcheckPath.trim() || undefined,
-  healthcheckTimeoutSecs: Number(f.healthcheckTimeoutSecs) || 300,
-  restartPolicy: f.restartPolicy,
-  memoryMb: optNum(f.memoryMb),
-  cpuMillis: optNum(f.cpuMillis),
-});
+/** The exact config shape the server accepts; build fields exist only for repo sources. */
+export const toConfig = (f: Form): ServiceConfig => {
+  const common = {
+    startCommand: f.startCommand.trim() ? splitArgs(f.startCommand) : undefined,
+    port: Number(f.port),
+    healthcheckPath: f.healthcheckPath.trim() || undefined,
+    healthcheckTimeoutSecs: Number(f.healthcheckTimeoutSecs) || 300,
+    restartPolicy: f.restartPolicy,
+    memoryMb: optNum(f.memoryMb),
+    cpuMillis: optNum(f.cpuMillis),
+    // Multi-server replicas need private networking; stored but pinned to 1 for now.
+    replicas: Math.max(1, Math.floor(Number(f.replicas)) || 1),
+  };
+  if (f.kind === "image") return { source: { type: "image", image: f.image.trim() }, ...common };
+  const watchPaths = f.watchPaths.split("\n").map((l) => l.trim()).filter(Boolean);
+  return {
+    source: { type: "repo", repo: f.repo.trim(), branch: f.branch.trim() || "main", rootDir: f.rootDir.trim() || undefined },
+    builder: f.builder,
+    dockerfilePath: f.builder === "dockerfile" ? f.dockerfilePath.trim() || undefined : undefined,
+    buildCommand: f.buildCommand.trim() || undefined,
+    autoDeploy: f.autoDeploy,
+    watchPaths: watchPaths.length ? watchPaths : undefined,
+    ...common,
+  };
+};
 
 export function SettingsTab({
   instance,
@@ -81,11 +117,11 @@ export function SettingsTab({
   const qc = useQueryClient();
   const [form, setForm] = useState(() => toForm(instance.config));
   useEffect(() => setForm(toForm(instance.config)), [instance.config]);
-  const dirty = JSON.stringify(fromForm(form)) !== JSON.stringify(fromForm(toForm(instance.config)));
+  const dirty = JSON.stringify(toConfig(form)) !== JSON.stringify(toConfig(toForm(instance.config)));
   const set = <K extends keyof Form>(k: K) => (e: { target: { value: string } }) => setForm((f) => ({ ...f, [k]: e.target.value as Form[K] }));
 
   const save = useMutation({
-    mutationFn: () => api.updateInstance(instance.id, fromForm(form)),
+    mutationFn: () => api.updateInstance(instance.id, toConfig(form)),
     onSuccess: (i) => qc.setQueryData(["instance", instance.id], i),
   });
   const deploy = useMutation({
@@ -102,9 +138,64 @@ export function SettingsTab({
 
   return (
     <div className="flex flex-col pb-20">
-      <Section title="Source" description="The image every deploy pulls.">
-        <Field label="Image">{(p) => <Input {...p} mono disabled={!canEdit} value={form.image} onChange={set("image")} />}</Field>
-      </Section>
+      {form.kind === "repo" ? (
+        <Section title="Source" description="The repository every deploy builds from.">
+          <Field label="Repository">{(p) => <Input {...p} mono disabled={!canEdit} value={form.repo} onChange={set("repo")} />}</Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Branch">{(p) => <Input {...p} mono disabled={!canEdit} value={form.branch} onChange={set("branch")} />}</Field>
+            <Field label="Root directory" hint="For monorepos.">
+              {(p) => <Input {...p} mono disabled={!canEdit} placeholder="/" value={form.rootDir} onChange={set("rootDir")} />}
+            </Field>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <div className="text-sm font-medium">Builder</div>
+            <div className={canEdit ? undefined : "pointer-events-none opacity-50"}>
+              <Segmented
+                label="Builder"
+                value={form.builder}
+                onChange={(builder) => setForm((f) => ({ ...f, builder }))}
+                options={[
+                  { value: "railpack", label: "Railpack" },
+                  { value: "dockerfile", label: "Dockerfile" },
+                ]}
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {form.builder === "railpack" ? "Detects your language and builds without a Dockerfile." : "Builds with a Dockerfile from the repository."}
+            </p>
+          </div>
+          {form.builder === "dockerfile" ? (
+            <Field label="Dockerfile path" hint="Relative to the root directory. Defaults to Dockerfile.">
+              {(p) => <Input {...p} mono disabled={!canEdit} placeholder="Dockerfile" value={form.dockerfilePath} onChange={set("dockerfilePath")} />}
+            </Field>
+          ) : null}
+          <Field label="Build command" hint="Leave empty to use the detected default.">
+            {(p) => <Input {...p} mono disabled={!canEdit} placeholder="npm run build" value={form.buildCommand} onChange={set("buildCommand")} />}
+          </Field>
+          <label className="flex items-start gap-2.5 text-sm">
+            <input
+              type="checkbox"
+              disabled={!canEdit}
+              checked={form.autoDeploy}
+              onChange={(e) => setForm((f) => ({ ...f, autoDeploy: e.target.checked }))}
+              className="mt-0.5 size-4 accent-foreground"
+            />
+            <span>
+              <span className="font-medium">Auto-deploy</span>
+              <span className="block text-xs text-muted-foreground">Deploy automatically when the branch gets new commits.</span>
+            </span>
+          </label>
+          <Field label="Watch paths" hint="One glob per line. Only matching changes trigger a deploy. Empty means any change.">
+            {(p) => (
+              <Textarea {...p} disabled={!canEdit} placeholder={"src/**\n!docs/**"} value={form.watchPaths} onChange={set("watchPaths")} />
+            )}
+          </Field>
+        </Section>
+      ) : (
+        <Section title="Source" description="The image every deploy pulls.">
+          <Field label="Image">{(p) => <Input {...p} mono disabled={!canEdit} value={form.image} onChange={set("image")} />}</Field>
+        </Section>
+      )}
 
       <Section title="Networking" description="Public hostnames on your apps domain. HTTPS is set up automatically.">
         <Domains instanceId={instance.id} canEdit={canEdit} />
@@ -114,7 +205,7 @@ export function SettingsTab({
       </Section>
 
       <Section title="Deploy">
-        <Field label="Start command" hint="Leave empty to use the image's default. Never run through a shell.">
+        <Field label="Start command" hint="Leave empty to use the default. Never run through a shell.">
           {(p) => <Input {...p} mono disabled={!canEdit} placeholder="node server.js" value={form.startCommand} onChange={set("startCommand")} />}
         </Field>
         <div className="grid grid-cols-[1fr_160px] gap-3">
@@ -145,6 +236,9 @@ export function SettingsTab({
             {(p) => <Input {...p} inputMode="numeric" disabled={!canEdit} placeholder="No limit" value={form.cpuMillis} onChange={set("cpuMillis")} />}
           </Field>
         </div>
+        <Field label="Replicas" hint="Each replica runs on a different server. On one server, raise CPU and memory instead." error={Number(form.replicas) > 1 ? "Multiple replicas need private networking between servers (coming soon)" : null}>
+          {(p) => <Input {...p} type="number" min={1} max={1} inputMode="numeric" disabled={!canEdit} value={form.replicas} onChange={set("replicas")} />}
+        </Field>
       </Section>
 
       {canDelete ? (
@@ -181,7 +275,7 @@ export function SettingsTab({
                 <Button size="sm" variant="ghost" onClick={() => setForm(toForm(instance.config))}>
                   Discard
                 </Button>
-                <Button size="sm" variant="secondary" loading={save.isPending} onClick={() => save.mutate()}>
+                <Button size="sm" variant="secondary" loading={save.isPending} disabled={Number(form.replicas) > 1} onClick={() => save.mutate()}>
                   Save
                 </Button>
               </>

@@ -9,6 +9,7 @@ use axum::extract::connect_info::MockConnectInfo;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use modula_crypto::envelope::MasterKey;
+use modula_id::Id;
 use modula_server::config::Config;
 use modula_server::keyring::Keyring;
 use modula_server::ratelimit::RateLimiter;
@@ -17,7 +18,6 @@ use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tower::ServiceExt;
-use uuid::Uuid;
 
 pub const ORIGIN: &str = "https://cloud.test";
 pub const COOKIE: &str = "__Host-modula_session";
@@ -38,13 +38,18 @@ pub fn config() -> Config {
         edge_tls: modula_server::config::EdgeTls::Acme,
         acme_email: None,
         release_dir: None,
+        github_api: "http://127.0.0.1:9".parse().unwrap(),
     }
 }
 
 pub fn state(pool: PgPool) -> AppState {
+    state_with(pool, config())
+}
+
+pub fn state_with(pool: PgPool, cfg: Config) -> AppState {
     AppState::new(
         pool,
-        config(),
+        cfg,
         Keyring::new(MasterKey::generate().unwrap()),
         RateLimiter::memory(),
     )
@@ -57,7 +62,11 @@ pub struct TestApp {
 
 impl TestApp {
     pub fn new(pool: PgPool) -> Self {
-        let state = state(pool);
+        Self::with_config(pool, config())
+    }
+
+    pub fn with_config(pool: PgPool, cfg: Config) -> Self {
+        let state = state_with(pool, cfg);
         let router = modula_server::http::app(state.clone())
             .layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, 1], 4000))));
         Self { state, router }
@@ -146,8 +155,8 @@ impl TestApp {
     }
 
     /// Insert a user directly and log them in.
-    pub async fn user(&self, email: &str) -> (Uuid, String) {
-        let id = Uuid::now_v7();
+    pub async fn user(&self, email: &str) -> (Id, String) {
+        let id = Id::new();
         let hash = modula_crypto::password::hash(PASSWORD).unwrap();
         sqlx::query("INSERT INTO users (id, email, name, password_hash) VALUES ($1, $2, 'U', $3)")
             .bind(id)
@@ -172,7 +181,7 @@ impl TestApp {
         r.session_cookie().unwrap()
     }
 
-    pub async fn create_workspace(&self, cookie: &str, name: &str) -> Uuid {
+    pub async fn create_workspace(&self, cookie: &str, name: &str) -> Id {
         let r = self
             .call(
                 Method::POST,
@@ -211,7 +220,7 @@ impl TestApp {
         self.send(b, None, body).await
     }
 
-    pub async fn add_member(&self, workspace: Uuid, user: Uuid, role: &str) {
+    pub async fn add_member(&self, workspace: Id, user: Id, role: &str) {
         sqlx::query(
             "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)",
         )
@@ -271,27 +280,27 @@ impl Resp {
 /// One of every resource, owned by `workspace`, inserted directly.
 #[derive(Debug, Clone, Copy)]
 pub struct Chain {
-    pub project: Uuid,
-    pub environment: Uuid,
-    pub service: Uuid,
-    pub instance: Uuid,
-    pub variable: Uuid,
-    pub deployment: Uuid,
-    pub domain: Uuid,
-    pub node: Uuid,
+    pub project: Id,
+    pub environment: Id,
+    pub service: Id,
+    pub instance: Id,
+    pub variable: Id,
+    pub deployment: Id,
+    pub domain: Id,
+    pub node: Id,
 }
 
 impl TestApp {
-    pub async fn seed_chain(&self, workspace: Uuid) -> Chain {
+    pub async fn seed_chain(&self, workspace: Id) -> Chain {
         let c = Chain {
-            project: Uuid::now_v7(),
-            environment: Uuid::now_v7(),
-            service: Uuid::now_v7(),
-            instance: Uuid::now_v7(),
-            variable: Uuid::now_v7(),
-            deployment: Uuid::now_v7(),
-            domain: Uuid::now_v7(),
-            node: Uuid::now_v7(),
+            project: Id::new(),
+            environment: Id::new(),
+            service: Id::new(),
+            instance: Id::new(),
+            variable: Id::new(),
+            deployment: Id::new(),
+            domain: Id::new(),
+            node: Id::new(),
         };
         let db = self.db();
         sqlx::query("INSERT INTO projects (id, workspace_id, name) VALUES ($1, $2, 'p')")

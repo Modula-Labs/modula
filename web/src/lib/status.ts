@@ -4,6 +4,7 @@ import type { DeploymentStatus } from "./api";
 /** How a deployment status reads in badges. */
 export const deploymentBadge: Record<DeploymentStatus, { label: string; tone: Tone }> = {
   queued: { label: "Queued", tone: "neutral" },
+  building: { label: "Building", tone: "strong" },
   deploying: { label: "Deploying", tone: "strong" },
   active: { label: "Active", tone: "success" },
   failed: { label: "Failed", tone: "danger" },
@@ -20,6 +21,8 @@ export function serviceState(status: DeploymentStatus | null): {
   switch (status) {
     case "active":
       return { label: "Online", tone: "success" };
+    case "building":
+      return { label: "Building", tone: "warn" };
     case "deploying":
     case "queued":
       return { label: "Deploying", tone: "warn" };
@@ -32,4 +35,4 @@ export function serviceState(status: DeploymentStatus | null): {
   }
 }
 
-export const isLive = (s: DeploymentStatus) => s === "queued" || s === "deploying";
+export const isLive = (s: DeploymentStatus) => s === "queued" || s === "building" || s === "deploying";

@@ -73,6 +73,12 @@ message NodeInfo {
   uint32 cpus = 4;
   uint64 memory_bytes = 5;
   string runtime_version = 6;
+  // Where the server runs, from its cloud's metadata service when it has one
+  // (e.g. "hetzner" / "fsn1-dc14"), else empty.
+  string cloud_provider = 7;
+  string cloud_region = 8;
+  // The nearest Cloudflare edge (IATA code), a fallback for the location.
+  string edge_colo = 9;
 }
 
 message Heartbeat {
@@ -81,6 +87,9 @@ message Heartbeat {
 
 enum DeploymentPhase {
   PHASE_UNSPECIFIED = 0;
+  BUILDING = 9;
+  // The build finished; `message` carries the image id (sha256:…).
+  BUILT = 10;
   PULLING = 1;
   CREATING = 2;
   STARTING = 3;
@@ -97,6 +106,21 @@ message DeploymentEvent {
   string message = 3;
   int64 at_unix_ms = 4;
   uint64 generation = 5;
+  // BUILT only: how the repository's config file changed the runtime settings.
+  // The server folds this into the deployment's config snapshot, so restarts
+  // and rollbacks run the same way.
+  BuildOutput build = 6;
+}
+
+message BuildOutput {
+  // Set when the start command was overridden (an empty command = image default).
+  bool has_command = 1;
+  repeated string command = 2;
+  string healthcheck_path = 3;
+  uint32 healthcheck_timeout_secs = 4;
+  RestartPolicy restart = 5;
+  // The app's stack guessed from the source (e.g. "nextjs"); empty = unknown.
+  string stack = 6;
 }
 
 message StateReport {
@@ -200,6 +224,40 @@ message Workload {
   HealthCheck health = 9;
   Limits limits = 10;
   RestartPolicy restart = 11;
+  // Set when the image must be built on this node first; `image` is then the
+  // node-local tag the build produces.
+  Build build = 12;
+  // Bumped by the server to restart the running container in place. The node
+  // restarts when it sees a higher value than it last applied.
+  uint32 restart_generation = 13;
+}
+
+// Build one deployment from source. The node downloads the source archive,
+// builds it in its sandboxed BuildKit and tags the result as Workload.image.
+// User variables reach the build only as BuildKit secrets (Workload.env).
+message Build {
+  // A gzipped tarball of the source at one commit (GitHub's tarball endpoint).
+  string source_url = 1;
+  // Authorization header value for source_url; empty for public sources.
+  string source_auth = 2;
+  // Directory inside the repository to build from ("" = repository root).
+  string root_dir = 3;
+  Builder builder = 4;
+  // Dockerfile builds: path relative to root_dir ("" = Dockerfile).
+  string dockerfile_path = 5;
+  // Overrides for the detected build and start commands (shell strings run
+  // inside the build/app container, never on the node).
+  string build_command = 6;
+  string start_command = 7;
+  // Prefix for BuildKit cache mounts (per workspace).
+  string cache_key = 8;
+  // Changes when variable values change, so cached layers that used them rebuild.
+  string secrets_hash = 9;
+}
+
+enum Builder {
+  BUILDER_RAILPACK = 0;
+  BUILDER_DOCKERFILE = 1;
 }
 
 message EnvVar {
@@ -231,6 +289,14 @@ message LogRequest {
   string deployment_id = 2;
   uint32 tail = 3;
   bool follow = 4;
+  LogKind kind = 5;
+}
+
+enum LogKind {
+  // Container stdout/stderr.
+  LOG_RUNTIME = 0;
+  // The deployment's build output.
+  LOG_BUILD = 1;
 }
 
 message LogCancel {

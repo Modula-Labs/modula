@@ -22,10 +22,10 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::edge::EdgeSink;
+use crate::build::BuildLogs;
 use crate::identity::{Identity, pem, pem_blocks};
 use crate::join::{connect, renewal_request};
-use crate::reconcile::Reconciler;
+use crate::reconcile::{Capabilities, Reconciler};
 use crate::runtime::Runtime;
 
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(15);
@@ -43,14 +43,18 @@ const LOG_BATCH_WAIT: Duration = Duration::from_millis(50);
 pub async fn run(
     dir: PathBuf,
     runtime: Arc<dyn Runtime>,
-    edge: Option<Arc<dyn EdgeSink>>,
+    caps: Capabilities,
     stop: CancellationToken,
 ) -> anyhow::Result<()> {
     let (out_tx, mut out_rx) = mpsc::channel(1024);
-    let has_edge = edge.is_some();
-    let reconciler = Reconciler::new(runtime.clone(), edge, out_tx);
+    let has_edge = caps.edge.is_some();
+    let build_logs = caps.build.as_ref().map(|b| b.logs.clone());
+    let reconciler = Reconciler::new(runtime.clone(), caps, out_tx);
     let (desired_tx, desired_rx) = watch::channel(None);
     let reconcile_task = tokio::spawn(reconciler.clone().run(desired_rx, stop.clone()));
+    // At most ~2 s, once per process: the location label for the dashboard.
+    let location = crate::location::detect().await;
+    tracing::info!(provider = %location.provider, region = %location.region, edge = %location.colo, "location hints");
 
     let mut backoff = Duration::from_secs(1);
     while !stop.is_cancelled() {
@@ -64,6 +68,8 @@ pub async fn run(
             outbox: &mut out_rx,
             stop: &stop,
             has_edge,
+            build_logs: build_logs.as_ref(),
+            location: &location,
         };
         match ctx.session().await {
             Ok(()) => break,
@@ -75,7 +81,7 @@ pub async fn run(
         if started.elapsed() > STABLE_AFTER {
             backoff = Duration::from_secs(1);
         }
-        let jitter = Duration::from_millis(u64::from(uuid::Uuid::new_v4().as_bytes()[0]) * 4);
+        let jitter = Duration::from_millis(u64::from(modula_id::Id::new().as_bytes()[0]) * 4);
         tokio::select! {
             _ = stop.cancelled() => break,
             _ = tokio::time::sleep(backoff + jitter) => {}
@@ -94,6 +100,8 @@ struct Ctx<'a> {
     outbox: &'a mut mpsc::Receiver<pb::NodeMessage>,
     stop: &'a CancellationToken,
     has_edge: bool,
+    build_logs: Option<&'a BuildLogs>,
+    location: &'a crate::location::Hints,
 }
 
 fn msg(m: Out) -> pb::NodeMessage {
@@ -189,7 +197,14 @@ impl Ctx<'_> {
                 }
             }
             In::Logs(req) => {
-                let task = tokio::spawn(stream_logs(self.runtime.clone(), req.clone(), tx.clone()));
+                let task = match pb::LogKind::try_from(req.kind) {
+                    Ok(pb::LogKind::LogBuild) => tokio::spawn(stream_build_logs(
+                        self.build_logs.cloned(),
+                        req.clone(),
+                        tx.clone(),
+                    )),
+                    _ => tokio::spawn(stream_logs(self.runtime.clone(), req.clone(), tx.clone())),
+                };
                 if let Some(old) = logs.insert(req.request_id, task) {
                     old.abort();
                 }
@@ -238,10 +253,16 @@ impl Ctx<'_> {
             capabilities: ["logs", "renew"]
                 .into_iter()
                 .chain(self.has_edge.then_some("edge"))
+                .chain(self.build_logs.is_some().then_some("build"))
                 .map(String::from)
                 .collect(),
             applied_generation: self.reconciler.applied_generation(),
-            info: Some(host_info(self.runtime.describe().await.unwrap_or_default())),
+            info: Some(pb::NodeInfo {
+                cloud_provider: self.location.provider.clone(),
+                cloud_region: self.location.region.clone(),
+                edge_colo: self.location.colo.clone(),
+                ..host_info(self.runtime.describe().await.unwrap_or_default())
+            }),
         }
     }
 }
@@ -267,7 +288,47 @@ fn host_info(runtime_version: String) -> pb::NodeInfo {
         cpus: std::thread::available_parallelism().map_or(0, |n| n.get() as u32),
         memory_bytes,
         runtime_version,
+        ..Default::default()
     }
+}
+
+/// Stream a deployment's build log back, following it while the build runs.
+async fn stream_build_logs(
+    logs: Option<BuildLogs>,
+    req: pb::LogRequest,
+    tx: mpsc::Sender<pb::NodeMessage>,
+) {
+    let chunk = |lines: Vec<pb::LogLine>, done: bool, error: String| {
+        msg(Out::Log(pb::LogChunk {
+            request_id: req.request_id.clone(),
+            lines,
+            done,
+            error,
+        }))
+    };
+    let reader = logs.and_then(|l| l.read(&req.deployment_id, req.tail, req.follow));
+    let Some(mut reader) = reader else {
+        let _ = tx
+            .send(chunk(vec![], true, "no build log on this server".into()))
+            .await;
+        return;
+    };
+    while let Some(batch) = reader.next_batch().await {
+        for part in batch.chunks(LOG_BATCH_LINES) {
+            let lines = part
+                .iter()
+                .map(|l| pb::LogLine {
+                    ts_unix_ms: l.ts_unix_ms,
+                    stderr: l.stderr,
+                    text: l.text.clone(),
+                })
+                .collect();
+            if tx.send(chunk(lines, false, String::new())).await.is_err() {
+                return;
+            }
+        }
+    }
+    let _ = tx.send(chunk(vec![], true, String::new())).await;
 }
 
 /// Stream a deployment's logs back in small batches (≤200 lines or 50 ms).

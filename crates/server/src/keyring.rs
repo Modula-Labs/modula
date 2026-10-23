@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use modula_crypto::envelope::{DataKey, FieldAad, MasterKey};
+use modula_id::Id;
 use sqlx::PgPool;
-use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::error::AppResult;
@@ -11,7 +11,7 @@ use crate::error::AppResult;
 /// Unwraps and caches per-scope data keys. Keys are created lazily on first use.
 pub struct Keyring {
     kek: MasterKey,
-    cache: RwLock<HashMap<Uuid, Arc<DataKey>>>,
+    cache: RwLock<HashMap<Id, Arc<DataKey>>>,
 }
 
 impl Keyring {
@@ -22,7 +22,7 @@ impl Keyring {
         }
     }
 
-    pub async fn data_key(&self, db: &PgPool, scope: Uuid) -> AppResult<Arc<DataKey>> {
+    pub async fn data_key(&self, db: &PgPool, scope: Id) -> AppResult<Arc<DataKey>> {
         if let Some(k) = self.cache.read().expect("keyring lock").get(&scope) {
             return Ok(k.clone());
         }
@@ -77,7 +77,7 @@ impl Keyring {
     }
 
     /// Drop a scope's cached key (e.g. after its workspace is deleted).
-    pub fn forget(&self, scope: Uuid) {
+    pub fn forget(&self, scope: Id) {
         self.cache.write().expect("keyring lock").remove(&scope);
     }
 }

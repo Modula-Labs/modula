@@ -2,7 +2,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { ArrowLeft, BrandDocker, ChevronRight, Database, Search } from "@/components/ui/icons";
+import { ArrowLeft, BrandDocker, BrandGithub, ChevronRight, Database, Search } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/misc";
 import { ApiError, api } from "@/lib/api";
@@ -19,7 +19,21 @@ export function serviceNameFromImage(image: string): string {
   return name || "service";
 }
 
-type Step = "root" | "image";
+/** Accepts `owner/name`, `github.com/owner/name` or a full GitHub URL (`.git`, trailing paths
+ *  and query strings tolerated) and returns `owner/name`, or null when it isn't one. */
+export function parseRepo(input: string): string | null {
+  const m = input
+    .trim()
+    .replace(/^(?:https?:\/\/)?(?:www\.)?github\.com\//i, "")
+    .replace(/^git@github\.com:/i, "")
+    .match(/^([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\/([A-Za-z0-9._-]+?)(?:\.git)?(?:[/?#].*)?$/);
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
+/** `acme/My_App` → `my-app`, made a valid service name. */
+export const serviceNameFromRepo = (repo: string) => serviceNameFromImage(repo.split("/").pop() ?? "");
+
+type Step = "root" | "image" | "repo";
 
 /** Command-style picker for adding a service (Docker image for now). */
 export function NewServiceDialog({
@@ -40,6 +54,9 @@ export function NewServiceDialog({
   const [image, setImage] = useState("");
   const [name, setName] = useState("");
   const [port, setPort] = useState("8080");
+  const [repoInput, setRepoInput] = useState("");
+  const [branch, setBranch] = useState("main");
+  const [rootDir, setRootDir] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
 
   const reset = () => {
@@ -47,15 +64,31 @@ export function NewServiceDialog({
     setImage("");
     setName("");
     setPort("8080");
+    setRepoInput("");
+    setBranch("main");
+    setRootDir("");
     setNotice(null);
   };
 
+  const repo = parseRepo(repoInput);
+
   const create = useMutation({
     mutationFn: async () => {
-      const svc = await api.createService(projectId, {
-        name: name || serviceNameFromImage(image),
-        config: { source: { type: "image", image: image.trim() }, port: Number(port) || 8080 },
-      });
+      const svc = await api.createService(
+        projectId,
+        step === "repo" && repo
+          ? {
+              name: name || serviceNameFromRepo(repo),
+              config: {
+                source: { type: "repo", repo, branch: branch.trim() || "main", rootDir: rootDir.trim().replace(/^\/+|\/+$/g, "") || undefined },
+                port: Number(port) || 8080,
+              },
+            }
+          : {
+              name: name || serviceNameFromImage(image),
+              config: { source: { type: "image", image: image.trim() }, port: Number(port) || 8080 },
+            },
+      );
       const instance = svc.instances.find((i) => i.environmentId === environmentId);
       // Deploy right away, like Railway; without a server the service just waits.
       if (instance) {
@@ -97,14 +130,69 @@ export function NewServiceDialog({
                 <ArrowLeft className="size-4" />
               </button>
             )}
-            <span className="text-sm text-foreground">{step === "root" ? "What would you like to add?" : "Docker image"}</span>
+            <span className="text-sm text-foreground">{step === "root" ? "What would you like to add?" : step === "repo" ? "GitHub repo" : "Docker image"}</span>
           </div>
 
           {step === "root" ? (
             <div className="p-1.5">
+              <PickerRow icon={<BrandGithub />} label="GitHub repo" onClick={() => setStep("repo")} />
               <PickerRow icon={<BrandDocker />} label="Docker image" onClick={() => setStep("image")} />
               <PickerRow icon={<Database />} label="Database" hint="Coming soon" />
             </div>
+          ) : step === "repo" ? (
+            <form
+              className="flex flex-col gap-4 p-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                create.mutate();
+              }}
+            >
+              {create.error ? <Alert>{create.error.message}</Alert> : null}
+              {notice ? <Alert tone="warn">{notice}</Alert> : null}
+              <Field
+                label="Repository"
+                hint="Public repositories for now; connect GitHub for private ones (coming soon)"
+                error={repoInput.trim() && !repo ? "Use owner/name or a github.com URL" : null}
+              >
+                {(p) => (
+                  <Input
+                    {...p}
+                    mono
+                    autoFocus
+                    required
+                    placeholder="owner/name or https://github.com/owner/name"
+                    value={repoInput}
+                    onChange={(e) => setRepoInput(e.target.value)}
+                  />
+                )}
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Branch">{(p) => <Input {...p} mono value={branch} onChange={(e) => setBranch(e.target.value)} />}</Field>
+                <Field label="Root directory" hint="For monorepos. Optional.">
+                  {(p) => <Input {...p} mono placeholder="/" value={rootDir} onChange={(e) => setRootDir(e.target.value)} />}
+                </Field>
+              </div>
+              <div className="grid grid-cols-[1fr_120px] gap-3">
+                <Field label="Service name">
+                  {(p) => (
+                    <Input {...p} placeholder={repo ? serviceNameFromRepo(repo) : "web"} value={name} onChange={(e) => setName(e.target.value)} />
+                  )}
+                </Field>
+                <Field label="Port">
+                  {(p) => (
+                    <Input {...p} inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} />
+                  )}
+                </Field>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+                  Cancel
+                </Button>
+                <Button type="submit" variant="primary" loading={create.isPending} disabled={!repo}>
+                  Deploy
+                </Button>
+              </div>
+            </form>
           ) : (
             <form
               className="flex flex-col gap-4 p-4"

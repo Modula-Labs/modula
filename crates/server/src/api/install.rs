@@ -21,6 +21,10 @@ const FILES: &[&str] = &[
     "modula-node-linux-arm64",
     "caddy-linux-amd64",
     "caddy-linux-arm64",
+    "buildctl-linux-amd64",
+    "buildctl-linux-arm64",
+    "railpack-linux-amd64",
+    "railpack-linux-arm64",
 ];
 
 /// `install.sh` with this instance's version and release URL filled in.

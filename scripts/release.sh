@@ -63,9 +63,12 @@ for arch in $ARCHES; do
       GOOS= GOARCH= go install github.com/caddyserver/xcaddy/cmd/xcaddy@$XCADDY_VERSION
       cd /tmp && xcaddy build $CADDY_VERSION ${with[*]} --output /out/caddy-linux-$arch
     "
+
+  echo "$arch: fetching buildctl and railpack (pinned sums)"
+  scripts/fetch-build-tools.sh "$arch" "$OUT"
 done
 
-(cd "$OUT" && sha256sum modula-*-linux-* caddy-linux-* >SHA256SUMS)
+(cd "$OUT" && sha256sum modula-*-linux-* caddy-linux-* buildctl-linux-* railpack-linux-* >SHA256SUMS)
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$OUT/SHA256SUMS" -out "$OUT/SHA256SUMS.sig"
 openssl pkeyutl -verify -pubin -inkey deploy/release.pub.pem -rawin \
   -in "$OUT/SHA256SUMS" -sigfile "$OUT/SHA256SUMS.sig" >/dev/null

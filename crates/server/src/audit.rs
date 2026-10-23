@@ -1,8 +1,8 @@
 //! Append-only audit trail for security-relevant events and all mutations.
 
+use modula_id::Id;
 use serde_json::Value;
 use sqlx::PgExecutor;
-use uuid::Uuid;
 
 use crate::auth::session::Actor;
 use crate::error::AppResult;
@@ -10,9 +10,9 @@ use crate::http::meta::RequestMeta;
 
 pub struct Entry<'a> {
     pub action: &'static str,
-    pub workspace_id: Option<Uuid>,
-    pub user_id: Option<Uuid>,
-    pub session_id: Option<Uuid>,
+    pub workspace_id: Option<Id>,
+    pub user_id: Option<Id>,
+    pub session_id: Option<Id>,
     pub target: Option<(&'static str, String)>,
     pub meta: &'a RequestMeta,
     pub metadata: Value,
@@ -37,12 +37,12 @@ impl<'a> Entry<'a> {
         self
     }
 
-    pub fn user(mut self, user_id: Uuid) -> Self {
+    pub fn user(mut self, user_id: Id) -> Self {
         self.user_id = Some(user_id);
         self
     }
 
-    pub fn workspace(mut self, id: Uuid) -> Self {
+    pub fn workspace(mut self, id: Id) -> Self {
         self.workspace_id = Some(id);
         self
     }

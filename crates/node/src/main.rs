@@ -5,11 +5,14 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use modula_node::build::buildkit::BuildkitBuilder;
+use modula_node::build::{BuildLogs, BuildSupport};
 use modula_node::edge::EdgeSink;
 use modula_node::edge::ask::{self, Allowlist};
 use modula_node::edge::caddy::CaddyEdge;
 use modula_node::identity::Identity;
 use modula_node::join::{JoinArgs, join};
+use modula_node::reconcile::Capabilities;
 use modula_node::runtime::docker::DockerRuntime;
 use modula_node::session;
 use tokio_util::sync::CancellationToken;
@@ -69,6 +72,18 @@ enum Command {
         /// The installer uses it for the dashboard on the main server.
         #[arg(long = "route", value_name = "HOST=ADDR", value_parser = modula_node::edge::parse_local_route)]
         routes: Vec<modula_node::edge::ResolvedRoute>,
+        /// Don't build images from source on this server.
+        #[arg(long)]
+        no_build: bool,
+        /// BuildKit client binary.
+        #[arg(long, env = "MODULA_BUILDCTL", default_value = "buildctl")]
+        buildctl: PathBuf,
+        /// Railpack binary.
+        #[arg(long, env = "MODULA_RAILPACK", default_value = "railpack")]
+        railpack: PathBuf,
+        /// Directory for BuildKit's socket (shared with its container).
+        #[arg(long, default_value = "/run/modula-buildkit")]
+        buildkit_dir: PathBuf,
     },
     /// Show this server's identity.
     Status,
@@ -113,6 +128,10 @@ async fn main() -> anyhow::Result<()> {
             ask_listen,
             no_edge,
             routes,
+            no_build,
+            buildctl,
+            railpack,
+            buildkit_dir,
         } => {
             let runtime = Arc::new(DockerRuntime::connect()?);
             let stop = CancellationToken::new();
@@ -144,7 +163,18 @@ async fn main() -> anyhow::Result<()> {
                     stop.cancel();
                 }
             });
-            session::run(cli.data_dir, runtime, edge, stop).await?;
+            let build = if no_build {
+                None
+            } else {
+                let logs = BuildLogs::new(cli.data_dir.join("build-logs"))?;
+                let builder =
+                    BuildkitBuilder::new(&cli.data_dir, buildkit_dir, buildctl, railpack)?;
+                Some(BuildSupport {
+                    builder: Arc::new(builder),
+                    logs,
+                })
+            };
+            session::run(cli.data_dir, runtime, Capabilities { edge, build }, stop).await?;
         }
         Command::Status => {
             let id = Identity::load(&cli.data_dir)?;

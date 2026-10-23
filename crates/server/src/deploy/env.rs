@@ -5,9 +5,9 @@
 use std::collections::BTreeMap;
 
 use modula_crypto::envelope::FieldAad;
+use modula_id::Id;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::keyring::Keyring;
@@ -46,7 +46,7 @@ pub fn validate_value(value: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn var_aad(env: Uuid, row: &str) -> FieldAad<'_> {
+fn var_aad(env: Id, row: &str) -> FieldAad<'_> {
     FieldAad {
         scope: env,
         table: "variables",
@@ -55,7 +55,7 @@ fn var_aad(env: Uuid, row: &str) -> FieldAad<'_> {
     }
 }
 
-fn snapshot_aad(env: Uuid, row: &str) -> FieldAad<'_> {
+fn snapshot_aad(env: Id, row: &str) -> FieldAad<'_> {
     FieldAad {
         scope: env,
         table: "deployments",
@@ -67,8 +67,8 @@ fn snapshot_aad(env: Uuid, row: &str) -> FieldAad<'_> {
 pub async fn seal_variable(
     keys: &Keyring,
     db: &PgPool,
-    env: Uuid,
-    var: Uuid,
+    env: Id,
+    var: Id,
     value: &str,
 ) -> AppResult<Vec<u8>> {
     keys.seal(db, value.as_bytes(), var_aad(env, &var.to_string()))
@@ -78,8 +78,8 @@ pub async fn seal_variable(
 pub async fn open_variable(
     keys: &Keyring,
     db: &PgPool,
-    env: Uuid,
-    var: Uuid,
+    env: Id,
+    var: Id,
     sealed: &[u8],
 ) -> AppResult<SecretString> {
     let plain = keys
@@ -91,8 +91,8 @@ pub async fn open_variable(
 }
 
 /// Decrypt every variable of a service instance.
-pub async fn resolve(keys: &Keyring, db: &PgPool, env: Uuid, instance: Uuid) -> AppResult<EnvMap> {
-    let rows: Vec<(Uuid, String, Vec<u8>)> = sqlx::query_as(
+pub async fn resolve(keys: &Keyring, db: &PgPool, env: Id, instance: Id) -> AppResult<EnvMap> {
+    let rows: Vec<(Id, String, Vec<u8>)> = sqlx::query_as(
         "SELECT id, name, value_sealed FROM variables WHERE service_instance_id = $1",
     )
     .bind(instance)
@@ -108,8 +108,8 @@ pub async fn resolve(keys: &Keyring, db: &PgPool, env: Uuid, instance: Uuid) -> 
 pub async fn seal_snapshot(
     keys: &Keyring,
     db: &PgPool,
-    env: Uuid,
-    deployment: Uuid,
+    env: Id,
+    deployment: Id,
     vars: &EnvMap,
 ) -> AppResult<Vec<u8>> {
     let plain: BTreeMap<&str, &str> = vars
@@ -124,8 +124,8 @@ pub async fn seal_snapshot(
 pub async fn open_snapshot(
     keys: &Keyring,
     db: &PgPool,
-    env: Uuid,
-    deployment: Uuid,
+    env: Id,
+    deployment: Id,
     sealed: &[u8],
 ) -> AppResult<EnvMap> {
     let plain = keys

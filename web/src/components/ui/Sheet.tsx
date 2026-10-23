@@ -1,6 +1,26 @@
 import { clsx } from "clsx";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { X } from "./icons";
+
+/** Keeps `value` around for `ms` after it goes undefined so an exit animation
+ *  can play; `leaving` is true during that window. No delay under reduced motion. */
+export function useLingering<T>(value: T | undefined, ms = 200): { value: T | undefined; leaving: boolean } {
+  const [kept, setKept] = useState(value);
+  useEffect(() => {
+    if (value !== undefined) {
+      setKept(value);
+      return;
+    }
+    const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) {
+      setKept(undefined);
+      return;
+    }
+    const t = window.setTimeout(() => setKept(undefined), ms);
+    return () => window.clearTimeout(t);
+  }, [value, ms]);
+  return value !== undefined ? { value, leaving: false } : { value: kept ?? undefined, leaving: kept !== undefined };
+}
 
 /** A right-side sheet inside the project area. `stacked` offsets a second
  *  sheet so the one below still peeks out. Esc closes the top-most sheet. */
@@ -9,15 +29,18 @@ export function Sheet({
   header,
   children,
   stacked,
+  leaving,
 }: {
   onClose: () => void;
   header: ReactNode;
   children: ReactNode;
   stacked?: boolean;
+  /** Plays the exit animation; the parent unmounts it afterwards (see `useLingering`). */
+  leaving?: boolean;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented) {
+      if (e.key === "Escape" && !e.defaultPrevented && !leaving) {
         e.preventDefault();
         onClose();
       }
@@ -25,11 +48,13 @@ export function Sheet({
     // Capture so the stacked (later-mounted) sheet handles Esc first.
     window.addEventListener("keydown", onKey, { capture: stacked });
     return () => window.removeEventListener("keydown", onKey, { capture: stacked });
-  }, [onClose, stacked]);
+  }, [onClose, stacked, leaving]);
   return (
     <section
       className={clsx(
-        "anim-sheet absolute top-0 right-0 bottom-0 flex flex-col rounded-tl-xl border-t border-l border-border bg-card shadow-modal",
+        leaving ? "anim-sheet-out" : "anim-sheet",
+        // Floats inside the canvas, clear of the navbar and edges (like Railway's panel).
+        "absolute top-3 right-3 bottom-3 flex flex-col overflow-hidden rounded-xl border border-border bg-card shadow-modal",
         stacked ? "z-30 w-[min(960px,calc(60%-24px))] min-w-[616px]" : "z-20 w-[min(960px,60%)] min-w-[640px]",
       )}
     >

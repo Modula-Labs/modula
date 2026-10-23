@@ -1,9 +1,9 @@
 use axum::Json;
 use axum::extract::State;
+use modula_id::Id;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use super::auth::{Membership, create_workspace_tx};
 use crate::audit::Entry;
@@ -17,7 +17,7 @@ use crate::validate;
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Workspace {
-    pub id: Uuid,
+    pub id: Id,
     pub name: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -44,7 +44,7 @@ pub async fn create(
     Json(req): Json<CreateWorkspace>,
 ) -> AppResult<Json<Workspace>> {
     let name = validate::display_name(&req.name, "workspace name")?;
-    let id = Uuid::now_v7();
+    let id = Id::new();
     let mut tx = state.db.begin().await?;
     create_workspace_tx(&mut tx, id, &name, actor.user_id).await?;
     Entry::new("workspace.create", &meta)
@@ -57,7 +57,7 @@ pub async fn create(
     fetch(&state, id).await.map(Json)
 }
 
-async fn fetch(state: &AppState, id: Uuid) -> AppResult<Workspace> {
+async fn fetch(state: &AppState, id: Id) -> AppResult<Workspace> {
     sqlx::query_as("SELECT id, name, created_at FROM workspaces WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)

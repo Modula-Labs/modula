@@ -7,8 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
+use modula_id::Id;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::tls::Fingerprint;
 
@@ -18,7 +18,7 @@ const CERT: &str = "node.crt";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meta {
-    pub node_id: Uuid,
+    pub node_id: Id,
     pub server: String,
     pub fingerprint: String,
 }

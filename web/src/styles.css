@@ -88,12 +88,22 @@
 }
 @keyframes mc-slide-in {
   from {
-    transform: translateX(24px);
+    transform: translateX(32px);
     opacity: 0;
   }
   to {
     transform: none;
     opacity: 1;
+  }
+}
+@keyframes mc-slide-out {
+  from {
+    transform: none;
+    opacity: 1;
+  }
+  to {
+    transform: translateX(32px);
+    opacity: 0;
   }
 }
 .anim-modal {
@@ -103,12 +113,17 @@
   animation: mc-pop-in 120ms var(--ease-out);
 }
 .anim-sheet {
-  animation: mc-slide-in 180ms var(--ease-out);
+  animation: mc-slide-in 240ms var(--ease-out);
+}
+.anim-sheet-out {
+  animation: mc-slide-out 200ms var(--ease-out) forwards;
+  pointer-events: none;
 }
 @media (prefers-reduced-motion: reduce) {
   .anim-modal,
   .anim-pop,
-  .anim-sheet {
+  .anim-sheet,
+  .anim-sheet-out {
     animation: none;
   }
 }

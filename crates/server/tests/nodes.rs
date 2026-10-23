@@ -10,13 +10,13 @@ use std::time::Duration;
 
 use axum::http::{Method, StatusCode};
 use common::*;
+use modula_id::Id;
 use modula_node::edge::RecordingEdge;
 use modula_node::join::{JoinArgs, join};
 use modula_node::runtime::fake::FakeRuntime;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 struct Cluster {
     app: TestApp,
@@ -33,7 +33,11 @@ impl Drop for Cluster {
 }
 
 async fn cluster(pool: PgPool) -> Cluster {
-    let app = TestApp::new(pool);
+    cluster_with(pool, config()).await
+}
+
+async fn cluster_with(pool: PgPool, cfg: modula_server::config::Config) -> Cluster {
+    let app = TestApp::with_config(pool, cfg);
     let admin = app.setup_admin().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -53,7 +57,7 @@ async fn cluster(pool: PgPool) -> Cluster {
 }
 
 fn temp_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("modula-node-test-{}", Uuid::new_v4()))
+    std::env::temp_dir().join(format!("modula-node-test-{}", Id::new()))
 }
 
 async fn wait_for<F, Fut>(what: &str, mut check: F)
@@ -96,7 +100,7 @@ impl Cluster {
     }
 
     /// Join a node and start its session on a fake runtime.
-    async fn start_node(&self) -> (Uuid, Arc<FakeRuntime>, CancellationToken) {
+    async fn start_node(&self) -> (Id, Arc<FakeRuntime>, CancellationToken) {
         let t = self.join_token().await;
         let dir = temp_dir();
         let id = join(JoinArgs {
@@ -110,10 +114,17 @@ impl Cluster {
         .expect("join");
         let rt = Arc::new(FakeRuntime::new());
         let stop = self.stop.child_token();
+        let caps = modula_node::reconcile::Capabilities {
+            edge: Some(self.edge.clone()),
+            build: Some(modula_node::build::BuildSupport {
+                builder: Arc::new(modula_node::build::FakeBuilder::default()),
+                logs: modula_node::build::BuildLogs::new(dir.join("build-logs")).unwrap(),
+            }),
+        };
         tokio::spawn(modula_node::session::run(
             dir,
             rt.clone(),
-            Some(self.edge.clone()),
+            caps,
             stop.clone(),
         ));
         let node = id.meta.node_id;
@@ -133,7 +144,14 @@ impl Cluster {
     }
 
     /// Workspace → project → service; returns the production instance id.
-    async fn service(&self, image: &str) -> Uuid {
+    async fn service(&self, image: &str) -> Id {
+        self.service_with(json!({
+            "source": { "type": "image", "image": image }, "port": 8080, "healthcheckPath": "/health"
+        }))
+        .await
+    }
+
+    async fn service_with(&self, config: Value) -> Id {
         let ws = self.app.create_workspace(&self.admin, "team").await;
         let p = self
             .app
@@ -152,10 +170,7 @@ impl Cluster {
                 Method::POST,
                 &format!("/api/projects/{project}/services"),
                 Some(&self.admin),
-                Some(json!({
-                    "name": "api",
-                    "config": { "source": { "type": "image", "image": image }, "port": 8080, "healthcheckPath": "/health" }
-                })),
+                Some(json!({ "name": "api", "config": config })),
             )
             .await;
         assert_eq!(s.status, StatusCode::OK, "{:?}", s.json);
@@ -166,7 +181,7 @@ impl Cluster {
             .unwrap()
     }
 
-    async fn deploy(&self, instance: Uuid) -> Uuid {
+    async fn deploy(&self, instance: Id) -> Id {
         let r = self
             .app
             .call(
@@ -180,7 +195,7 @@ impl Cluster {
         r.json["id"].as_str().unwrap().parse().unwrap()
     }
 
-    async fn status(&self, deployment: Uuid) -> String {
+    async fn status(&self, deployment: Id) -> String {
         let r = self
             .app
             .call(
@@ -193,7 +208,7 @@ impl Cluster {
         r.json["status"].as_str().unwrap_or_default().to_owned()
     }
 
-    async fn wait_status(&self, deployment: Uuid, want: &str) {
+    async fn wait_status(&self, deployment: Id, want: &str) {
         wait_for(&format!("deployment {want}"), || async {
             self.status(deployment).await == want
         })
@@ -430,7 +445,7 @@ async fn a_node_cannot_report_on_another_nodes_deployments(pool: PgPool) {
         message: "forged".into(),
         ..Default::default()
     };
-    let other_node = Uuid::now_v7();
+    let other_node = Id::new();
     modula_server::deploy::state::apply_event(c.app.db(), other_node, &ev)
         .await
         .unwrap();
@@ -440,4 +455,192 @@ async fn a_node_cannot_report_on_another_nodes_deployments(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(status, "deploying");
+}
+
+/// A stand-in for GitHub's REST API: one repository with one branch.
+async fn mock_github() -> url::Url {
+    use axum::routing::get;
+    let app = axum::Router::new().route(
+        "/repos/acme/app/commits/{branch}",
+        get(
+            |axum::extract::Path(branch): axum::extract::Path<String>| async move {
+                if branch != "main" {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        axum::Json(json!({"message": "No commit found"})),
+                    );
+                }
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "sha": "0123456789abcdef0123456789abcdef01234567",
+                        "commit": { "message": "Add checkout", "author": { "name": "Ada" } }
+                    })),
+                )
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}").parse().unwrap()
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn repository_deploys_build_on_the_node(pool: PgPool) {
+    let mut cfg = config();
+    cfg.github_api = mock_github().await;
+    let c = cluster_with(pool, cfg).await;
+    let (_node, rt, _stop) = c.start_node().await;
+    let instance = c
+        .service_with(json!({
+            "source": { "type": "repo", "repo": "acme/app", "branch": "main" },
+            "port": 8080
+        }))
+        .await;
+
+    let d = c.deploy(instance).await;
+    let r = c
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/deployments/{d}"),
+            Some(&c.admin),
+            None,
+        )
+        .await;
+    assert_eq!(
+        r.json["commitSha"],
+        "0123456789abcdef0123456789abcdef01234567"
+    );
+    assert_eq!(r.json["commitMessage"], "Add checkout");
+    assert_eq!(r.json["source"], "acme/app@main");
+    assert!(
+        r.json["image"]
+            .as_str()
+            .unwrap()
+            .starts_with("modula-build/")
+    );
+
+    c.wait_status(d, "active").await;
+    let r = c
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/deployments/{d}"),
+            Some(&c.admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.json["imageDigest"], format!("sha256:{}", "ab".repeat(32)));
+    assert!(r.json["buildFinishedAt"].is_string());
+    let phases: Vec<&str> = r.json["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["phase"].as_str().unwrap())
+        .collect();
+    assert!(
+        phases.starts_with(&["queued", "building", "built"]),
+        "{phases:?}"
+    );
+    assert!(
+        !phases.contains(&"pulling"),
+        "built images are never pulled"
+    );
+    assert_eq!(rt.running_deployments().len(), 1);
+
+    // The build log streams through the same endpoint as container logs.
+    let (status, body) = c
+        .app
+        .get_text(
+            &format!("/api/deployments/{d}/logs?kind=build&follow=false"),
+            &c.admin,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("Build complete"), "{body}");
+
+    // An unknown branch is a clear error, not a queued deployment.
+    let other = c
+        .service_with(json!({ "source": { "type": "repo", "repo": "acme/app", "branch": "nope" } }))
+        .await;
+    let r = c
+        .app
+        .call(
+            Method::POST,
+            &format!("/api/service-instances/{other}/deployments"),
+            Some(&c.admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn rollback_rebuilds_the_commit_and_restart_is_in_place(pool: PgPool) {
+    use modula_node::runtime::Runtime;
+
+    let mut cfg = config();
+    cfg.github_api = mock_github().await;
+    let c = cluster_with(pool, cfg).await;
+    let (_node, rt, _stop) = c.start_node().await;
+    let instance = c
+        .service_with(json!({ "source": { "type": "repo", "repo": "acme/app", "branch": "main" } }))
+        .await;
+    let first = c.deploy(instance).await;
+    c.wait_status(first, "active").await;
+
+    let post = |action: &'static str, d: Id| {
+        let app = &c.app;
+        let admin = c.admin.clone();
+        async move {
+            app.call(
+                Method::POST,
+                &format!("/api/deployments/{d}/{action}"),
+                Some(&admin),
+                None,
+            )
+            .await
+        }
+    };
+
+    // Restart: same deployment, the container restarts in place.
+    let r = post("restart", first).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    wait_for("container restarted", || async {
+        rt.containers()
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.restart_count == 1)
+    })
+    .await;
+    assert_eq!(c.status(first).await, "active");
+
+    // Rollback: a new deployment that rebuilds the same commit.
+    let r = post("rollback", first).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["trigger"], "rollback");
+    assert_eq!(r.json["sourceDeploymentId"], first.to_string());
+    assert_eq!(
+        r.json["commitSha"],
+        "0123456789abcdef0123456789abcdef01234567"
+    );
+    assert_eq!(r.json["status"], "building");
+    let second: Id = r.json["id"].as_str().unwrap().parse().unwrap();
+    c.wait_status(second, "active").await;
+    c.wait_status(first, "removed").await;
+
+    // Only running deployments restart.
+    assert_eq!(post("restart", first).await.status, StatusCode::CONFLICT);
+
+    // Image deployments redeploy but can't be rolled back to.
+    let image = c.service("nginx:alpine").await;
+    let d = c.deploy(image).await;
+    assert_eq!(post("rollback", d).await.status, StatusCode::CONFLICT);
+    let r = post("redeploy", d).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["trigger"], "redeploy");
+    assert_eq!(r.json["sourceKind"], "image");
 }

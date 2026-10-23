@@ -10,11 +10,19 @@ import { relativeTime } from "@/lib/format";
 import { deploymentBadge, isLive } from "@/lib/status";
 import { LogViewer } from "./LogViewer";
 
-type Tab = "details" | "logs";
+type Tab = "details" | "build" | "logs";
 
-export function DeploymentSheet({ deploymentId, onClose }: { deploymentId: string; onClose: () => void }) {
+const shortDigest = (d: string) => (d.startsWith("sha256:") ? `sha256:${d.slice(7, 19)}` : d.slice(0, 19));
+
+function duration(from: string, to: string): string {
+  const secs = Math.max(0, Math.round((new Date(to).getTime() - new Date(from).getTime()) / 1000));
+  return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+}
+
+export function DeploymentSheet({ deploymentId, leaving, onClose }: { deploymentId: string; leaving?: boolean; onClose: () => void }) {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<Tab>("logs");
+  const [picked, setPicked] = useState<Tab | null>(null);
+  const [initial, setInitial] = useState<Tab | null>(null);
   const dep = useQuery({
     queryKey: ["deployment", deploymentId],
     queryFn: () => api.deployment(deploymentId),
@@ -25,17 +33,22 @@ export function DeploymentSheet({ deploymentId, onClose }: { deploymentId: strin
     onSuccess: () => qc.invalidateQueries(),
   });
   const d = dep.data;
+  const isRepo = !!d?.commitSha;
+  // Settle the default once, so the tab doesn't jump when a build finishes.
+  if (d && !initial) setInitial(d.status === "building" && d.commitSha ? "build" : "logs");
+  const tab = picked ?? initial ?? "logs";
 
   return (
     <Sheet
       stacked
+      leaving={leaving}
       onClose={onClose}
       header={
         d ? (
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center gap-2.5">
               <Badge tone={deploymentBadge[d.status].tone}>{deploymentBadge[d.status].label}</Badge>
-              <span className="truncate font-mono text-[13px]">{d.image}</span>
+              <span className="truncate font-mono text-[13px]">{d.source || d.image}</span>
             </div>
             <div className="text-sm text-muted-foreground">
               {d.trigger} · {relativeTime(d.createdAt)}
@@ -48,9 +61,10 @@ export function DeploymentSheet({ deploymentId, onClose }: { deploymentId: strin
     >
       <Tabs
         value={tab}
-        onChange={setTab}
+        onChange={setPicked}
         tabs={[
           { value: "details", label: "Details" },
+          ...(isRepo ? [{ value: "build" as const, label: "Build logs" }] : []),
           { value: "logs", label: "Deploy logs" },
         ]}
       >
@@ -64,8 +78,46 @@ export function DeploymentSheet({ deploymentId, onClose }: { deploymentId: strin
                   <span className="truncate font-mono text-[13px]">{d.id}</span>
                   <CopyButton value={d.id} label="Copy deployment id" />
                 </dd>
+                {d.commitSha ? (
+                  <>
+                    <dt className="text-muted-foreground">Commit</dt>
+                    <dd className="flex min-w-0 items-center gap-1">
+                      <span className="font-mono text-[13px]">{d.commitSha.slice(0, 7)}</span>
+                      <CopyButton value={d.commitSha} label="Copy commit sha" />
+                    </dd>
+                    {d.commitMessage ? (
+                      <>
+                        <dt className="text-muted-foreground">Message</dt>
+                        <dd className="line-clamp-3 whitespace-pre-line break-words">{d.commitMessage}</dd>
+                      </>
+                    ) : null}
+                    {d.commitAuthor ? (
+                      <>
+                        <dt className="text-muted-foreground">Author</dt>
+                        <dd className="truncate">{d.commitAuthor}</dd>
+                      </>
+                    ) : null}
+                    <dt className="text-muted-foreground">Source</dt>
+                    <dd className="truncate font-mono text-[13px]">{d.source}</dd>
+                  </>
+                ) : null}
                 <dt className="text-muted-foreground">Image</dt>
                 <dd className="truncate font-mono text-[13px]">{d.image}</dd>
+                {d.imageDigest ? (
+                  <>
+                    <dt className="text-muted-foreground">Digest</dt>
+                    <dd className="flex min-w-0 items-center gap-1">
+                      <span className="truncate font-mono text-[13px]">{shortDigest(d.imageDigest)}</span>
+                      <CopyButton value={d.imageDigest} label="Copy image digest" />
+                    </dd>
+                  </>
+                ) : null}
+                {d.buildStartedAt && d.buildFinishedAt ? (
+                  <>
+                    <dt className="text-muted-foreground">Build time</dt>
+                    <dd>{duration(d.buildStartedAt, d.buildFinishedAt)}</dd>
+                  </>
+                ) : null}
                 <dt className="text-muted-foreground">Created</dt>
                 <dd>{relativeTime(d.createdAt)}</dd>
                 {d.finishedAt ? (
@@ -77,7 +129,7 @@ export function DeploymentSheet({ deploymentId, onClose }: { deploymentId: strin
                 {d.nodeId ? (
                   <>
                     <dt className="text-muted-foreground">Node</dt>
-                    <dd className="truncate font-mono text-[13px]">{d.nodeId.slice(0, 8)}</dd>
+                    <dd className="truncate font-mono text-[13px]" title={d.nodeId}>{d.nodeId}</dd>
                   </>
                 ) : null}
               </dl>
@@ -103,6 +155,13 @@ export function DeploymentSheet({ deploymentId, onClose }: { deploymentId: strin
             </div>
           ) : null}
         </TabPanel>
+        {isRepo ? (
+          <TabPanel value="build">
+            <div className="flex h-full flex-col">
+              <LogViewer url={api.deploymentLogsUrl(deploymentId, 500, "build")} downloadName={`deployment-${deploymentId}-build.log`} />
+            </div>
+          </TabPanel>
+        ) : null}
         <TabPanel value="logs">
           <div className="flex h-full flex-col">
             <LogViewer url={api.deploymentLogsUrl(deploymentId)} downloadName={`deployment-${deploymentId}.log`} />

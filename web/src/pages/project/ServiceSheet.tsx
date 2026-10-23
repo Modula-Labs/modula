@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/Button";
-import { BrandDocker, Rocket } from "@/components/ui/icons";
+import { Rocket } from "@/components/ui/icons";
+import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { Sheet } from "@/components/ui/Sheet";
 import { TabPanel, Tabs } from "@/components/ui/Tabs";
 import { Alert, Skeleton } from "@/components/ui/misc";
@@ -19,6 +20,7 @@ export function ServiceSheet({
   deploymentId,
   onTab,
   onOpenDeployment,
+  leaving,
   onClose,
 }: {
   instanceId: string;
@@ -27,6 +29,7 @@ export function ServiceSheet({
   deploymentId?: string;
   onTab: (t: ServiceTab) => void;
   onOpenDeployment: (id: string) => void;
+  leaving?: boolean;
   onClose: () => void;
 }) {
   const qc = useQueryClient();
@@ -45,11 +48,16 @@ export function ServiceSheet({
 
   return (
     <Sheet
+      leaving={leaving}
       onClose={onClose}
       header={
         i ? (
           <div className="flex items-center gap-3">
-            <BrandDocker className="size-6 text-muted-foreground" />
+            <ServiceIcon
+              stack={i.stack}
+              image={i.config.source.type === "image" ? i.config.source.image : null}
+              repo={i.config.source.type === "repo" ? i.config.source.repo : null}
+            />
             <h2 className="truncate text-xl font-semibold">{i.serviceName}</h2>
             <div className="ml-auto pr-2">
               {canDeploy ? (

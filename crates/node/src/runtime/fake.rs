@@ -159,6 +159,17 @@ impl Runtime for FakeRuntime {
         Ok(())
     }
 
+    async fn restart(&self, container_id: &str) -> anyhow::Result<()> {
+        let mut s = self.state.lock().expect("fake lock");
+        let c = s
+            .containers
+            .get_mut(container_id)
+            .ok_or_else(|| anyhow::anyhow!("no such container"))?;
+        c.running = true;
+        c.restart_count += 1;
+        Ok(())
+    }
+
     async fn remove(&self, container_id: &str) -> anyhow::Result<()> {
         self.state
             .lock()

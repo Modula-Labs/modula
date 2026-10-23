@@ -1,7 +1,9 @@
 pub mod account;
+pub mod activity;
 pub mod auth;
 pub mod deployments;
 pub mod domains;
+pub mod github;
 pub mod install;
 pub mod instance;
 pub mod nodes;
@@ -54,6 +56,8 @@ pub fn routes(state: AppState) -> ApiRouter {
         .delete("/api/projects/{project_id}", Resource(Action::ProjectDelete), projects::delete)
         .post("/api/projects/{project_id}/environments", Resource(Action::EnvironmentCreate), projects::create_environment)
         .delete("/api/environments/{environment_id}", Resource(Action::EnvironmentDelete), projects::delete_environment)
+        .post("/api/environments/{environment_id}/sync", Resource(Action::EnvironmentSync), projects::sync_environment)
+        .get("/api/projects/{project_id}/activity", Resource(Action::ProjectRead), activity::list)
         // Services, per-environment config, variables
         .post("/api/projects/{project_id}/services", Resource(Action::ServiceCreate), services::create)
         .delete("/api/services/{service_id}", Resource(Action::ServiceDelete), services::delete)
@@ -68,6 +72,9 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/deployments/{deployment_id}", Resource(Action::DeploymentRead), deployments::get)
         .delete("/api/deployments/{deployment_id}", Resource(Action::DeploymentRemove), deployments::remove)
         .get("/api/deployments/{deployment_id}/logs", Resource(Action::DeploymentRead), deployments::logs)
+        .post("/api/deployments/{deployment_id}/redeploy", Resource(Action::DeploymentRollout), deployments::redeploy)
+        .post("/api/deployments/{deployment_id}/rollback", Resource(Action::DeploymentRollout), deployments::rollback)
+        .post("/api/deployments/{deployment_id}/restart", Resource(Action::DeploymentRollout), deployments::restart)
         // Domains
         .get("/api/service-instances/{instance_id}/domains", Resource(Action::InstanceRead), domains::list)
         .post("/api/service-instances/{instance_id}/domains", Resource(Action::DomainCreate), domains::generate)
@@ -75,5 +82,17 @@ pub fn routes(state: AppState) -> ApiRouter {
         // Servers (instance admins)
         .get("/api/nodes", Instance(Action::NodeList), nodes::list)
         .post("/api/nodes/join-tokens", Instance(Action::NodeJoinTokenCreate), nodes::create_join_token)
+        .patch("/api/nodes/{node_id}", Resource(Action::NodeUpdate), nodes::update)
         .delete("/api/nodes/{node_id}", Resource(Action::NodeRevoke), nodes::revoke)
+        .get("/api/locations", Authenticated, nodes::locations)
+        // GitHub App: one per instance (admins), installed per workspace.
+        .get("/api/github/app", Authenticated, github::status)
+        .post("/api/github/app/manifest", Instance(Action::GithubAppCreate), github::manifest)
+        // Bound to the admin's session by the single-use state, so not Public.
+        .get("/api/github/app/callback", Authenticated, github::app_callback)
+        .post("/api/workspaces/{workspace_id}/github/install", Resource(Action::GithubInstall), github::install)
+        .get("/api/github/install/callback", Authenticated, github::install_callback)
+        .get("/api/workspaces/{workspace_id}/github/repos", Resource(Action::GithubRepoList), github::repos)
+        // Authenticated by HMAC signature; the only path exempt from the Origin check.
+        .post(github::WEBHOOK_PATH, Public, github::webhook)
 }

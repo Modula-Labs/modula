@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -39,7 +39,7 @@ pub struct NewJob<'a> {
 }
 
 /// Returns the new job id, or None when deduplicated.
-pub async fn enqueue(db: &PgPool, job: NewJob<'_>) -> AppResult<Option<i64>> {
+pub async fn enqueue<'e>(db: impl PgExecutor<'e>, job: NewJob<'_>) -> AppResult<Option<i64>> {
     let id = sqlx::query_scalar(
         "INSERT INTO jobs (kind, payload, run_at, max_attempts, dedupe_key)
          VALUES ($1, $2, COALESCE($3, now()), COALESCE($4, 5), $5)

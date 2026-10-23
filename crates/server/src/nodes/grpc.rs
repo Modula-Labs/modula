@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 use modula_crypto::token::{self, prefix};
+use modula_id::Id;
 use modula_proto::node::v1 as pb;
 use modula_proto::node::v1::node_message::Msg as In;
 use modula_proto::node::v1::server_message::Msg as Out;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
-use uuid::Uuid;
 
 use crate::audit::Entry;
 use crate::deploy;
@@ -84,7 +84,7 @@ impl pb::node_server::Node for NodeService {
             return Err(Status::permission_denied("invalid or expired join token"));
         }
         let pki = self.state.pki().await.map_err(internal)?;
-        let node_id = Uuid::now_v7();
+        let node_id = Id::new();
         // Validate the CSR before burning the token.
         let issued = pki
             .issue_node_cert(node_id, &req.csr_der)
@@ -93,7 +93,7 @@ impl pb::node_server::Node for NodeService {
         let version: String = req.node_version.chars().take(64).collect();
 
         let mut tx = self.state.db.begin().await.map_err(internal)?;
-        let token_id: Option<Uuid> = sqlx::query_scalar(
+        let token_id: Option<Id> = sqlx::query_scalar(
             "UPDATE node_join_tokens SET used_at = now()
              WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
              RETURNING id",
@@ -188,9 +188,12 @@ impl pb::node_server::Node for NodeService {
             )));
         }
         let info = hello.info.clone().unwrap_or_default();
+        let location =
+            crate::locations::resolve(&info.cloud_provider, &info.cloud_region, &info.edge_colo);
         sqlx::query(
             "UPDATE nodes SET status = 'online', node_version = $2, protocol = $3, runtime = $4,
-                    applied_generation = $5, info = $6, last_seen_at = now()
+                    applied_generation = $5, info = $6, last_seen_at = now(),
+                    location = CASE WHEN location_pinned THEN location ELSE coalesce($7, location) END
              WHERE id = $1",
         )
         .bind(node)
@@ -205,7 +208,11 @@ impl pb::node_server::Node for NodeService {
             "cpus": info.cpus,
             "memoryBytes": info.memory_bytes,
             "capabilities": hello.capabilities.iter().take(32).map(|c| c.chars().take(64).collect::<String>()).collect::<Vec<_>>(),
+            "cloudProvider": info.cloud_provider.chars().take(32).collect::<String>(),
+            "cloudRegion": info.cloud_region.chars().take(64).collect::<String>(),
+            "edgeColo": info.edge_colo.chars().take(8).collect::<String>(),
         }))
+        .bind(location.map(|l| l.id))
         .execute(&state.db)
         .await
         .map_err(internal)?;
@@ -290,7 +297,7 @@ impl pb::node_server::Node for NodeService {
 
 async fn handle(
     state: &AppState,
-    node: Uuid,
+    node: Id,
     tx: &crate::nodes::hub::Outbound,
     msg: In,
 ) -> anyhow::Result<()> {

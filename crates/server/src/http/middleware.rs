@@ -6,8 +6,8 @@ use axum::response::{IntoResponse, Response};
 use crate::error::AppError;
 use crate::state::AppState;
 
-/// Paths that authenticate by signature instead of cookies (no Origin check).
-const SIGNED_WEBHOOK_PREFIX: &str = "/api/webhooks/";
+/// The one endpoint that authenticates by signature instead of cookies (no Origin check).
+const SIGNED_WEBHOOK: (Method, &str) = (Method::POST, crate::api::github::WEBHOOK_PATH);
 
 /// CSRF defence: every state-changing request must come from our exact origin.
 /// Browsers always send `Origin` on cross-origin and same-origin non-GET fetches,
@@ -20,7 +20,8 @@ pub async fn require_same_origin(
     next: Next,
 ) -> Response {
     let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
-    if safe || req.uri().path().starts_with(SIGNED_WEBHOOK_PREFIX) {
+    let webhook = *req.method() == SIGNED_WEBHOOK.0 && req.uri().path() == SIGNED_WEBHOOK.1;
+    if safe || webhook {
         return next.run(req).await;
     }
     let origin_ok = req

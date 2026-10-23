@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 modula-crypto.workspace = true
+modula-id = { workspace = true, features = ["sqlx"] }
 modula-proto.workspace = true
 
 anyhow.workspace = true
@@ -23,6 +24,10 @@ redis.workspace = true
 rcgen.workspace = true
 base64.workspace = true
 rustls.workspace = true
+reqwest.workspace = true
+hmac.workspace = true
+globset.workspace = true
+jsonwebtoken.workspace = true
 x509-parser.workspace = true
 tonic.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
@@ -43,7 +48,6 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
-uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

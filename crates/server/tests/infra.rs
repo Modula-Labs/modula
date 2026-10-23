@@ -1,11 +1,11 @@
 mod common;
 
 use modula_crypto::envelope::{FieldAad, MasterKey};
+use modula_id::Id;
 use modula_server::jobs::{self, NewJob};
 use modula_server::keyring::Keyring;
 use serde_json::json;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
 async fn job_lifecycle(pool: PgPool) {
@@ -183,7 +183,7 @@ async fn worker_runs_handlers_and_kills_unknown_kinds(pool: PgPool) {
 async fn keyring_persists_and_binds_keys(pool: PgPool) {
     let kek = MasterKey::generate().unwrap();
     let encoded = kek.encode();
-    let ws = Uuid::now_v7();
+    let ws = Id::new();
     let aad = FieldAad {
         scope: ws,
         table: "variables",
@@ -243,7 +243,7 @@ async fn redis_rate_limiter() {
     use modula_server::ratelimit::{Limit, RateLimiter};
     let client = redis::Client::open(url).unwrap();
     let rl = RateLimiter::Redis(redis::aio::ConnectionManager::new(client).await.unwrap());
-    let key = Uuid::now_v7().to_string();
+    let key = Id::new().to_string();
     let lim = Limit::per(2, std::time::Duration::from_millis(400));
     rl.check("test", &key, lim).await.unwrap();
     rl.check("test", &key, lim).await.unwrap();

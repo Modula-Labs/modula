@@ -13,7 +13,8 @@ import {
 import "@xyflow/react/dist/base.css";
 import { clsx } from "clsx";
 import { useEffect, useRef } from "react";
-import { BrandDocker, Maximize, Minus, Plus } from "@/components/ui/icons";
+import { Maximize, Minus, Plus } from "@/components/ui/icons";
+import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { StatusDot } from "@/components/ui/misc";
 import type { DeploymentStatus } from "@/lib/api";
 import { serviceState } from "@/lib/status";
@@ -23,7 +24,13 @@ export interface CanvasService {
   id: string;
   name: string;
   domain?: string;
+  /** `owner/name` for services built from GitHub. */
+  repo?: string;
+  /** Docker image for image-based services. */
+  image?: string | null;
   status: DeploymentStatus | null;
+  /** Detected framework/runtime, if known. */
+  stack?: string | null;
 }
 
 type ServiceNode = Node<{ service: CanvasService; selected: boolean }, "service">;
@@ -40,10 +47,10 @@ function ServiceCard({ data }: NodeProps<ServiceNode>) {
     >
       <Handle type="target" position={Position.Left} className="!opacity-0" />
       <div className="flex items-center gap-2.5">
-        <BrandDocker className="size-5 text-muted-foreground" />
+        <ServiceIcon stack={service.stack} image={service.image} repo={service.repo} />
         <span className="truncate text-base font-semibold">{service.name}</span>
       </div>
-      <div className="mt-1 truncate text-sm text-muted-foreground">{service.domain ?? " "}</div>
+      <div className="mt-1 truncate text-sm text-muted-foreground">{service.domain ?? service.repo ?? " "}</div>
       <div className="mt-auto">
         <StatusDot tone={state.tone}>{state.label}</StatusDot>
       </div>

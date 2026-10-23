@@ -3,10 +3,10 @@
 
 use axum::Json;
 use axum::extract::State;
+use modula_id::Id;
 use serde::Serialize;
 use serde_json::json;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use crate::audit::Entry;
 use crate::auth::session::Actor;
@@ -21,7 +21,7 @@ const MAX_GENERATED: i64 = 5;
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Domain {
-    pub id: Uuid,
+    pub id: Id,
     pub hostname: String,
     pub kind: String,
     #[serde(with = "time::serde::rfc3339")]
@@ -68,15 +68,15 @@ fn generated_label(service: &str, environment: &str) -> anyhow::Result<String> {
 }
 
 /// Nodes serving this instance, whose routes change with its domains.
-async fn serving_nodes(tx: &mut sqlx::PgConnection, instance: Uuid) -> AppResult<Vec<Uuid>> {
-    let nodes: Vec<Option<Uuid>> = sqlx::query_scalar(
+async fn serving_nodes(tx: &mut sqlx::PgConnection, instance: Id) -> AppResult<Vec<Id>> {
+    let nodes: Vec<Option<Id>> = sqlx::query_scalar(
         "SELECT DISTINCT node_id FROM deployments
          WHERE service_instance_id = $1 AND status IN ('active', 'crashed')",
     )
     .bind(instance)
     .fetch_all(&mut *tx)
     .await?;
-    let nodes: Vec<Uuid> = nodes.into_iter().flatten().collect();
+    let nodes: Vec<Id> = nodes.into_iter().flatten().collect();
     for n in &nodes {
         deploy::bump(&mut *tx, *n).await?;
     }
@@ -113,7 +113,7 @@ pub async fn generate(
             "a service can have at most {MAX_GENERATED} generated domains"
         )));
     }
-    let id = Uuid::now_v7();
+    let id = Id::new();
     // A collision on the random suffix is astronomically unlikely; retry once.
     let mut hostname = String::new();
     for _ in 0..2 {
@@ -157,7 +157,7 @@ pub async fn delete(
 ) -> AppResult<Json<serde_json::Value>> {
     let id = grant.id();
     let mut tx = state.db.begin().await?;
-    let (instance, hostname): (Uuid, String) =
+    let (instance, hostname): (Id, String) =
         sqlx::query_as("DELETE FROM domains WHERE id = $1 RETURNING service_instance_id, hostname")
             .bind(id)
             .fetch_one(&mut *tx)

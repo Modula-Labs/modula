@@ -2,9 +2,9 @@
 
 use modula_crypto::envelope::{FieldAad, INSTANCE_SCOPE};
 use modula_crypto::totp::{self, backup};
+use modula_id::Id;
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
-use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::error::{AppError, AppResult};
@@ -14,7 +14,7 @@ pub const ISSUER: &str = "Modula Deploy";
 /// An unconfirmed enrollment must be confirmed within this window.
 const ENROLL_TTL: Duration = Duration::minutes(15);
 
-fn row_id(user_id: Uuid) -> String {
+fn row_id(user_id: Id) -> String {
     user_id.to_string()
 }
 
@@ -39,7 +39,7 @@ async fn pepper(state: &AppState) -> AppResult<[u8; 32]> {
         .derive("backup-codes"))
 }
 
-pub async fn totp_enabled(db: &PgPool, user_id: Uuid) -> AppResult<bool> {
+pub async fn totp_enabled(db: &PgPool, user_id: Id) -> AppResult<bool> {
     Ok(
         sqlx::query_scalar("SELECT totp_enabled_at IS NOT NULL FROM users WHERE id = $1")
             .bind(user_id)
@@ -49,7 +49,7 @@ pub async fn totp_enabled(db: &PgPool, user_id: Uuid) -> AppResult<bool> {
 }
 
 /// Verify a TOTP code for an enrolled user and consume its time step.
-pub async fn verify_totp(state: &AppState, user_id: Uuid, code: &str) -> AppResult<bool> {
+pub async fn verify_totp(state: &AppState, user_id: Id, code: &str) -> AppResult<bool> {
     let row: Option<(Option<Vec<u8>>, Option<i64>)> =
         sqlx::query_as("SELECT totp_secret, totp_last_step FROM users WHERE id = $1")
             .bind(user_id)
@@ -80,7 +80,7 @@ pub async fn verify_totp(state: &AppState, user_id: Uuid, code: &str) -> AppResu
     Ok(won)
 }
 
-pub async fn consume_backup_code(state: &AppState, user_id: Uuid, code: &str) -> AppResult<bool> {
+pub async fn consume_backup_code(state: &AppState, user_id: Id, code: &str) -> AppResult<bool> {
     let Some(normalized) = backup::normalize(code) else {
         return Ok(false);
     };
@@ -98,7 +98,7 @@ pub async fn consume_backup_code(state: &AppState, user_id: Uuid, code: &str) ->
     Ok(used)
 }
 
-pub async fn backup_codes_remaining(db: &PgPool, user_id: Uuid) -> AppResult<i64> {
+pub async fn backup_codes_remaining(db: &PgPool, user_id: Id) -> AppResult<i64> {
     Ok(sqlx::query_scalar(
         "SELECT count(*) FROM backup_codes WHERE user_id = $1 AND used_at IS NULL",
     )
@@ -113,11 +113,7 @@ pub struct Enrollment {
 }
 
 /// Start (or restart) enrollment. The secret stays pending until confirmed.
-pub async fn begin_enrollment(
-    state: &AppState,
-    user_id: Uuid,
-    email: &str,
-) -> AppResult<Enrollment> {
+pub async fn begin_enrollment(state: &AppState, user_id: Id, email: &str) -> AppResult<Enrollment> {
     if totp_enabled(&state.db, user_id).await? {
         return Err(AppError::Conflict(
             "two-factor authentication is already enabled".into(),
@@ -145,7 +141,7 @@ pub async fn begin_enrollment(
 /// Confirm with a code from the app; enables TOTP and returns fresh backup codes.
 pub async fn confirm_enrollment(
     state: &AppState,
-    user_id: Uuid,
+    user_id: Id,
     code: &str,
 ) -> AppResult<Vec<Zeroizing<String>>> {
     let row: (Option<Vec<u8>>, Option<OffsetDateTime>) = sqlx::query_as(
@@ -196,7 +192,7 @@ pub async fn confirm_enrollment(
     Ok(codes)
 }
 
-pub async fn disable(state: &AppState, user_id: Uuid) -> AppResult<()> {
+pub async fn disable(state: &AppState, user_id: Id) -> AppResult<()> {
     let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE users SET totp_secret = NULL, totp_enabled_at = NULL, totp_last_step = NULL,
@@ -216,7 +212,7 @@ pub async fn disable(state: &AppState, user_id: Uuid) -> AppResult<()> {
 
 pub async fn regenerate_backup_codes(
     state: &AppState,
-    user_id: Uuid,
+    user_id: Id,
 ) -> AppResult<Vec<Zeroizing<String>>> {
     if !totp_enabled(&state.db, user_id).await? {
         return Err(AppError::bad_request(
@@ -232,7 +228,7 @@ pub async fn regenerate_backup_codes(
 async fn replace_backup_codes(
     state: &AppState,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    user_id: Uuid,
+    user_id: Id,
 ) -> AppResult<Vec<Zeroizing<String>>> {
     let pepper = pepper(state).await?;
     sqlx::query("DELETE FROM backup_codes WHERE user_id = $1")

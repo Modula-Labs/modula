@@ -9,7 +9,7 @@ use axum::http::Method;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, delete, get, patch, post, put};
-use uuid::Uuid;
+use modula_id::Id;
 
 use crate::auth::session::{self, SessionKind};
 use crate::authz::{self, Action, Resource, ResourceKind};
@@ -222,7 +222,7 @@ async fn authorize_request(
         let (name, value) = params.iter().next().ok_or(AppError::NotFound)?;
         let kind = ResourceKind::from_param(name)
             .ok_or_else(|| AppError::Internal(anyhow::anyhow!("unmapped param {name}")))?;
-        let id = Uuid::parse_str(value).map_err(|_| AppError::NotFound)?;
+        let id = value.parse::<Id>().map_err(|_| AppError::NotFound)?;
         let grant = authz::authorize(&state.db, &actor, action, Resource { kind, id }).await?;
         parts.extensions.insert(grant);
     }

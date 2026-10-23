@@ -13,6 +13,12 @@ if [[ "${1:-}" == "--rm" ]]; then
   name=${2:-dev-node-1}
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker volume rm "$name-data" "$name-docker" >/dev/null 2>&1 || true
+  # Revoke it in the dev database so deployments aren't placed on a ghost.
+  docker exec modula-cloud-pg psql -U modula -d modula_dev -qc \
+    "UPDATE deployments SET status = 'removed', finished_at = now()
+       WHERE status IN ('queued', 'building', 'deploying', 'active', 'crashed')
+         AND node_id IN (SELECT id FROM nodes WHERE name = '$name' AND status <> 'revoked');
+     UPDATE nodes SET status = 'revoked', revoked_at = now() WHERE name = '$name' AND status <> 'revoked'" >/dev/null 2>&1 || true
   echo "$name: removed"
   exit 0
 fi
@@ -31,6 +37,10 @@ docker run --rm \
   -w /src rust:1-alpine \
   sh -c 'apk add -q --no-cache musl-dev protobuf-dev >/dev/null && cargo build -q --release -p modula-node && cp /target/release/modula-node /target/modula-node.out'
 docker run --rm -v modula-node-target:/target -v "$PWD/$build":/out alpine cp /target/modula-node.out /out/modula-node
+arch=$(docker info --format '{{.Architecture}}' | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+[[ -f $build/buildctl-linux-$arch ]] || scripts/fetch-build-tools.sh "$arch" "$build"
+cp "$build/buildctl-linux-$arch" "$build/buildctl"
+cp "$build/railpack-linux-$arch" "$build/railpack"
 cp deploy/dev/node.Dockerfile deploy/dev/entrypoint.sh "$build/"
 docker build -q -t modula-dev-node -f "$build/node.Dockerfile" "$build" >/dev/null
 

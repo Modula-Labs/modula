@@ -10,8 +10,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use modula_id::Id;
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{Error, Result, random_bytes};
@@ -24,12 +24,12 @@ const FIELD_AAD_DOMAIN: &[u8] = b"modula/field/v1";
 
 /// Scope used for instance-level secrets that belong to no workspace
 /// (e.g. the self-hosted GitHub App private key).
-pub const INSTANCE_SCOPE: Uuid = Uuid::nil();
+pub const INSTANCE_SCOPE: Id = Id::ZERO;
 
 /// Where a sealed field lives. Every part is length-prefixed in the AAD.
 #[derive(Debug, Clone, Copy)]
 pub struct FieldAad<'a> {
-    pub scope: Uuid,
+    pub scope: Id,
     pub table: &'a str,
     pub column: &'a str,
     pub row: &'a str,
@@ -122,18 +122,18 @@ impl MasterKey {
         format!("kek_{}", hex::encode(&h.finalize()[..8]))
     }
 
-    pub fn wrap(&self, dek: &DataKey, scope: Uuid) -> Result<Vec<u8>> {
+    pub fn wrap(&self, dek: &DataKey, scope: Id) -> Result<Vec<u8>> {
         seal(&self.0, &dek.0, &dek_aad(scope))
     }
 
-    pub fn unwrap(&self, wrapped: &[u8], scope: Uuid) -> Result<DataKey> {
+    pub fn unwrap(&self, wrapped: &[u8], scope: Id) -> Result<DataKey> {
         let plain = open(&self.0, wrapped, &dek_aad(scope))?;
         let arr: [u8; KEY_LEN] = plain.as_slice().try_into().map_err(|_| Error::Malformed)?;
         Ok(DataKey(arr))
     }
 }
 
-fn dek_aad(scope: Uuid) -> Vec<u8> {
+fn dek_aad(scope: Id) -> Vec<u8> {
     let mut out = Vec::with_capacity(40);
     push_part(&mut out, DEK_AAD_DOMAIN);
     push_part(&mut out, scope.as_bytes());
@@ -175,7 +175,7 @@ mod tests {
 
     fn aad(row: &str) -> FieldAad<'_> {
         FieldAad {
-            scope: Uuid::from_u128(7),
+            scope: "0000000000000007".parse::<Id>().unwrap(),
             table: "variables",
             column: "value",
             row,
@@ -204,7 +204,7 @@ mod tests {
         };
         assert!(dek.open(&sealed, &other_col).is_err());
         let other_scope = FieldAad {
-            scope: Uuid::from_u128(8),
+            scope: "0000000000000008".parse::<Id>().unwrap(),
             ..aad("r1")
         };
         assert!(dek.open(&sealed, &other_scope).is_err());
@@ -214,14 +214,14 @@ mod tests {
     fn aad_parts_are_unambiguous() {
         // ("ab","c") must not collide with ("a","bc").
         let a = FieldAad {
-            scope: Uuid::nil(),
+            scope: Id::ZERO,
             table: "ab",
             column: "c",
             row: "x",
         }
         .encode();
         let b = FieldAad {
-            scope: Uuid::nil(),
+            scope: Id::ZERO,
             table: "a",
             column: "bc",
             row: "x",
@@ -261,11 +261,14 @@ mod tests {
     fn wrap_unwrap_bound_to_scope() {
         let kek = MasterKey::generate().unwrap();
         let dek = DataKey::generate().unwrap();
-        let ws = Uuid::from_u128(1);
+        let ws = "0000000000000001".parse::<Id>().unwrap();
         let wrapped = kek.wrap(&dek, ws).unwrap();
         let back = kek.unwrap(&wrapped, ws).unwrap();
         assert_eq!(back.0, dek.0);
-        assert!(kek.unwrap(&wrapped, Uuid::from_u128(2)).is_err());
+        assert!(
+            kek.unwrap(&wrapped, "0000000000000002".parse::<Id>().unwrap())
+                .is_err()
+        );
         let other = MasterKey::generate().unwrap();
         assert!(other.unwrap(&wrapped, ws).is_err());
     }

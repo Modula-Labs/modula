@@ -4,9 +4,9 @@
 //!
 //! Instance admins get no implicit access to workspaces (SaaS-ready isolation).
 
+use modula_id::Id;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use crate::auth::session::Actor;
 use crate::error::{AppError, AppResult};
@@ -64,6 +64,8 @@ pub enum Action {
     ProjectDelete,
     EnvironmentCreate,
     EnvironmentDelete,
+    /// Copy another environment's config (and missing variables) into this one.
+    EnvironmentSync,
     ServiceCreate,
     ServiceDelete,
     InstanceRead,
@@ -76,6 +78,8 @@ pub enum Action {
     DeploymentCreate,
     DeploymentRead,
     DeploymentRemove,
+    /// Redeploy, roll back to, or restart an existing deployment.
+    DeploymentRollout,
     DomainCreate,
     DomainDelete,
     /// Instance-level, no path parameter.
@@ -83,6 +87,14 @@ pub enum Action {
     /// Instance-level, no path parameter.
     NodeJoinTokenCreate,
     NodeRevoke,
+    /// Pin a server's location.
+    NodeUpdate,
+    /// Instance-level, no path parameter: create the instance's GitHub App.
+    GithubAppCreate,
+    /// Install the GitHub App for a workspace.
+    GithubInstall,
+    /// List repositories reachable through a workspace's installations.
+    GithubRepoList,
 }
 
 impl Action {
@@ -96,7 +108,7 @@ impl Action {
             Self::SessionRevoke => K::Session,
             Self::ProjectRead | Self::ProjectUpdate | Self::ProjectDelete => K::Project,
             Self::EnvironmentCreate | Self::ServiceCreate => K::Project,
-            Self::EnvironmentDelete => K::Environment,
+            Self::EnvironmentDelete | Self::EnvironmentSync => K::Environment,
             Self::ServiceDelete => K::Service,
             Self::InstanceRead | Self::InstanceUpdate => K::ServiceInstance,
             Self::VariablesRead | Self::VariablesWrite | Self::DeploymentCreate => {
@@ -105,9 +117,12 @@ impl Action {
             Self::VariableReveal => K::Variable,
             Self::DomainCreate => K::ServiceInstance,
             Self::DomainDelete => K::Domain,
-            Self::DeploymentRead | Self::DeploymentRemove => K::Deployment,
-            Self::NodeRevoke => K::Node,
-            Self::NodeList | Self::NodeJoinTokenCreate => return None,
+            Self::DeploymentRead | Self::DeploymentRemove | Self::DeploymentRollout => {
+                K::Deployment
+            }
+            Self::NodeRevoke | Self::NodeUpdate => K::Node,
+            Self::GithubInstall | Self::GithubRepoList => K::Workspace,
+            Self::NodeList | Self::NodeJoinTokenCreate | Self::GithubAppCreate => return None,
         })
     }
 
@@ -123,25 +138,32 @@ impl Action {
             | Self::InstanceRead
             | Self::VariablesRead
             | Self::DeploymentRead => Role::Viewer,
-            Self::VariablesWrite | Self::DeploymentCreate | Self::DeploymentRemove => {
-                Role::Deployer
-            }
+            Self::VariablesWrite
+            | Self::DeploymentCreate
+            | Self::DeploymentRemove
+            | Self::DeploymentRollout => Role::Deployer,
             Self::ProjectCreate
             | Self::ProjectUpdate
             | Self::EnvironmentCreate
+            | Self::EnvironmentSync
             | Self::ServiceCreate
             | Self::ServiceDelete
             | Self::InstanceUpdate
             | Self::VariableReveal
             | Self::DomainCreate
-            | Self::DomainDelete => Role::Member,
+            | Self::DomainDelete
+            | Self::GithubRepoList => Role::Member,
             Self::WorkspaceUpdate
             | Self::WorkspaceDelete
             | Self::ProjectDelete
-            | Self::EnvironmentDelete => Role::Admin,
-            Self::SessionRevoke | Self::NodeList | Self::NodeJoinTokenCreate | Self::NodeRevoke => {
-                Role::Admin
-            }
+            | Self::EnvironmentDelete
+            | Self::GithubInstall => Role::Admin,
+            Self::SessionRevoke
+            | Self::NodeList
+            | Self::NodeJoinTokenCreate
+            | Self::NodeRevoke
+            | Self::NodeUpdate
+            | Self::GithubAppCreate => Role::Admin,
         }
     }
 
@@ -154,7 +176,8 @@ impl Action {
             | Self::ServiceDelete
             | Self::VariableReveal
             | Self::NodeJoinTokenCreate
-            | Self::NodeRevoke => true,
+            | Self::NodeRevoke
+            | Self::GithubAppCreate => true,
             Self::WorkspaceRead
             | Self::WorkspaceUpdate
             | Self::SessionRevoke
@@ -162,6 +185,7 @@ impl Action {
             | Self::ProjectRead
             | Self::ProjectUpdate
             | Self::EnvironmentCreate
+            | Self::EnvironmentSync
             | Self::ServiceCreate
             | Self::InstanceRead
             | Self::InstanceUpdate
@@ -170,9 +194,13 @@ impl Action {
             | Self::DeploymentCreate
             | Self::DeploymentRead
             | Self::DeploymentRemove
+            | Self::DeploymentRollout
             | Self::DomainCreate
             | Self::DomainDelete
-            | Self::NodeList => false,
+            | Self::NodeList
+            | Self::NodeUpdate
+            | Self::GithubInstall
+            | Self::GithubRepoList => false,
         }
     }
 }
@@ -242,8 +270,8 @@ impl ResourceKind {
     }
 
     /// The id of the workspace or user that owns resource `id`, if it exists.
-    /// Instance-owned resources return the nil uuid.
-    async fn owner_id(self, db: &PgPool, id: Uuid) -> AppResult<Option<Uuid>> {
+    /// Instance-owned resources return the all-zero id.
+    async fn owner_id(self, db: &PgPool, id: Id) -> AppResult<Option<Id>> {
         let sql = match self {
             Self::Workspace => "SELECT id FROM workspaces WHERE id = $1",
             Self::Session => "SELECT user_id FROM sessions WHERE id = $1 AND kind = 'full'",
@@ -279,9 +307,7 @@ impl ResourceKind {
                  JOIN services s ON s.id = i.service_id
                  JOIN projects p ON p.id = s.project_id WHERE m.id = $1"
             }
-            Self::Node => {
-                "SELECT '00000000-0000-0000-0000-000000000000'::uuid FROM nodes WHERE id = $1"
-            }
+            Self::Node => "SELECT '0000000000000000' FROM nodes WHERE id = $1",
         };
         Ok(sqlx::query_scalar(sql).bind(id).fetch_optional(db).await?)
     }
@@ -290,13 +316,13 @@ impl ResourceKind {
 #[derive(Debug, Clone, Copy)]
 pub struct Resource {
     pub kind: ResourceKind,
-    pub id: Uuid,
+    pub id: Id,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Scope {
-    Workspace { id: Uuid, role: Role },
-    Account { user_id: Uuid },
+    Workspace { id: Id, role: Role },
+    Account { user_id: Id },
     Instance,
 }
 
@@ -309,11 +335,11 @@ pub struct Grant {
 
 impl Grant {
     /// The id from the route's path parameter.
-    pub fn id(&self) -> Uuid {
+    pub fn id(&self) -> Id {
         self.resource.id
     }
 
-    pub fn workspace_id(&self) -> AppResult<Uuid> {
+    pub fn workspace_id(&self) -> AppResult<Id> {
         match self.scope {
             Scope::Workspace { id, .. } => Ok(id),
             Scope::Account { .. } | Scope::Instance => {
@@ -391,6 +417,7 @@ mod tests {
             Action::NodeList,
             Action::NodeJoinTokenCreate,
             Action::NodeRevoke,
+            Action::GithubAppCreate,
         ] {
             assert_eq!(a.owner(), OwnerKind::Instance);
         }

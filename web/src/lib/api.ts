@@ -107,7 +107,7 @@ export interface ServiceSummary {
   name: string;
   icon: string | null;
 }
-export type DeploymentStatus = "queued" | "deploying" | "active" | "failed" | "crashed" | "removed" | "cancelled";
+export type DeploymentStatus = "queued" | "building" | "deploying" | "active" | "failed" | "crashed" | "removed" | "cancelled";
 export interface InstanceSummary {
   id: string;
   serviceId: string;
@@ -116,15 +116,52 @@ export interface InstanceSummary {
   latestDeploymentId: string | null;
   latestDeploymentStatus: DeploymentStatus | null;
   domain: string | null;
+  sourceType: "image" | "repo" | null;
+  repo: string | null;
+  image?: string | null;
+  /** Detected framework/runtime (e.g. "nextjs", "postgres"), used for the card icon. */
+  stack?: string | null;
 }
 export interface ProjectDetail extends Project {
   environments: Environment[];
   services: ServiceSummary[];
   instances: InstanceSummary[];
 }
+export interface SyncResult {
+  created: number;
+  updated: number;
+}
+export interface ActivityChange {
+  kind: "variable" | "config" | "deployment" | "service";
+  op: "added" | "updated" | "removed" | "created" | "deleted" | "status";
+  /** Variable name or config field. */
+  key: string | null;
+  /** Deployment status. */
+  status: string | null;
+  deploymentId: string | null;
+  message: string | null;
+  at: string;
+}
+export interface ActivityGroup {
+  id: string;
+  serviceId: string | null;
+  serviceName: string | null;
+  actor: { name: string; avatarUrl: string | null } | null;
+  /** Newest change in the group. */
+  at: string;
+  changes: ActivityChange[];
+}
+export type ActivityKind = "deployment" | "variable" | "config";
 export type RestartPolicy = "on_failure" | "always" | "never";
+export type ServiceSource = { type: "image"; image: string } | { type: "repo"; repo: string; branch: string; rootDir?: string };
+export type Builder = "railpack" | "dockerfile";
 export interface ServiceConfig {
-  source: { type: "image"; image: string };
+  source: ServiceSource;
+  builder?: Builder;
+  dockerfilePath?: string;
+  buildCommand?: string;
+  autoDeploy?: boolean;
+  watchPaths?: string[];
   startCommand?: string[];
   port: number;
   healthcheckPath?: string;
@@ -132,7 +169,19 @@ export interface ServiceConfig {
   restartPolicy: RestartPolicy;
   memoryMb?: number;
   cpuMillis?: number;
+  /** Each replica runs on a different server. */
+  replicas?: number;
 }
+export interface Location {
+  id: string;
+  label: string;
+  provider: string;
+  countryCode: string;
+}
+export interface LocationOption extends Location {
+  city: string;
+}
+export type InstanceState = "online" | "offline" | "deploying" | "crashed";
 export interface Instance {
   id: string;
   serviceId: string;
@@ -142,6 +191,10 @@ export interface Instance {
   projectId: string;
   nodeId: string | null;
   config: ServiceConfig;
+  /** The server running it. */
+  location?: Location | null;
+  status?: InstanceState;
+  stack?: string | null;
   updatedAt: string;
 }
 export interface VariableInfo {
@@ -156,7 +209,18 @@ export interface Deployment {
   nodeId: string | null;
   status: DeploymentStatus;
   image: string;
+  imageDigest: string | null;
+  commitSha: string | null;
+  commitMessage: string | null;
+  commitAuthor: string | null;
+  /** What was deployed: `owner/name@branch` or the image. */
+  source: string;
+  buildStartedAt: string | null;
+  buildFinishedAt: string | null;
+  sourceKind?: "github" | "image" | "upload";
+  /** manual | push | rollback | redeploy | restart */
   trigger: string;
+  commitAuthorAvatar?: string | null;
   error: string | null;
   createdBy: string | null;
   createdAt: string;
@@ -190,6 +254,7 @@ export interface NodeInfo {
   certExpiresAt: string;
   createdAt: string;
   connected: boolean;
+  location?: Location | null;
 }
 export interface JoinToken {
   token: string;
@@ -235,6 +300,15 @@ export const api = {
   deleteProject: (id: string) => del<{ ok: true }>(`/api/projects/${enc(id)}`),
   createEnvironment: (project: string, name: string) =>
     post<Environment>(`/api/projects/${enc(project)}/environments`, { name }),
+  syncEnvironment: (target: string, fromEnvironmentId: string) =>
+    post<SyncResult>(`/api/environments/${enc(target)}/sync`, { fromEnvironmentId }),
+  activity: (project: string, q: { environmentId?: string; serviceId?: string; kind?: ActivityKind }) => {
+    const params = new URLSearchParams();
+    if (q.environmentId) params.set("environmentId", q.environmentId);
+    if (q.serviceId) params.set("serviceId", q.serviceId);
+    if (q.kind) params.set("kind", q.kind);
+    return get<{ items: ActivityGroup[] }>(`/api/projects/${enc(project)}/activity?${params}`);
+  },
   deleteEnvironment: (id: string) => del<{ ok: true }>(`/api/environments/${enc(id)}`),
 
   createService: (project: string, b: { name: string; config: Partial<ServiceConfig> & { source: ServiceConfig["source"] } }) =>
@@ -251,8 +325,12 @@ export const api = {
   deployments: (instance: string) => get<Deployment[]>(`/api/service-instances/${enc(instance)}/deployments`),
   deploy: (instance: string) => post<DeploymentDetail>(`/api/service-instances/${enc(instance)}/deployments`),
   deployment: (id: string) => get<DeploymentDetail>(`/api/deployments/${enc(id)}`),
+  redeployDeployment: (id: string) => post<DeploymentDetail>(`/api/deployments/${enc(id)}/redeploy`),
+  rollbackDeployment: (id: string) => post<DeploymentDetail>(`/api/deployments/${enc(id)}/rollback`),
+  restartDeployment: (id: string) => post<DeploymentDetail>(`/api/deployments/${enc(id)}/restart`),
   removeDeployment: (id: string) => del<DeploymentDetail>(`/api/deployments/${enc(id)}`),
-  deploymentLogsUrl: (id: string, tail = 500) => `/api/deployments/${enc(id)}/logs?tail=${tail}&follow=true`,
+  deploymentLogsUrl: (id: string, tail = 500, kind: "deploy" | "build" = "deploy") =>
+    `/api/deployments/${enc(id)}/logs?${kind === "build" ? "kind=build&" : ""}tail=${tail}&follow=true`,
 
   domains: (instance: string) => get<Domain[]>(`/api/service-instances/${enc(instance)}/domains`),
   generateDomain: (instance: string) => post<Domain>(`/api/service-instances/${enc(instance)}/domains`),
@@ -260,5 +338,7 @@ export const api = {
 
   nodes: () => get<NodeInfo[]>("/api/nodes"),
   createJoinToken: () => post<JoinToken>("/api/nodes/join-tokens"),
+  locations: () => get<LocationOption[]>("/api/locations"),
+  setNodeLocation: (id: string, location: string | null) => patch<NodeInfo>(`/api/nodes/${enc(id)}`, { location }),
   revokeNode: (id: string) => del<{ ok: true }>(`/api/nodes/${enc(id)}`),
 };

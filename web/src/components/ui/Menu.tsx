@@ -25,15 +25,18 @@ export function MenuItem({
   icon,
   children,
   disabled,
+  title,
 }: {
   onSelect: () => void;
   danger?: boolean;
   icon?: ReactNode;
   children: ReactNode;
   disabled?: boolean;
+  title?: string;
 }) {
   return (
     <M.Item
+      title={title}
       disabled={disabled}
       onSelect={onSelect}
       className={clsx(

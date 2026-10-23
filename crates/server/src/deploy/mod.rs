@@ -1,19 +1,21 @@
 //! Services, variables and deployments: everything between an API request and
 //! the desired state a node reconciles to.
 
+pub mod build_output;
 pub mod config;
 pub mod desired;
 pub mod env;
 pub mod placement;
+pub mod start;
 pub mod state;
 
+use modula_id::Id;
 use sqlx::PgExecutor;
-use uuid::Uuid;
 
 use crate::error::AppResult;
 
 /// Mark a node's desired state as changed. The hub pushes the new snapshot.
-pub async fn bump<'e>(db: impl PgExecutor<'e>, node_id: Uuid) -> AppResult<()> {
+pub async fn bump<'e>(db: impl PgExecutor<'e>, node_id: Id) -> AppResult<()> {
     sqlx::query("UPDATE nodes SET desired_generation = desired_generation + 1 WHERE id = $1")
         .bind(node_id)
         .execute(db)
@@ -26,13 +28,13 @@ pub async fn bump<'e>(db: impl PgExecutor<'e>, node_id: Uuid) -> AppResult<()> {
 pub async fn remove_live(
     tx: &mut sqlx::PgConnection,
     filter: LiveFilter,
-    id: Uuid,
-) -> AppResult<Vec<Uuid>> {
-    let nodes: Vec<Option<Uuid>> = sqlx::query_scalar(filter.sql())
+    id: Id,
+) -> AppResult<Vec<Id>> {
+    let nodes: Vec<Option<Id>> = sqlx::query_scalar(filter.sql())
         .bind(id)
         .fetch_all(&mut *tx)
         .await?;
-    let mut nodes: Vec<Uuid> = nodes.into_iter().flatten().collect();
+    let mut nodes: Vec<Id> = nodes.into_iter().flatten().collect();
     nodes.sort();
     nodes.dedup();
     for n in &nodes {
@@ -56,7 +58,7 @@ macro_rules! remove_live_sql {
             "UPDATE deployments d SET status = 'removed', finished_at = now(), updated_at = now()
              FROM service_instances i, services s
              WHERE i.id = d.service_instance_id AND s.id = i.service_id
-               AND d.status IN ('queued', 'deploying', 'active', 'crashed') AND ",
+               AND d.status IN ('queued', 'building', 'deploying', 'active', 'crashed') AND ",
             $cond,
             " RETURNING d.node_id"
         )

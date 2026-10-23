@@ -8,6 +8,8 @@ FROM caddy:2-alpine AS caddy
 FROM docker:28-dind
 COPY --from=caddy /usr/bin/caddy /usr/bin/caddy
 COPY modula-node /usr/local/bin/modula-node
+COPY buildctl /usr/local/bin/buildctl
+COPY railpack /usr/local/bin/railpack
 COPY entrypoint.sh /usr/local/bin/modula-dev-node
 ENV DOCKER_TLS_CERTDIR=""
 EXPOSE 80 443

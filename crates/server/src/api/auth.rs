@@ -3,11 +3,11 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum_extra::extract::CookieJar;
 use modula_crypto::{ct_eq, password, token};
+use modula_id::Id;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgPool;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use crate::audit::Entry;
 use crate::auth::mfa;
@@ -26,7 +26,7 @@ const SETUP_PER_IP: Limit = Limit::per(10, std::time::Duration::from_secs(15 * 6
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeUser {
-    pub id: Uuid,
+    pub id: Id,
     pub email: String,
     pub name: String,
     pub is_instance_admin: bool,
@@ -35,7 +35,7 @@ pub struct MeUser {
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Membership {
-    pub id: Uuid,
+    pub id: Id,
     pub name: String,
     pub role: String,
 }
@@ -47,8 +47,8 @@ pub struct Me {
     pub workspaces: Vec<Membership>,
 }
 
-pub async fn load_me(db: &PgPool, user_id: Uuid) -> AppResult<Me> {
-    let (id, email, name, is_instance_admin): (Uuid, String, String, bool) =
+pub async fn load_me(db: &PgPool, user_id: Id) -> AppResult<Me> {
+    let (id, email, name, is_instance_admin): (Id, String, String, bool) =
         sqlx::query_as("SELECT id, email, name, is_instance_admin FROM users WHERE id = $1")
             .bind(user_id)
             .fetch_one(db)
@@ -128,8 +128,8 @@ pub async fn setup(
         return Err(AppError::InvalidCredentials);
     }
 
-    let user_id = Uuid::now_v7();
-    let workspace_id = Uuid::now_v7();
+    let user_id = Id::new();
+    let workspace_id = Id::new();
     sqlx::query(
         "INSERT INTO users (id, email, name, password_hash, is_instance_admin) VALUES ($1, $2, $3, $4, true)",
     )
@@ -159,9 +159,9 @@ pub async fn setup(
 
 pub async fn create_workspace_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    id: Uuid,
+    id: Id,
     name: &str,
-    admin: Uuid,
+    admin: Id,
 ) -> AppResult<()> {
     sqlx::query("INSERT INTO workspaces (id, name) VALUES ($1, $2)")
         .bind(id)
@@ -211,7 +211,7 @@ pub async fn login(
         .check("login-email", &email, LOGIN_PER_EMAIL)
         .await?;
 
-    let user: Option<(Uuid, Option<String>)> =
+    let user: Option<(Id, Option<String>)> =
         sqlx::query_as("SELECT id, password_hash FROM users WHERE email = $1")
             .bind(&email)
             .fetch_optional(&state.db)
@@ -291,7 +291,7 @@ pub struct SecondFactor {
 /// Returns the method name used ("totp" / "backup_code"), or None if invalid.
 async fn check_second_factor(
     state: &AppState,
-    user_id: Uuid,
+    user_id: Id,
     f: &SecondFactor,
 ) -> AppResult<Option<&'static str>> {
     Ok(match (&f.totp_code, &f.backup_code) {

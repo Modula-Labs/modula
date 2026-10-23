@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use modula_id::Id;
 use modula_proto::node::v1 as pb;
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-use uuid::Uuid;
 
 pub type Outbound = mpsc::Sender<Result<pb::ServerMessage, Status>>;
 
@@ -30,15 +30,15 @@ pub struct Registered {
 
 #[derive(Default)]
 pub struct Hub {
-    conns: Mutex<HashMap<Uuid, Conn>>,
+    conns: Mutex<HashMap<Id, Conn>>,
     /// request id → (node that must answer, where chunks go).
-    logs: Mutex<HashMap<String, (Uuid, mpsc::Sender<pb::LogChunk>)>>,
+    logs: Mutex<HashMap<String, (Id, mpsc::Sender<pb::LogChunk>)>>,
     next: AtomicU64,
 }
 
 impl Hub {
     /// Register a node's stream, replacing (and cancelling) any older one.
-    pub fn register(&self, node: Uuid, tx: Outbound) -> Registered {
+    pub fn register(&self, node: Id, tx: Outbound) -> Registered {
         let conn = Conn {
             id: self.next.fetch_add(1, Ordering::Relaxed),
             tx,
@@ -57,7 +57,7 @@ impl Hub {
     }
 
     /// Remove the connection if it is still the current one for `node`.
-    pub fn unregister(&self, node: Uuid, conn_id: u64) -> bool {
+    pub fn unregister(&self, node: Id, conn_id: u64) -> bool {
         let mut conns = self.conns.lock().expect("hub lock");
         if conns.get(&node).is_some_and(|c| c.id == conn_id) {
             if let Some(c) = conns.remove(&node) {
@@ -72,7 +72,7 @@ impl Hub {
         false
     }
 
-    pub fn disconnect(&self, node: Uuid) {
+    pub fn disconnect(&self, node: Id) {
         if let Some(c) = self.conns.lock().expect("hub lock").remove(&node) {
             c.cancel.cancel();
         }
@@ -82,23 +82,23 @@ impl Hub {
             .retain(|_, (n, _)| *n != node);
     }
 
-    pub fn is_connected(&self, node: Uuid) -> bool {
+    pub fn is_connected(&self, node: Id) -> bool {
         self.conns.lock().expect("hub lock").contains_key(&node)
     }
 
-    pub fn kick(&self, node: Uuid) {
+    pub fn kick(&self, node: Id) {
         if let Some(c) = self.conns.lock().expect("hub lock").get(&node) {
             c.kick.notify_one();
         }
     }
 
-    pub fn kick_all(&self, nodes: &[Uuid]) {
+    pub fn kick_all(&self, nodes: &[Id]) {
         for n in nodes {
             self.kick(*n);
         }
     }
 
-    fn sender(&self, node: Uuid) -> Option<Outbound> {
+    fn sender(&self, node: Id) -> Option<Outbound> {
         self.conns
             .lock()
             .expect("hub lock")
@@ -110,13 +110,14 @@ impl Hub {
     /// until one has `done` set or the stream is closed with [`Hub::close_logs`].
     pub async fn open_logs(
         &self,
-        node: Uuid,
-        deployment: Uuid,
+        node: Id,
+        deployment: Id,
         tail: u32,
         follow: bool,
+        kind: pb::LogKind,
     ) -> Option<(String, mpsc::Receiver<pb::LogChunk>)> {
         let tx = self.sender(node)?;
-        let request_id = Uuid::new_v4().to_string();
+        let request_id = Id::new().to_string();
         let (ctx, crx) = mpsc::channel(64);
         self.logs
             .lock()
@@ -128,6 +129,7 @@ impl Hub {
                 deployment_id: deployment.to_string(),
                 tail,
                 follow,
+                kind: kind as i32,
             })),
         };
         if tx.send(Ok(msg)).await.is_err() {
@@ -156,7 +158,7 @@ impl Hub {
     /// so the caller can cancel it on the node. Waiting here would stall every
     /// other message from that node (deployment events included) behind one
     /// slow browser. Chunks for requests another node owns are ignored.
-    pub fn deliver_logs(&self, node: Uuid, chunk: pb::LogChunk) -> Option<String> {
+    pub fn deliver_logs(&self, node: Id, chunk: pb::LogChunk) -> Option<String> {
         let mut logs = self.logs.lock().expect("hub lock");
         let id = chunk.request_id.clone();
         let tx = match logs.get(&id) {

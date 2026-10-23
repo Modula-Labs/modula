@@ -1,5 +1,6 @@
 //! modula-server: the Modula Deploy control plane.
 
+pub mod activity;
 pub mod api;
 pub mod audit;
 pub mod auth;
@@ -8,9 +9,11 @@ pub mod config;
 pub mod db;
 pub mod deploy;
 pub mod error;
+pub mod github;
 pub mod http;
 pub mod jobs;
 pub mod keyring;
+pub mod locations;
 pub mod nodes;
 pub mod pki;
 pub mod ratelimit;
@@ -54,12 +57,15 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let stop = state.shutdown.clone();
     let worker = tokio::spawn(jobs::run_worker(
         state.clone(),
-        jobs::Registry::default().on("sessions.cleanup", |s, _| async move {
-            let n = auth::session::delete_expired(&s.db).await?;
-            tracing::info!(deleted = n, "expired sessions removed");
-            Ok(())
-        }),
-        format!("server-{}", uuid::Uuid::new_v4()),
+        jobs::Registry::default()
+            .on("sessions.cleanup", |s, _| async move {
+                let n = auth::session::delete_expired(&s.db).await?;
+                tracing::info!(deleted = n, "expired sessions removed");
+                api::github::prune(&s.db).await?;
+                Ok(())
+            })
+            .on(github::app::STATUS_JOB, github::app::status_job),
+        format!("server-{}", modula_id::Id::new()),
         stop.clone(),
     ));
     let cleanup = tokio::spawn(schedule_cleanup(state.clone(), stop.clone()));

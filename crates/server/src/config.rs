@@ -30,6 +30,8 @@ pub struct Config {
     /// The installed release (binaries + signed checksums). Served to servers
     /// joining this instance so they run the same version. None in development.
     pub release_dir: Option<PathBuf>,
+    /// GitHub's REST API (a mock in tests).
+    pub github_api: Url,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +92,10 @@ impl Config {
                 .ok()
                 .filter(|d| !d.is_empty())
                 .map(PathBuf::from),
+            github_api: std::env::var("MODULA_GITHUB_API_URL")
+                .unwrap_or_else(|_| "https://api.github.com".into())
+                .parse()
+                .context("invalid MODULA_GITHUB_API_URL")?,
         };
         let mut cfg = cfg;
         cfg.node_url = match std::env::var("MODULA_NODE_URL") {
@@ -250,6 +256,7 @@ impl Config {
             edge_tls: EdgeTls::Acme,
             acme_email: None,
             release_dir: None,
+            github_api: "https://api.github.com".parse().unwrap(),
         }
     }
 }
@@ -291,7 +298,7 @@ mod tests {
 
     #[test]
     fn master_key_file_permissions() {
-        let dir = std::env::temp_dir().join(format!("modula-key-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("modula-key-{}", modula_id::Id::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("master.key");
         let k = write_new_master_key(&path).unwrap();

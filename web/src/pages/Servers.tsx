@@ -3,10 +3,12 @@ import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { CopyButton } from "@/components/ui/CopyButton";
 import { DotsVertical, Plus, Server, Trash } from "@/components/ui/icons";
+import { Select } from "@/components/ui/Input";
 import { Menu, MenuItem } from "@/components/ui/Menu";
 import { Modal } from "@/components/ui/Modal";
 import { Alert, Badge, EmptyState, Skeleton, StatusDot } from "@/components/ui/misc";
-import { api, type JoinToken, type NodeInfo } from "@/lib/api";
+import { api, type JoinToken, type LocationOption, type NodeInfo } from "@/lib/api";
+import { flagEmoji } from "@/lib/flags";
 import { relativeTime } from "@/lib/format";
 
 const gb = (b?: number) => (b ? `${(b / 1024 ** 3).toFixed(b >= 10 * 1024 ** 3 ? 0 : 1)} GB` : "—");
@@ -18,6 +20,12 @@ export function ServersPage() {
   const [adding, setAdding] = useState(false);
   const revoke = useMutation({
     mutationFn: (id: string) => api.revokeNode(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["nodes"] }),
+  });
+
+  const locations = useQuery({ queryKey: ["locations"], queryFn: api.locations, staleTime: 5 * 60_000 });
+  const setLocation = useMutation({
+    mutationFn: ({ id, location }: { id: string; location: string | null }) => api.setNodeLocation(id, location),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["nodes"] }),
   });
 
@@ -34,7 +42,7 @@ export function ServersPage() {
       </p>
 
       <div className="mt-8">
-        {revoke.error ? <Alert>{revoke.error.message}</Alert> : null}
+        {revoke.error ?? setLocation.error ? <Alert>{(revoke.error ?? setLocation.error)?.message}</Alert> : null}
         {nodes.isPending ? (
           <Skeleton className="h-32" />
         ) : nodes.error ? (
@@ -53,7 +61,13 @@ export function ServersPage() {
         ) : (
           <div className="divide-y divide-border rounded-lg border border-border">
             {nodes.data.map((n) => (
-              <NodeRow key={n.id} n={n} onRevoke={() => revoke.mutate(n.id)} />
+              <NodeRow
+                key={n.id}
+                n={n}
+                locations={locations.data ?? []}
+                onLocation={(location) => setLocation.mutate({ id: n.id, location })}
+                onRevoke={() => revoke.mutate(n.id)}
+              />
             ))}
           </div>
         )}
@@ -63,7 +77,17 @@ export function ServersPage() {
   );
 }
 
-function NodeRow({ n, onRevoke }: { n: NodeInfo; onRevoke: () => void }) {
+function NodeRow({
+  n,
+  locations,
+  onLocation,
+  onRevoke,
+}: {
+  n: NodeInfo;
+  locations: LocationOption[];
+  onLocation: (location: string | null) => void;
+  onRevoke: () => void;
+}) {
   const tone = n.status === "revoked" ? "danger" : n.connected ? "success" : "neutral";
   const label = n.status === "revoked" ? "Revoked" : n.connected ? "Connected" : "Offline";
   const behind = n.connected && n.appliedGeneration < n.desiredGeneration;
@@ -82,6 +106,7 @@ function NodeRow({ n, onRevoke }: { n: NodeInfo; onRevoke: () => void }) {
             .join(" · ")}
         </div>
       </div>
+      {n.status !== "revoked" ? <LocationSelect n={n} locations={locations} onChange={onLocation} /> : null}
       <div className="flex flex-col items-end gap-0.5">
         <StatusDot tone={tone}>{label}</StatusDot>
         <span className="text-xs text-muted-foreground">{n.lastSeenAt ? `Seen ${relativeTime(n.lastSeenAt)}` : "Never connected"}</span>
@@ -99,6 +124,40 @@ function NodeRow({ n, onRevoke }: { n: NodeInfo; onRevoke: () => void }) {
           </MenuItem>
         </Menu>
       ) : null}
+    </div>
+  );
+}
+
+/** Instance admins pick where a server lives; it shows on every service it runs. */
+function LocationSelect({ n, locations, onChange }: { n: NodeInfo; locations: LocationOption[]; onChange: (l: string | null) => void }) {
+  const providers = [...new Set(locations.map((l) => l.provider))];
+  const current = n.location;
+  const known = !current || locations.some((l) => l.id === current.id);
+  return (
+    <div className="flex items-center gap-2">
+      <span aria-hidden className="text-base">
+        {flagEmoji(current?.countryCode)}
+      </span>
+      <Select
+        aria-label={`Location of ${n.name}`}
+        className="w-44"
+        value={current?.id ?? ""}
+        onChange={(e) => onChange(e.target.value || null)}
+      >
+        <option value="">No location</option>
+        {!known && current ? <option value={current.id}>{current.label}</option> : null}
+        {providers.map((p) => (
+          <optgroup key={p} label={p}>
+            {locations
+              .filter((l) => l.provider === p)
+              .map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.label}
+                </option>
+              ))}
+          </optgroup>
+        ))}
+      </Select>
     </div>
   );
 }

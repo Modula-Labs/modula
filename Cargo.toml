@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 modula-crypto = { path = "crates/crypto" }
 modula-proto = { path = "crates/proto" }
+modula-id = { path = "crates/id" }
 modula-node = { path = "crates/node" }
 
 anyhow = "1"
@@ -25,6 +26,7 @@ futures = "0.3"
 hex = "0.4"
 http = "1"
 getrandom = "0.4"
+globset = "0.4"
 redis = { version = "1", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
 regex = "1"
 prost = "0.14"
@@ -32,6 +34,7 @@ tonic = { version = "0.14", default-features = false, features = ["transport", "
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser", "crypto"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 x509-parser = "0.18"
 bollard = "0.21"
@@ -42,21 +45,25 @@ secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "macros", "migrate", "json", "uuid", "time"] }
+tar = "0.4"
+flate2 = "1"
+sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "macros", "migrate", "json", "time"] }
 subtle = "2"
 thiserror = "2"
 totp-rs = { version = "6", default-features = false, features = ["alloc"] }
 hmac = "0.13"
+# 9.x signs with ring (already in the tree); 10+ needs aws-lc or RustCrypto RSA.
+jsonwebtoken = "9"
 data-encoding = "2"
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "time", "sync", "fs"] }
 tokio-util = "0.7"
+toml = "1"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace", "request-id", "limit", "set-header", "timeout"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2"
-uuid = { version = "1", features = ["v4", "v7", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [profile.release]

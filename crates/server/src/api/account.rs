@@ -3,11 +3,11 @@
 use axum::Json;
 use axum::extract::State;
 use modula_crypto::password;
+use modula_id::Id;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 use crate::audit::Entry;
 use crate::auth::mfa;
@@ -117,7 +117,7 @@ pub async fn backup_codes_regenerate(
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
-    pub id: Uuid,
+    pub id: Id,
     pub ip: Option<String>,
     pub user_agent: Option<String>,
     #[serde(with = "time::serde::rfc3339")]

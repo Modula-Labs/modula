@@ -3,20 +3,23 @@ import { Link } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
-import { Check, ChevronDown, LayoutGrid, Plus, Server, Settings } from "@/components/ui/icons";
+import { Activity, Check, ChevronDown, LayoutGrid, Plus, Refresh, Server, Settings } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
 import { LogoMark } from "@/components/ui/Logo";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { Modal } from "@/components/ui/Modal";
+import { useLingering } from "@/components/ui/Sheet";
 import { Alert, Skeleton } from "@/components/ui/misc";
 import { ApiError, api, type DeploymentStatus } from "@/lib/api";
 import { atLeast } from "@/lib/roles";
 import { isLive } from "@/lib/status";
 import { useMe } from "@/lib/workspace";
+import { ActivityPanel } from "./ActivityPanel";
 import { Canvas, type CanvasService } from "./Canvas";
 import { DeploymentSheet } from "./DeploymentSheet";
 import { NewServiceDialog } from "./NewServiceDialog";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
+import { SyncDialog } from "./SyncDialog";
 import { ServiceSheet, type ServiceTab } from "./ServiceSheet";
 
 export interface ProjectSearch {
@@ -41,6 +44,8 @@ export function ProjectPage({
   const [adding, setAdding] = useState(false);
   const [newEnv, setNewEnv] = useState(false);
   const [settings, setSettings] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
   const project = useQuery({
     queryKey: ["project", projectId],
     queryFn: () => api.project(projectId),
@@ -59,11 +64,18 @@ export function ProjectPage({
         id: s.id,
         name: s.name,
         domain: i?.domain ?? undefined,
+        repo: i?.sourceType === "repo" ? (i.repo ?? undefined) : undefined,
         status: (i?.latestDeploymentStatus ?? null) as DeploymentStatus | null,
+        stack: i?.stack,
+        image: i?.sourceType === "image" ? i.image : undefined,
       };
     });
   }, [p, env]);
-  const instanceId = p?.instances.find((i) => i.serviceId === search.service && i.environmentId === env?.id)?.id;
+  const currentInstanceId = p?.instances.find((i) => i.serviceId === search.service && i.environmentId === env?.id)?.id;
+  // Keep the sheets mounted while they slide out.
+  const { value: instanceId, leaving: sheetLeaving } = useLingering(currentInstanceId);
+  const { value: deploymentId, leaving: deploymentLeaving } = useLingering(currentInstanceId ? search.deployment : undefined);
+  const canEdit = atLeast(role, "member");
 
   if (project.error) {
     const missing = project.error instanceof ApiError && project.error.status === 404;
@@ -127,13 +139,6 @@ export function ProjectPage({
             <Settings />
           </button>
         ) : null}
-        <div className="ml-auto">
-          {atLeast(role, "member") && env ? (
-            <Button variant="primary" size="sm" icon={<Plus />} onClick={() => setAdding(true)}>
-              Add
-            </Button>
-          ) : null}
-        </div>
       </header>
 
       <nav aria-label="Project" className="flex flex-col items-center gap-1 pt-2">
@@ -152,11 +157,53 @@ export function ProjectPage({
         ) : (
           <div className="dotgrid h-full" />
         )}
+        {p && env ? (
+          <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Activity />}
+              aria-pressed={activityOpen}
+              onClick={() => setActivityOpen((o) => !o)}
+            >
+              Activity
+            </Button>
+            {canEdit ? (
+              <>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<Refresh />}
+                  disabled={p.environments.length < 2}
+                  title={p.environments.length < 2 ? "Create another environment to sync from" : undefined}
+                  onClick={() => setSyncing(true)}
+                >
+                  Sync
+                </Button>
+                <Button variant="primary" size="sm" icon={<Plus />} onClick={() => setAdding(true)}>
+                  Add
+                </Button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {p && env && activityOpen ? (
+          <ActivityPanel
+            projectId={projectId}
+            environmentId={env.id}
+            services={p.services}
+            onClose={() => setActivityOpen(false)}
+            onOpenDeployment={(service, deployment) => {
+              setActivityOpen(false);
+              if (service) setSearch({ env: search.env, service, tab: "deployments", deployment });
+            }}
+          />
+        ) : null}
         {p && services.length === 0 ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div className="pointer-events-auto flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-card px-10 py-8 text-center">
               <div className="text-base font-semibold">Add your first service</div>
-              <p className="max-w-xs text-sm text-muted-foreground">Deploy a Docker image. GitHub repos and databases are coming next.</p>
+              <p className="max-w-xs text-sm text-muted-foreground">Deploy from a GitHub repository or a Docker image.</p>
               {atLeast(role, "member") ? (
                 <Button variant="outline" icon={<Plus />} onClick={() => setAdding(true)}>
                   Add a service
@@ -173,15 +220,17 @@ export function ProjectPage({
             role={role}
             tab={search.tab ?? "deployments"}
             deploymentId={search.deployment}
+            leaving={sheetLeaving}
             onTab={(tab) => setSearch({ ...search, tab, deployment: undefined })}
             onOpenDeployment={(deployment) => setSearch({ ...search, tab: "deployments", deployment })}
             onClose={() => setSearch({ env: search.env })}
           />
         ) : null}
-        {instanceId && search.deployment ? (
+        {instanceId && deploymentId ? (
           <DeploymentSheet
-            key={search.deployment}
-            deploymentId={search.deployment}
+            key={deploymentId}
+            deploymentId={deploymentId}
+            leaving={deploymentLeaving || sheetLeaving}
             onClose={() => setSearch({ ...search, deployment: undefined })}
           />
         ) : null}
@@ -195,6 +244,9 @@ export function ProjectPage({
           environmentId={env.id}
           onCreated={(service) => setSearch({ env: search.env, service, tab: "deployments" })}
         />
+      ) : null}
+      {p && env ? (
+        <SyncDialog open={syncing} onOpenChange={setSyncing} projectId={projectId} target={env} environments={p.environments} />
       ) : null}
       {p && env ? (
         <ProjectSettingsDialog

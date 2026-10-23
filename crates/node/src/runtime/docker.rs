@@ -21,7 +21,7 @@ use bollard::models::{
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     ListNetworksOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    StopContainerOptionsBuilder,
+    RestartContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
@@ -56,6 +56,24 @@ impl DockerRuntime {
             docker: Docker::connect_with_local_defaults().context("cannot connect to Docker")?,
         })
     }
+}
+
+/// MTU of the interface carrying the default route (Linux), if known.
+fn host_mtu() -> Option<u32> {
+    let routes = std::fs::read_to_string("/proc/net/route").ok()?;
+    let iface = routes.lines().skip(1).find_map(|l| {
+        let mut f = l.split_whitespace();
+        let (iface, dest) = (f.next()?, f.next()?);
+        (dest == "00000000").then(|| iface.to_owned())
+    })?;
+    if iface.contains('/') || iface.contains("..") {
+        return None;
+    }
+    std::fs::read_to_string(format!("/sys/class/net/{iface}/mtu"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn network_name(environment_id: &str) -> String {
@@ -98,6 +116,11 @@ impl Runtime for DockerRuntime {
             .create_network(NetworkCreateRequest {
                 name,
                 driver: Some("bridge".into()),
+                // Containers must not send bigger packets than the host's
+                // uplink carries (some clouds and nested setups are < 1500).
+                options: host_mtu().filter(|m| *m < 1500).map(|m| {
+                    HashMap::from([("com.docker.network.driver.mtu".to_owned(), m.to_string())])
+                }),
                 labels: Some(HashMap::from([
                     (labels::MANAGED.to_owned(), "true".to_owned()),
                     (labels::ENVIRONMENT.to_owned(), environment_id.to_owned()),
@@ -238,14 +261,23 @@ impl Runtime for DockerRuntime {
             }),
             ..Default::default()
         };
-        let short = &w.deployment_id[..w.deployment_id.len().min(8)];
-        let name = format!("modula-{}-{short}", w.service_name);
+        let name = format!("modula-{}-{}", w.service_name, w.deployment_id);
         let opts = CreateContainerOptionsBuilder::new().name(&name).build();
         Ok(self.docker.create_container(Some(opts), body).await?.id)
     }
 
     async fn start(&self, container_id: &str) -> anyhow::Result<()> {
         self.docker.start_container(container_id, None).await?;
+        Ok(())
+    }
+
+    async fn restart(&self, container_id: &str) -> anyhow::Result<()> {
+        let opts = RestartContainerOptionsBuilder::new()
+            .t(STOP_GRACE_SECS)
+            .build();
+        self.docker
+            .restart_container(container_id, Some(opts))
+            .await?;
         Ok(())
     }
 

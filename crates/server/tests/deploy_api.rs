@@ -5,14 +5,14 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use common::*;
+use modula_id::Id;
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use uuid::Uuid;
 
 struct Fixture {
     app: TestApp,
     admin: String,
-    workspace: Uuid,
+    workspace: Id,
     project: String,
     instance: String,
 }
@@ -107,7 +107,7 @@ async fn variables_are_write_only_and_reveals_are_audited(pool: PgPool) {
             .unwrap();
     assert!(!String::from_utf8_lossy(&raw).contains("hunter2"));
     let env_key: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM data_keys k JOIN environments e ON e.id = k.scope WHERE e.project_id = $1::uuid",
+        "SELECT count(*) FROM data_keys k JOIN environments e ON e.id = k.scope WHERE e.project_id = $1",
     )
     .bind(&f.project)
     .fetch_one(f.app.db())
@@ -405,7 +405,7 @@ async fn environments_copy_config_and_keep_their_own_keys(pool: PgPool) {
         )
         .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
-    let keys: i64 = sqlx::query_scalar("SELECT count(*) FROM data_keys WHERE scope = $1::uuid")
+    let keys: i64 = sqlx::query_scalar("SELECT count(*) FROM data_keys WHERE scope = $1")
         .bind(&staging)
         .fetch_one(f.app.db())
         .await
@@ -471,4 +471,126 @@ async fn bad_input_is_rejected(pool: PgPool) {
         let r = f.set_vars(&f.admin, body.clone()).await;
         assert_eq!(r.status, StatusCode::BAD_REQUEST, "{body}");
     }
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn activity_records_names_and_sync_copies_config(pool: PgPool) {
+    let f = fixture(pool).await;
+    f.set_vars(&f.admin, json!({ "set": { "A": "1", "B": "2" } }))
+        .await;
+    f.set_vars(&f.admin, json!({ "set": { "A": "3" }, "delete": ["B"] }))
+        .await;
+    let r = f
+        .app
+        .call(
+            Method::PATCH,
+            &format!("/api/service-instances/{}", f.instance),
+            Some(&f.admin),
+            Some(json!({ "config": { "source": { "type": "image", "image": "nginx:alpine" }, "port": 3000 } })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+
+    let feed = |query: &'static str| {
+        let app = &f.app;
+        let (admin, project) = (f.admin.clone(), f.project.clone());
+        async move {
+            let r = app
+                .call(
+                    Method::GET,
+                    &format!("/api/projects/{project}/activity{query}"),
+                    Some(&admin),
+                    None,
+                )
+                .await;
+            assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+            r.json["items"].as_array().unwrap().clone()
+        }
+    };
+    let lines = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .flat_map(|g| g["changes"].as_array().unwrap().clone())
+            .map(|c| {
+                format!(
+                    "{} {} {}",
+                    c["kind"].as_str().unwrap(),
+                    c["op"].as_str().unwrap(),
+                    c["key"].as_str().unwrap_or("")
+                )
+            })
+            .collect()
+    };
+    let all = feed("").await;
+    assert_eq!(
+        lines(&all),
+        [
+            "config updated port",
+            "variable updated A",
+            "variable removed B",
+            "variable added A",
+            "variable added B",
+            "service created api",
+        ]
+    );
+    assert_eq!(all[1]["serviceName"], "api");
+    assert_eq!(all[1]["actor"]["name"], "Admin");
+    assert!(
+        !Value::from(all.clone()).to_string().contains("\"3\""),
+        "values are never recorded"
+    );
+    assert_eq!(lines(&feed("?kind=config").await), ["config updated port"]);
+    let bad = f
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/projects/{}/activity?kind=bogus", f.project),
+            Some(&f.admin),
+            None,
+        )
+        .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+
+    // Sync: staging takes production's config and the variables it lacks.
+    let r = f
+        .app
+        .call(
+            Method::POST,
+            &format!("/api/projects/{}/environments", f.project),
+            Some(&f.admin),
+            Some(json!({"name": "staging"})),
+        )
+        .await;
+    let staging = r.json["id"].as_str().unwrap().to_owned();
+    let prod: String =
+        sqlx::query_scalar("SELECT environment_id FROM service_instances WHERE id = $1")
+            .bind(&f.instance)
+            .fetch_one(&f.app.state.db)
+            .await
+            .unwrap();
+    f.set_vars(&f.admin, json!({ "set": { "C": "4" }, "sealed": ["C"] }))
+        .await;
+    let sync = |from: String| {
+        let app = &f.app;
+        let (admin, staging) = (f.admin.clone(), staging.clone());
+        async move {
+            app.call(
+                Method::POST,
+                &format!("/api/environments/{staging}/sync"),
+                Some(&admin),
+                Some(json!({ "fromEnvironmentId": from })),
+            )
+            .await
+        }
+    };
+    let r = sync(prod.clone()).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(
+        r.json,
+        json!({ "created": 1, "updated": 0 }),
+        "A is copied; sealed C is not"
+    );
+    let r = sync(prod).await;
+    assert_eq!(r.json, json!({ "created": 0, "updated": 0 }));
+    assert_eq!(sync(staging.clone()).await.status, StatusCode::BAD_REQUEST);
 }

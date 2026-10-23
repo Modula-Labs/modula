@@ -22,6 +22,9 @@ pub enum AppError {
     Conflict(String),
     #[error("too many requests")]
     TooManyRequests { retry_after_secs: u64 },
+    /// An upstream service (e.g. GitHub) failed; the message is safe to show.
+    #[error("{0}")]
+    Unavailable(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -43,6 +46,7 @@ impl AppError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             Self::TooManyRequests { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            Self::Unavailable(_) => (StatusCode::BAD_GATEWAY, "upstream_unavailable"),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
         }
     }

@@ -6,20 +6,20 @@
 //! cannot route to bridge IPs from the host; it runs in the Linux e2e suite.
 
 use futures::StreamExt;
+use modula_id::Id;
 use modula_node::runtime::Runtime;
 use modula_node::runtime::docker::DockerRuntime;
 use modula_proto::node::v1 as pb;
-use uuid::Uuid;
 
 #[tokio::test]
 #[ignore = "needs a Docker daemon"]
 async fn container_lifecycle() {
     let rt = DockerRuntime::connect().unwrap();
     assert!(rt.describe().await.unwrap().starts_with("docker "));
-    let (env, dep) = (Uuid::now_v7().to_string(), Uuid::now_v7().to_string());
+    let (env, dep) = (Id::new().to_string(), Id::new().to_string());
     let w = pb::Workload {
         deployment_id: dep.clone(),
-        service_id: Uuid::nil().to_string(),
+        service_id: Id::ZERO.to_string(),
         environment_id: env.clone(),
         service_name: "smoke".into(),
         image: "busybox:1.36".into(),

@@ -1,13 +1,13 @@
 //! Which node runs a service instance. Single-node for now: sticky to the
 //! instance's node while it exists, else the least-loaded usable node.
 
+use modula_id::Id;
 use sqlx::PgConnection;
-use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 
-pub async fn choose(tx: &mut PgConnection, instance: Uuid) -> AppResult<Uuid> {
-    let sticky: Option<Uuid> = sqlx::query_scalar(
+pub async fn choose(tx: &mut PgConnection, instance: Id) -> AppResult<Id> {
+    let sticky: Option<Id> = sqlx::query_scalar(
         "SELECT n.id FROM service_instances i JOIN nodes n ON n.id = i.node_id
          WHERE i.id = $1 AND n.status <> 'revoked'",
     )
@@ -18,9 +18,9 @@ pub async fn choose(tx: &mut PgConnection, instance: Uuid) -> AppResult<Uuid> {
         return Ok(n);
     }
     // Prefer online nodes, then the fewest live deployments.
-    let picked: Option<Uuid> = sqlx::query_scalar(
+    let picked: Option<Id> = sqlx::query_scalar(
         "SELECT n.id FROM nodes n
-         LEFT JOIN deployments d ON d.node_id = n.id AND d.status IN ('deploying', 'active', 'crashed')
+         LEFT JOIN deployments d ON d.node_id = n.id AND d.status IN ('building', 'deploying', 'active', 'crashed')
          WHERE n.status <> 'revoked'
          GROUP BY n.id, n.status
          ORDER BY (n.status = 'online') DESC, count(d.id), n.created_at

@@ -1,7 +1,7 @@
 //! Converges the runtime to the newest desired state.
 //!
-//! Each new workload gets a rollout task: pull → create → start → health
-//! check → ACTIVE (or FAILED, after which its container is removed). A periodic
+//! Each new workload gets a rollout task: [build →] pull → create → start →
+//! health check → ACTIVE (or FAILED, after which its container is removed). A periodic
 //! pass repairs drift and reports crashes and recoveries. Containers whose
 //! deployment is no longer desired are stopped and removed; nothing without
 //! our labels is ever touched.
@@ -11,14 +11,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use modula_id::Id;
 use modula_proto::node::v1 as pb;
 use pb::DeploymentPhase as Phase;
 use pb::node_message::Msg;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
+use crate::build::{BuildLog, BuildSupport, Built, LOCAL_PREFIX};
 use crate::edge::{EdgeConfig, EdgeSink, ResolvedRoute};
 use crate::runtime::{Container, Runtime};
 
@@ -31,11 +32,21 @@ struct Tracked {
     phase: Phase,
     message: String,
     rollout: Option<JoinHandle<()>>,
+    /// The `restart_generation` last applied; `None` until first observed.
+    restarted: Option<u32>,
+}
+
+/// Optional parts of a node: an edge (Caddy) and a builder.
+#[derive(Clone, Default)]
+pub struct Capabilities {
+    pub edge: Option<Arc<dyn EdgeSink>>,
+    pub build: Option<BuildSupport>,
 }
 
 pub struct Reconciler {
     runtime: Arc<dyn Runtime>,
     edge: Option<Arc<dyn EdgeSink>>,
+    build: Option<BuildSupport>,
     out: mpsc::Sender<pb::NodeMessage>,
     tracked: Mutex<HashMap<String, Tracked>>,
     applied: AtomicU64,
@@ -56,20 +67,21 @@ fn workload_is_sane(w: &pb::Workload) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     name_ok
-        && Uuid::parse_str(&w.deployment_id).is_ok()
-        && Uuid::parse_str(&w.environment_id).is_ok()
+        && w.deployment_id.parse::<Id>().is_ok()
+        && w.environment_id.parse::<Id>().is_ok()
         && u16::try_from(w.port).is_ok_and(|p| p > 0)
 }
 
 impl Reconciler {
     pub fn new(
         runtime: Arc<dyn Runtime>,
-        edge: Option<Arc<dyn EdgeSink>>,
+        caps: Capabilities,
         out: mpsc::Sender<pb::NodeMessage>,
     ) -> Arc<Self> {
         Arc::new(Self {
             runtime,
-            edge,
+            edge: caps.edge,
+            build: caps.build,
             out,
             tracked: Mutex::new(HashMap::new()),
             applied: AtomicU64::new(0),
@@ -128,6 +140,16 @@ impl Reconciler {
     }
 
     fn set_phase(&self, deployment: &str, phase: Phase, message: impl Into<String>) {
+        self.set_phase_with(deployment, phase, message, None);
+    }
+
+    fn set_phase_with(
+        &self,
+        deployment: &str,
+        phase: Phase,
+        message: impl Into<String>,
+        build: Option<pb::BuildOutput>,
+    ) {
         let message = message.into();
         {
             let mut tracked = self.tracked.lock().expect("tracked lock");
@@ -135,23 +157,28 @@ impl Reconciler {
                 phase: Phase::PhaseUnspecified,
                 message: String::new(),
                 rollout: None,
+                restarted: None,
             });
             t.phase = phase;
             t.message = message.clone();
             if !matches!(
                 phase,
-                Phase::Pulling | Phase::Creating | Phase::Starting | Phase::Healthchecking
+                Phase::Building
+                    | Phase::Built
+                    | Phase::Pulling
+                    | Phase::Creating
+                    | Phase::Starting
+                    | Phase::Healthchecking
             ) {
                 t.rollout = None;
             }
         }
         tracing::info!(deployment, phase = ?phase, %message, "deployment phase");
-        self.emit(event(
-            deployment,
-            phase,
-            &message,
-            self.applied_generation(),
-        ));
+        let mut ev = event(deployment, phase, &message, self.applied_generation());
+        if let Some(Msg::Event(e)) = &mut ev.msg {
+            e.build = build;
+        }
+        self.emit(ev);
     }
 
     pub async fn apply(self: &Arc<Self>, ds: &pb::DesiredState) -> anyhow::Result<()> {
@@ -308,6 +335,26 @@ impl Reconciler {
             .is_some_and(|h| !h.is_finished())
     }
 
+    /// Whether the server asked for a restart this node hasn't done yet. The
+    /// first generation seen is taken as applied (it may predate a node restart).
+    fn restart_due(&self, deployment: &str, generation: u32) -> bool {
+        let mut tracked = self.tracked.lock().expect("tracked lock");
+        let Some(t) = tracked.get_mut(deployment) else {
+            return false;
+        };
+        match t.restarted {
+            Some(g) if g >= generation => false,
+            Some(_) => {
+                t.restarted = Some(generation);
+                true
+            }
+            None => {
+                t.restarted = Some(generation);
+                false
+            }
+        }
+    }
+
     fn phase_of(&self, deployment: &str) -> Option<Phase> {
         self.tracked
             .lock()
@@ -333,6 +380,13 @@ impl Reconciler {
         // mid-rollout; keep the first.
         for extra in containers.iter().skip(1) {
             self.runtime.remove(&extra.id).await?;
+        }
+        if let Some(c) = containers.first()
+            && self.restart_due(id, w.restart_generation)
+        {
+            self.runtime.restart(&c.id).await?;
+            self.set_phase(id, Phase::Active, "restarted");
+            return Ok(());
         }
         match (containers.first(), phase) {
             (None, _) => self.start_rollout(w.clone()),
@@ -376,17 +430,42 @@ impl Reconciler {
             phase: Phase::PhaseUnspecified,
             message: String::new(),
             rollout: None,
+            restarted: None,
         });
         t.rollout = Some(handle);
     }
 
     async fn rollout(&self, w: &pb::Workload) -> Result<(), String> {
         let id = w.deployment_id.as_str();
-        self.set_phase(id, Phase::Pulling, format!("Pulling {}", w.image));
-        self.runtime
-            .pull(&w.image)
-            .await
-            .map_err(|e| format!("Image pull failed: {e:#}"))?;
+        let mut effective;
+        let w = match &w.build {
+            Some(spec) => {
+                let built = self.build(w, spec).await?;
+                // The message is the image id: the server stores it as the digest.
+                self.set_phase_with(
+                    id,
+                    Phase::Built,
+                    built.image,
+                    Some(pb::BuildOutput {
+                        stack: built.stack.clone(),
+                        ..built.overrides.to_output()
+                    }),
+                );
+                // The repository's config file overrides the dashboard.
+                effective = w.clone();
+                built.overrides.apply(&mut effective);
+                &effective
+            }
+            None => w,
+        };
+        // Built images exist only here; everything else comes from a registry.
+        if !w.image.starts_with(LOCAL_PREFIX) {
+            self.set_phase(id, Phase::Pulling, format!("Pulling {}", w.image));
+            self.runtime
+                .pull(&w.image)
+                .await
+                .map_err(|e| format!("Image pull failed: {e:#}"))?;
+        }
 
         self.set_phase(id, Phase::Creating, "Creating container");
         let container = self
@@ -437,6 +516,32 @@ impl Reconciler {
         Ok(())
     }
 
+    /// Build the workload's image.
+    async fn build(&self, w: &pb::Workload, spec: &pb::Build) -> Result<Built, String> {
+        let id = w.deployment_id.as_str();
+        let Some(b) = &self.build else {
+            return Err("This server can't build images (no builder configured)".into());
+        };
+        self.set_phase(id, Phase::Building, "Building from source");
+        let log = b
+            .logs
+            .create(id)
+            .map_err(|e| format!("Cannot write the build log: {e:#}"))?;
+        // Followers stop waiting even if the build is cancelled mid-way.
+        let _finish = FinishOnDrop(log.clone());
+        match b.builder.build(w, spec, &log).await {
+            Ok(image) => {
+                log.line(false, "Build complete");
+                Ok(image)
+            }
+            Err(e) => {
+                let message = format!("{e:#}");
+                log.line(true, &message);
+                Err(format!("Build failed: {message}"))
+            }
+        }
+    }
+
     async fn ensure_running(&self, container: &str) -> Result<(), String> {
         let cs = self
             .runtime
@@ -454,6 +559,14 @@ impl Reconciler {
     }
 }
 
+struct FinishOnDrop(BuildLog);
+
+impl Drop for FinishOnDrop {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
+}
+
 fn event(deployment: &str, phase: Phase, message: &str, generation: u64) -> pb::NodeMessage {
     pb::NodeMessage {
         msg: Some(Msg::Event(pb::DeploymentEvent {
@@ -462,6 +575,7 @@ fn event(deployment: &str, phase: Phase, message: &str, generation: u64) -> pb::
             message: message.to_owned(),
             at_unix_ms: now_ms(),
             generation,
+            build: None,
         })),
     }
 }
@@ -471,10 +585,10 @@ mod tests {
     use super::*;
     use crate::runtime::fake::FakeRuntime;
 
-    fn workload(dep: Uuid, env: Uuid, health: &str) -> pb::Workload {
+    fn workload(dep: Id, env: Id, health: &str) -> pb::Workload {
         pb::Workload {
             deployment_id: dep.to_string(),
-            service_id: Uuid::nil().to_string(),
+            service_id: Id::ZERO.to_string(),
             environment_id: env.to_string(),
             service_name: "web".into(),
             image: "nginx:alpine".into(),
@@ -487,7 +601,7 @@ mod tests {
         }
     }
 
-    fn state(generation: u64, env: Uuid, ws: Vec<pb::Workload>) -> pb::DesiredState {
+    fn state(generation: u64, env: Id, ws: Vec<pb::Workload>) -> pb::DesiredState {
         pb::DesiredState {
             generation,
             networks: vec![pb::Network {
@@ -509,7 +623,7 @@ mod tests {
         out
     }
 
-    fn of(events: &[(String, Phase)], dep: Uuid) -> Vec<Phase> {
+    fn of(events: &[(String, Phase)], dep: Id) -> Vec<Phase> {
         events
             .iter()
             .filter(|(d, _)| *d == dep.to_string())
@@ -518,11 +632,11 @@ mod tests {
     }
 
     /// Drain and return the phases emitted for `dep`.
-    fn phases(rx: &mut mpsc::Receiver<pb::NodeMessage>, dep: Uuid) -> Vec<Phase> {
+    fn phases(rx: &mut mpsc::Receiver<pb::NodeMessage>, dep: Id) -> Vec<Phase> {
         of(&drain(rx), dep)
     }
 
-    async fn settle(r: &Arc<Reconciler>, dep: Uuid) {
+    async fn settle(r: &Arc<Reconciler>, dep: Id) {
         for _ in 0..50 {
             if !r.rollout_running(&dep.to_string()) {
                 return;
@@ -533,11 +647,34 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_higher_restart_generation_restarts_in_place() {
+        let rt = Arc::new(FakeRuntime::new());
+        let (tx, mut rx) = mpsc::channel(256);
+        let r = Reconciler::new(rt.clone(), Capabilities::default(), tx);
+        let (env, dep) = (Id::new(), Id::new());
+        let mut w = workload(dep, env, "");
+        r.apply(&state(1, env, vec![w.clone()])).await.unwrap();
+        settle(&r, dep).await;
+        assert_eq!(phases(&mut rx, dep).last(), Some(&Phase::Active));
+        let restarts = || async { rt.containers().await.unwrap()[0].restart_count };
+
+        // Seen again unchanged: nothing happens.
+        r.apply(&state(2, env, vec![w.clone()])).await.unwrap();
+        assert_eq!(restarts().await, 0);
+
+        w.restart_generation = 1;
+        r.apply(&state(3, env, vec![w.clone()])).await.unwrap();
+        assert_eq!(restarts().await, 1);
+        r.apply(&state(4, env, vec![w])).await.unwrap();
+        assert_eq!(restarts().await, 1, "a generation is applied once");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn rolls_out_supersedes_and_removes() {
         let rt = Arc::new(FakeRuntime::new());
         let (tx, mut rx) = mpsc::channel(256);
-        let r = Reconciler::new(rt.clone(), None, tx);
-        let (env, d1, d2) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let r = Reconciler::new(rt.clone(), Capabilities::default(), tx);
+        let (env, d1, d2) = (Id::new(), Id::new(), Id::new());
 
         r.apply(&state(1, env, vec![workload(d1, env, "/health")]))
             .await
@@ -587,8 +724,8 @@ mod tests {
     async fn failures_are_reported_once_and_cleaned_up() {
         let rt = Arc::new(FakeRuntime::new());
         let (tx, mut rx) = mpsc::channel(256);
-        let r = Reconciler::new(rt.clone(), None, tx);
-        let (env, bad_pull, unhealthy) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let r = Reconciler::new(rt.clone(), Capabilities::default(), tx);
+        let (env, bad_pull, unhealthy) = (Id::new(), Id::new(), Id::new());
         rt.unpullable
             .lock()
             .unwrap()
@@ -618,8 +755,8 @@ mod tests {
     async fn crashes_and_recoveries_are_reported() {
         let rt = Arc::new(FakeRuntime::new());
         let (tx, mut rx) = mpsc::channel(256);
-        let r = Reconciler::new(rt.clone(), None, tx);
-        let (env, dep) = (Uuid::now_v7(), Uuid::now_v7());
+        let r = Reconciler::new(rt.clone(), Capabilities::default(), tx);
+        let (env, dep) = (Id::new(), Id::new());
         let ds = state(1, env, vec![workload(dep, env, "")]);
         r.apply(&ds).await.unwrap();
         settle(&r, dep).await;
@@ -643,8 +780,15 @@ mod tests {
         let rt = Arc::new(FakeRuntime::new());
         let edge = Arc::new(crate::edge::RecordingEdge::default());
         let (tx, _rx) = mpsc::channel(256);
-        let r = Reconciler::new(rt.clone(), Some(edge.clone()), tx);
-        let (env, dep) = (Uuid::now_v7(), Uuid::now_v7());
+        let r = Reconciler::new(
+            rt.clone(),
+            Capabilities {
+                edge: Some(edge.clone()),
+                ..Default::default()
+            },
+            tx,
+        );
+        let (env, dep) = (Id::new(), Id::new());
         let mut ds = state(1, env, vec![workload(dep, env, "")]);
         r.apply(&ds).await.unwrap();
         settle(&r, dep).await;
@@ -681,12 +825,129 @@ mod tests {
     async fn malformed_workloads_are_ignored() {
         let rt = Arc::new(FakeRuntime::new());
         let (tx, _rx) = mpsc::channel(256);
-        let r = Reconciler::new(rt.clone(), None, tx);
-        let env = Uuid::now_v7();
-        let mut w = workload(Uuid::now_v7(), env, "");
+        let r = Reconciler::new(rt.clone(), Capabilities::default(), tx);
+        let env = Id::new();
+        let mut w = workload(Id::new(), env, "");
         w.service_name = "web; rm -rf /".into();
         r.apply(&state(1, env, vec![w])).await.unwrap();
         tokio::time::sleep(Duration::from_secs(5)).await;
         assert!(rt.running_deployments().is_empty());
+    }
+
+    fn with_builder() -> (Capabilities, std::path::PathBuf) {
+        with_overrides(Default::default())
+    }
+
+    fn with_overrides(
+        overrides: crate::build::RuntimeOverrides,
+    ) -> (Capabilities, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("modula-reconcile-{}", Id::new()));
+        let caps = Capabilities {
+            build: Some(BuildSupport {
+                builder: Arc::new(crate::build::FakeBuilder { overrides }),
+                logs: crate::build::BuildLogs::new(&dir).unwrap(),
+            }),
+            ..Default::default()
+        };
+        (caps, dir)
+    }
+
+    fn built(dep: Id, env: Id, source: &str) -> pb::Workload {
+        pb::Workload {
+            image: format!("{LOCAL_PREFIX}svc:{dep}"),
+            build: Some(pb::Build {
+                source_url: source.into(),
+                ..Default::default()
+            }),
+            ..workload(dep, env, "")
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn builds_then_runs_the_local_image() {
+        let rt = Arc::new(FakeRuntime::new());
+        let (tx, mut rx) = mpsc::channel(256);
+        let (caps, dir) = with_builder();
+        let logs = caps.build.as_ref().unwrap().logs.clone();
+        let r = Reconciler::new(rt.clone(), caps, tx);
+        let (env, ok, bad) = (Id::new(), Id::new(), Id::new());
+        // A local image must never be pulled: make any pull of it fail.
+        rt.unpullable
+            .lock()
+            .unwrap()
+            .insert(format!("{LOCAL_PREFIX}svc:{ok}"));
+        r.apply(&state(
+            1,
+            env,
+            vec![
+                built(ok, env, "https://x/ok"),
+                built(bad, env, "https://x/fail"),
+            ],
+        ))
+        .await
+        .unwrap();
+        settle(&r, ok).await;
+        settle(&r, bad).await;
+        let events = drain(&mut rx);
+        assert_eq!(
+            of(&events, ok),
+            [
+                Phase::Building,
+                Phase::Built,
+                Phase::Creating,
+                Phase::Starting,
+                Phase::Active
+            ]
+        );
+        assert_eq!(of(&events, bad), [Phase::Building, Phase::Failed]);
+        let mut log = logs.read(&bad.to_string(), 100, false).unwrap();
+        let lines = log.next_batch().await.unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.stderr && l.text.contains("the build failed"))
+        );
+
+        // Without a builder, a build is a clear failure, not a pull attempt.
+        let (tx, mut rx) = mpsc::channel(64);
+        let plain = Reconciler::new(rt.clone(), Capabilities::default(), tx);
+        let other = Id::new();
+        plain
+            .apply(&state(1, env, vec![built(other, env, "https://x/ok")]))
+            .await
+            .unwrap();
+        settle(&plain, other).await;
+        assert_eq!(phases(&mut rx, other), [Phase::Failed]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repo_config_overrides_reach_the_rollout() {
+        let rt = Arc::new(FakeRuntime::new());
+        let (tx, mut rx) = mpsc::channel(256);
+        let (caps, dir) = with_overrides(crate::build::RuntimeOverrides {
+            healthcheck_path: Some("/up".into()),
+            ..Default::default()
+        });
+        let r = Reconciler::new(rt.clone(), caps, tx);
+        let (env, dep) = (Id::new(), Id::new());
+        rt.unhealthy.lock().unwrap().insert(dep.to_string());
+        // The dashboard has no health check; the file's applies.
+        r.apply(&state(1, env, vec![built(dep, env, "https://x/ok")]))
+            .await
+            .unwrap();
+        settle(&r, dep).await;
+        assert_eq!(
+            phases(&mut rx, dep),
+            [
+                Phase::Building,
+                Phase::Built,
+                Phase::Creating,
+                Phase::Starting,
+                Phase::Healthchecking,
+                Phase::Failed
+            ]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -5,10 +5,10 @@ use axum::http::HeaderMap;
 use axum::http::request::Parts;
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use modula_crypto::token::{self, prefix};
+use modula_id::Id;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
-use uuid::Uuid;
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
@@ -60,8 +60,8 @@ impl SessionKind {
 /// The authenticated caller, inserted into request extensions by the router.
 #[derive(Debug, Clone)]
 pub struct Actor {
-    pub user_id: Uuid,
-    pub session_id: Uuid,
+    pub user_id: Id,
+    pub session_id: Id,
     pub is_instance_admin: bool,
     pub sudo_until: Option<OffsetDateTime>,
 }
@@ -105,7 +105,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Actor {
 }
 
 pub struct NewSession {
-    pub id: Uuid,
+    pub id: Id,
     pub token: SecretString,
     pub expires_at: OffsetDateTime,
 }
@@ -114,12 +114,12 @@ pub struct NewSession {
 /// re-authentication) starts in sudo mode.
 pub async fn create(
     db: &PgPool,
-    user_id: Uuid,
+    user_id: Id,
     kind: SessionKind,
     meta: &RequestMeta,
 ) -> AppResult<NewSession> {
     let t = token::generate(kind.prefix())?;
-    let id = Uuid::now_v7();
+    let id = Id::new();
     let now = OffsetDateTime::now_utc();
     let expires_at = now + kind.ttl();
     let sudo_until = (kind == SessionKind::Full).then_some(now + SUDO_TTL);
@@ -146,8 +146,8 @@ pub async fn create(
 
 #[derive(sqlx::FromRow)]
 struct SessionRow {
-    id: Uuid,
-    user_id: Uuid,
+    id: Id,
+    user_id: Id,
     is_instance_admin: bool,
     last_seen_at: OffsetDateTime,
     sudo_until: Option<OffsetDateTime>,
@@ -195,7 +195,7 @@ pub async fn rotate(db: &PgPool, old: &Actor, meta: &RequestMeta) -> AppResult<N
 }
 
 /// Revoke every full session of a user except `keep` (e.g. after a password change).
-pub async fn revoke_others(db: &PgPool, user_id: Uuid, keep: Uuid) -> AppResult<u64> {
+pub async fn revoke_others(db: &PgPool, user_id: Id, keep: Id) -> AppResult<u64> {
     let res = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
         .bind(user_id)
         .bind(keep)
@@ -204,7 +204,7 @@ pub async fn revoke_others(db: &PgPool, user_id: Uuid, keep: Uuid) -> AppResult<
     Ok(res.rows_affected())
 }
 
-pub async fn revoke(db: &PgPool, session_id: Uuid) -> AppResult<()> {
+pub async fn revoke(db: &PgPool, session_id: Id) -> AppResult<()> {
     sqlx::query("DELETE FROM sessions WHERE id = $1")
         .bind(session_id)
         .execute(db)

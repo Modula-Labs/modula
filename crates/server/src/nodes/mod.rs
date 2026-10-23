@@ -21,7 +21,7 @@ use crate::state::AppState;
 /// Join tokens: `mcj_…`, single use, short-lived; only the hash is stored.
 pub async fn create_join_token(
     db: &sqlx::PgPool,
-    created_by: Option<uuid::Uuid>,
+    created_by: Option<modula_id::Id>,
     ttl: time::Duration,
 ) -> AppResult<(secrecy::SecretString, time::OffsetDateTime)> {
     use modula_crypto::token::{self, prefix};
@@ -30,7 +30,7 @@ pub async fn create_join_token(
     sqlx::query(
         "INSERT INTO node_join_tokens (id, token_hash, created_by, expires_at) VALUES ($1, $2, $3, $4)",
     )
-    .bind(uuid::Uuid::now_v7())
+    .bind(modula_id::Id::new())
     .bind(t.hash.as_bytes())
     .bind(created_by)
     .bind(expires)

@@ -9,10 +9,10 @@ use std::path::Path;
 
 use axum::http::{Method, StatusCode};
 use common::*;
+use modula_id::Id;
 use modula_server::authz::ResourceKind;
 use modula_server::http::{Access, route_specs};
 use sqlx::PgPool;
-use uuid::Uuid;
 
 /// Changing this list is a security decision; keep it short.
 const PUBLIC_ROUTES: &[(&str, &str)] = &[
@@ -22,9 +22,11 @@ const PUBLIC_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/releases"),
     ("POST", "/api/auth/setup"),
     ("POST", "/api/auth/login"),
+    // Authenticated by an HMAC signature under the GitHub App's webhook secret.
+    ("POST", "/api/github/webhook"),
 ];
 
-fn fill(path: &str, id: Uuid) -> String {
+fn fill(path: &str, id: Id) -> String {
     let mut out = path.to_owned();
     for p in modula_server::http::router::path_params(path) {
         out = out.replace(&format!("{{{p}}}"), &id.to_string());
@@ -36,10 +38,10 @@ fn fill(path: &str, id: Uuid) -> String {
 async fn fixture(
     app: &TestApp,
     kind: ResourceKind,
-    workspace: Uuid,
-    victim: Uuid,
+    workspace: Id,
+    victim: Id,
     chain: &Chain,
-) -> Uuid {
+) -> Id {
     match kind {
         ResourceKind::Workspace => workspace,
         ResourceKind::Session => {
@@ -84,7 +86,7 @@ async fn every_guarded_route_rejects_anonymous_and_bad_sessions(pool: PgPool) {
         .iter()
         .filter(|s| s.access != Access::Public)
     {
-        let path = fill(spec.path, Uuid::now_v7());
+        let path = fill(spec.path, Id::new());
         for cookie in [
             None,
             Some("garbage"),
@@ -114,7 +116,7 @@ async fn resource_routes_hide_other_workspaces(pool: PgPool) {
     let app = TestApp::new(pool);
     let admin = app.setup_admin().await;
     let victim_ws = app.create_workspace(&admin, "victim").await;
-    let victim: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email = 'admin@example.com'")
+    let victim: Id = sqlx::query_scalar("SELECT id FROM users WHERE email = 'admin@example.com'")
         .fetch_one(app.db())
         .await
         .unwrap();
@@ -150,7 +152,7 @@ async fn resource_routes_hide_other_workspaces(pool: PgPool) {
         );
 
         // Malformed ids are a plain 404 too.
-        let bad = spec.path.replace(&format!("{{{param}}}"), "not-a-uuid");
+        let bad = spec.path.replace(&format!("{{{param}}}"), "not-an-id");
         let r = app
             .call(spec.method.clone(), &bad, Some(&attacker), None)
             .await;
@@ -207,7 +209,7 @@ async fn sudo_routes_require_recent_reauthentication(pool: PgPool) {
     let app = TestApp::new(pool);
     let admin = app.setup_admin().await;
     let ws = app.create_workspace(&admin, "team").await;
-    let me: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email = 'admin@example.com'")
+    let me: Id = sqlx::query_scalar("SELECT id FROM users WHERE email = 'admin@example.com'")
         .fetch_one(app.db())
         .await
         .unwrap();

@@ -6,12 +6,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axum::Json;
 use axum::extract::State;
+use modula_id::Id;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
+use crate::activity::{self, Change};
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
@@ -40,32 +41,53 @@ pub fn validate_service_name(name: &str) -> AppResult<()> {
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct Instance {
-    pub id: Uuid,
-    pub service_id: Uuid,
+    pub id: Id,
+    pub service_id: Id,
     pub service_name: String,
-    pub environment_id: Uuid,
+    pub environment_id: Id,
     pub environment_name: String,
-    pub project_id: Uuid,
-    pub node_id: Option<Uuid>,
+    pub project_id: Id,
+    pub node_id: Option<Id>,
     #[sqlx(json)]
     pub config: ServiceConfig,
+    /// `online`, `deploying`, `crashed` or `offline`, from its deployments.
+    pub status: String,
+    #[serde(skip)]
+    pub location_id: Option<String>,
+    /// Where the server running it is.
+    #[sqlx(skip)]
+    pub location: Option<&'static crate::locations::Location>,
+    pub stack: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
-pub async fn load_instance(state: &AppState, id: Uuid) -> AppResult<Instance> {
-    sqlx::query_as(
+pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
+    let mut i: Instance = sqlx::query_as(
         "SELECT i.id, i.service_id, s.name AS service_name, i.environment_id, e.name AS environment_name,
-                s.project_id, i.node_id, i.config, i.updated_at
+                s.project_id, i.node_id, i.config, i.stack, i.updated_at, n.location AS location_id,
+                CASE
+                  WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id AND status = 'active')
+                    THEN 'online'
+                  WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id
+                               AND status IN ('queued', 'building', 'deploying'))
+                    THEN 'deploying'
+                  WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id AND status = 'crashed')
+                    THEN 'crashed'
+                  ELSE 'offline'
+                END AS status
          FROM service_instances i
          JOIN services s ON s.id = i.service_id
          JOIN environments e ON e.id = i.environment_id
+         LEFT JOIN nodes n ON n.id = i.node_id
          WHERE i.id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or(AppError::NotFound)
+    .ok_or(AppError::NotFound)?;
+    i.location = i.location_id.as_deref().and_then(crate::locations::get);
+    Ok(i)
 }
 
 #[derive(Deserialize)]
@@ -78,7 +100,7 @@ pub struct CreateService {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatedService {
-    pub id: Uuid,
+    pub id: Id,
     pub name: String,
     pub instances: Vec<Instance>,
 }
@@ -94,7 +116,7 @@ pub async fn create(
     validate_service_name(&req.name)?;
     req.config.validate()?;
     let config = serde_json::to_value(&req.config).map_err(anyhow::Error::from)?;
-    let id = Uuid::now_v7();
+    let id = Id::new();
     let mut tx = state.db.begin().await?;
     let inserted = sqlx::query(
         "INSERT INTO services (id, project_id, name) VALUES ($1, $2, $3)
@@ -111,9 +133,9 @@ pub async fn create(
             req.name
         )));
     }
-    let instance_ids: Vec<Uuid> = sqlx::query_scalar(
+    let instance_ids: Vec<Id> = sqlx::query_scalar(
         "INSERT INTO service_instances (id, service_id, environment_id, config)
-         SELECT gen_random_uuid(), $1, e.id, $3 FROM environments e WHERE e.project_id = $2
+         SELECT new_id(), $1, e.id, $3 FROM environments e WHERE e.project_id = $2
          RETURNING id",
     )
     .bind(id)
@@ -121,11 +143,21 @@ pub async fn create(
     .bind(&config)
     .fetch_all(&mut *tx)
     .await?;
+    let envs: Vec<Id> = sqlx::query_scalar("SELECT id FROM environments WHERE project_id = $1")
+        .bind(project)
+        .fetch_all(&mut *tx)
+        .await?;
+    for env in envs {
+        let created = [Change::new("service", "created", req.name.as_str())];
+        activity::record(&mut tx, env, Some(id), Some(actor.user_id), &created).await?;
+    }
     Entry::new("service.create", &meta)
         .actor(&actor)
         .workspace(grant.workspace_id()?)
         .target("service", id)
-        .metadata(json!({ "project": project, "name": req.name, "image": req.config.image() }))
+        .metadata(
+            json!({ "project": project, "name": req.name, "source": req.config.source_label() }),
+        )
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -190,72 +222,41 @@ pub async fn update_instance(
     req.config.validate()?;
     let config = serde_json::to_value(&req.config).map_err(anyhow::Error::from)?;
     let mut tx = state.db.begin().await?;
-    let env: Uuid = sqlx::query_scalar(
-        "UPDATE service_instances SET config = $2, updated_at = now() WHERE id = $1 RETURNING environment_id",
+    let (env, service, old): (Id, Id, serde_json::Value) = sqlx::query_as(
+        "SELECT environment_id, service_id, config FROM service_instances WHERE id = $1 FOR UPDATE",
     )
     .bind(id)
-    .bind(&config)
     .fetch_one(&mut *tx)
     .await?;
-    record_change(
-        &mut tx,
-        env,
-        id,
-        "config",
-        json!({ "image": req.config.image() }),
-        actor.user_id,
-    )
-    .await?;
+    sqlx::query("UPDATE service_instances SET config = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(&config)
+        .execute(&mut *tx)
+        .await?;
+    let changes = activity::config_changes(&old, &config);
+    activity::record(&mut tx, env, Some(service), Some(actor.user_id), &changes).await?;
     Entry::new("service_instance.update", &meta)
         .actor(&actor)
         .workspace(grant.workspace_id()?)
         .target("service_instance", id)
-        .metadata(json!({ "image": req.config.image() }))
+        .metadata(json!({ "source": req.config.source_label() }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
     load_instance(&state, id).await.map(Json)
 }
 
-async fn record_change(
-    tx: &mut sqlx::PgConnection,
-    env: Uuid,
-    instance: Uuid,
-    kind: &str,
-    summary: serde_json::Value,
-    user: Uuid,
-) -> AppResult<()> {
-    let set = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO change_sets (id, environment_id, status, created_by, applied_at, applied_by)
-         VALUES ($1, $2, 'applied', $3, now(), $3)",
-    )
-    .bind(set)
-    .bind(env)
-    .bind(user)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("INSERT INTO changes (change_set_id, service_instance_id, kind, summary) VALUES ($1, $2, $3, $4)")
-        .bind(set)
-        .bind(instance)
-        .bind(kind)
-        .bind(summary)
-        .execute(&mut *tx)
-        .await?;
-    Ok(())
-}
-
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct VariableInfo {
-    pub id: Uuid,
+    pub id: Id,
     pub name: String,
     pub sealed: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
-async fn list_variables(state: &AppState, instance: Uuid) -> AppResult<Vec<VariableInfo>> {
+async fn list_variables(state: &AppState, instance: Id) -> AppResult<Vec<VariableInfo>> {
     Ok(sqlx::query_as(
         "SELECT id, name, sealed, updated_at FROM variables WHERE service_instance_id = $1 ORDER BY name",
     )
@@ -312,12 +313,12 @@ pub async fn update_variables(
     if req.set.len() + req.delete.len() > env::MAX_VARIABLES {
         return Err(AppError::bad_request("too many variables in one request"));
     }
-    let env_id: Uuid =
-        sqlx::query_scalar("SELECT environment_id FROM service_instances WHERE id = $1")
+    let (env_id, service_id): (Id, Id) =
+        sqlx::query_as("SELECT environment_id, service_id FROM service_instances WHERE id = $1")
             .bind(instance)
             .fetch_one(&state.db)
             .await?;
-    let existing: BTreeMap<String, Uuid> = sqlx::query_as::<_, (String, Uuid)>(
+    let existing: BTreeMap<String, Id> = sqlx::query_as::<_, (String, Id)>(
         "SELECT name, id FROM variables WHERE service_instance_id = $1",
     )
     .bind(instance)
@@ -340,7 +341,7 @@ pub async fn update_variables(
     // environment's data key). The row id is bound into each ciphertext.
     let mut rows = Vec::with_capacity(req.set.len());
     for (name, value) in &req.set {
-        let id = existing.get(name).copied().unwrap_or_else(Uuid::now_v7);
+        let id = existing.get(name).copied().unwrap_or_else(Id::new);
         let sealed = env::seal_variable(&state.keys, &state.db, env_id, id, value).await?;
         rows.push((id, name, sealed, req.sealed.contains(name)));
     }
@@ -376,13 +377,30 @@ pub async fn update_variables(
         .execute(&mut *tx)
         .await?;
     let summary = json!({ "set": req.set.keys().collect::<Vec<_>>(), "deleted": deleted });
-    record_change(
+    let changes: Vec<Change> = req
+        .set
+        .keys()
+        .map(|k| {
+            let op = if existing.contains_key(k) {
+                "updated"
+            } else {
+                "added"
+            };
+            Change::new("variable", op, k.as_str())
+        })
+        .chain(
+            deleted
+                .iter()
+                .filter(|k| existing.contains_key(k.as_str()))
+                .map(|k| Change::new("variable", "removed", k.as_str())),
+        )
+        .collect();
+    activity::record(
         &mut tx,
         env_id,
-        instance,
-        "variables",
-        summary.clone(),
-        actor.user_id,
+        Some(service_id),
+        Some(actor.user_id),
+        &changes,
     )
     .await?;
     Entry::new("variables.update", &meta)
@@ -403,7 +421,7 @@ pub async fn reveal_variable(
     meta: RequestMeta,
 ) -> AppResult<Json<serde_json::Value>> {
     let id = grant.id();
-    let (name, sealed, value, env_id): (String, bool, Vec<u8>, Uuid) = sqlx::query_as(
+    let (name, sealed, value, env_id): (String, bool, Vec<u8>, Id) = sqlx::query_as(
         "SELECT v.name, v.sealed, v.value_sealed, i.environment_id
          FROM variables v JOIN service_instances i ON i.id = v.service_instance_id WHERE v.id = $1",
     )
