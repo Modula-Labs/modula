@@ -14,6 +14,7 @@ const deploymentVerb: Record<string, string> = {
   building: "started building",
   deploying: "is deploying",
   active: "succeeded",
+  sleeping: "went to sleep",
   failed: "failed",
   crashed: "crashed",
   removed: "was removed",

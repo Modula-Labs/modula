@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deploymentTitle, viaLabel } from "./deployments";
+import { deploymentTitle, sleepingLine, viaLabel } from "./deployments";
 
 const base = { trigger: "manual", sourceKind: "github" as const, commitSha: "abc1234def", image: "x:1", commitMessage: null };
 
@@ -22,5 +22,13 @@ describe("deployments", () => {
     expect(deploymentTitle({ ...base, commitMessage: "fix: a\n\nbody" })).toBe("fix: a");
     expect(deploymentTitle({ ...base, commitSha: null })).toBe("x:1");
     expect(deploymentTitle({ ...base, commitSha: null, sourceKind: "upload" })).toBe("Local files");
+  });
+  it("describes a sleeping deployment", () => {
+    const now = Date.parse("2026-01-01T12:00:00Z");
+    expect(sleepingLine({ wokeAt: null, coldStartMs: null }, now)).toBe("Sleeping · wakes on request");
+    expect(sleepingLine({ wokeAt: "2026-01-01T11:57:00Z", coldStartMs: 412 }, now)).toBe(
+      "Sleeping · wakes on request · Last cold start 412 ms · 3m ago",
+    );
+    expect(sleepingLine({ wokeAt: null, coldStartMs: 1500 }, now)).toBe("Sleeping · wakes on request · Last cold start 1.5 s");
   });
 });

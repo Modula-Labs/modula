@@ -7,10 +7,10 @@ import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { Alert, Badge, Skeleton, StatusDot } from "@/components/ui/misc";
 import { SourceAvatar } from "@/components/ui/SourceAvatar";
 import { api, type Deployment, type DeploymentDetail, type Instance, type InstanceState } from "@/lib/api";
-import { deploymentTitle, viaLabel } from "@/lib/deployments";
+import { deploymentTitle, sleepingLine, viaLabel } from "@/lib/deployments";
 import { flagEmoji } from "@/lib/flags";
 import { relativeTime } from "@/lib/format";
-import { deploymentBadge, isLive } from "@/lib/status";
+import { deploymentBadge, isLive, isServingStatus } from "@/lib/status";
 import { load, save } from "@/lib/storage";
 
 const HIDE_SKIPPED_KEY = "modula.hideSkipped";
@@ -25,9 +25,9 @@ interface RowActions {
   run: (action: Action, id: string) => void;
 }
 
-const isServing = (d: Deployment) => d.status === "active" || d.status === "crashed";
+const isServing = (d: Deployment) => isServingStatus(d.status);
 
-/** Newest first. The serving deployment (active/crashed) gets its own card. */
+/** Newest first. The serving deployment (active/sleeping/crashed) gets its own card. */
 export function DeploymentsTab({
   instanceId,
   selected,
@@ -142,12 +142,13 @@ export function DeploymentsTab({
 /** What the service is doing now, from the instance when the server reports it. */
 function stateOf(instance: Instance | undefined, serving: Deployment | undefined, latest: Deployment | undefined): InstanceState {
   if (instance?.status) return instance.status;
-  if (serving) return serving.status === "crashed" ? "crashed" : "online";
+  if (serving) return serving.status === "crashed" ? "crashed" : serving.status === "sleeping" ? "sleeping" : "online";
   return latest && isLive(latest.status) ? "deploying" : "offline";
 }
 
 const stateView: Record<InstanceState, { label: string; tone: "success" | "warn" | "danger" | "neutral" }> = {
   online: { label: "Online", tone: "success" },
+  sleeping: { label: "Sleeping", tone: "neutral" },
   offline: { label: "Service offline", tone: "neutral" },
   deploying: { label: "Deploying…", tone: "warn" },
   crashed: { label: "Crashed", tone: "danger" },
@@ -272,6 +273,7 @@ function DeploymentRow({
             {relativeTime(d.createdAt)} {viaLabel(d)}
             {d.hosting === "cloudflare" ? " · Cloudflare" : ""}
           </span>
+          {d.status === "sleeping" ? <span className="block truncate text-[13px] text-muted-foreground">{sleepingLine(d)}</span> : null}
           {d.error ? <span className="block truncate text-[13px] text-error">{d.error}</span> : null}
         </span>
       </button>

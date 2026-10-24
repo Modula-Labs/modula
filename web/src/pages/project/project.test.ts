@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseRepo, serviceNameFromImage } from "./NewServiceDialog";
-import { joinArgs, splitArgs, switchSource, toConfig, toForm } from "./SettingsTab";
+import { joinArgs, serverlessBlocker, serverlessError, splitArgs, switchSource, toConfig, toForm } from "./SettingsTab";
 import type { NodeInfo, ServiceConfig } from "@/lib/api";
 import { CPU_STEP, DEFAULT_CPU_MILLIS, DEFAULT_MEMORY_MB, MEM_STEP, capacity, formatCpu, formatMemory, fromSlider, serverLabel, toSlider } from "./resources";
 
@@ -158,5 +158,34 @@ describe("resource sliders", () => {
     } as NodeInfo;
     expect(serverLabel(node)).toBe("🇩🇪 Falkenstein · modula-main (4 vCPU · 8 GB)");
     expect(serverLabel({ ...node, location: null })).toBe("modula-main (4 vCPU · 8 GB)");
+  });
+});
+
+describe("serverless settings", () => {
+  const c: ServiceConfig = { port: 8080, healthcheckTimeoutSecs: 300, restartPolicy: "on_failure", replicas: 1, source: { type: "image", image: "nginx:1" } };
+
+  it("round-trips idle minutes and omits the field while off", () => {
+    const on: ServiceConfig = { ...c, serverless: { idleMinutes: 30 } };
+    expect(toConfig(toForm(on)).serverless).toEqual({ idleMinutes: 30 });
+    expect(toForm(c)).toMatchObject({ serverless: false, idleMinutes: "10" });
+    expect(JSON.parse(JSON.stringify(toConfig(toForm(c)))).serverless).toBeUndefined();
+  });
+
+  it("validates idle minutes only while on", () => {
+    const f = { ...toForm(c), serverless: true };
+    expect(serverlessError({ ...f, idleMinutes: "1" }, false)).toBeNull();
+    expect(serverlessError({ ...f, idleMinutes: "1440" }, false)).toBeNull();
+    for (const bad of ["0", "1441", "2.5", "", "abc"]) expect(serverlessError({ ...f, idleMinutes: bad }, false)).toBe("Between 1 and 1440");
+    expect(serverlessError({ ...f, serverless: false, idleMinutes: "0" }, false)).toBeNull();
+  });
+
+  it("names what blocks scaling to zero", () => {
+    const f = toForm(c);
+    expect(serverlessBlocker(f, false)).toBeNull();
+    expect(serverlessBlocker(f, true)).toMatch(/volume/);
+    expect(serverlessBlocker({ ...f, cronSchedule: "@daily" }, false)).toMatch(/cron/);
+    expect(serverlessBlocker({ ...f, cloudflare: true }, false)).toMatch(/Cloudflare/);
+    expect(serverlessBlocker({ ...f, replicas: "2" }, false)).toMatch(/replica/);
+    expect(serverlessError({ ...f, serverless: true, replicas: "2" }, false)).toMatch(/replica/);
   });
 });

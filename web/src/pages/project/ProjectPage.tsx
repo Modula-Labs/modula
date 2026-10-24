@@ -215,7 +215,7 @@ export function ProjectPage({
                   const inst = instanceOf(id);
                   if (!svc) return null;
                   const pendingHere = (services.find((s) => s.id === id)?.pendingChanges ?? 0) > 0;
-                  const canRestart = !!inst?.latestDeploymentId && ["active", "crashed"].includes(inst.latestDeploymentStatus ?? "");
+                  const canRestart = !!inst?.latestDeploymentId && ["active", "sleeping", "crashed"].includes(inst.latestDeploymentStatus ?? "");
                   return (
                     <>
                       <MenuLabel>{svc.name}</MenuLabel>

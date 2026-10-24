@@ -1,4 +1,5 @@
 import type { Deployment } from "./api";
+import { formatMs, relativeTime } from "./format";
 
 type ViaFields = "trigger" | "sourceKind" | "commitSha" | "image" | "sourceBranch" | "sourceDirty";
 
@@ -24,4 +25,13 @@ export function deploymentTitle(d: Pick<Deployment, "commitMessage" | "commitSha
   if (line) return line;
   if (d.commitSha) return d.commitSha.slice(0, 7);
   return d.sourceKind === "upload" ? "Local files" : d.image;
+}
+
+/** "Sleeping · wakes on request", plus "Last cold start 412 ms · 3m ago" once it has woken before. */
+export function sleepingLine(d: Pick<Deployment, "wokeAt" | "coldStartMs">, now = Date.now()): string {
+  const cold =
+    d.coldStartMs != null
+      ? ` · Last cold start ${formatMs(d.coldStartMs)}${d.wokeAt ? ` · ${relativeTime(d.wokeAt, now)}` : ""}`
+      : "";
+  return `Sleeping · wakes on request${cold}`;
 }

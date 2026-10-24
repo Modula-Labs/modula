@@ -206,6 +206,8 @@ export type DeploymentStatus =
   | "building"
   | "deploying"
   | "active"
+  /** Serving, scaled to zero: the next request wakes it. */
+  | "sleeping"
   | "failed"
   | "crashed"
   | "removed"
@@ -310,6 +312,8 @@ export interface ServiceConfig {
   cpuMillis?: number;
   /** Each replica runs on a different server. */
   replicas?: number;
+  /** Scale to zero: stops after `idleMinutes` (1–1440) without requests, starts on the next one. Absent = always running. */
+  serverless?: { idleMinutes: number };
   /** Static sites only (repo or local source): absent = served from your servers. */
   hosting?: CloudflareHosting;
   /** Edge rules, applied in order to every request to the service's domains (omitted when empty). */
@@ -354,7 +358,7 @@ export interface Location {
 export interface LocationOption extends Location {
   city: string;
 }
-export type InstanceState = "online" | "offline" | "deploying" | "crashed";
+export type InstanceState = "online" | "sleeping" | "offline" | "deploying" | "crashed";
 export interface CronPreview {
   valid: boolean;
   error: string | null;
@@ -794,6 +798,10 @@ export interface Deployment {
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
+  /** When a request last woke it from sleep (RFC3339). */
+  wokeAt?: string | null;
+  /** How long the last cold start took. */
+  coldStartMs?: number | null;
 }
 export interface DeploymentEvent {
   phase: string;
