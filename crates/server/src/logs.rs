@@ -61,8 +61,9 @@ pub async fn record(db: &PgPool, node: Id, b: &pb::LogBatch) -> anyhow::Result<(
         "INSERT INTO log_lines (environment_id, service_instance_id, deployment_id, at, stderr, line)
          SELECT i.environment_id, d.service_instance_id, d.id, to_timestamp(l.at / 1000.0), l.err, l.line
          FROM unnest($2::text[], $3::bigint[], $4::bool[], $5::text[]) AS l(dep, at, err, line)
-         JOIN deployments d ON d.id = l.dep::text AND d.node_id = $1
-         JOIN service_instances i ON i.id = d.service_instance_id",
+         JOIN deployments d ON d.id = l.dep::text
+         JOIN service_instances i ON i.id = d.service_instance_id
+         WHERE EXISTS (SELECT 1 FROM deployment_replicas r WHERE r.deployment_id = d.id AND r.node_id = $1)",
     )
     .bind(node)
     .bind(lines.iter().map(|(l, _)| l.deployment_id.clone()).collect::<Vec<_>>())

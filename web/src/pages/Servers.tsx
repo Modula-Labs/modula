@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { DotsVertical, Plus, Server, Trash } from "@/components/ui/icons";
 import { Select } from "@/components/ui/Input";
+import { Segmented } from "@/components/ui/Tabs";
 import { Menu, MenuItem } from "@/components/ui/Menu";
 import {
   Alert,
@@ -17,6 +18,7 @@ import { useCurrentWorkspace, useMe } from "@/lib/workspace";
 import { SelfBackupCard } from "./BackupStorage";
 import { relativeTime } from "@/lib/format";
 import { AddServerDialog } from "./servers/AddServerDialog";
+import { NetworkPanel } from "./servers/NetworkPanel";
 import { ProvisionedServers } from "./servers/ProvisionedServers";
 
 const gb = (b?: number) =>
@@ -33,6 +35,7 @@ export function ServersPage() {
     refetchInterval: 10_000,
   });
   const [adding, setAdding] = useState(false);
+  const [tab, setTab] = useState<"servers" | "network">("servers");
   const revoke = useMutation({
     mutationFn: (id: string) => api.revokeNode(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["nodes"] }),
@@ -66,47 +69,67 @@ export function ServersPage() {
         dials out to this instance over mutual TLS. No inbound ports needed.
       </p>
 
-      <div className="mt-6 flex flex-col gap-4">
-        {(revoke.error ?? setLocation.error) ? (
-          <Alert>{(revoke.error ?? setLocation.error)?.message}</Alert>
-        ) : null}
-        {nodes.isPending ? (
-          <Skeleton className="h-32" />
-        ) : nodes.error ? (
-          <Alert>{nodes.error.message}</Alert>
-        ) : nodes.data.length === 0 ? (
-          <EmptyState
-            icon={<Server />}
-            title="No servers yet"
-            body="Add a server to start deploying. Any Linux machine with Docker works, including this one."
-            action={
-              <Button
-                variant="outline"
-                icon={<Plus />}
-                onClick={() => setAdding(true)}
-              >
-                Add server
-              </Button>
-            }
-          />
-        ) : (
-          <div className="divide-y divide-border rounded-xl border border-border">
-            {nodes.data.map((n) => (
-              <NodeRow
-                key={n.id}
-                n={n}
-                locations={locations.data ?? []}
-                onLocation={(location) =>
-                  setLocation.mutate({ id: n.id, location })
-                }
-                onRevoke={() => revoke.mutate(n.id)}
-              />
-            ))}
-          </div>
-        )}
+      <div className="mt-6">
+        <Segmented
+          label="View"
+          value={tab}
+          onChange={setTab}
+          options={[
+            { value: "servers", label: "Servers" },
+            { value: "network", label: "Network" },
+          ]}
+        />
       </div>
-      <SelfBackupCard workspaceId={workspace?.id} />
-      <ProvisionedServers workspaceId={workspace?.id} />
+
+      {tab === "network" ? (
+        <div className="mt-4">
+          <NetworkPanel />
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 flex flex-col gap-4">
+            {(revoke.error ?? setLocation.error) ? (
+              <Alert>{(revoke.error ?? setLocation.error)?.message}</Alert>
+            ) : null}
+            {nodes.isPending ? (
+              <Skeleton className="h-32" />
+            ) : nodes.error ? (
+              <Alert>{nodes.error.message}</Alert>
+            ) : nodes.data.length === 0 ? (
+              <EmptyState
+                icon={<Server />}
+                title="No servers yet"
+                body="Add a server to start deploying. Any Linux machine with Docker works, including this one."
+                action={
+                  <Button
+                    variant="outline"
+                    icon={<Plus />}
+                    onClick={() => setAdding(true)}
+                  >
+                    Add server
+                  </Button>
+                }
+              />
+            ) : (
+              <div className="divide-y divide-border rounded-xl border border-border">
+                {nodes.data.map((n) => (
+                  <NodeRow
+                    key={n.id}
+                    n={n}
+                    locations={locations.data ?? []}
+                    onLocation={(location) =>
+                      setLocation.mutate({ id: n.id, location })
+                    }
+                    onRevoke={() => revoke.mutate(n.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+          <SelfBackupCard workspaceId={workspace?.id} />
+          <ProvisionedServers workspaceId={workspace?.id} />
+        </>
+      )}
       <AddServerDialog
         open={adding}
         onOpenChange={setAdding}

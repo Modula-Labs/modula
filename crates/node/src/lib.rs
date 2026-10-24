@@ -11,6 +11,7 @@ pub mod identity;
 pub mod join;
 pub mod location;
 pub mod logship;
+pub mod mesh;
 pub mod metrics;
 pub mod reconcile;
 pub mod runtime;

@@ -528,6 +528,27 @@ export interface NodeInfo {
   connected: boolean;
   location?: Location | null;
 }
+/** The private network between servers (WireGuard mesh). */
+export interface MeshNetwork {
+  nodes: {
+    id: string;
+    name: string;
+    /** This server's /24 of 10.80.0.0/16; null = not in the network. */
+    subnet: string | null;
+    connected: boolean;
+    /** Unix seconds of its last tunnel report. */
+    reportedAt: number | null;
+  }[];
+  /** One per ordered pair: how `from` reaches `to` and what it measured. */
+  links: {
+    from: string;
+    to: string;
+    path: "private" | "public" | "none";
+    endpoint: string | null;
+    latencyMs: number | null;
+    lastHandshake: number | null;
+  }[];
+}
 export interface JoinToken {
   token: string;
   expiresAt: string;
@@ -1061,6 +1082,7 @@ export const api = {
     post<DbCredentials>(`/api/service-instances/${enc(i)}/database/password`),
 
   nodes: () => get<NodeInfo[]>("/api/nodes"),
+  meshNetwork: () => get<MeshNetwork>("/api/nodes/network"),
   createJoinToken: () => post<JoinToken>("/api/nodes/join-tokens"),
   locations: () => get<LocationOption[]>("/api/locations"),
   setNodeLocation: (id: string, location: string | null) =>

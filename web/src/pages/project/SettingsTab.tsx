@@ -124,6 +124,22 @@ export const switchSource = (f: Form, kind: Form["kind"]): Form => ({
 const optNum = (s: string) => (s.trim() ? Number(s) : undefined);
 
 /** The exact config shape the server accepts; build fields exist only for repo sources. */
+/** Each replica on its own server (the server enforces the same). */
+export const MAX_REPLICAS = 16;
+
+/** Why `replicas` can't be saved, or null. A volume's data is on one server. */
+export function replicasError(
+  replicas: string,
+  hasVolume: boolean,
+): string | null {
+  const n = Number(replicas);
+  if (!Number.isInteger(n) || n < 1 || n > MAX_REPLICAS)
+    return `Between 1 and ${MAX_REPLICAS}`;
+  if (n > 1 && hasVolume)
+    return "A service with a volume runs one replica: raise CPU and memory instead";
+  return null;
+}
+
 export const toConfig = (f: Form): ServiceConfig => {
   const common = {
     startCommand: f.startCommand.trim() ? splitArgs(f.startCommand) : undefined,
@@ -142,7 +158,6 @@ export const toConfig = (f: Form): ServiceConfig => {
     drainingSeconds: optNum(f.drainingSeconds) || undefined,
     memoryMb: optNum(f.memoryMb),
     cpuMillis: optNum(f.cpuMillis),
-    // Multi-server replicas need private networking; stored but pinned to 1 for now.
     replicas: Math.max(1, Math.floor(Number(f.replicas)) || 1),
   };
   if (f.kind === "image")
@@ -661,12 +676,8 @@ export function SettingsTab({
         />
         <Field
           label="Replicas"
-          hint="Each replica runs on a different server. On one server, raise CPU and memory instead."
-          error={
-            Number(form.replicas) > 1
-              ? "Multiple replicas need private networking between servers (coming soon)"
-              : null
-          }
+          hint="Each replica runs on a different server, and every one of them serves the service's domains. On one server, raise CPU and memory instead."
+          error={replicasError(form.replicas, !!instance.volume)}
         >
           {(p) => (
             <Input
@@ -674,7 +685,7 @@ export function SettingsTab({
               className="w-32"
               type="number"
               min={1}
-              max={1}
+              max={MAX_REPLICAS}
               inputMode="numeric"
               disabled={!canEdit}
               value={form.replicas}
@@ -739,7 +750,10 @@ export function SettingsTab({
                   size="sm"
                   variant="secondary"
                   loading={save.isPending}
-                  disabled={Number(form.replicas) > 1 || !!invalidSource}
+                  disabled={
+                    !!replicasError(form.replicas, !!instance.volume) ||
+                    !!invalidSource
+                  }
                   onClick={() => save.mutate()}
                 >
                   Save

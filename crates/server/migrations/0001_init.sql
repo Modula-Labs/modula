@@ -189,6 +189,15 @@ CREATE TABLE nodes (
     location_pinned     boolean NOT NULL DEFAULT false,
     -- The public IPv4 the node reaches the internet from (TCP proxy host).
     public_ip           text,
+    -- Private networking (C9): the node's WireGuard public key and UDP port,
+    -- its /24 of the mesh (10.80.<mesh_index>.0/24), its own interface
+    -- addresses ("ip/prefix", for picking a private path to peers) and its
+    -- last report on the tunnels to its peers.
+    wg_public_key       text,
+    wg_port             integer,
+    mesh_index          smallint UNIQUE CHECK (mesh_index BETWEEN 1 AND 254),
+    addresses           jsonb NOT NULL DEFAULT '[]'::jsonb,
+    mesh_status         jsonb NOT NULL DEFAULT '{}'::jsonb,
     -- Desired-state generation the server wants vs. the one the node applied.
     desired_generation  bigint NOT NULL DEFAULT 1,
     applied_generation  bigint NOT NULL DEFAULT 0,
@@ -416,6 +425,35 @@ CREATE INDEX deployments_node_live_idx ON deployments (node_id)
     WHERE status IN ('building', 'deploying', 'active', 'crashed');
 -- At most one active deployment per service instance.
 CREATE UNIQUE INDEX deployments_one_active ON deployments (service_instance_id) WHERE status = 'active';
+
+-- Where a deployment runs: one row per replica, each on a different server.
+-- Replica 0 is the deployment's own node (deployments.node_id; it builds,
+-- serves the TCP proxy, backups and the Database tab) and is created with
+-- the deployment by the trigger below.
+CREATE TABLE deployment_replicas (
+    deployment_id   id NOT NULL REFERENCES deployments (id) ON DELETE CASCADE,
+    ordinal         smallint NOT NULL CHECK (ordinal BETWEEN 0 AND 63),
+    node_id         id REFERENCES nodes (id) ON DELETE SET NULL,
+    -- The container's address on its node's mesh network (in the node's /24).
+    mesh_ip         text CHECK (mesh_ip ~ '^10\.80\.[0-9]{1,3}\.[0-9]{1,3}$'),
+    status          text NOT NULL DEFAULT 'starting'
+                    CHECK (status IN ('starting', 'active', 'crashed', 'failed')),
+    updated_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (deployment_id, ordinal),
+    UNIQUE (deployment_id, node_id)
+);
+CREATE INDEX deployment_replicas_node_idx ON deployment_replicas (node_id);
+
+CREATE FUNCTION deployment_primary_replica() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO deployment_replicas (deployment_id, ordinal, node_id, status)
+    VALUES (NEW.id, 0, NEW.node_id, CASE WHEN NEW.status = 'active' THEN 'active' ELSE 'starting' END);
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER deployments_primary_replica AFTER INSERT ON deployments
+    FOR EACH ROW EXECUTE FUNCTION deployment_primary_replica();
 
 CREATE TABLE deployment_events (
     id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

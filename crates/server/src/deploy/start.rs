@@ -66,6 +66,7 @@ pub struct Prebuilt {
     pub digest: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct Started {
     pub id: Id,
     pub node: Id,
@@ -112,11 +113,25 @@ pub async fn start(
         (None, false) => ("deploying", d.config.source_label(), None),
     };
     let node = placement::choose(&mut *tx, d.instance).await?;
+    // Volume-backed services can't run twice on the same data.
+    let has_volume: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM volumes WHERE service_instance_id = $1)")
+            .bind(d.instance)
+            .fetch_one(&mut *tx)
+            .await?;
+    if has_volume && d.config.replicas > 1 {
+        return Err(crate::error::AppError::Conflict(
+            "a service with a volume runs one replica: raise its CPU and memory instead".into(),
+        ));
+    }
+    let extra = placement::choose_replicas(&mut *tx, d.instance, node, d.config.replicas).await?;
     // A newer deployment supersedes any still in progress (the running one
     // keeps serving until the new one is healthy).
     let superseded: Vec<Option<Id>> = sqlx::query_scalar(
-        "UPDATE deployments SET status = 'cancelled', finished_at = now(), updated_at = now()
-         WHERE service_instance_id = $1 AND status IN ('queued', 'building', 'deploying') RETURNING node_id",
+        "WITH gone AS (
+             UPDATE deployments SET status = 'cancelled', finished_at = now(), updated_at = now()
+             WHERE service_instance_id = $1 AND status IN ('queued', 'building', 'deploying') RETURNING id)
+         SELECT r.node_id FROM deployment_replicas r JOIN gone ON gone.id = r.deployment_id",
     )
     .bind(d.instance)
     .fetch_all(&mut *tx)
@@ -159,6 +174,27 @@ pub async fn start(
     .bind(&vars_sealed)
     .execute(&mut *tx)
     .await?;
+    // Addresses on the private network (the trigger created replica 0).
+    let mesh_ip = crate::mesh::allocate_ip(&mut *tx, node).await?;
+    sqlx::query(
+        "UPDATE deployment_replicas SET mesh_ip = $2 WHERE deployment_id = $1 AND ordinal = 0",
+    )
+    .bind(id)
+    .bind(&mesh_ip)
+    .execute(&mut *tx)
+    .await?;
+    for (i, n) in extra.iter().enumerate() {
+        let ip = crate::mesh::allocate_ip(&mut *tx, *n).await?;
+        sqlx::query(
+            "INSERT INTO deployment_replicas (deployment_id, ordinal, node_id, mesh_ip) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(i as i16 + 1)
+        .bind(n)
+        .bind(&ip)
+        .execute(&mut *tx)
+        .await?;
+    }
     let what = match (commit, d.config.upload()) {
         (_, Some(_)) if d.prebuilt.is_none() => "Building uploaded files".to_owned(),
         (Some(c), None) => format!("Building {} at {}", d.config.source_label(), &c.sha[..7]),
@@ -185,6 +221,10 @@ pub async fn start(
     }
     let mut kick: Vec<Id> = superseded.into_iter().flatten().chain(retired).collect();
     kick.push(node);
+    kick.extend(extra);
+    // The rest of the environment lets the new replicas in (a database on
+    // another server must accept the new API before it is healthy).
+    kick.extend(crate::mesh::bump_environment(&mut *tx, env_id).await?);
     kick.sort();
     kick.dedup();
     for n in &kick {

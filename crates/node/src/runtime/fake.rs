@@ -226,6 +226,7 @@ impl Runtime for FakeRuntime {
                 running: false,
                 exit_code: 0,
                 restart_count: 0,
+                mesh_ip: w.mesh_ip.parse().ok(),
             },
         );
         Ok(id)

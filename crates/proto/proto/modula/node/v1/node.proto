@@ -63,6 +63,7 @@ message NodeMessage {
     TunnelClose tunnel_close = 33;
     UpgradeStatus upgrade_status = 60;
     AccessStatus access_status = 70;
+    MeshReport mesh_report = 80;
   }
 }
 
@@ -90,6 +91,14 @@ message NodeInfo {
   string edge_colo = 9;
   // The public IPv4 the node reaches the internet from (Cloudflare trace).
   string public_ip = 10;
+  // Private networking (capability "mesh"): the node's WireGuard public key
+  // (base64; the private key never leaves the node) and UDP port.
+  string wg_public_key = 11;
+  uint32 wg_port = 12;
+  // The node's own IPv4 interface addresses as "ip/prefix" (loopback,
+  // container bridges and the mesh excluded). Two nodes with an address in
+  // the same subnet (a provider private network) peer over it.
+  repeated string addresses = 13;
 }
 
 message Heartbeat {
@@ -224,6 +233,68 @@ message DesiredState {
   repeated TcpProxy tcp_proxies = 6;
   // Volumes to delete from this node (their service or volume was deleted).
   repeated string volume_removals = 7;
+  // Private networking between servers; absent = this node is not in a mesh.
+  Mesh mesh = 8;
+}
+
+// ---------------------------------------------------------------- private network (80–89)
+//
+// Every node joins one WireGuard mesh. The server allocates each node a /24
+// of 10.80.0.0/16; the node's host address on the mesh is its .1 and its
+// containers get server-assigned addresses from the rest. Containers keep
+// their per-environment bridge (and Docker's names for local services) and
+// are also attached to the node's `modula-mesh` network with that address.
+// nftables on every node only lets addresses of the same environment talk.
+
+message Mesh {
+  // This node's /24, e.g. "10.80.3.0/24"; its host address is the .1.
+  string subnet = 1;
+  uint32 listen_port = 2;
+  repeated MeshPeer peers = 3;
+  // Environments with workloads on this node, with every mesh address of
+  // theirs on any node (isolation and discovery).
+  repeated MeshEnvironment environments = 4;
+}
+
+message MeshPeer {
+  string node_id = 1;
+  string name = 2;
+  string public_key = 3;
+  // "ip:port" to send to; empty = wait for the peer to reach us.
+  string endpoint = 4;
+  // The peer's /24.
+  string subnet = 5;
+  // The endpoint is on a private network shared with this node.
+  bool private_path = 6;
+}
+
+message MeshEnvironment {
+  string environment_id = 1;
+  repeated MeshMember members = 2;
+}
+
+message MeshMember {
+  string ip = 1;
+  string service_name = 2;
+  string deployment_id = 3;
+  string node_id = 4;
+  // Serving (its deployment is the live one) and reported healthy: the
+  // resolver answers `<service_name>.modula.internal` with these.
+  bool healthy = 5;
+}
+
+// Sent every 30s by nodes in a mesh.
+message MeshReport {
+  repeated PeerStatus peers = 1;
+}
+
+message PeerStatus {
+  string node_id = 1;
+  // Round trip over the tunnel (0 = no answer).
+  uint32 latency_us = 2;
+  int64 last_handshake_unix = 3;
+  uint64 rx_bytes = 4;
+  uint64 tx_bytes = 5;
 }
 
 // hostname → the container of one deployment on this node.
@@ -231,6 +302,9 @@ message Route {
   string hostname = 1;
   string deployment_id = 2;
   uint32 port = 3;
+  // Healthy replicas of the deployment on other nodes, as "mesh-ip:port";
+  // load-balanced together with the local one.
+  repeated string remote_upstreams = 4;
 }
 
 enum TlsMode {
@@ -291,6 +365,8 @@ message Workload {
   uint32 draining_seconds = 46;
   // ON_FAILURE only: give up after this many restarts (0 = unlimited).
   uint32 restart_max_retries = 47;
+  // The container's address on the node's mesh network (empty = none).
+  string mesh_ip = 80;
 }
 
 message Volume {

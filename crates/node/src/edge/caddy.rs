@@ -193,14 +193,27 @@ pub fn render(cfg: &EdgeConfig, listeners: Listeners, admin_listen: &str, ask_ur
     let mut routes: Vec<Value> = by_host
         .iter()
         .map(|(host, ups)| {
+            let mut proxy = json!({
+                "handler": "reverse_proxy",
+                "upstreams": ups.iter().map(|d| json!({ "dial": d })).collect::<Vec<_>>(),
+                // Stream responses (SSE, long polling) instead of buffering.
+                "flush_interval": -1
+            });
+            // Replicas (on this and other servers): spread requests, skip
+            // one that refuses connections for a while, retry on another.
+            if ups.len() > 1 {
+                proxy["load_balancing"] = json!({
+                    "selection_policy": { "policy": "round_robin" },
+                    "try_duration": "5s",
+                    "try_interval": "250ms"
+                });
+                proxy["health_checks"] = json!({
+                    "passive": { "fail_duration": "10s", "max_fails": 1 }
+                });
+            }
             json!({
                 "match": [{ "host": [host] }],
-                "handle": [{
-                    "handler": "reverse_proxy",
-                    "upstreams": ups.iter().map(|d| json!({ "dial": d })).collect::<Vec<_>>(),
-                    // Stream responses (SSE, long polling) instead of buffering.
-                    "flush_interval": -1
-                }],
+                "handle": [proxy],
                 "terminal": true
             })
         })
@@ -390,6 +403,18 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+        // Several replicas: balanced, with failed ones skipped for a while.
+        let lb = &routes[0]["handle"][0];
+        assert_eq!(
+            lb["load_balancing"]["selection_policy"]["policy"],
+            "round_robin"
+        );
+        assert_eq!(lb["health_checks"]["passive"]["fail_duration"], "10s");
+        assert!(
+            c["apps"]["http"]["servers"]["modula"]["routes"][0]["handle"][0]
+                .get("load_balancing")
+                .is_none()
         );
         assert_eq!(routes[1]["handle"][0]["status_code"], 404);
         let auto = &c["apps"]["tls"]["automation"];

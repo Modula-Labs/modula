@@ -112,6 +112,12 @@ enum Command {
         /// the control plane's request are offered only when it exists.
         #[arg(long, default_value = "/var/lib/modula-upgrade")]
         upgrade_dir: PathBuf,
+        /// Stay out of the private network between servers (WireGuard).
+        #[arg(long, env = "MODULA_NO_MESH")]
+        no_mesh: bool,
+        /// UDP port of this server's WireGuard tunnel to the others.
+        #[arg(long, env = "MODULA_WG_PORT", default_value_t = modula_node::mesh::DEFAULT_PORT)]
+        wg_port: u16,
     },
     /// List what this build supports (the installer checks before using it).
     Features,
@@ -177,6 +183,8 @@ async fn main() -> anyhow::Result<()> {
             build_concurrency,
             caddy_sockets,
             upgrade_dir,
+            no_mesh,
+            wg_port,
         } => {
             let runtime = Arc::new(DockerRuntime::connect()?);
             // Containers must not reach the cloud's metadata service.
@@ -247,11 +255,17 @@ async fn main() -> anyhow::Result<()> {
                 edge.clone(),
                 serves_dashboard,
             )));
+            let mesh = if no_mesh {
+                None
+            } else {
+                open_mesh(&cli.data_dir, wg_port).await
+            };
             let caps = Capabilities {
                 edge,
                 build,
                 db: Some(db),
                 upgrade,
+                mesh,
             };
             session::run(cli.data_dir, runtime, caps, stop).await?;
         }
@@ -273,6 +287,34 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The node's side of the private network, or None (warned) when this host
+/// can't take part: not Linux, or no WireGuard.
+async fn open_mesh(dir: &std::path::Path, port: u16) -> Option<Arc<modula_node::mesh::Mesh>> {
+    #[cfg(target_os = "linux")]
+    {
+        match modula_node::mesh::linux::LinuxMesh::open(dir) {
+            Ok((sys, public_key)) => {
+                modula_node::mesh::linux::open_ufw_port(port).await;
+                Some(modula_node::mesh::Mesh::new(
+                    Arc::new(sys),
+                    public_key,
+                    port,
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(error = format!("{e:#}"), "private networking is off");
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (dir, port);
+        tracing::info!("private networking needs Linux; this server stays out of it");
+        None
+    }
 }
 
 async fn shutdown_signal() {

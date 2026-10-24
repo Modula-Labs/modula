@@ -51,6 +51,11 @@ pub async fn run(
     let build_logs = caps.build.as_ref().map(|b| b.logs.clone());
     let db = caps.db.clone();
     let upgrade = caps.upgrade.clone();
+    let mesh = caps.mesh.clone();
+    // Tunnel counters and latencies for the dashboard's Network tab.
+    if let Some(m) = &mesh {
+        tokio::spawn(report_mesh(m.clone(), out_tx.clone(), stop.clone()));
+    }
     // Set by a finished upgrade (tests' fake one): reconnect to say Hello again.
     let reconnect = Arc::new(tokio::sync::Notify::new());
     // Backup results also go through the outbox, to survive reconnects.
@@ -85,6 +90,7 @@ pub async fn run(
             db: db.as_ref(),
             upgrade: upgrade.as_ref(),
             reconnect: &reconnect,
+            mesh: mesh.as_ref(),
         };
         match ctx.session().await {
             Ok(()) => break,
@@ -123,6 +129,7 @@ struct Ctx<'a> {
     db: Option<&'a Arc<dyn crate::db::Executor>>,
     upgrade: Option<&'a Arc<dyn crate::upgrade::Upgrader>>,
     reconnect: &'a Arc<tokio::sync::Notify>,
+    mesh: Option<&'a Arc<crate::mesh::Mesh>>,
 }
 
 fn msg(m: Out) -> pb::NodeMessage {
@@ -399,6 +406,7 @@ impl Ctx<'_> {
                 .chain(self.build_logs.is_some().then_some("build"))
                 .chain(self.db.is_some().then_some("db"))
                 .chain(self.upgrade.is_some().then_some("upgrade"))
+                .chain(self.mesh.map(|_| "mesh"))
                 .chain(crate::access::applier().map(|_| "cf-access"))
                 .chain(
                     crate::access::applier()
@@ -413,8 +421,37 @@ impl Ctx<'_> {
                 cloud_region: self.location.region.clone(),
                 edge_colo: self.location.colo.clone(),
                 public_ip: self.location.public_ip.clone(),
+                wg_public_key: self
+                    .mesh
+                    .map(|m| m.public_key().to_owned())
+                    .unwrap_or_default(),
+                wg_port: self.mesh.map_or(0, |m| u32::from(m.port())),
+                addresses: match self.mesh {
+                    Some(_) => crate::mesh::addrs::detect().await,
+                    None => Vec::new(),
+                },
                 ..host_info(self.runtime.describe().await.unwrap_or_default())
             }),
+        }
+    }
+}
+
+const MESH_REPORT_EVERY: Duration = Duration::from_secs(30);
+
+async fn report_mesh(
+    mesh: Arc<crate::mesh::Mesh>,
+    out: mpsc::Sender<pb::NodeMessage>,
+    stop: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(MESH_REPORT_EVERY) => {}
+        }
+        if let Some(r) = mesh.report().await
+            && !r.peers.is_empty()
+        {
+            let _ = out.try_send(msg(Out::MeshReport(r)));
         }
     }
 }

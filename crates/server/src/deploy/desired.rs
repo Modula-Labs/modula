@@ -42,6 +42,9 @@ struct Row {
     mount_path: Option<String>,
     node_public_ip: Option<String>,
     tcp_public_port: Option<i32>,
+    mesh_ip: Option<String>,
+    /// This replica hasn't come up yet (it still builds, if it must).
+    replica_starting: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -50,6 +53,7 @@ struct RouteRow {
     deployment_id: Id,
     config: serde_json::Value,
     target_port: Option<i32>,
+    remote_ips: Vec<String>,
 }
 
 pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
@@ -65,17 +69,19 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
                 (SELECT hostname FROM domains WHERE service_instance_id = i.id AND status = 'verified'
                  ORDER BY created_at LIMIT 1) AS public_domain,
                 d.restart_generation, v.id AS volume_id, v.mount_path,
-                n.public_ip AS node_public_ip, t.public_port AS tcp_public_port
-         FROM deployments d
+                n.public_ip AS node_public_ip, t.public_port AS tcp_public_port,
+                r.mesh_ip, r.status = 'starting' AS replica_starting
+         FROM deployment_replicas r
+         JOIN deployments d ON d.id = r.deployment_id
          JOIN service_instances i ON i.id = d.service_instance_id
-         JOIN nodes n ON n.id = d.node_id
+         LEFT JOIN nodes n ON n.id = d.node_id
          LEFT JOIN source_uploads u ON u.id = d.upload_id AND u.purged_at IS NULL
          LEFT JOIN volumes v ON v.service_instance_id = i.id
          LEFT JOIN tcp_proxies t ON t.service_instance_id = i.id
          JOIN environments e ON e.id = i.environment_id
          JOIN services s ON s.id = i.service_id
          JOIN projects p ON p.id = s.project_id
-         WHERE d.node_id = $1 AND d.status = ANY($2)
+         WHERE r.node_id = $1 AND d.status = ANY($2)
          ORDER BY d.created_at",
     )
     .bind(node)
@@ -140,14 +146,20 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
             _ => Vec::new(),
         };
         // Where the source comes from: GitHub at the commit, or this server
-        // for an upload (a signed download bound to this deployment).
-        let source = match (r.status.as_str(), cfg.repo(), cfg.upload(), &r.commit_sha) {
-            ("building", Some((repo, _, _)), _, Some(sha)) => Some((
+        // for an upload (a signed download bound to this deployment). Every
+        // replica builds on its own server; one that hasn't come up still
+        // does after the first replica's build moved the deployment on.
+        let builds = r.status == "building"
+            || (r.status == "deploying"
+                && r.replica_starting
+                && r.image.starts_with(super::start::BUILD_PREFIX));
+        let source = match (builds, cfg.repo(), cfg.upload(), &r.commit_sha) {
+            (true, Some((repo, _, _)), _, Some(sha)) => Some((
                 state.github.tarball_url(repo, sha),
                 crate::github::app::source_auth(state, r.workspace_id, repo).await?,
                 String::new(),
             )),
-            ("building", None, Some(upload), _) => Some((
+            (true, None, Some(upload), _) => Some((
                 upload_url(state),
                 format!(
                     "Bearer {}",
@@ -224,17 +236,24 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
                 RestartPolicy::OnFailure => cfg.restart_policy_max_retries.unwrap_or(0),
                 _ => 0,
             },
+            mesh_ip: r.mesh_ip.unwrap_or_default(),
         });
     }
     // Public hostnames route to the serving deployment only (never one still
     // rolling out), so traffic moves in the same snapshot that retires the old one.
     // Unverified custom domains are left out, which also keeps them off the
-    // node's `ask` allowlist (no certificate).
+    // node's `ask` allowlist (no certificate). Every node running a replica
+    // serves them, balancing over its own and the other healthy replicas.
     let routes: Vec<RouteRow> = sqlx::query_as(
-        "SELECT m.hostname, d.id AS deployment_id, d.config, m.target_port
+        "SELECT m.hostname, d.id AS deployment_id, d.config, m.target_port,
+                ARRAY(SELECT o.mesh_ip FROM deployment_replicas o
+                      WHERE o.deployment_id = d.id AND o.node_id <> $1 AND o.mesh_ip IS NOT NULL
+                        AND o.status = 'active'
+                      ORDER BY o.ordinal) AS remote_ips
          FROM domains m
          JOIN deployments d ON d.service_instance_id = m.service_instance_id
-         WHERE d.node_id = $1 AND d.status IN ('active', 'crashed') AND m.status = 'verified'
+         JOIN deployment_replicas r ON r.deployment_id = d.id AND r.node_id = $1
+         WHERE d.status IN ('active', 'crashed') AND m.status = 'verified'
          ORDER BY m.hostname",
     )
     .bind(node)
@@ -243,13 +262,19 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
     let mut pb_routes = Vec::with_capacity(routes.len());
     for r in routes {
         let cfg: ServiceConfig = serde_json::from_value(r.config).map_err(anyhow::Error::from)?;
+        let port = r
+            .target_port
+            .and_then(|p| u32::try_from(p).ok())
+            .unwrap_or(u32::from(cfg.port));
         pb_routes.push(pb::Route {
             hostname: r.hostname,
             deployment_id: r.deployment_id.to_string(),
-            port: r
-                .target_port
-                .and_then(|p| u32::try_from(p).ok())
-                .unwrap_or(u32::from(cfg.port)),
+            port,
+            remote_upstreams: r
+                .remote_ips
+                .iter()
+                .map(|ip| format!("{ip}:{port}"))
+                .collect(),
         });
     }
     // TCP proxies point at the serving deployment, like routes.
@@ -299,6 +324,7 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
             acme_email: state.cfg.acme_email.clone().unwrap_or_default(),
             dashboard_hosts: state.hosts().dashboard.into_iter().collect(),
         }),
+        mesh: crate::mesh::build(&state.db, node).await?,
     })
 }
 

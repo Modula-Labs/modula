@@ -8,8 +8,9 @@ scripts/dev-services.sh >/dev/null
 if [[ "${1:-}" == "--rebuild-web" || ! -f web/dist/index.html ]]; then
   (cd web && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
 fi
-docker exec modula-cloud-pg psql -U modula -tc "SELECT 1 FROM pg_database WHERE datname='modula_dev'" | grep -q 1 \
-  || docker exec modula-cloud-pg psql -U modula -c "CREATE DATABASE modula_dev" >/dev/null
+db=${MODULA_DEV_DB:-modula_dev}
+docker exec modula-cloud-pg psql -U modula -tc "SELECT 1 FROM pg_database WHERE datname='$db'" | grep -q 1 \
+  || docker exec modula-cloud-pg psql -U modula -c "CREATE DATABASE $db" >/dev/null
 
 mkdir -p .dev
 [[ -f .dev/master.key ]] || cargo run -q -p modula-server -- keygen --out .dev/master.key

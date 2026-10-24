@@ -54,15 +54,25 @@ pub enum LiveFilter {
     Node,
 }
 
+/// Returns the nodes that ran a replica of what was removed, and every node
+/// running something else of the same environments (their address books).
 macro_rules! remove_live_sql {
     ($cond:literal) => {
         concat!(
-            "UPDATE deployments d SET status = 'removed', finished_at = now(), updated_at = now()
-             FROM service_instances i, services s
-             WHERE i.id = d.service_instance_id AND s.id = i.service_id
-               AND d.status IN ('queued', 'building', 'deploying', 'active', 'crashed') AND ",
+            "WITH gone AS (
+                 UPDATE deployments d SET status = 'removed', finished_at = now(), updated_at = now()
+                 FROM service_instances i, services s
+                 WHERE i.id = d.service_instance_id AND s.id = i.service_id
+                   AND d.status IN ('queued', 'building', 'deploying', 'active', 'crashed') AND ",
             $cond,
-            " RETURNING d.node_id"
+            " RETURNING d.id, i.environment_id)
+             SELECT r.node_id FROM deployment_replicas r JOIN gone ON gone.id = r.deployment_id
+             UNION
+             SELECT r.node_id FROM deployment_replicas r
+             JOIN deployments d ON d.id = r.deployment_id
+             JOIN service_instances i ON i.id = d.service_instance_id
+             WHERE i.environment_id IN (SELECT environment_id FROM gone)
+               AND d.status IN ('building', 'deploying', 'active', 'crashed')"
         )
     };
 }

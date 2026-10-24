@@ -71,6 +71,59 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Json<Vec<Node>>> {
 }
 
 /// Every location a server can be placed in, for the picker.
+/// The private network: every server in it and, per pair, the path the
+/// first takes to the second and what it last measured.
+pub async fn network(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
+    let rows: Vec<(Id, String, Option<i16>, serde_json::Value)> = sqlx::query_as(
+        "SELECT id, name, mesh_index, mesh_status FROM nodes
+         WHERE status <> 'revoked' ORDER BY created_at",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let mut nodes = Vec::with_capacity(rows.len());
+    let mut links = Vec::new();
+    for (id, name, index, status) in &rows {
+        nodes.push(json!({
+            "id": id,
+            "name": name,
+            "subnet": index.map(crate::mesh::subnet),
+            "connected": state.hub.is_connected(*id),
+            "reportedAt": status.get("at"),
+        }));
+        let Some((me, peers)) = crate::mesh::nodes(&state.db, *id).await? else {
+            continue;
+        };
+        let reported = status.get("peers").and_then(|p| p.as_array());
+        for p in peers {
+            let (endpoint, private) = crate::mesh::endpoint(&me, &p);
+            let seen = reported.and_then(|r| {
+                r.iter()
+                    .find(|x| x.get("nodeId").and_then(|v| v.as_str()) == Some(p.id.as_str()))
+            });
+            let latency_us = seen
+                .and_then(|s| s.get("latencyUs"))
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0);
+            links.push(json!({
+                "from": id,
+                "to": p.id,
+                "path": match (endpoint.is_empty(), private) {
+                    (true, _) => "none",
+                    (false, true) => "private",
+                    (false, false) => "public",
+                },
+                "endpoint": (!endpoint.is_empty()).then_some(endpoint),
+                "latencyMs": latency_us.map(|us| us as f64 / 1000.0),
+                "lastHandshake": seen
+                    .and_then(|s| s.get("lastHandshake"))
+                    .and_then(|v| v.as_i64())
+                    .filter(|v| *v > 0),
+            }));
+        }
+    }
+    Ok(Json(json!({ "nodes": nodes, "links": links })))
+}
+
 pub async fn locations() -> Json<&'static [Location]> {
     Json(locations::CATALOG)
 }
