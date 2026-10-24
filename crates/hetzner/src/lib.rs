@@ -215,7 +215,8 @@ pub struct FirewallRule {
 }
 
 /// What `POST /servers` needs. `root_password` in the response is never read.
-#[derive(Debug, Clone, Serialize)]
+/// `Debug` leaves `user_data` out: it holds a one-time setup or join token.
+#[derive(Clone, Serialize)]
 pub struct CreateServer {
     pub name: String,
     pub server_type: String,
@@ -226,6 +227,25 @@ pub struct CreateServer {
     pub labels: BTreeMap<String, String>,
     pub firewalls: Vec<FirewallRef>,
     pub start_after_create: bool,
+}
+
+impl std::fmt::Debug for CreateServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateServer")
+            .field("name", &self.name)
+            .field("server_type", &self.server_type)
+            .field("location", &self.location)
+            .field("image", &self.image)
+            .field("ssh_keys", &self.ssh_keys)
+            .field(
+                "user_data",
+                &format_args!("<redacted, {} bytes>", self.user_data.len()),
+            )
+            .field("labels", &self.labels)
+            .field("firewalls", &self.firewalls)
+            .field("start_after_create", &self.start_after_create)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -545,6 +565,33 @@ pub fn price_cents(amount: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_server_debug_hides_user_data() {
+        let req = CreateServer {
+            name: "modula-main".into(),
+            server_type: "cx22".into(),
+            location: "fsn1".into(),
+            image: "ubuntu-24.04".into(),
+            ssh_keys: vec![7],
+            user_data: "#!/bin/bash\nbash install.sh --setup-token mcsetup_SECRET\n".into(),
+            labels: BTreeMap::from([("modula".into(), "main".into())]),
+            firewalls: vec![FirewallRef { firewall: 3 }],
+            start_after_create: true,
+        };
+        let d = format!("{req:?} {req:#?}");
+        assert!(
+            !d.contains("mcsetup_SECRET") && !d.contains("install.sh"),
+            "{d}"
+        );
+        assert!(d.contains("<redacted, ") && d.contains("modula-main") && d.contains("fsn1"));
+        // The request itself still carries it.
+        assert!(
+            serde_json::to_string(&req)
+                .unwrap()
+                .contains("mcsetup_SECRET")
+        );
+    }
 
     #[test]
     fn prices_round_up_to_the_cent() {

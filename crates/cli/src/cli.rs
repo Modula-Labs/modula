@@ -47,6 +47,10 @@ pub struct Global {
     /// stdin isn't a terminal).
     #[arg(short, long, global = true)]
     pub yes: bool,
+    /// Allow sending the API token over plain http to an instance that isn't
+    /// this machine (it travels unencrypted).
+    #[arg(long, global = true, env = "MODULA_ALLOW_INSECURE_HTTP")]
+    pub allow_insecure_http: bool,
 }
 
 /// `up`: deploy local files without GitHub (honors .gitignore and .modulaignore).

@@ -23,6 +23,7 @@ use crate::output::Output;
 
 /// Run one command; returns the process exit code.
 pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32> {
+    crate::config::set_allow_insecure_http(cli.global.allow_insecure_http);
     let mut ctx = Ctx::new(session, cli.global, out)?;
     let ctx = &mut ctx;
     match cli.command {

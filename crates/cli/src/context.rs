@@ -72,7 +72,11 @@ impl Ctx {
     pub fn new(session: Session, global: Global, out: Output) -> anyhow::Result<Self> {
         let cfg = config::load(&session.config_path)?;
         let link = config::find_link(&session.cwd)?;
-        let local_login = config::find_local_login(&session.cwd)?;
+        let local = config::find_local_login(&session.cwd)?;
+        if let Some(w) = &local.warning {
+            out.note(w);
+        }
+        let local_login = local.found;
         Ok(Self {
             session,
             global,
@@ -108,8 +112,28 @@ impl Ctx {
             self.session.env_url.clone(),
             self.session.env_token.clone(),
         )?;
+        if let Some(note) = self.local_instance_notice(&login) {
+            self.out.note(note);
+        }
         let api = Api::new(login)?;
         Ok(self.api.get_or_init(|| api))
+    }
+
+    /// A line naming the instance when this directory's `.modula/token`
+    /// sends commands somewhere other than the global login does.
+    fn local_instance_notice(&self, login: &config::Login) -> Option<String> {
+        if self.session.env_url.is_some() {
+            return None;
+        }
+        let (path, local) = self.local_login.as_ref()?;
+        let local_url = config::parse_url(local.url.as_deref()?).ok()?;
+        let global_url = self
+            .cfg
+            .url
+            .as_deref()
+            .and_then(|u| config::parse_url(u).ok());
+        (local_url == login.url && global_url.as_ref() != Some(&local_url))
+            .then(|| format!("using instance {local_url} from {}", path.display()))
     }
 
     pub fn linked(&self) -> Option<&Link> {
@@ -310,5 +334,46 @@ mod tests {
         // MODULA_TOKEN wins over both.
         assert_eq!(token(&dir, Some("mdt_env")), "mdt_env");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_directory_login_elsewhere_is_announced() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(dir.join("app/src")).unwrap();
+        let global = Config {
+            url: Some("https://global.example.com".into()),
+            token: Some("mdt_global".into()),
+            ..Default::default()
+        };
+        config::save(&dir.join("global.toml"), &global).unwrap();
+        let notice = |local_url: Option<&str>| {
+            config::save_local_login(
+                &dir.join("app"),
+                &Config {
+                    url: local_url.map(Into::into),
+                    token: Some("mdt_local".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let session = Session {
+                config_path: dir.join("global.toml"),
+                cwd: dir.join("app/src"),
+                env_url: None,
+                env_token: None,
+                interactive: false,
+            };
+            let ctx = Ctx::new(session, Global::default(), Output::capture(false).0).unwrap();
+            let login = config::login(&ctx.saved_login(), None, None).unwrap();
+            ctx.local_instance_notice(&login)
+        };
+        let n = notice(Some("https://other.example.com")).expect("a notice");
+        assert!(
+            n.starts_with("using instance https://other.example.com/ from ")
+                && n.ends_with(".modula/token"),
+            "{n}"
+        );
+        assert_eq!(notice(Some("https://global.example.com/")), None);
+        assert_eq!(notice(None), None);
     }
 }

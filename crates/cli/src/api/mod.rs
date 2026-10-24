@@ -101,6 +101,8 @@ pub struct Api {
 
 impl Api {
     pub fn new(login: Login) -> anyhow::Result<Self> {
+        // Every request carries the token: never in the clear to another machine.
+        crate::config::check_transport(&login.url)?;
         install_crypto();
         // Redirects are never followed: the API doesn't redirect, and
         // Cloudflare Access's sign-in redirect must be seen, not followed.
