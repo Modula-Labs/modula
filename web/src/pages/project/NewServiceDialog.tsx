@@ -231,6 +231,9 @@ export function NewServiceDialog({
   const createFunction = useMutation({
     mutationFn: async () => {
       const svc = await api.createService(projectId, { name: fnName, config: newFunctionConfig(code, target) });
+      // A function only answers HTTP, so on the servers it starts with a generated domain.
+      const instance = svc.instances.find((i) => i.environmentId === environmentId);
+      if (target === "self" && instance) await api.generateDomain(instance.id);
       await deployNew(svc);
       return svc;
     },
