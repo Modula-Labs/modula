@@ -1,14 +1,17 @@
 //! An in-memory runtime for tests: no Docker, deterministic, scriptable.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use modula_proto::node::v1::Workload;
+use tokio::io::AsyncReadExt;
 
-use super::{Container, Exec, LogLine, OutputSink, Runtime};
+use super::{
+    Container, Exec, ExecControl, ExecOutput, ExecSession, ExecSpec, LogLine, OutputSink, Runtime,
+};
 
 #[derive(Default)]
 struct State {
@@ -43,6 +46,19 @@ pub struct FakeRuntime {
     /// Report this as every container's address (e.g. 127.0.0.1, so tunnels
     /// reach a test server); `None` = a made-up 10.88.0.x per container.
     pub address_override: Mutex<Option<std::net::IpAddr>>,
+    /// Every interactive command started, in order.
+    pub sessions: Mutex<Vec<SessionCall>>,
+    /// Every terminal resize of an interactive command, as (cols, rows).
+    pub resizes: Arc<Mutex<Vec<(u16, u16)>>>,
+}
+
+/// An interactive command started with `exec_interactive`. The fake command
+/// echoes its stdin to stdout; a line `stderr <text>` prints `<text>` to
+/// stderr, `exit <n>` exits with `n`, and the end of stdin exits 0.
+#[derive(Debug, Clone)]
+pub struct SessionCall {
+    pub deployment_id: String,
+    pub spec: ExecSpec,
 }
 
 /// A command run inside a fake container.
@@ -417,6 +433,95 @@ impl Runtime for FakeRuntime {
         }
         self.record_exec(container_id, exec, Some(fed))
     }
+
+    async fn exec_interactive(
+        &self,
+        container_id: &str,
+        spec: ExecSpec,
+    ) -> anyhow::Result<ExecSession> {
+        let deployment_id = self.running_deployment(container_id)?;
+        self.sessions.lock().expect("fake lock").push(SessionCall {
+            deployment_id,
+            spec,
+        });
+        let (input, mut stdin) = tokio::io::duplex(64 * 1024);
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let exit = Arc::new(Mutex::new(None));
+        let code = exit.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 16 * 1024];
+            let mut line = Vec::new();
+            let status = 'run: loop {
+                let n = match stdin.read(&mut buf).await {
+                    Ok(0) | Err(_) => break 0,
+                    Ok(n) => n,
+                };
+                let out = ExecOutput {
+                    stderr: false,
+                    data: bytes::Bytes::copy_from_slice(&buf[..n]),
+                };
+                if tx.send(Ok(out)).await.is_err() {
+                    break 0;
+                }
+                for &b in &buf[..n] {
+                    if b != b'\n' && b != b'\r' {
+                        line.push(b);
+                        continue;
+                    }
+                    let text = String::from_utf8_lossy(&std::mem::take(&mut line)).into_owned();
+                    if let Some(n) = text.strip_prefix("exit ") {
+                        break 'run n.trim().parse().unwrap_or(1);
+                    }
+                    if let Some(t) = text.strip_prefix("stderr ") {
+                        let err = ExecOutput {
+                            stderr: true,
+                            data: bytes::Bytes::from(format!("{t}\n")),
+                        };
+                        let _ = tx.send(Ok(err)).await;
+                    }
+                }
+            };
+            *code.lock().expect("fake lock") = Some(status);
+        });
+        Ok(ExecSession {
+            output: tokio_stream::wrappers::ReceiverStream::new(rx).boxed(),
+            input: Box::pin(input),
+            control: Box::new(FakeControl {
+                exit,
+                resizes: self.resizes.clone(),
+            }),
+        })
+    }
+}
+
+impl FakeRuntime {
+    /// The deployment of a running container.
+    fn running_deployment(&self, container_id: &str) -> anyhow::Result<String> {
+        let s = self.state.lock().expect("fake lock");
+        let c = s
+            .containers
+            .get(container_id)
+            .ok_or_else(|| anyhow::anyhow!("no such container"))?;
+        anyhow::ensure!(c.running, "container {container_id} is not running");
+        Ok(c.deployment_id.clone())
+    }
+}
+
+struct FakeControl {
+    exit: Arc<Mutex<Option<i64>>>,
+    resizes: Arc<Mutex<Vec<(u16, u16)>>>,
+}
+
+#[async_trait]
+impl ExecControl for FakeControl {
+    async fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.resizes.lock().expect("fake lock").push((cols, rows));
+        Ok(())
+    }
+
+    async fn exit_code(&self) -> anyhow::Result<Option<i64>> {
+        Ok(*self.exit.lock().expect("fake lock"))
+    }
 }
 
 impl FakeRuntime {
@@ -426,15 +531,7 @@ impl FakeRuntime {
         exec: Exec,
         stdin: Option<Vec<u8>>,
     ) -> anyhow::Result<()> {
-        let deployment_id = {
-            let s = self.state.lock().expect("fake lock");
-            let c = s
-                .containers
-                .get(container_id)
-                .ok_or_else(|| anyhow::anyhow!("no such container"))?;
-            anyhow::ensure!(c.running, "container {container_id} is not running");
-            c.deployment_id.clone()
-        };
+        let deployment_id = self.running_deployment(container_id)?;
         self.execs.lock().expect("fake lock").push(ExecCall {
             deployment_id,
             cmd: exec.cmd,

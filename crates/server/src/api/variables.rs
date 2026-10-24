@@ -1,6 +1,8 @@
 //! Variables of a service instance, and the shared variables of an
 //! environment (`${{shared.NAME}}`). Values are write-only through this API
-//! except for an explicit, audited, sudo-gated reveal.
+//! except for an explicit, audited, sudo-gated reveal, and `run_env`
+//! (`modula run`): an instance's resolved values, audited, without sealed
+//! variables or any that reference one.
 //!
 //! References between variables are parsed on save and stored in clear
 //! (`variables.refs`), so dependency edges and cycle checks never decrypt.
@@ -459,6 +461,59 @@ pub async fn reveal(
     Ok(Json(
         json!({ "name": name, "value": plain.expose_secret() }),
     ))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunEnv {
+    /// Name → value, references expanded.
+    pub variables: BTreeMap<String, String>,
+    /// Sealed variables and those referencing one: never sent.
+    pub withheld: Vec<String>,
+    /// References to variables that don't exist (expanded to "").
+    pub missing: Vec<String>,
+}
+
+/// `GET /api/service-instances/{instance_id}/run-env` — the instance's
+/// variables with their values, for running a command locally
+/// (`modula run`). Audited with the names returned.
+pub async fn run_env(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+) -> AppResult<Json<RunEnv>> {
+    let instance = grant.id();
+    let environment: Id =
+        sqlx::query_scalar("SELECT environment_id FROM service_instances WHERE id = $1")
+            .bind(instance)
+            .fetch_one(&state.db)
+            .await?;
+    let resolved = env::resolve_for_run(
+        &state.keys,
+        &state.db,
+        state.cfg.tcp_proxy_host.as_deref(),
+        environment,
+        instance,
+    )
+    .await?;
+    let names: Vec<&String> = resolved.vars.keys().collect();
+    Entry::new("variable.run_env", &meta)
+        .actor(&actor)
+        .workspace(grant.workspace_id()?)
+        .target("service_instance", instance)
+        .metadata(json!({ "names": names, "withheld": resolved.withheld }))
+        .record(&state.db)
+        .await?;
+    Ok(Json(RunEnv {
+        variables: resolved
+            .vars
+            .iter()
+            .map(|(k, v)| (k.clone(), v.expose_secret().to_owned()))
+            .collect(),
+        withheld: resolved.withheld,
+        missing: resolved.missing,
+    }))
 }
 
 /// A variable sealed and ready to insert (sealing happens outside the

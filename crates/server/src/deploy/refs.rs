@@ -200,6 +200,33 @@ impl<'a> Expander<'a> {
     }
 }
 
+/// Whether `key` is in `targets` or its value references one of them,
+/// directly or through other variables in `raw`.
+pub fn depends_on(
+    raw: &BTreeMap<VarKey, String>,
+    key: &VarKey,
+    targets: &std::collections::BTreeSet<VarKey>,
+) -> bool {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut todo = vec![key.clone()];
+    while let Some(k) = todo.pop() {
+        if targets.contains(&k) {
+            return true;
+        }
+        if !seen.insert(k.clone()) {
+            continue;
+        }
+        if let Some(value) = raw.get(&k) {
+            todo.extend(
+                occurrences(value)
+                    .into_iter()
+                    .map(|(_, r)| resolve_key(k.0.as_deref(), &r)),
+            );
+        }
+    }
+    false
+}
+
 /// Reject a set of variables whose references loop (checked on save, from
 /// the references alone; values aren't needed).
 pub fn check_cycles(edges: &BTreeMap<VarKey, Vec<VarKey>>) -> Result<(), ExpandError> {
@@ -310,6 +337,24 @@ mod tests {
             "postgres://u:s3cret@db.modula.internal/"
         );
         assert_eq!(e.missing, ["shared.DB"]);
+    }
+
+    #[test]
+    fn dependencies_are_followed_through_other_variables() {
+        let raw: BTreeMap<VarKey, String> = [
+            (key(Some("api"), "URL"), "postgres://${{db.AUTH}}@db".into()),
+            (key(Some("api"), "PLAIN"), "${{shared.REGION}}".into()),
+            (key(Some("api"), "LOOP"), "${{LOOP}}".into()),
+            (key(Some("db"), "AUTH"), "u:${{shared.SECRET}}".into()),
+            (key(None, "SECRET"), "s3cret".into()),
+            (key(None, "REGION"), "eu".into()),
+        ]
+        .into();
+        let sealed = [key(None, "SECRET")].into();
+        assert!(depends_on(&raw, &key(Some("api"), "URL"), &sealed));
+        assert!(depends_on(&raw, &key(None, "SECRET"), &sealed));
+        assert!(!depends_on(&raw, &key(Some("api"), "PLAIN"), &sealed));
+        assert!(!depends_on(&raw, &key(Some("api"), "LOOP"), &sealed));
     }
 
     #[test]

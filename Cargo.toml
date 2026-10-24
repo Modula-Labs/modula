@@ -42,6 +42,7 @@ globset = "0.4"
 ignore = "0.4"
 # `modula server create`: the interactive wizard (selects with filtering, hidden input).
 inquire = { version = "0.9", default-features = false, features = ["crossterm", "fuzzy"] }
+crossterm = { version = "0.29", default-features = false }
 redis = { version = "1", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
 regex = "1"
 prost = "0.14"

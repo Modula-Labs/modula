@@ -196,6 +196,11 @@ pub enum Action {
     WebhookCreate,
     WebhookTest,
     WebhookDelete,
+    /// Open a shell or run a command in a deployment's running container.
+    DeploymentExec,
+    /// A service instance's resolved variables, with values, for running a
+    /// command locally (`modula run`).
+    RunEnvRead,
 }
 
 impl Action {
@@ -268,6 +273,8 @@ impl Action {
             Self::EnvironmentLogsRead => K::Environment,
             Self::WebhookList | Self::WebhookCreate => K::Project,
             Self::WebhookTest | Self::WebhookDelete => K::Webhook,
+            Self::DeploymentExec => K::Deployment,
+            Self::RunEnvRead => K::ServiceInstance,
         })
     }
 
@@ -359,6 +366,8 @@ impl Action {
             Self::WebhookList | Self::WebhookCreate | Self::WebhookTest | Self::WebhookDelete => {
                 Role::Member
             }
+            // A shell sees every secret the container has.
+            Self::DeploymentExec | Self::RunEnvRead => Role::Member,
         }
     }
 
@@ -450,7 +459,16 @@ impl Action {
             | Self::WebhookCreate
             | Self::WebhookTest
             | Self::WebhookDelete => false,
+            // Sudo for dashboard sessions only: see `session_sudo`.
+            Self::DeploymentExec | Self::RunEnvRead => false,
         }
+    }
+
+    /// Secret-revealing actions the CLI needs: a cookie session must be
+    /// recently re-authenticated, while API tokens (which never have sudo)
+    /// pass and every use is audited instead.
+    pub fn session_sudo(self) -> bool {
+        matches!(self, Self::DeploymentExec | Self::RunEnvRead)
     }
 }
 
@@ -722,6 +740,24 @@ mod tests {
         assert!(Action::DatabaseWrite.requires_sudo());
         assert_eq!(Action::DatabaseCredentials.min_role(), Role::Member);
         assert!(!Action::DatabaseCredentials.requires_sudo());
+    }
+
+    #[test]
+    fn shells_and_run_env_are_member_with_session_sudo() {
+        for a in [Action::DeploymentExec, Action::RunEnvRead] {
+            assert_eq!(a.min_role(), Role::Member);
+            assert!(a.session_sudo());
+            assert!(!a.requires_sudo());
+        }
+        assert_eq!(
+            Action::DeploymentExec.kind(),
+            Some(ResourceKind::Deployment)
+        );
+        assert_eq!(
+            Action::RunEnvRead.kind(),
+            Some(ResourceKind::ServiceInstance)
+        );
+        assert!(!Action::TunnelOpen.session_sudo());
     }
 
     #[test]

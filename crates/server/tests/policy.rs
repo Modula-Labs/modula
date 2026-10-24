@@ -290,7 +290,11 @@ async fn sudo_routes_require_recent_reauthentication(pool: PgPool) {
     let chain = app.seed_chain(ws).await;
     app.drop_sudo().await;
     let specs = route_specs(app.state.clone());
-    let sudo_routes: Vec<_> = specs.iter().filter(|s| s.access.requires_sudo()).collect();
+    // Cookie sessions need sudo for session-sudo routes too (tokens pass those).
+    let sudo_routes: Vec<_> = specs
+        .iter()
+        .filter(|s| s.access.requires_sudo() || s.access.session_sudo())
+        .collect();
     assert!(
         sudo_routes.len() >= 6,
         "expected sudo-gated routes, got {}",

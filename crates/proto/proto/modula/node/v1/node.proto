@@ -61,6 +61,9 @@ message NodeMessage {
     TunnelOpened tunnel_opened = 31;
     TunnelData tunnel_data = 32;
     TunnelClose tunnel_close = 33;
+    ExecOpened exec_opened = 40;
+    ExecData exec_data = 41;
+    ExecClose exec_close = 43;
     UpgradeStatus upgrade_status = 60;
     AccessStatus access_status = 70;
     MeshReport mesh_report = 80;
@@ -214,6 +217,10 @@ message ServerMessage {
     TunnelOpen tunnel_open = 31;
     TunnelData tunnel_data = 32;
     TunnelClose tunnel_close = 33;
+    ExecOpen exec_open = 40;
+    ExecData exec_data = 41;
+    ExecResize exec_resize = 42;
+    ExecClose exec_close = 43;
     UpgradeRequest upgrade = 60;
     AccessConfig access = 70;
   }
@@ -578,6 +585,63 @@ message TunnelData {
 message TunnelClose {
   string tunnel_id = 1;
   string reason = 2;
+}
+
+// ---------------------------------------------------------------- exec
+//
+// Interactive shells and commands in a running container (`modula ssh`, the
+// dashboard's Shell tab): a user's WebSocket on the control plane is relayed
+// over this stream to the node, which runs the command with `docker exec` in
+// the container of one deployment it runs. Flow control is the tunnels'
+// (credit per exec and direction, 256 KiB window, 64 KiB chunks).
+
+message ExecOpen {
+  string exec_id = 1;
+  // The deployment whose running container the command runs in.
+  string deployment_id = 2;
+  // argv; empty = a login shell (bash when the image has it, else sh).
+  repeated string cmd = 3;
+  // Allocate a terminal (stdout and stderr arrive merged).
+  bool tty = 4;
+  // Initial terminal size (tty only; 0 = Docker's default).
+  uint32 cols = 5;
+  uint32 rows = 6;
+}
+
+// The node's answer to ExecOpen: the command started, or why not.
+message ExecOpened {
+  string exec_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+// Server → node: the command's stdin. Node → server: its output.
+message ExecData {
+  string exec_id = 1;
+  // At most 64 KiB; may be empty when only returning credit.
+  bytes data = 2;
+  // Bytes the sender of this message has consumed since its last credit.
+  uint32 credit = 3;
+  // Node → server: `data` is stderr (only without a tty).
+  bool stderr = 4;
+  // Server → node: stdin ends after `data`.
+  bool eof = 5;
+}
+
+message ExecResize {
+  string exec_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+// Either side: the exec is gone. From the node once the command exited
+// (`exited` and its code) or failed; from the server when the user went
+// away (the node then drops the command's connection, hanging it up).
+message ExecClose {
+  string exec_id = 1;
+  bool exited = 2;
+  int32 exit_code = 3;
+  string reason = 4;
 }
 
 // ---------------------------------------------------------------- database tab

@@ -44,6 +44,11 @@ impl Access {
             Self::Public | Self::MfaPending | Self::Authenticated => false,
         }
     }
+
+    /// Sudo for cookie sessions only (see [`crate::authz::Action::session_sudo`]).
+    pub fn session_sudo(self) -> bool {
+        matches!(self, Self::Resource(a) | Self::Instance(a) if a.session_sudo())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -253,7 +258,8 @@ async fn authorize_request(
         parts.extensions.insert(grant);
     }
     // After authorization, so a non-member learns nothing (404) before sudo (403).
-    if access.requires_sudo() && !actor.sudo_active() {
+    let needs_sudo = access.requires_sudo() || (access.session_sudo() && actor.api_token.is_none());
+    if needs_sudo && !actor.sudo_active() {
         return Err(AppError::SudoRequired);
     }
     parts.extensions.insert(actor);

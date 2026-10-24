@@ -32,27 +32,27 @@ const MAX_TUNNELS: usize = 64;
 
 /// A byte window: `take` waits for room, `give` returns credit (capped at
 /// what is outstanding).
-struct Credit {
+pub(crate) struct Credit {
     room: Semaphore,
     in_flight: AtomicUsize,
 }
 
 impl Credit {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             room: Semaphore::new(WINDOW),
             in_flight: AtomicUsize::new(0),
         }
     }
 
-    async fn take(&self, n: usize) {
+    pub(crate) async fn take(&self, n: usize) {
         if let Ok(p) = self.room.acquire_many(n as u32).await {
             p.forget();
             self.in_flight.fetch_add(n, Ordering::AcqRel);
         }
     }
 
-    fn give(&self, n: usize) {
+    pub(crate) fn give(&self, n: usize) {
         let given = self
             .in_flight
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |f| Some(f - n.min(f)))

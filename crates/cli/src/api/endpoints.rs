@@ -154,6 +154,12 @@ impl Api {
             .await
     }
 
+    /// The instance's variables with values, for `modula run` (audited).
+    pub async fn run_env(&self, instance: &str) -> anyhow::Result<RunEnv> {
+        self.get(&format!("/api/service-instances/{instance}/run-env"))
+            .await
+    }
+
     pub async fn deployment(&self, id: &str) -> anyhow::Result<Deployment> {
         self.get(&format!("/api/deployments/{id}")).await
     }

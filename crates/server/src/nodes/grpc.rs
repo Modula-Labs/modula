@@ -338,6 +338,7 @@ impl pb::node_server::Node for NodeService {
                 }
                 // Tunnels through this stream are gone with it.
                 state.tunnels.node_gone(node);
+                state.execs.node_gone(node);
             });
         }
 
@@ -519,6 +520,12 @@ async fn handle(
         // Never waits: see crate::tunnel on flow control.
         m @ (In::TunnelOpened(_) | In::TunnelData(_) | In::TunnelClose(_)) => {
             if let Some(reply) = state.tunnels.from_node(node, m) {
+                let _ = tx.try_send(Ok(reply));
+            }
+        }
+        // Never waits either: see crate::exec.
+        m @ (In::ExecOpened(_) | In::ExecData(_) | In::ExecClose(_)) => {
+            if let Some(reply) = state.execs.from_node(node, m) {
                 let _ = tx.try_send(Ok(reply));
             }
         }

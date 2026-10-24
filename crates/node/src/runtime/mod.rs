@@ -174,6 +174,47 @@ pub trait Runtime: Send + Sync + 'static {
         exec: Exec,
         stdin: BoxStream<'static, anyhow::Result<Bytes>>,
     ) -> anyhow::Result<()>;
+
+    /// Start a command in a running container with its stdin, stdout and
+    /// stderr attached (a user's shell: see [`crate::exec`]).
+    async fn exec_interactive(
+        &self,
+        container_id: &str,
+        spec: ExecSpec,
+    ) -> anyhow::Result<ExecSession>;
+}
+
+/// A command a user runs in a container: argv, and whether it gets a
+/// terminal of `cols`×`rows` (0 = the runtime's default).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecSpec {
+    pub cmd: Vec<String>,
+    pub tty: bool,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// A started [`ExecSpec`]. Dropping `input` closes the command's stdin;
+/// dropping everything hangs up its connection.
+pub struct ExecSession {
+    /// Ends when the command closed its output (usually: it exited).
+    pub output: BoxStream<'static, anyhow::Result<ExecOutput>>,
+    pub input: std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>,
+    pub control: Box<dyn ExecControl>,
+}
+
+/// A chunk of a command's output; with a terminal, everything is stdout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecOutput {
+    pub stderr: bool,
+    pub data: Bytes,
+}
+
+#[async_trait]
+pub trait ExecControl: Send + Sync {
+    async fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()>;
+    /// The exit code once the output ended (`None`: unknown).
+    async fn exit_code(&self) -> anyhow::Result<Option<i64>>;
 }
 
 /// A command run inside a container: argv (never a shell string) and extra

@@ -2,13 +2,14 @@
 //! (`data_keys.scope = environment id`), so environments never share a key and
 //! one can be rotated or destroyed alone.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use modula_crypto::envelope::FieldAad;
 use modula_id::Id;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::PgPool;
 
+use super::refs::{Expander, VarKey};
 use crate::error::{AppError, AppResult};
 use crate::keyring::Keyring;
 
@@ -176,8 +177,99 @@ pub async fn resolve_for_deployment(
     instance: Id,
     deployment: Option<Id>,
 ) -> AppResult<Resolved> {
-    use super::refs::{Expander, VarKey};
+    let loaded = load(keys, db, tcp_proxy_host, env, instance, deployment).await?;
+    let mut expander = Expander::new(&loaded.raw);
+    let mut vars = EnvMap::new();
+    for key in loaded.own_user_vars() {
+        let value = expander
+            .value(&key)
+            .map_err(|e| AppError::bad_request(e.to_string()))?
+            .unwrap_or_default();
+        vars.insert(key.1, SecretString::from(value));
+    }
+    Ok(Resolved {
+        vars,
+        missing: expander.missing,
+    })
+}
 
+/// A service instance's variables for a command run outside the platform
+/// (`modula run`): its own variables expanded plus its `MODULA_*` platform
+/// variables, except sealed variables and every variable whose value
+/// references one (directly or through others): sealed values never leave
+/// the server. Those are listed in `withheld`.
+pub struct ForRun {
+    pub vars: EnvMap,
+    pub withheld: Vec<String>,
+    pub missing: Vec<String>,
+}
+
+pub async fn resolve_for_run(
+    keys: &Keyring,
+    db: &PgPool,
+    tcp_proxy_host: Option<&str>,
+    env: Id,
+    instance: Id,
+) -> AppResult<ForRun> {
+    let loaded = load(keys, db, tcp_proxy_host, env, instance, None).await?;
+    let mut expander = Expander::new(&loaded.raw);
+    let mut vars = EnvMap::new();
+    let mut withheld = Vec::new();
+    for key in loaded.own_user_vars() {
+        if super::refs::depends_on(&loaded.raw, &key, &loaded.sealed) {
+            withheld.push(key.1);
+            continue;
+        }
+        let value = expander
+            .value(&key)
+            .map_err(|e| AppError::bad_request(e.to_string()))?
+            .unwrap_or_default();
+        vars.insert(key.1, SecretString::from(value));
+    }
+    for ((owner, name), value) in &loaded.raw {
+        if owner.as_deref() == Some(loaded.own.as_str())
+            && name.starts_with("MODULA_")
+            && !value.is_empty()
+        {
+            vars.insert(name.clone(), SecretString::from(value.clone()));
+        }
+    }
+    Ok(ForRun {
+        vars,
+        withheld,
+        missing: expander.missing,
+    })
+}
+
+/// Every variable of an environment, decrypted, with each service's
+/// platform variables; what both resolvers expand from.
+struct Loaded {
+    raw: BTreeMap<VarKey, String>,
+    /// User-defined variables (not platform ones).
+    user: Vec<VarKey>,
+    sealed: BTreeSet<VarKey>,
+    /// The instance's service name.
+    own: String,
+}
+
+impl Loaded {
+    fn own_user_vars(&self) -> Vec<VarKey> {
+        self.user
+            .iter()
+            .filter(|(owner, _)| owner.as_deref() == Some(self.own.as_str()))
+            .cloned()
+            .collect()
+    }
+}
+
+async fn load(
+    keys: &Keyring,
+    db: &PgPool,
+    tcp_proxy_host: Option<&str>,
+    env: Id,
+    instance: Id,
+    deployment: Option<Id>,
+) -> AppResult<Loaded> {
     // (instance, service, service name, environment name, project, config,
     // public domain, TCP proxy port, its node's public IP, serving deployment)
     #[allow(clippy::type_complexity)]
@@ -208,8 +300,10 @@ pub async fn resolve_for_deployment(
     .bind(env)
     .fetch_all(db)
     .await?;
-    let rows: Vec<(Id, Option<String>, String, Vec<u8>)> = sqlx::query_as(
-        "SELECT v.id, s.name, v.name, v.value_sealed FROM variables v
+    // (id, service name or None for shared, name, value, sealed)
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(Id, Option<String>, String, Vec<u8>, bool)> = sqlx::query_as(
+        "SELECT v.id, s.name, v.name, v.value_sealed, v.sealed FROM variables v
          LEFT JOIN service_instances i ON i.id = v.service_instance_id
          LEFT JOIN services s ON s.id = i.service_id
          WHERE v.environment_id = $1",
@@ -220,10 +314,15 @@ pub async fn resolve_for_deployment(
 
     let mut raw: BTreeMap<VarKey, String> = BTreeMap::new();
     let mut user: Vec<VarKey> = Vec::new();
-    for (id, owner, name, sealed) in rows {
-        user.push((owner.clone(), name.clone()));
-        let value = open_variable(keys, db, env, id, &sealed).await?;
-        raw.insert((owner, name), value.expose_secret().to_owned());
+    let mut sealed = BTreeSet::new();
+    for (id, owner, name, value_sealed, is_sealed) in rows {
+        let key = (owner, name);
+        user.push(key.clone());
+        if is_sealed {
+            sealed.insert(key.clone());
+        }
+        let value = open_variable(keys, db, env, id, &value_sealed).await?;
+        raw.insert(key, value.expose_secret().to_owned());
     }
     let mut own = None;
     for (
@@ -265,24 +364,11 @@ pub async fn resolve_for_deployment(
         }
     }
     let own = own.ok_or(AppError::NotFound)?;
-
-    // Only the instance's own user variables; desired state adds platform ones.
-    let names: Vec<VarKey> = user
-        .into_iter()
-        .filter(|(owner, _)| owner.as_deref() == Some(own.as_str()))
-        .collect();
-    let mut expander = Expander::new(&raw);
-    let mut vars = EnvMap::new();
-    for key in names {
-        let value = expander
-            .value(&key)
-            .map_err(|e| AppError::bad_request(e.to_string()))?
-            .unwrap_or_default();
-        vars.insert(key.1, SecretString::from(value));
-    }
-    Ok(Resolved {
-        vars,
-        missing: expander.missing,
+    Ok(Loaded {
+        raw,
+        user,
+        sealed,
+        own,
     })
 }
 

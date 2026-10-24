@@ -169,6 +169,7 @@ impl Ctx<'_> {
         let mut logs: HashMap<String, JoinHandle<()>> = HashMap::new();
         // Closed (dropped) when this session ends.
         let tunnels = crate::tunnel::Tunnels::new(self.runtime.clone(), tx.clone());
+        let execs = crate::exec::Execs::new(self.runtime.clone(), tx.clone());
         let mut heartbeat = tokio::time::interval(HEARTBEAT_EVERY);
         let mut metrics_tick = tokio::time::interval(crate::metrics::EVERY);
         let sampler = Arc::new(tokio::sync::Mutex::new(crate::metrics::Sampler::new(
@@ -180,7 +181,7 @@ impl Ctx<'_> {
                 _ = self.reconnect.notified() => break Err(anyhow::anyhow!("reconnecting after an upgrade")),
                 incoming = inbound.message() => match incoming {
                     Ok(Some(pb::ServerMessage { msg: Some(m) })) => {
-                        if let Err(e) = self.handle(m, &tx, &mut logs, &tunnels, &mut pending_key).await {
+                        if let Err(e) = self.handle(m, &tx, &mut logs, &tunnels, &execs, &mut pending_key).await {
                             break Err(e);
                         }
                     }
@@ -227,6 +228,7 @@ impl Ctx<'_> {
         tx: &mpsc::Sender<pb::NodeMessage>,
         logs: &mut HashMap<String, JoinHandle<()>>,
         tunnels: &crate::tunnel::Tunnels,
+        execs: &crate::exec::Execs,
         pending_key: &mut Option<rcgen::KeyPair>,
     ) -> anyhow::Result<()> {
         match m {
@@ -319,6 +321,10 @@ impl Ctx<'_> {
             In::TunnelOpen(req) => tunnels.open(req),
             In::TunnelData(d) => tunnels.data(d),
             In::TunnelClose(c) => tunnels.close(c),
+            In::ExecOpen(req) => execs.open(req),
+            In::ExecData(d) => execs.data(d),
+            In::ExecResize(r) => execs.resize(r),
+            In::ExecClose(c) => execs.close(c),
             In::LogCancel(c) => {
                 if let Some(h) = logs.remove(&c.request_id) {
                     h.abort();
