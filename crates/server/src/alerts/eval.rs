@@ -435,7 +435,7 @@ async fn nodes(state: &AppState, rule: &Rule) -> anyhow::Result<Vec<NodeRow>> {
                     JOIN service_instances i ON i.id = d.service_instance_id
                     JOIN services s ON s.id = i.service_id
                     JOIN projects p ON p.id = s.project_id
-                    WHERE r.node_id = n.id AND d.status IN ('deploying', 'active', 'crashed')
+                    WHERE r.node_id = n.id AND d.status IN ('deploying', 'active', 'sleeping', 'crashed')
                       AND p.workspace_id = $1 AND ($2::text IS NULL OR p.id = $2)
                       AND ($3::text IS NULL OR s.id = $3)))",
     )
