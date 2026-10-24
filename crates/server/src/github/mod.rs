@@ -5,6 +5,8 @@
 //! Private repositories need an installation token (GitHub App, see `app`).
 
 pub mod app;
+pub mod ci;
+pub mod pull_request;
 pub mod push;
 
 use std::collections::HashMap;
@@ -15,6 +17,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::error::{AppError, AppResult};
+use crate::jobs::{self, NewJob};
 
 const USER_AGENT: &str = concat!("modula-deploy/", env!("CARGO_PKG_VERSION"));
 
@@ -176,4 +179,27 @@ impl Client {
         self.url(&format!("/repos/{repo}/tarball/{sha}"))
             .to_string()
     }
+}
+
+/// Queue what GitHub hears about a deployment reaching `state` (`pending`,
+/// `success`, `failure`): the commit status when `commit_status`, and for a
+/// pull request preview's settled deployments, its comment.
+pub async fn report(
+    tx: &mut sqlx::PgConnection,
+    deployment: modula_id::Id,
+    state: &str,
+    commit_status: bool,
+) -> AppResult<()> {
+    if commit_status {
+        let job = NewJob {
+            kind: app::STATUS_JOB,
+            payload: serde_json::json!({ "deploymentId": deployment, "state": state }),
+            ..Default::default()
+        };
+        jobs::enqueue(&mut *tx, job).await?;
+    }
+    if state != "pending" {
+        pull_request::queue_comment_for(tx, deployment).await?;
+    }
+    Ok(())
 }

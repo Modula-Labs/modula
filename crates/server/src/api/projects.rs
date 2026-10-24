@@ -45,6 +45,11 @@ pub struct Environment {
     /// The project's oldest environment (production): never deleted, and its
     /// generated domains carry no environment suffix.
     pub is_default: bool,
+    /// A pull request's preview (see `github::pull_request`), removed when
+    /// the pull request closes.
+    pub ephemeral: bool,
+    pub pr_number: Option<i32>,
+    pub pr_repo: Option<String>,
 }
 
 /// Columns of [`Environment`] for a query over `environments e`.
@@ -52,7 +57,8 @@ macro_rules! environment_columns {
     () => {
         "e.id, e.name, e.created_at,
          e.id = (SELECT f.id FROM environments f WHERE f.project_id = e.project_id
-                 ORDER BY f.created_at, f.id LIMIT 1) AS is_default"
+                 ORDER BY f.created_at, f.id LIMIT 1) AS is_default,
+         e.ephemeral, e.pr_number, e.pr_repo"
     };
 }
 
@@ -101,11 +107,25 @@ pub struct Service {
     pub app_template: Option<String>,
 }
 
+/// Pull request previews: an environment per open pull request of a
+/// repository the base environment deploys from.
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrPreviews {
+    #[sqlx(rename = "pr_previews")]
+    pub enabled: bool,
+    /// The environment previews are duplicated from; None = the default one.
+    #[sqlx(rename = "pr_base_environment_id")]
+    #[serde(default)]
+    pub base_environment_id: Option<Id>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDetail {
     #[serde(flatten)]
     pub project: Project,
+    pub pr_previews: PrPreviews,
     pub environments: Vec<Environment>,
     pub services: Vec<Service>,
     pub instances: Vec<InstanceSummary>,
@@ -257,6 +277,11 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
+    let pr_previews =
+        sqlx::query_as("SELECT pr_previews, pr_base_environment_id FROM projects WHERE id = $1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
     let environments = sqlx::query_as(concat!(
         "SELECT ",
         environment_columns!(),
@@ -315,6 +340,7 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
     .await?;
     Ok(ProjectDetail {
         project,
+        pr_previews,
         environments,
         services,
         instances,
@@ -327,9 +353,11 @@ pub async fn get(State(state): State<AppState>, grant: Grant) -> AppResult<Json<
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateProject {
     pub name: Option<String>,
     pub description: Option<String>,
+    pub pr_previews: Option<PrPreviews>,
 }
 
 pub async fn update(
@@ -356,10 +384,36 @@ pub async fn update(
     .bind(&desc)
     .execute(&mut *tx)
     .await?;
+    if let Some(pr) = &req.pr_previews {
+        if let Some(base) = pr.base_environment_id {
+            let ok: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM environments
+                                WHERE id = $1 AND project_id = $2 AND NOT ephemeral)",
+            )
+            .bind(base)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !ok {
+                return Err(AppError::bad_request(
+                    "the base environment must be a non-preview environment of this project",
+                ));
+            }
+        }
+        sqlx::query(
+            "UPDATE projects SET pr_previews = $2, pr_base_environment_id = $3 WHERE id = $1",
+        )
+        .bind(id)
+        .bind(pr.enabled)
+        .bind(pr.base_environment_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     Entry::new("project.update", &meta)
         .actor(&actor)
         .workspace(grant.workspace_id()?)
         .target("project", id)
+        .metadata(json!({ "prPreviews": req.pr_previews }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -442,9 +496,57 @@ pub async fn create_environment(
     meta: RequestMeta,
     Json(req): Json<CreateEnvironment>,
 ) -> AppResult<Json<Environment>> {
-    let project = grant.id();
     let name = validate::display_name(&req.name, "environment name")?.to_lowercase();
-    for branch in req.branches.values() {
+    let id = insert_environment(
+        &state,
+        Some(&actor),
+        &meta,
+        NewEnvironment {
+            project: grant.id(),
+            workspace: grant.workspace_id()?,
+            name,
+            duplicate_from: req.duplicate_from,
+            branches: req.branches,
+            copy_sealed: true,
+            pr: None,
+        },
+    )
+    .await?;
+    environment(&state.db, id).await.map(Json)
+}
+
+/// The pull request a preview environment belongs to.
+pub struct PrRef<'a> {
+    pub repo: &'a str,
+    pub number: i32,
+    pub head_sha: &'a str,
+}
+
+pub struct NewEnvironment<'a> {
+    pub project: Id,
+    pub workspace: Id,
+    /// Validated and lowercased.
+    pub name: String,
+    pub duplicate_from: Option<Id>,
+    /// The branch each repo service (by service id) deploys from.
+    pub branches: BTreeMap<Id, String>,
+    /// A duplicate copies sealed variables too (re-encrypted). Previews
+    /// don't: a pull request's code mustn't see the base environment's secrets.
+    pub copy_sealed: bool,
+    /// A pull request's preview (ephemeral).
+    pub pr: Option<PrRef<'a>>,
+}
+
+/// Create an environment; see [`CreateEnvironment`]. `actor` is None for the
+/// system (pull request previews).
+pub async fn insert_environment(
+    state: &AppState,
+    actor: Option<&Actor>,
+    meta: &RequestMeta,
+    ne: NewEnvironment<'_>,
+) -> AppResult<Id> {
+    let (project, name) = (ne.project, &ne.name);
+    for branch in ne.branches.values() {
         deploy::config::validate_branch(branch)?;
     }
     let id = Id::new();
@@ -456,21 +558,27 @@ pub async fn create_environment(
          ORDER BY created_at, id LIMIT 1",
     )
     .bind(project)
-    .bind(req.duplicate_from)
+    .bind(ne.duplicate_from)
     .fetch_optional(&mut *tx)
     .await?;
-    if req.duplicate_from.is_some() && source.is_none() {
+    if ne.duplicate_from.is_some() && source.is_none() {
         return Err(AppError::bad_request(
             "duplicateFrom must be an environment of this project",
         ));
     }
+    let pr = ne.pr.as_ref();
     let inserted = sqlx::query(
-        "INSERT INTO environments (id, project_id, name) VALUES ($1, $2, $3)
+        "INSERT INTO environments (id, project_id, name, ephemeral, pr_repo, pr_number, pr_head_sha)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (project_id, name) DO NOTHING",
     )
     .bind(id)
     .bind(project)
-    .bind(&name)
+    .bind(name)
+    .bind(pr.is_some())
+    .bind(pr.map(|p| p.repo))
+    .bind(pr.map(|p| p.number))
+    .bind(pr.map(|p| p.head_sha))
     .execute(&mut *tx)
     .await?;
     if inserted.rows_affected() == 0 {
@@ -489,7 +597,7 @@ pub async fn create_environment(
     .bind(id)
     .execute(&mut *tx)
     .await?;
-    for (service, branch) in &req.branches {
+    for (service, branch) in &ne.branches {
         let set = sqlx::query(
             "UPDATE service_instances SET config = jsonb_set(config, '{source,branch}', to_jsonb($3::text))
              WHERE environment_id = $1 AND service_id = $2 AND config->'source'->>'type' = 'repo'",
@@ -519,15 +627,19 @@ pub async fn create_environment(
     .bind(id)
     .execute(&mut *tx)
     .await?;
-    Entry::new("environment.create", &meta)
-        .actor(&actor)
-        .workspace(grant.workspace_id()?)
+    let mut entry = Entry::new("environment.create", meta);
+    if let Some(a) = actor {
+        entry = entry.actor(a);
+    }
+    entry
+        .workspace(ne.workspace)
         .target("environment", id)
         .metadata(json!({
             "project": project,
             "name": name,
-            "duplicateFrom": req.duplicate_from,
-            "branches": req.branches,
+            "duplicateFrom": ne.duplicate_from,
+            "branches": ne.branches,
+            "pullRequest": pr.map(|p| json!({ "repo": p.repo, "number": p.number })),
         }))
         .record(&mut *tx)
         .await?;
@@ -535,22 +647,22 @@ pub async fn create_environment(
     // Fresh template passwords go in first so the variable copy can't bring
     // the source's; the template's other variables fill whatever is still
     // missing afterwards.
-    seed_template_variables(&state, id, true).await?;
-    if let Some(from) = req.duplicate_from {
+    seed_template_variables(state, id, true).await?;
+    if let Some(from) = ne.duplicate_from {
         copy_environment(
-            &state,
-            actor.user_id,
+            state,
+            actor.map(|a| a.user_id),
             id,
             from,
             CopyScope {
                 configs: false,
-                sealed: true,
+                sealed: ne.copy_sealed,
             },
         )
         .await?;
     }
-    seed_template_variables(&state, id, false).await?;
-    environment(&state.db, id).await.map(Json)
+    seed_template_variables(state, id, false).await?;
+    Ok(id)
 }
 
 #[derive(Deserialize)]
@@ -664,7 +776,27 @@ pub async fn delete_environment(
     grant: Grant,
     meta: RequestMeta,
 ) -> AppResult<Json<serde_json::Value>> {
-    let id = grant.id();
+    remove_environment(
+        &state,
+        Some(&actor),
+        &meta,
+        grant.workspace_id()?,
+        grant.id(),
+    )
+    .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Delete environment `id` of `workspace`: what runs in it stops, its
+/// volumes and buckets go. The default environment is refused. `actor` is
+/// None for the system (a closed pull request's preview).
+pub async fn remove_environment(
+    state: &AppState,
+    actor: Option<&Actor>,
+    meta: &RequestMeta,
+    workspace: Id,
+    id: Id,
+) -> AppResult<()> {
     let mut tx = state.db.begin().await?;
     let default: bool = sqlx::query_scalar(concat!(
         "SELECT is_default FROM (SELECT ",
@@ -679,7 +811,7 @@ pub async fn delete_environment(
             "the default environment can't be deleted".into(),
         ));
     }
-    crate::api::buckets::release_best_effort(&state, crate::api::buckets::Scope::Environment(id))
+    crate::api::buckets::release_best_effort(state, crate::api::buckets::Scope::Environment(id))
         .await;
     let mut nodes = deploy::remove_live(&mut tx, LiveFilter::Environment, id).await?;
     nodes.extend(deploy::queue_volume_removals(&mut tx, LiveFilter::Environment, id).await?);
@@ -691,16 +823,19 @@ pub async fn delete_environment(
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    Entry::new("environment.delete", &meta)
-        .actor(&actor)
-        .workspace(grant.workspace_id()?)
+    let mut entry = Entry::new("environment.delete", meta);
+    if let Some(a) = actor {
+        entry = entry.actor(a);
+    }
+    entry
+        .workspace(workspace)
         .target("environment", id)
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
-    forget_environments(&state, &[id]).await;
+    forget_environments(state, &[id]).await;
     state.hub.kick_all(&nodes);
-    Ok(Json(json!({ "ok": true })))
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -736,7 +871,7 @@ pub async fn sync_environment(
     }
     let (created, updated) = copy_environment(
         &state,
-        actor.user_id,
+        Some(actor.user_id),
         target,
         from,
         CopyScope {
@@ -771,7 +906,7 @@ struct CopyScope {
 /// belong to the same project.
 async fn copy_environment(
     state: &AppState,
-    user: Id,
+    user: Option<Id>,
     target: Id,
     from: Id,
     copy: CopyScope,
@@ -872,7 +1007,7 @@ async fn copy_environment(
         }
     }
     for (service, list) in &changes {
-        activity::record(&mut tx, target, *service, Some(user), list).await?;
+        activity::record(&mut tx, target, *service, user, list).await?;
     }
     tx.commit().await?;
     Ok((created, updated))

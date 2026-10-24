@@ -152,7 +152,7 @@ pub fn should_deploy(patterns: &[String], changed: Option<&[&str]>) -> bool {
     }
 }
 
-fn is_sha(s: &str) -> bool {
+pub fn is_sha(s: &str) -> bool {
     s.len() == 40
         && s.bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
@@ -160,7 +160,8 @@ fn is_sha(s: &str) -> bool {
 
 /// Start a `push` deployment for every service instance that tracks the
 /// pushed branch with auto-deploy on, in a workspace that installed the App
-/// for this repository's owner. Returns the new deployment ids. Per-instance
+/// for this repository's owner. Pull request previews deploy on
+/// `pull_request` events instead (see `pull_request`). Returns the new deployment ids. Per-instance
 /// failures (e.g. no server available) are logged and skipped.
 pub async fn handle_push(
     state: &AppState,
@@ -185,8 +186,10 @@ pub async fn handle_push(
          FROM service_instances i
          JOIN services s ON s.id = i.service_id
          JOIN projects p ON p.id = s.project_id
+         JOIN environments e ON e.id = i.environment_id
          JOIN github_installations g ON g.workspace_id = p.workspace_id
          WHERE g.id = $1 AND g.app_id = $5 AND lower(g.account_login) = lower($2)
+           AND NOT e.ephemeral
            AND i.config->'source'->>'type' = 'repo'
            AND lower(i.config->'source'->>'repo') = lower($3)
            AND i.config->'source'->>'branch' = $4
@@ -237,8 +240,41 @@ pub async fn handle_push(
         if !cfg.auto_deploy || !should_deploy(&cfg.watch_paths, changed.as_deref()) {
             continue;
         }
-        // A replayed (or re-sent) push for a commit this instance already
-        // deployed starts nothing: delivery ids aren't signed, commits are.
+        if let Some(id) = deploy(
+            state,
+            meta,
+            delivery,
+            instance,
+            env_id,
+            workspace,
+            cfg,
+            Some(&commit),
+        )
+        .await?
+        {
+            started.push(id);
+        }
+    }
+    Ok(started)
+}
+
+/// Start a `push` deployment of `commit` on `instance` (None: an image or
+/// template service), unless the instance already has one of that commit:
+/// delivery ids aren't signed, commits are, so a replayed (or re-sent) event
+/// starts nothing. Failures to start (e.g. no server available) are logged
+/// and give None.
+#[allow(clippy::too_many_arguments)]
+pub async fn deploy(
+    state: &AppState,
+    meta: &RequestMeta,
+    delivery: &str,
+    instance: Id,
+    env_id: Id,
+    workspace: Id,
+    cfg: ServiceConfig,
+    commit: Option<&Commit>,
+) -> AppResult<Option<Id>> {
+    if let Some(commit) = commit {
         let seen: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM deployments
                             WHERE service_instance_id = $1 AND commit_sha = $2)",
@@ -248,45 +284,47 @@ pub async fn handle_push(
         .fetch_one(&state.db)
         .await?;
         if seen {
-            tracing::info!(%instance, commit = %commit.sha, delivery, "commit already deployed; push ignored");
-            continue;
-        }
-        let source = cfg.source_label();
-        let mut tx = state.db.begin().await?;
-        let new = NewDeployment {
-            instance,
-            config: cfg,
-            trigger: Trigger::Push,
-            created_by: None,
-            commit: Some(commit.clone()),
-            local_git: None,
-            prebuilt: None,
-            source_deployment: None,
-        };
-        match start(state, &mut tx, env_id, new).await {
-            Ok(s) => {
-                Entry::new("deployment.create", meta)
-                    .workspace(workspace)
-                    .target("deployment", s.id)
-                    .metadata(serde_json::json!({
-                        "serviceInstance": instance,
-                        "source": source,
-                        "commit": commit.sha,
-                        "node": s.node,
-                        "trigger": "push",
-                        "delivery": delivery,
-                    }))
-                    .record(&mut *tx)
-                    .await?;
-                tx.commit().await?;
-                state.hub.kick_all(&s.kick);
-                started.push(s.id);
-            }
-            Err(AppError::Internal(e)) => return Err(AppError::Internal(e)),
-            Err(e) => tracing::warn!(%instance, error = %e, "push deployment not started"),
+            tracing::info!(%instance, commit = %commit.sha, delivery, "commit already deployed; ignored");
+            return Ok(None);
         }
     }
-    Ok(started)
+    let source = cfg.source_label();
+    let mut tx = state.db.begin().await?;
+    let new = NewDeployment {
+        instance,
+        config: cfg,
+        trigger: Trigger::Push,
+        created_by: None,
+        commit: commit.cloned(),
+        local_git: None,
+        prebuilt: None,
+        source_deployment: None,
+    };
+    match start(state, &mut tx, env_id, new).await {
+        Ok(s) => {
+            Entry::new("deployment.create", meta)
+                .workspace(workspace)
+                .target("deployment", s.id)
+                .metadata(serde_json::json!({
+                    "serviceInstance": instance,
+                    "source": source,
+                    "commit": commit.map(|c| &c.sha),
+                    "node": s.node,
+                    "trigger": "push",
+                    "delivery": delivery,
+                }))
+                .record(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            state.hub.kick_all(&s.kick);
+            Ok(Some(s.id))
+        }
+        Err(AppError::Internal(e)) => Err(AppError::Internal(e)),
+        Err(e) => {
+            tracing::warn!(%instance, error = %e, "push deployment not started");
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]

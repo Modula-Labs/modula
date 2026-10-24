@@ -191,7 +191,21 @@ pub async fn generate(
     grant: Grant,
     meta: RequestMeta,
 ) -> AppResult<Json<Domain>> {
-    let instance = grant.id();
+    let workspace = grant.workspace_id()?;
+    generate_for(&state, Some(&actor), &meta, workspace, grant.id())
+        .await
+        .map(Json)
+}
+
+/// Give `instance` (of `workspace`) a hostname under the apps domain.
+/// `actor` is None for the system (pull request previews).
+pub async fn generate_for(
+    state: &AppState,
+    actor: Option<&Actor>,
+    meta: &RequestMeta,
+    workspace: Id,
+    instance: Id,
+) -> AppResult<Domain> {
     let apps = state.apps_domain().ok_or_else(|| {
         AppError::Conflict(
             "generated domains need an apps domain: add one in Settings → Domain (or use a custom domain)".into(),
@@ -229,16 +243,19 @@ pub async fn generate(
     )
     .await?;
     let nodes = bump_serving_nodes(&mut tx, instance).await?;
-    Entry::new("domain.create", &meta)
-        .actor(&actor)
-        .workspace(grant.workspace_id()?)
+    let mut entry = Entry::new("domain.create", meta);
+    if let Some(a) = actor {
+        entry = entry.actor(a);
+    }
+    entry
+        .workspace(workspace)
         .target("domain", id)
         .metadata(json!({ "hostname": hostname, "serviceInstance": instance }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
     state.hub.kick_all(&nodes);
-    Ok(Json(fetch_one(&state, id).await?))
+    fetch_one(state, id).await
 }
 
 fn check_port(port: Option<i32>) -> AppResult<()> {

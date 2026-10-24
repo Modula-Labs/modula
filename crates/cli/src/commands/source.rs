@@ -113,12 +113,14 @@ pub async fn run(ctx: &Ctx, args: SourceArgs) -> anyhow::Result<()> {
     }
     let mut config = detail.config.clone();
     config["source"] = next.clone();
-    // Auto-deploy and watch paths only mean something for a repository.
+    // Auto-deploy, watch paths and waiting for CI only mean something for a
+    // repository.
     if next["type"] != "repo"
         && let Some(o) = config.as_object_mut()
     {
         o.remove("autoDeploy");
         o.remove("watchPaths");
+        o.remove("waitForCi");
     }
     let _: Value = api
         .patch(

@@ -114,9 +114,12 @@ pub async fn start(
             .fetch_one(&mut *tx)
             .await?;
 
-    // What runs: an image as configured, a rebuilt-before image, or a build.
+    // What runs: an image as configured, a rebuilt-before image, or a build
+    // (held back until CI passes for a push with `waitForCi`).
+    let waits_for_ci = d.trigger == Trigger::Push && d.config.wait_for_ci && d.commit.is_some();
     let (status, image, digest) = match (&d.prebuilt, d.config.builds_from_source()) {
         (Some(p), _) => ("deploying", p.image.clone(), p.digest.clone()),
+        (None, true) if waits_for_ci => ("waiting_ci", build_tag(service_id, id), None),
         (None, true) => ("building", build_tag(service_id, id), None),
         (None, false) => ("deploying", d.config.source_label(), None),
     };
@@ -133,12 +136,13 @@ pub async fn start(
         ));
     }
     let extra = placement::choose_replicas(&mut *tx, d.instance, node, d.config.replicas).await?;
-    // A newer deployment supersedes any still in progress (the running one
-    // keeps serving until the new one is healthy).
+    // A newer deployment supersedes any still in progress or waiting for CI
+    // (the running one keeps serving until the new one is healthy).
     let superseded: Vec<Option<Id>> = sqlx::query_scalar(
         "WITH gone AS (
              UPDATE deployments SET status = 'cancelled', finished_at = now(), updated_at = now()
-             WHERE service_instance_id = $1 AND status IN ('queued', 'building', 'deploying') RETURNING id)
+             WHERE service_instance_id = $1 AND status IN ('waiting_ci', 'queued', 'building', 'deploying')
+             RETURNING id)
          SELECT r.node_id FROM deployment_replicas r JOIN gone ON gone.id = r.deployment_id",
     )
     .bind(d.instance)
@@ -204,6 +208,11 @@ pub async fn start(
         .await?;
     }
     let what = match (commit, d.config.upload()) {
+        (Some(c), None) if status == "waiting_ci" => format!(
+            "Waiting for CI on {} before building {}",
+            &c.sha[..7],
+            d.config.source_label()
+        ),
         (_, Some(_)) if d.prebuilt.is_none() => "Building uploaded files".to_owned(),
         (Some(c), None) => format!("Building {} at {}", d.config.source_label(), &c.sha[..7]),
         _ => format!("Deploying {image}"),
@@ -215,6 +224,9 @@ pub async fn start(
     .bind(what)
     .execute(&mut *tx)
     .await?;
+    if status == "waiting_ci" {
+        crate::github::ci::schedule_timeout(&mut *tx, id).await?;
+    }
     if !resolved.missing.is_empty() {
         sqlx::query(
             "INSERT INTO deployment_events (deployment_id, phase, message) VALUES ($1, 'warning', $2)",

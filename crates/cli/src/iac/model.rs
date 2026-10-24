@@ -33,6 +33,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "buildCommand",
     "autoDeploy",
     "watchPaths",
+    "waitForCi",
     "hosting",
     "cronSchedule",
     "cronTimeoutSecs",
@@ -127,6 +128,8 @@ pub struct ServiceSpec {
     pub auto_deploy: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_for_ci: Option<bool>,
     /// Run once per due time (5-field cron, UTC) instead of continuously.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron_schedule: Option<String>,

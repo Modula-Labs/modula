@@ -32,7 +32,7 @@ use crate::auth::session::Actor;
 use crate::authz::{Grant, Role};
 use crate::error::{AppError, AppResult};
 use crate::github::app::{self, Branch, Repo, aad};
-use crate::github::push;
+use crate::github::{ci, pull_request, push};
 use crate::http::meta::RequestMeta;
 use crate::ratelimit::Limit;
 use crate::state::AppState;
@@ -64,6 +64,15 @@ pub struct AppView {
     public: bool,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
+    /// Permissions (`name: level`) and events the App lacks: created by an
+    /// older version, its owner has to approve them on GitHub.
+    missing_permissions: Vec<String>,
+    missing_events: Vec<String>,
+    /// Where the App's owner reviews its permissions and events.
+    #[sqlx(skip)]
+    permissions_url: String,
+    #[serde(skip)]
+    owner_is_org: bool,
 }
 
 #[derive(Serialize)]
@@ -76,12 +85,27 @@ pub struct AppList {
 
 /// The instance's GitHub Apps (no secrets).
 pub async fn apps(State(state): State<AppState>) -> AppResult<Json<AppList>> {
-    let apps = sqlx::query_as(
-        "SELECT id, slug, html_url, owner_login, public, created_at
-         FROM github_apps ORDER BY created_at",
+    let mut apps: Vec<AppView> = sqlx::query_as(
+        "SELECT a.id, a.slug, a.html_url, a.owner_login, a.public, a.created_at,
+                a.missing_permissions, a.missing_events,
+                EXISTS (SELECT 1 FROM github_installations g
+                        WHERE g.app_id = a.id AND g.account_type = 'Organization'
+                          AND lower(g.account_login) = lower(a.owner_login)) AS owner_is_org
+         FROM github_apps a ORDER BY a.created_at",
     )
     .fetch_all(&state.db)
     .await?;
+    let web = app::web_origin(&state);
+    let web = web.as_str().trim_end_matches('/');
+    for a in &mut apps {
+        a.permissions_url = match (&a.owner_login, a.owner_is_org) {
+            (Some(org), true) => format!(
+                "{web}/organizations/{org}/settings/apps/{}/permissions",
+                a.slug
+            ),
+            _ => format!("{web}/settings/apps/{}/permissions", a.slug),
+        };
+    }
     Ok(Json(AppList {
         apps,
         webhook_url: format!("{}{WEBHOOK_PATH}", state.public_origin()),
@@ -350,12 +374,11 @@ pub async fn manifest(
         // else can install it (and send it webhooks). Another account or
         // organization gets an App of its own.
         "public": false,
-        "default_permissions": {
-            "contents": "read",
-            "metadata": "read",
-            "statuses": "write",
-        },
-        "default_events": ["push"],
+        "default_permissions": app::PERMISSIONS
+            .iter()
+            .map(|(k, v)| (k.to_string(), json!(v)))
+            .collect::<serde_json::Map<_, _>>(),
+        "default_events": app::EVENTS,
     });
     let mut url: Url = match &req.org {
         Some(org) => {
@@ -826,6 +849,21 @@ async fn handle_event(
             let ev: push::PushEvent = serde_json::from_slice(body).map_err(bad)?;
             let ids = push::handle_push(state, meta, app, delivery, &ev).await?;
             Ok((StatusCode::OK, Json(json!({ "deployments": ids }))))
+        }
+        "pull_request" => {
+            let ev: pull_request::PullRequestEvent = serde_json::from_slice(body).map_err(bad)?;
+            let out = pull_request::handle_pull_request(state, meta, app, delivery, &ev).await?;
+            Ok((StatusCode::OK, Json(out)))
+        }
+        "check_suite" => {
+            let ev: ci::CheckSuiteEvent = serde_json::from_slice(body).map_err(bad)?;
+            let ids = ci::handle_check_suite(state, app, &ev).await?;
+            Ok((StatusCode::OK, Json(json!({ "settled": ids }))))
+        }
+        "status" => {
+            let ev: ci::StatusEvent = serde_json::from_slice(body).map_err(bad)?;
+            let ids = ci::handle_status(state, app, &ev).await?;
+            Ok((StatusCode::OK, Json(json!({ "settled": ids }))))
         }
         "installation" | "installation_repositories" => {
             #[derive(Deserialize)]

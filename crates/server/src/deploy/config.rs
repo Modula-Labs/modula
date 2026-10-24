@@ -115,6 +115,10 @@ pub struct ServiceConfig {
     /// Only pushes touching these paths (gitignore-style globs) deploy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub watch_paths: Vec<String>,
+    /// A push waits for the commit's other GitHub checks to pass before it
+    /// builds (`waiting_ci`), and fails if any of them fails.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wait_for_ci: bool,
 
     /// Where a built static site is served from; None = this instance's own
     /// servers (the built image runs behind the edge).

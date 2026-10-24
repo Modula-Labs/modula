@@ -578,7 +578,7 @@ pub async fn remove(
     let id = grant.id();
     let mut tx = state.db.begin().await?;
     let removed: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM deployments WHERE id = $1 AND status IN ('queued', 'building', 'deploying', 'active', 'crashed')",
+        "SELECT count(*) FROM deployments WHERE id = $1 AND status IN ('waiting_ci', 'queued', 'building', 'deploying', 'active', 'crashed')",
     )
     .bind(id)
     .fetch_one(&mut *tx)

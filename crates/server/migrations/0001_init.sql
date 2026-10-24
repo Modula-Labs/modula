@@ -257,10 +257,26 @@ CREATE TABLE environments (
     id          id PRIMARY KEY,
     project_id  id NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     name        text NOT NULL,
+    -- A pull request's preview (`pr-<number>`), created and deleted with
+    -- the pull request (see github::pull_request).
     ephemeral   boolean NOT NULL DEFAULT false,
     created_at  timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (project_id, name)
+    -- Previews only: the pull request, the commit last deployed, and the
+    -- comment on it that lists the preview's URLs.
+    pr_repo     text,
+    pr_number   integer CHECK (pr_number > 0),
+    pr_head_sha text CHECK (pr_head_sha ~ '^[0-9a-f]{40}$'),
+    pr_comment_id bigint,
+    UNIQUE (project_id, name),
+    CHECK (ephemeral = (pr_number IS NOT NULL) AND (pr_number IS NULL) = (pr_repo IS NULL))
 );
+CREATE INDEX environments_pr_idx ON environments (lower(pr_repo), pr_number) WHERE pr_number IS NOT NULL;
+
+-- Pull request previews: an environment per open pull request, duplicated
+-- from the base environment (off unless set).
+ALTER TABLE projects
+    ADD COLUMN pr_previews boolean NOT NULL DEFAULT false,
+    ADD COLUMN pr_base_environment_id id REFERENCES environments (id) ON DELETE SET NULL;
 
 -- Service names are DNS labels: they become <name>.modula.internal.
 CREATE TABLE services (
@@ -408,8 +424,10 @@ CREATE TABLE deployments (
     service_instance_id id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
     node_id             id REFERENCES nodes (id) ON DELETE SET NULL,
     status              text NOT NULL DEFAULT 'queued'
-                        CHECK (status IN ('queued', 'building', 'deploying', 'active', 'failed',
-                                          'crashed', 'removed', 'cancelled')),
+                        -- waiting_ci: placed, but not built until the commit's
+                        -- other checks pass (config.waitForCi; see github::ci).
+                        CHECK (status IN ('waiting_ci', 'queued', 'building', 'deploying', 'active',
+                                          'failed', 'crashed', 'removed', 'cancelled')),
     image               text NOT NULL,
     config              jsonb NOT NULL,
     -- Resolved variables at creation, sealed with the environment's data key
@@ -590,7 +608,12 @@ CREATE TABLE github_apps (
     webhook_secret_sealed  bytea NOT NULL,
     client_secret_sealed   bytea NOT NULL,
     created_by             id REFERENCES users (id) ON DELETE SET NULL,
-    created_at             timestamptz NOT NULL DEFAULT now()
+    created_at             timestamptz NOT NULL DEFAULT now(),
+    -- What the App lacks of the permissions and events this version asks
+    -- for, as GitHub last reported (Apps created by an older version); the
+    -- App's owner approves them on GitHub.
+    missing_permissions    text[] NOT NULL DEFAULT '{}',
+    missing_events         text[] NOT NULL DEFAULT '{}'
 );
 
 -- Installations of the App, each bound to one workspace. `id` is GitHub's.
