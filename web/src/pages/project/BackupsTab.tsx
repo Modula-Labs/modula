@@ -5,6 +5,9 @@ import { Button } from "@/components/ui/Button";
 import { Checkbox } from "@/components/ui/Controls";
 import { Archive, DotsVertical, History, Trash } from "@/components/ui/icons";
 import { Field, Input, Select } from "@/components/ui/Input";
+import { DestinationField } from "./DestinationField";
+import { PitrSection } from "./PitrSection";
+import { ReplicationSection } from "./ReplicationSection";
 import { Menu, MenuItem } from "@/components/ui/Menu";
 import { Modal } from "@/components/ui/Modal";
 import { Alert, Badge, EmptyState, Skeleton, type Tone } from "@/components/ui/misc";
@@ -79,8 +82,10 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
   if (info.isPending || destinations.isPending) return <Skeleton className="h-48" />;
   if (info.error) return <Alert tone="danger">{info.error.message}</Alert>;
   if (destinations.error) return <Alert tone="danger">{destinations.error.message}</Alert>;
+  const postgres = instance.template === "postgres";
   if (groups.length === 0) {
     return (
+      <div className="flex flex-col gap-8 pb-10">
       <EmptyState
         icon={<Archive />}
         title="No backup storage yet"
@@ -91,17 +96,12 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
           </Link>
         }
       />
+      {postgres ? <ReplicationSection instance={instance} canEdit={canEdit} /> : null}
+      </div>
     );
   }
 
-  const chosenBucket = destination.startsWith("bucket:") ? dests!.buckets.find((b) => `bucket:${b.instanceId}` === destination) : undefined;
-  const note =
-    destination === "local"
-      ? "Kept on that server only: if the server is lost, so are these backups. Restores need the database to run there."
-      : chosenBucket?.template === "bucket"
-        ? "Uploaded by the database's server over the private network."
-        : null;
-
+  const dumps = info.data.backups.filter((b) => b.method !== "walg");
   const setRetention = (k: keyof BackupRetention) => (e: { target: { value: string } }) =>
     setForm((f) => ({ ...f, retention: { ...f.retention, [k]: Math.max(0, Math.floor(Number(e.target.value)) || 0) } }));
   const error = save.error ?? now.error ?? remove.error;
@@ -128,21 +128,13 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
           label="Run backups on a schedule"
         />
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Storage" hint={note ?? undefined}>
-            {(p) => (
-              <Select {...p} disabled={!canEdit} value={destination} onChange={(e) => setForm((f) => ({ ...f, destination: e.target.value }))}>
-                {groups.map((g) => (
-                  <optgroup key={g.label} label={g.label}>
-                    {g.options.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.hint ? `${o.label} · ${o.hint}` : o.label}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
-              </Select>
-            )}
-          </Field>
+          <DestinationField
+            groups={groups}
+            dests={dests!}
+            value={destination}
+            disabled={!canEdit}
+            onChange={(v) => setForm((f) => ({ ...f, destination: v }))}
+          />
           <Field label="Time of day">
             {(p) => (
               <Select {...p} disabled={!canEdit} value={form.hourUtc} onChange={(e) => setForm((f) => ({ ...f, hourUtc: Number(e.target.value) }))}>
@@ -177,11 +169,11 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
 
       <section className="flex flex-col gap-3">
         <h3 className="text-base leading-6 font-bold">Backups</h3>
-        {info.data.backups.length === 0 ? (
+        {dumps.length === 0 ? (
           <p className="text-sm text-muted-foreground">No backups yet.</p>
         ) : (
           <div className="divide-y divide-border overflow-hidden rounded-xl border border-border">
-            {info.data.backups.map((b) => (
+            {dumps.map((b) => (
               <div key={b.id} className="flex min-h-14 items-center gap-3 px-3 py-2.5 transition-colors hover:bg-muted/50">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
@@ -221,6 +213,9 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
           </div>
         )}
       </section>
+
+      {postgres ? <PitrSection instance={instance} canEdit={canEdit} dests={dests!} groups={groups} /> : null}
+      {postgres ? <ReplicationSection instance={instance} canEdit={canEdit} /> : null}
 
       <RestoreDialog instance={instance} backup={restoring} onClose={() => setRestoring(null)} />
     </div>

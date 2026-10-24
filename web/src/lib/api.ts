@@ -517,6 +517,86 @@ export interface Backup {
   error: string | null;
   targetName: string;
   targetKind: BackupTargetKind;
+  /** `dump`, or `walg` for a base backup used by point-in-time recovery. */
+  method: "dump" | "walg";
+  walgName: string | null;
+}
+export interface PitrConfig {
+  enabled: boolean;
+  targetId: string;
+  targetName: string;
+  targetKind: BackupTargetKind;
+  windowDays: number;
+  hourUtc: number;
+}
+export interface PitrArchiving {
+  lastArchivedAt: string | null;
+  lastFailedAt: string | null;
+  failedCount: number;
+  inRecovery: boolean;
+}
+export interface PitrRestore {
+  id: string;
+  sourceInstanceId: string;
+  instanceId: string;
+  serviceName: string;
+  targetTime: string;
+  status: "running" | "completed" | "failed";
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+export interface PitrInfo {
+  config: PitrConfig | null;
+  window: { from: string; to: string } | null;
+  archiving: PitrArchiving | null;
+  baseBackups: Backup[];
+  restores: PitrRestore[];
+}
+export type PitrInput = {
+  enabled: boolean;
+  windowDays?: number;
+  hourUtc?: number;
+} & Partial<BackupDestinationChoice>;
+export interface PitrRestoreInput {
+  targetTime: string;
+  into: "new" | "same";
+  name?: string;
+  confirm?: string;
+}
+export interface PitrRestored {
+  restoreId: string;
+  instanceId: string;
+  serviceId: string;
+  serviceName: string;
+}
+export interface ReplicationPeer {
+  serviceId: string;
+  serviceName: string;
+  instanceId: string | null;
+  nodeId: string | null;
+}
+export interface CreatedReplica {
+  serviceId: string;
+  serviceName: string;
+  instanceId: string;
+  nodeId: string;
+}
+export interface Standby {
+  name: string;
+  address: string | null;
+  state: string | null;
+  replayLagSeconds: number | null;
+  lagBytes: number | null;
+}
+export type ReplicationStatus =
+  | { role: "primary"; standbys: Standby[] }
+  | { role: "replica"; replayLagSeconds: number | null; caughtUp: boolean; receiver: string | null };
+export interface Replication {
+  role: "primary" | "replica" | "standalone";
+  primary: ReplicationPeer | null;
+  replicas: ReplicationPeer[];
+  status: ReplicationStatus | null;
 }
 export interface BackupsInfo {
   schedule: BackupSchedule | null;
@@ -1231,6 +1311,20 @@ export const api = {
     ),
   backupNow: (instance: string, dest?: BackupDestinationChoice) =>
     post<Backup>(`/api/service-instances/${enc(instance)}/backups`, dest),
+  pitr: (instance: string) =>
+    get<PitrInfo>(`/api/service-instances/${enc(instance)}/pitr`),
+  savePitr: (instance: string, b: PitrInput) =>
+    request<PitrInfo>("PUT", `/api/service-instances/${enc(instance)}/pitr`, b),
+  pitrBaseBackup: (instance: string) =>
+    post<PitrInfo>(`/api/service-instances/${enc(instance)}/pitr/base-backups`),
+  pitrRestore: (instance: string, b: PitrRestoreInput) =>
+    post<PitrRestored>(`/api/service-instances/${enc(instance)}/pitr/restore`, b),
+  replication: (instance: string) =>
+    get<Replication>(`/api/service-instances/${enc(instance)}/replication`),
+  addReplica: (instance: string, b: { name?: string }) =>
+    post<CreatedReplica>(`/api/service-instances/${enc(instance)}/replicas`, b),
+  promoteReplica: (instance: string, confirm: string) =>
+    post<Replication>(`/api/service-instances/${enc(instance)}/promote`, { confirm }),
   restoreBackup: (id: string) =>
     post<{ ok: true }>(`/api/backups/${enc(id)}/restore`),
   deleteBackup: (id: string) => del<Backup>(`/api/backups/${enc(id)}`),
