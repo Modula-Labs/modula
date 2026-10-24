@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::{
-    ContainerCreateBody, ContainerSummaryStateEnum, EndpointSettings, HostConfig,
-    HostConfigLogConfig, Mount, MountType, NetworkCreateRequest, NetworkingConfig,
-    RestartPolicy as DockerRestart, RestartPolicyNameEnum,
+    ContainerCreateBody, ContainerSummaryStateEnum, EndpointIpamConfig, EndpointSettings,
+    HostConfig, HostConfigLogConfig, Ipam, IpamConfig, Mount, MountType, NetworkConnectRequest,
+    NetworkCreateRequest, NetworkingConfig, RestartPolicy as DockerRestart, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
@@ -29,6 +29,7 @@ use modula_proto::node::v1::{RestartPolicy, Workload};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{Container, LogLine, OutputSink, Runtime, labels};
+use crate::mesh::{self, Subnet};
 
 /// Docker's default set minus NET_RAW, MKNOD, AUDIT_WRITE and SYS_CHROOT.
 const CAPABILITIES: &[&str] = &[
@@ -51,14 +52,57 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct DockerRuntime {
     docker: Docker,
+    /// The mesh network, once [`Runtime::ensure_mesh_network`] made it.
+    mesh: std::sync::Mutex<Option<MeshNet>>,
 }
+
+#[derive(Clone)]
+struct MeshNet {
+    subnet: Subnet,
+    /// Containers' resolvers: the node's own, then the host's.
+    dns: Vec<String>,
+}
+
+/// Marks the mesh network with the /24 it was made for.
+const MESH_LABEL: &str = "modula.mesh";
 
 impl DockerRuntime {
     /// Connects to the local engine (`DOCKER_HOST` or the default socket).
     pub fn connect() -> anyhow::Result<Self> {
         Ok(Self {
             docker: Docker::connect_with_local_defaults().context("cannot connect to Docker")?,
+            mesh: std::sync::Mutex::new(None),
         })
+    }
+
+    fn mesh(&self) -> Option<MeshNet> {
+        self.mesh.lock().expect("mesh lock").clone()
+    }
+
+    /// The mesh network's settings for a workload with an address on it.
+    fn mesh_for(&self, w: &Workload) -> Option<(MeshNet, std::net::Ipv4Addr)> {
+        let ip: std::net::Ipv4Addr = w.mesh_ip.parse().ok()?;
+        let mesh = self.mesh()?;
+        mesh.subnet.contains(ip).then_some((mesh, ip))
+    }
+
+    async fn connect_mesh(&self, container: &str, ip: std::net::Ipv4Addr) -> anyhow::Result<()> {
+        self.docker
+            .connect_network(
+                mesh::BRIDGE,
+                NetworkConnectRequest {
+                    container: container.to_owned(),
+                    endpoint_config: Some(EndpointSettings {
+                        ipam_config: Some(EndpointIpamConfig {
+                            ipv4_address: Some(ip.to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                },
+            )
+            .await
+            .with_context(|| format!("cannot attach the container to the mesh as {ip}"))
     }
 }
 
@@ -157,6 +201,72 @@ impl Runtime for DockerRuntime {
             .collect())
     }
 
+    async fn ensure_mesh_network(&self, subnet: Subnet, mtu: u32) -> anyhow::Result<()> {
+        let want = subnet.to_string();
+        if let Ok(n) = self.docker.inspect_network(mesh::BRIDGE, None).await {
+            let label = n.labels.as_ref().and_then(|l| l.get(MESH_LABEL)).cloned();
+            if label.as_deref() == Some(want.as_str()) {
+                *self.mesh.lock().expect("mesh lock") = Some(MeshNet {
+                    subnet,
+                    dns: mesh_dns(subnet),
+                });
+                return Ok(());
+            }
+            // Made for another /24 (the node was re-added): replace it.
+            self.docker
+                .remove_network(mesh::BRIDGE)
+                .await
+                .context("cannot replace the mesh network (containers still attached)")?;
+        }
+        self.docker
+            .create_network(NetworkCreateRequest {
+                name: mesh::BRIDGE.into(),
+                driver: Some("bridge".into()),
+                // No gateway route or masquerade: containers keep their
+                // default route on their environment's bridge. The whole /16
+                // is on-link; the host answers ARP for other nodes' /24s.
+                internal: Some(true),
+                ipam: Some(Ipam {
+                    config: Some(vec![IpamConfig {
+                        subnet: Some("10.80.0.0/16".into()),
+                        ip_range: Some(subnet.lease_range()),
+                        gateway: Some(subnet.gateway().to_string()),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                options: Some(HashMap::from([
+                    (
+                        "com.docker.network.bridge.name".to_owned(),
+                        mesh::BRIDGE.to_owned(),
+                    ),
+                    // Same-server traffic stays on environment bridges.
+                    (
+                        "com.docker.network.bridge.enable_icc".to_owned(),
+                        "false".to_owned(),
+                    ),
+                    ("com.docker.network.driver.mtu".to_owned(), mtu.to_string()),
+                ])),
+                labels: Some(HashMap::from([
+                    (labels::MANAGED.to_owned(), "true".to_owned()),
+                    (MESH_LABEL.to_owned(), want),
+                ])),
+                ..Default::default()
+            })
+            .await
+            .context("cannot create the mesh network")?;
+        *self.mesh.lock().expect("mesh lock") = Some(MeshNet {
+            subnet,
+            dns: mesh_dns(subnet),
+        });
+        super::firewall::spawn_block_metadata();
+        Ok(())
+    }
+
+    async fn attach_mesh(&self, container_id: &str, ip: std::net::Ipv4Addr) -> anyhow::Result<()> {
+        self.connect_mesh(container_id, ip).await
+    }
+
     async fn stats(&self, container_id: &str) -> anyhow::Result<Option<super::Stats>> {
         // Not one-shot: Docker samples twice a second apart, so the CPU
         // percentage covers that second.
@@ -195,7 +305,14 @@ impl Runtime for DockerRuntime {
                     Err(_) => (0, 0),
                 }
             };
+            let mesh_ip = c
+                .network_settings
+                .and_then(|n| n.networks)
+                .and_then(|mut n| n.remove(mesh::BRIDGE))
+                .and_then(|e| e.ip_address)
+                .and_then(|ip| ip.parse().ok());
             out.push(Container {
+                mesh_ip,
                 deployment_id: labels.get(labels::DEPLOYMENT).cloned().unwrap_or_default(),
                 service_id: labels.get(labels::SERVICE).cloned().unwrap_or_default(),
                 environment_id: labels.get(labels::ENVIRONMENT).cloned().unwrap_or_default(),
@@ -251,6 +368,11 @@ impl Runtime for DockerRuntime {
             }),
             ..host_config(w)
         };
+        let mesh = self.mesh_for(w);
+        let host = HostConfig {
+            dns: mesh.as_ref().map(|(m, _)| m.dns.clone()),
+            ..host
+        };
         let body = ContainerCreateBody {
             // Every later stop (retire, restart) waits this long after SIGTERM.
             stop_timeout: (w.draining_seconds > 0).then_some(i64::from(w.draining_seconds)),
@@ -285,7 +407,19 @@ impl Runtime for DockerRuntime {
         };
         let name = format!("modula-{}-{}", w.service_name, w.deployment_id);
         let opts = CreateContainerOptionsBuilder::new().name(&name).build();
-        Ok(self.docker.create_container(Some(opts), body).await?.id)
+        let id = self.docker.create_container(Some(opts), body).await?.id;
+        // The mesh endpoint has no aliases: names are per environment, and
+        // the mesh network is shared by all of them.
+        if let Some((_, ip)) = mesh
+            && let Err(e) = self.connect_mesh(&id, ip).await
+        {
+            let _ = self
+                .docker
+                .remove_container(&id, Some(force_remove()))
+                .await;
+            return Err(e);
+        }
+        Ok(id)
     }
 
     async fn start(&self, container_id: &str) -> anyhow::Result<()> {
@@ -320,12 +454,14 @@ impl Runtime for DockerRuntime {
                 w.deployment_id.clone(),
             )])),
             // On the environment network (databases resolve) but without the
-            // service's aliases: nothing routes to it.
+            // service's aliases: nothing routes to it. On the mesh with the
+            // address the node leased it, so services on other servers do.
             host_config: Some(HostConfig {
                 restart_policy: Some(DockerRestart {
                     name: Some(RestartPolicyNameEnum::NO),
                     maximum_retry_count: None,
                 }),
+                dns: self.mesh_for(w).map(|(m, _)| m.dns),
                 ..host_config(w)
             }),
             ..Default::default()
@@ -336,6 +472,9 @@ impl Runtime for DockerRuntime {
             docker: self.docker.clone(),
             id: id.clone(),
         };
+        if let Some((_, ip)) = self.mesh_for(w) {
+            self.connect_mesh(&id, ip).await?;
+        }
         let docker = self
             .docker
             .clone()
@@ -543,6 +682,15 @@ impl Runtime for DockerRuntime {
 
 /// What every container gets: limits, dropped capabilities, no new
 /// privileges, an init, rotated logs, and only its environment's network.
+/// The node's resolver first, the host's as a fallback (when it is down,
+/// only names on other servers stop resolving).
+fn mesh_dns(subnet: Subnet) -> Vec<String> {
+    std::iter::once(subnet.gateway().to_string())
+        .chain(mesh::Mesh::fallback_dns())
+        .take(3)
+        .collect()
+}
+
 fn host_config(w: &Workload) -> HostConfig {
     let limits = w.limits.unwrap_or_default();
     HostConfig {

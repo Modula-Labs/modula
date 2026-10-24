@@ -91,8 +91,9 @@ pub struct ServiceConfig {
     pub memory_mb: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_millis: Option<u32>,
-    /// Copies of the service, each on a different server (one server scales
-    /// up with memory and CPU instead). Only 1 until multi-server placement.
+    /// Copies of the service, each on a different server of the private
+    /// network (one server scales up with memory and CPU instead). Services
+    /// with a volume run one.
     #[serde(default = "one")]
     pub replicas: u32,
 
@@ -126,6 +127,8 @@ fn one() -> u32 {
 }
 
 /// Upper bound for `draining_seconds` (and its variable override).
+/// Each on its own server.
+pub const MAX_REPLICAS: u32 = 16;
 pub const MAX_DRAINING_SECS: u32 = 300;
 
 fn default_port() -> u16 {
@@ -214,10 +217,10 @@ impl ServiceConfig {
         if let Some(p) = &self.dockerfile_path {
             validate_rel_path(p, "Dockerfile path")?;
         }
-        if self.replicas != 1 {
-            return Err(AppError::bad_request(
-                "multiple replicas need one server per replica; coming with multi-server placement",
-            ));
+        if !(1..=MAX_REPLICAS).contains(&self.replicas) {
+            return Err(AppError::bad_request(format!(
+                "replicas must be between 1 and {MAX_REPLICAS}"
+            )));
         }
         if let Some(c) = &self.build_command
             && (c.len() > 4096 || c.contains('\0'))

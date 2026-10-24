@@ -6,15 +6,20 @@
 #   scripts/dev-node.sh --rm [name]            remove it (and its data)
 #
 # Apps routed by it are reachable at http://<generated-host>.localhost:<http-port>.
+# MODULA_DEV_DB, MODULA_DEV_NODE_IMAGE and MODULA_DEV_NODE_TARGET pick another
+# database, image tag and build cache (a second control plane next to the usual one).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+db=${MODULA_DEV_DB:-modula_dev}
+image=${MODULA_DEV_NODE_IMAGE:-modula-dev-node}
+target=${MODULA_DEV_NODE_TARGET:-modula-node-target}
 
 if [[ "${1:-}" == "--rm" ]]; then
   name=${2:-dev-node-1}
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker volume rm "$name-data" "$name-docker" >/dev/null 2>&1 || true
   # Revoke it in the dev database so deployments aren't placed on a ghost.
-  docker exec modula-cloud-pg psql -U modula -d modula_dev -qc \
+  docker exec modula-cloud-pg psql -U modula -d "$db" -qc \
     "UPDATE deployments SET status = 'removed', finished_at = now()
        WHERE status IN ('queued', 'building', 'deploying', 'active', 'crashed')
          AND node_id IN (SELECT id FROM nodes WHERE name = '$name' AND status <> 'revoked');
@@ -32,17 +37,17 @@ mkdir -p "$build"
 docker run --rm \
   -v "$PWD":/src:ro \
   -v modula-cargo-registry:/usr/local/cargo/registry \
-  -v modula-node-target:/target \
+  -v "$target":/target \
   -e CARGO_TARGET_DIR=/target \
   -w /src rust:1-alpine \
   sh -c 'apk add -q --no-cache musl-dev protobuf-dev >/dev/null && cargo build -q --release -p modula-node && cp /target/release/modula-node /target/modula-node.out'
-docker run --rm -v modula-node-target:/target -v "$PWD/$build":/out alpine cp /target/modula-node.out /out/modula-node
+docker run --rm -v "$target":/target -v "$PWD/$build":/out alpine cp /target/modula-node.out /out/modula-node
 arch=$(docker info --format '{{.Architecture}}' | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 [[ -f $build/buildctl-linux-$arch ]] || scripts/fetch-build-tools.sh "$arch" "$build"
 cp "$build/buildctl-linux-$arch" "$build/buildctl"
 cp "$build/railpack-linux-$arch" "$build/railpack"
 cp deploy/dev/node.Dockerfile deploy/dev/entrypoint.sh "$build/"
-docker build -q -t modula-dev-node -f "$build/node.Dockerfile" "$build" >/dev/null
+docker build -q -t "$image" -f "$build/node.Dockerfile" "$build" >/dev/null
 
 if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
   docker start "$name" >/dev/null
@@ -61,5 +66,5 @@ docker run -d --privileged --name "$name" \
   -p "127.0.0.1:$port:80" \
   -e MODULA_SERVER="$server" -e MODULA_JOIN_TOKEN="$token" -e MODULA_CA="$ca" -e MODULA_NODE_NAME="$name" \
   -v "$name-data:/var/lib/modula-node" -v "$name-docker:/var/lib/docker" \
-  modula-dev-node >/dev/null
+  "$image" >/dev/null
 echo "$name: running; apps on http://<host>.localhost:$port"

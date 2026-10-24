@@ -10,6 +10,13 @@
 //!
 //! A node may only report on deployments placed on it; anything else is ignored.
 //!
+//! Replicas: a deployment with several replicas runs one on each of several
+//! nodes (`deployment_replicas`). Each node reports on its own; the build of
+//! replica 0 (the deployment's node) is the one recorded. The deployment is
+//! active once every replica is, failed when any fails, and crashed when no
+//! replica is running any more. Replica changes re-push the environment's
+//! address book to every node running something of it.
+//!
 //! Repository deployments report `pending` / `success` / `failure` on their
 //! commit through the job queue (never inline: GitHub must not slow this path).
 
@@ -48,34 +55,84 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
     let phase = DeploymentPhase::try_from(ev.phase).unwrap_or(DeploymentPhase::PhaseUnspecified);
     let message: String = ev.message.chars().take(2000).collect();
     let mut tx = db.begin().await?;
-    // Lock the row and check ownership: a node can only touch its own deployments.
-    let row: Option<(Id, String, bool, serde_json::Value)> = sqlx::query_as(
-        "SELECT service_instance_id, status,
-                commit_sha IS NOT NULL AND trigger IN ('push', 'manual')
+    // Lock the row and check ownership: a node can only touch deployments
+    // with a replica placed on it.
+    let row: Option<(Id, String, bool, serde_json::Value, i16, String, Id)> = sqlx::query_as(
+        "SELECT d.service_instance_id, d.status,
+                d.commit_sha IS NOT NULL AND d.trigger IN ('push', 'manual')
                   AND EXISTS (SELECT 1 FROM github_apps),
-                config
-         FROM deployments WHERE id = $1 AND node_id = $2 FOR UPDATE",
+                d.config, r.ordinal, r.status, i.environment_id
+         FROM deployments d
+         JOIN deployment_replicas r ON r.deployment_id = d.id AND r.node_id = $2
+         JOIN service_instances i ON i.id = d.service_instance_id
+         WHERE d.id = $1 FOR UPDATE OF d",
     )
     .bind(dep)
     .bind(node)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((instance, status, reports_commit, config)) = row else {
+    let Some((instance, status, reports_commit, config, ordinal, replica_status, environment)) =
+        row
+    else {
         tracing::warn!(%node, deployment = %dep, "event for a deployment not placed on this node; ignored");
         return Ok(vec![]);
+    };
+    let primary = ordinal == 0;
+    let replicas: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM deployment_replicas WHERE deployment_id = $1 AND node_id IS NOT NULL",
+    )
+    .bind(dep)
+    .fetch_one(&mut *tx)
+    .await?;
+    let shown = if replicas > 1 {
+        format!("Replica {}: {message}", ordinal + 1)
+    } else {
+        message.clone()
     };
     sqlx::query(
         "INSERT INTO deployment_events (deployment_id, phase, message) VALUES ($1, $2, $3)",
     )
     .bind(dep)
     .bind(phase_name(phase))
-    .bind(&message)
+    .bind(&shown)
     .execute(&mut *tx)
     .await?;
 
     let mut kick = Vec::new();
     let mut commit_status = None;
+    // This replica's own state, for discovery and the rollout below.
+    let replica_now = match phase {
+        DeploymentPhase::Active => Some("active"),
+        DeploymentPhase::Crashed => Some("crashed"),
+        DeploymentPhase::Failed => Some("failed"),
+        _ => None,
+    };
+    if let Some(now) = replica_now.filter(|now| *now != replica_status) {
+        sqlx::query(
+            "UPDATE deployment_replicas SET status = $3, updated_at = now()
+             WHERE deployment_id = $1 AND ordinal = $2",
+        )
+        .bind(dep)
+        .bind(ordinal)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        kick.extend(crate::mesh::bump_environment(&mut tx, environment).await?);
+    }
+    let running: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM deployment_replicas
+         WHERE deployment_id = $1 AND node_id IS NOT NULL AND status = 'active'",
+    )
+    .bind(dep)
+    .fetch_one(&mut *tx)
+    .await?;
     match (phase, status.as_str()) {
+        // Only replica 0's build is recorded; the others build the same commit.
+        (DeploymentPhase::Building | DeploymentPhase::Built, _) if !primary => {}
+        // Not live until every replica is.
+        (DeploymentPhase::Active, "deploying") if running < replicas => {}
+        // Others still run: the deployment keeps serving.
+        (DeploymentPhase::Crashed, "active") if running > 0 => {}
         (DeploymentPhase::Building, "building") => {
             commit_status = Some("pending");
             sqlx::query(
@@ -131,9 +188,11 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             // Supersede the previous active deployment in the same transaction:
             // the one-active-per-instance unique index requires it.
             let old: Vec<Option<Id>> = sqlx::query_scalar(
-                "UPDATE deployments SET status = 'removed', finished_at = now(), updated_at = now()
-                 WHERE service_instance_id = $1 AND status IN ('active', 'crashed') AND id <> $2
-                 RETURNING node_id",
+                "WITH old AS (
+                     UPDATE deployments SET status = 'removed', finished_at = now(), updated_at = now()
+                     WHERE service_instance_id = $1 AND status IN ('active', 'crashed') AND id <> $2
+                     RETURNING id)
+                 SELECT r.node_id FROM deployment_replicas r JOIN old ON old.id = r.deployment_id",
             )
             .bind(instance)
             .bind(dep)
@@ -158,8 +217,9 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             commit_status = Some("success");
             crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentSucceeded)
                 .await?;
-            // This node's routes now point at the new deployment.
+            // Routes and the address book now point at the new deployment.
             kick.push(node);
+            kick.extend(crate::mesh::bump_environment(&mut tx, environment).await?);
         }
         (DeploymentPhase::Failed, "building" | "deploying") => {
             sqlx::query(
@@ -167,10 +227,12 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
                  WHERE id = $1",
             )
             .bind(dep)
-            .bind(&message)
+            .bind(&shown)
             .execute(&mut *tx)
             .await?;
-            kick.push(node);
+            // Every replica stops (it left the desired state).
+            kick.extend(replica_nodes(&mut tx, *dep).await?);
+            kick.extend(crate::mesh::bump_environment(&mut tx, environment).await?);
             commit_status = Some("failure");
             crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentFailed)
                 .await?;
@@ -179,7 +241,7 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             // Stays in the desired state so the restart policy can recover it.
             sqlx::query("UPDATE deployments SET status = 'crashed', error = $2, updated_at = now() WHERE id = $1")
                 .bind(dep)
-                .bind(&message)
+                .bind(&shown)
                 .execute(&mut *tx)
                 .await?;
             crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentCrashed)
@@ -202,6 +264,16 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
     }
     tx.commit().await?;
     Ok(kick)
+}
+
+/// The nodes running a replica of `deployment`.
+async fn replica_nodes(tx: &mut sqlx::PgConnection, deployment: Id) -> AppResult<Vec<Id>> {
+    Ok(sqlx::query_scalar(
+        "SELECT node_id FROM deployment_replicas WHERE deployment_id = $1 AND node_id IS NOT NULL",
+    )
+    .bind(deployment)
+    .fetch_all(&mut *tx)
+    .await?)
 }
 
 /// Stack ids are short slugs (`nextjs`, `python`); anything else from a node is dropped.

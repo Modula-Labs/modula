@@ -6,6 +6,8 @@
 FROM caddy:2-alpine AS caddy
 
 FROM docker:28-dind
+# Private networking: nftables and iproute2 (WireGuard is the host kernel's).
+RUN apk add --no-cache nftables iproute2
 COPY --from=caddy /usr/bin/caddy /usr/bin/caddy
 COPY modula-node /usr/local/bin/modula-node
 COPY buildctl /usr/local/bin/buildctl

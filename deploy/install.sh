@@ -414,7 +414,8 @@ apt_install() {
 
 DOCKER_FRESH=0 # Docker was installed by this run, so nothing runs on it yet
 packages() {
-  local want=(ca-certificates curl openssl jq)
+  # nftables + iproute2: the private network between servers (WireGuard is in the kernel).
+  local want=(ca-certificates curl openssl jq nftables iproute2)
   [[ $MODE == main ]] && want+=(postgresql redis-server)
   if need_docker; then want+=(docker.io); DOCKER_FRESH=1; fi
   apt_install "${want[@]}"
@@ -470,6 +471,8 @@ firewall_rules() {
   local p
   for p in $(ssh_ports); do echo "$p/tcp"; done
   echo 80/tcp 443/tcp 443/udp | tr ' ' '\n'
+  # WireGuard between servers (modula-node --wg-port).
+  echo 51820/udp
   [[ $MODE == main ]] && echo "$NODE_PORT/tcp"
   return 0
 }

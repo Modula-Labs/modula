@@ -1,6 +1,8 @@
 # Environment for running modula-server against the local dev services.
 # Sourced by dev-server.sh and dev-node.sh.
-MODULA_DATABASE_URL=postgres://modula:modula@127.0.0.1:55432/modula_dev
+# Another database (and ports) for a second control plane next to the usual one.
+MODULA_DEV_DB=${MODULA_DEV_DB:-modula_dev}
+MODULA_DATABASE_URL=postgres://modula:modula@127.0.0.1:55432/$MODULA_DEV_DB
 MODULA_REDIS_URL=redis://:modula@127.0.0.1:56379
 MODULA_PUBLIC_URL=${MODULA_PUBLIC_URL:-http://localhost:7100}
 MODULA_LISTEN=${MODULA_LISTEN:-127.0.0.1:7100}

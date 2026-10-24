@@ -237,6 +237,16 @@ impl pb::node_server::Node for NodeService {
         if !hello_ok {
             return Err(revoked());
         }
+        // Private networking: its key and addresses (a /24 the first time).
+        // Its peers' tunnels to it change when they do.
+        match crate::mesh::record_hello(&state.db, node, &hello).await {
+            Ok(true) => match crate::mesh::bump_peers(&state.db, node).await {
+                Ok(peers) => state.hub.kick_all(&peers),
+                Err(e) => tracing::warn!(%node, error = ?e, "cannot update the node's peers"),
+            },
+            Ok(false) => {}
+            Err(e) => tracing::warn!(%node, error = ?e, "cannot record the node's mesh settings"),
+        }
 
         let (tx, rx) = mpsc::channel(256);
         let reg = state.hub.register(node, tx.clone());
@@ -503,6 +513,9 @@ async fn handle(
         In::DbResult(r) => state.hub.deliver_db(node, r),
         In::UpgradeStatus(s) => crate::updates::rollout::on_status(state, node, s).await?,
         In::AccessStatus(s) => state.private.deliver(node, s),
+        In::MeshReport(r) => crate::mesh::record_report(&state.db, node, &r)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?,
         // Never waits: see crate::tunnel on flow control.
         m @ (In::TunnelOpened(_) | In::TunnelData(_) | In::TunnelClose(_)) => {
             if let Some(reply) = state.tunnels.from_node(node, m) {

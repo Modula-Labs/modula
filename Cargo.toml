@@ -78,6 +78,10 @@ totp-rs = { version = "6", default-features = false, features = ["alloc"] }
 hmac = "0.13"
 # Custom domain verification: TXT/CNAME/A lookups against public resolvers.
 hickory-resolver = { version = "0.26", default-features = false, features = ["tokio"] }
+# The node's resolver for `<service>.modula.internal` (messages only).
+hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
+# Private networking: kernel WireGuard over netlink (modula-node, Linux only).
+defguard_wireguard_rs = { version = "0.12", default-features = false }
 # 9.x signs with ring (already in the tree); 10+ needs aws-lc or RustCrypto RSA.
 jsonwebtoken = "9"
 data-encoding = "2"

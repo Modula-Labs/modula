@@ -122,6 +122,7 @@ impl Cluster {
             }),
             db: None,
             upgrade: None,
+            mesh: None,
         };
         tokio::spawn(modula_node::session::run(
             dir,

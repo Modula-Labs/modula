@@ -50,12 +50,15 @@ pub struct Capabilities {
     pub db: Option<Arc<dyn crate::db::Executor>>,
     /// Upgrades on the control plane's request ([`crate::upgrade`]).
     pub upgrade: Option<Arc<dyn crate::upgrade::Upgrader>>,
+    /// Private networking between servers ([`crate::mesh`]).
+    pub mesh: Option<Arc<crate::mesh::Mesh>>,
 }
 
 pub struct Reconciler {
     runtime: Arc<dyn Runtime>,
     edge: Option<Arc<dyn EdgeSink>>,
     build: Option<BuildSupport>,
+    mesh: Option<Arc<crate::mesh::Mesh>>,
     out: mpsc::Sender<pb::NodeMessage>,
     tracked: Mutex<HashMap<String, Tracked>>,
     applied: AtomicU64,
@@ -98,6 +101,7 @@ impl Reconciler {
             runtime,
             edge: caps.edge,
             build: caps.build,
+            mesh: caps.mesh,
             out,
             tracked: Mutex::new(HashMap::new()),
             applied: AtomicU64::new(0),
@@ -219,6 +223,7 @@ impl Reconciler {
         for net in &networks {
             self.runtime.ensure_network(net).await?;
         }
+        let in_mesh = self.apply_mesh(ds).await;
 
         // 1. Point the edge at what serves now, *before* retiring anything, so
         //    traffic moves to a new deployment before the old one stops.
@@ -273,6 +278,9 @@ impl Reconciler {
 
         // 3. Start, adopt, and watch what is wanted.
         let containers = self.runtime.containers().await?;
+        if in_mesh {
+            self.attach_to_mesh(&workloads, &containers).await;
+        }
         for w in workloads {
             let mine: Vec<&Container> = containers
                 .iter()
@@ -319,6 +327,62 @@ impl Reconciler {
         Ok(())
     }
 
+    /// Converge the mesh (network, tunnels, firewall, resolver) when the
+    /// server put this node in one. False when it isn't (or that failed):
+    /// workloads then run without mesh addresses.
+    async fn apply_mesh(self: &Arc<Self>, ds: &pb::DesiredState) -> bool {
+        let (Some(mesh), Some(spec)) = (&self.mesh, &ds.mesh) else {
+            return false;
+        };
+        let Some(subnet) = crate::mesh::Subnet::parse(&spec.subnet) else {
+            tracing::warn!(subnet = %spec.subnet, "ignoring an invalid mesh subnet");
+            return false;
+        };
+        // The bridge first: it holds the address the tunnel and resolver use.
+        if let Err(e) = self
+            .runtime
+            .ensure_mesh_network(subnet, crate::mesh::Mesh::mtu())
+            .await
+        {
+            tracing::warn!(
+                error = format!("{e:#}"),
+                "cannot create the mesh network; will retry"
+            );
+            return false;
+        }
+        if let Err(e) = mesh.apply(spec).await {
+            tracing::warn!(
+                error = format!("{e:#}"),
+                "cannot configure the mesh; will retry"
+            );
+        }
+        true
+    }
+
+    /// Containers from before this node was in a mesh join it in place.
+    async fn attach_to_mesh(&self, workloads: &[&pb::Workload], containers: &[Container]) {
+        for w in workloads {
+            let Ok(ip) = w.mesh_ip.parse::<std::net::Ipv4Addr>() else {
+                continue;
+            };
+            for c in containers
+                .iter()
+                .filter(|c| c.deployment_id == w.deployment_id && c.mesh_ip.is_none())
+            {
+                match self.runtime.attach_mesh(&c.id, ip).await {
+                    Ok(()) => {
+                        tracing::info!(deployment = %w.deployment_id, %ip, "attached to the mesh")
+                    }
+                    Err(e) => tracing::warn!(
+                        deployment = %w.deployment_id,
+                        error = format!("{e:#}"),
+                        "cannot attach to the mesh"
+                    ),
+                }
+            }
+        }
+    }
+
     /// Resolve routes to running containers and hand them to the edge. Edge
     /// failures are logged, never fatal: workloads keep reconciling.
     async fn apply_edge(&self, ds: &pb::DesiredState, containers: &[Container]) {
@@ -340,6 +404,22 @@ impl Reconciler {
                     Ok(None) => {}
                     Err(e) => {
                         tracing::warn!(error = format!("{e:#}"), "cannot resolve a route upstream")
+                    }
+                }
+            }
+            // Replicas on other servers, over the mesh (only inside it).
+            if ds.mesh.is_some() {
+                for up in &r.remote_upstreams {
+                    match up.parse::<std::net::SocketAddr>() {
+                        Ok(a) if matches!(a.ip(), std::net::IpAddr::V4(v4) if v4.octets()[..2] == [10, 80]) => {
+                            routes.push(ResolvedRoute {
+                                hostname: r.hostname.clone(),
+                                upstream: a,
+                            })
+                        }
+                        _ => {
+                            tracing::warn!(upstream = %up, "ignoring a remote upstream outside the mesh")
+                        }
                     }
                 }
             }
@@ -659,10 +739,19 @@ impl Reconciler {
                 }
             })
         };
+        // On the mesh with a leased address, so it reaches services on other
+        // servers (migrations against a database elsewhere).
+        let lease = match &self.mesh {
+            Some(m) if !w.mesh_ip.is_empty() => m.lease(&w.environment_id).await,
+            _ => None,
+        };
+        let mut once = w.clone();
+        once.mesh_ip = lease.as_ref().map(|l| l.ip.to_string()).unwrap_or_default();
         let result = self
             .runtime
-            .run_once(w, &w.pre_deploy_command, PRE_DEPLOY_TIMEOUT, sink)
+            .run_once(&once, &w.pre_deploy_command, PRE_DEPLOY_TIMEOUT, sink)
             .await;
+        drop(lease);
         let outcome = match &result {
             Ok(0) => return Ok(()),
             Ok(code) => format!("Pre-deploy command exited with code {code}"),
@@ -1011,6 +1100,7 @@ mod tests {
             hostname: "api.apps.test".into(),
             deployment_id: dep.to_string(),
             port: 8080,
+            ..Default::default()
         }];
         ds.edge = Some(pb::EdgeSettings {
             tls: pb::TlsMode::TlsInternal as i32,

@@ -29,6 +29,8 @@ pub struct Container {
     pub running: bool,
     pub exit_code: i64,
     pub restart_count: u32,
+    /// Its address on the mesh network, when attached.
+    pub mesh_ip: Option<std::net::Ipv4Addr>,
 }
 
 /// One resource sample of a running container.
@@ -63,6 +65,26 @@ pub trait Runtime: Send + Sync + 'static {
     async fn remove_network(&self, environment_id: &str) -> anyhow::Result<()>;
     /// Environment ids that currently have a managed network.
     async fn networks(&self) -> anyhow::Result<Vec<String>>;
+
+    /// Ensure the mesh network for this node's /24 exists (see
+    /// [`crate::mesh`]). From then on, workloads with a `mesh_ip` join it
+    /// and use the node's resolver. Runtimes without one do nothing.
+    async fn ensure_mesh_network(
+        &self,
+        _subnet: crate::mesh::Subnet,
+        _mtu: u32,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    /// Attach a running container to the mesh network with `ip` (containers
+    /// created before the node was in a mesh).
+    async fn attach_mesh(
+        &self,
+        _container_id: &str,
+        _ip: std::net::Ipv4Addr,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 
     /// Every managed container, running or not.
     async fn containers(&self) -> anyhow::Result<Vec<Container>>;

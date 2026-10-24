@@ -50,8 +50,11 @@ pub async fn create_join_token(
 /// attach again (a revoked server re-joins with a new token). False when it
 /// was already revoked. The caller disconnects it after committing.
 pub async fn revoke(tx: &mut sqlx::PgConnection, node: modula_id::Id) -> AppResult<bool> {
+    // Its peers drop it now (bumped before it leaves the mesh); its /24 is free again.
+    crate::mesh::bump_peers(&mut *tx, node).await?;
     let r = sqlx::query(
-        "UPDATE nodes SET status = 'revoked', revoked_at = now(), cert_serial = 'revoked:' || cert_serial
+        "UPDATE nodes SET status = 'revoked', revoked_at = now(), cert_serial = 'revoked:' || cert_serial,
+                mesh_index = NULL, wg_public_key = NULL
          WHERE id = $1 AND status <> 'revoked'",
     )
     .bind(node)
@@ -65,6 +68,14 @@ pub async fn revoke(tx: &mut sqlx::PgConnection, node: modula_id::Id) -> AppResu
         .bind(node)
         .execute(&mut *tx)
         .await?;
+    // Replicas it ran for deployments placed elsewhere stop being addressed.
+    sqlx::query(
+        "UPDATE deployment_replicas SET node_id = NULL, mesh_ip = NULL, status = 'failed', updated_at = now()
+         WHERE node_id = $1",
+    )
+    .bind(node)
+    .execute(&mut *tx)
+    .await?;
     Ok(true)
 }
 

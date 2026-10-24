@@ -20,6 +20,7 @@ pub mod keyring;
 pub mod listen;
 pub mod locations;
 pub mod logs;
+pub mod mesh;
 pub mod metrics;
 pub mod nodes;
 pub mod pki;
