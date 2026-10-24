@@ -23,7 +23,7 @@ impl Keyring {
     }
 
     pub async fn data_key(&self, db: &PgPool, scope: Id) -> AppResult<Arc<DataKey>> {
-        if let Some(k) = self.cache.read().expect("keyring lock").get(&scope) {
+        if let Some(k) = crate::sync::read(&self.cache).get(&scope) {
             return Ok(k.clone());
         }
         let fresh = DataKey::generate()?;
@@ -51,10 +51,7 @@ impl Keyring {
             .into());
         }
         let key = Arc::new(self.kek.unwrap(&stored, scope)?);
-        self.cache
-            .write()
-            .expect("keyring lock")
-            .insert(scope, key.clone());
+        crate::sync::write(&self.cache).insert(scope, key.clone());
         Ok(key)
     }
 
@@ -84,6 +81,6 @@ impl Keyring {
 
     /// Drop a scope's cached key (e.g. after its workspace is deleted).
     pub fn forget(&self, scope: Id) {
-        self.cache.write().expect("keyring lock").remove(&scope);
+        crate::sync::write(&self.cache).remove(&scope);
     }
 }

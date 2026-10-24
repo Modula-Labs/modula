@@ -15,6 +15,10 @@ use crate::error::AppResult;
 use crate::state::AppState;
 
 const DEFAULT_PIDS: i64 = 4096;
+/// Limits for a service that sets none: one runaway container must not take
+/// the whole server (and its neighbours) down with it. Raise them per service.
+pub const DEFAULT_MEMORY_MB: u32 = 512;
+pub const DEFAULT_CPU_MILLIS: u32 = 1000;
 
 #[derive(sqlx::FromRow)]
 struct Row {
@@ -196,8 +200,8 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
                 timeout_secs: cfg.healthcheck_timeout_secs,
             }),
             limits: Some(pb::Limits {
-                memory_bytes: cfg.memory_mb.map_or(0, |m| u64::from(m) * 1024 * 1024),
-                nano_cpus: cfg.cpu_millis.map_or(0, |c| u64::from(c) * 1_000_000),
+                memory_bytes: u64::from(cfg.memory_mb.unwrap_or(DEFAULT_MEMORY_MB)) * 1024 * 1024,
+                nano_cpus: u64::from(cfg.cpu_millis.unwrap_or(DEFAULT_CPU_MILLIS)) * 1_000_000,
                 pids: DEFAULT_PIDS,
             }),
             restart: match cfg.restart_policy {

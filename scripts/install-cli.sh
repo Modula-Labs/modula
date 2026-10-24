@@ -15,7 +15,7 @@ set -euo pipefail
 VERSION="${MODULA_VERSION:-latest}"
 RELEASE_URL="${MODULA_RELEASE_URL:-https://downloads.usemodula.org/releases}"
 # Ed25519 key that signs SHA256SUMS (deploy/release.pub.pem); release.sh checks it matches.
-RELEASE_PUBKEY="${MODULA_RELEASE_PUBKEY:-MCowBQYDK2VwAyEAEofOHNvogrpURvg/JDfOV83WE6+yAoXsdXvjJlOp/xI=}"
+RELEASE_PUBKEY="${MODULA_RELEASE_PUBKEY:-MCowBQYDK2VwAyEAVl1B0m1qDZY+gGHSLVry769Tl1KmGKKFhFiav9ccXCE=}"
 DIR="${MODULA_CLI_DIR:-$HOME/.local/bin}"
 
 # ---------------------------------------------------------------- output

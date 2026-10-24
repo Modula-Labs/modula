@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "Modula Deploy server daemon: joins the control plane and runs workloads"
 
 [[bin]]
@@ -22,6 +23,8 @@ bollard.workspace = true
 clap.workspace = true
 futures.workspace = true
 hex.workspace = true
+hmac.workspace = true
+getrandom.workspace = true
 prost.workspace = true
 reqwest.workspace = true
 tar.workspace = true

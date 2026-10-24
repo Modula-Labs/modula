@@ -37,6 +37,15 @@ GitHub repo** (workspace admins).
 - Workspace admins on an instance without an App are asked to get an instance
   admin to connect GitHub; other roles are asked to get a workspace admin.
 
+Installing also asks you to authorize the App on GitHub (OAuth during
+installation). The server uses that one-time authorization only to check that
+the installation you came back with is one *you* can access on GitHub, then
+discards it, so nobody can bind someone else's installation by guessing its id.
+An App created before this check existed must have **Request user authorization
+(OAuth) during installation** turned on in its GitHub settings, with the
+callback URL `https://<your instance>/api/github/install/callback`; or delete
+it and connect GitHub again.
+
 The installation is bound to the workspace that started it and can't be moved
 to another. Installed accounts show with their avatar and a **Configure** link
 to change repository access on GitHub. Every hop through GitHub carries a
@@ -66,9 +75,12 @@ leave the server.
 | `GET /api/workspaces/{id}/github/repos?q=&page=&perPage=` | Member | `fullName`, `private`, `defaultBranch`, `updatedAt` (last push), `ownerAvatar` |
 | `GET /api/workspaces/{id}/github/branches?repo=owner/name&q=` | Member | `name`, `protected` |
 
-Pushes arrive on `POST /api/github/webhook`, verified by HMAC signature. A push
-deploys every service instance whose `source.branch` matches, has
-`autoDeploy` on, and whose `watchPaths` (if any) match a changed file.
+Pushes arrive on `POST /api/github/webhook`, verified by HMAC signature and
+rate limited per source IP. A push deploys every service instance whose
+`source.branch` matches, has `autoDeploy` on, and whose `watchPaths` (if any)
+match a changed file. A push for a commit that service already has a
+deployment of is ignored, so a replayed webhook can't roll a service back; to
+redeploy an old commit, use **Rollback** or **Redeploy**.
 Deployments report their status on the commit in GitHub. Creating the App,
 installing, uninstalling and changes to an installation's repositories are
 recorded in the audit log.

@@ -168,7 +168,7 @@ pub(crate) mod tests {
         assert_eq!(
             base64::engine::general_purpose::STANDARD
                 .encode([&ED25519_SPKI_PREFIX[..], &k].concat()),
-            "MCowBQYDK2VwAyEAEofOHNvogrpURvg/JDfOV83WE6+yAoXsdXvjJlOp/xI="
+            "MCowBQYDK2VwAyEAVl1B0m1qDZY+gGHSLVry769Tl1KmGKKFhFiav9ccXCE="
         );
         assert!(pubkey_from_spki("bm90IGEga2V5").is_err());
     }

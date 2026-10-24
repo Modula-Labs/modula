@@ -206,7 +206,7 @@ impl Default for Runtime {
 impl Runtime {
     /// The Access token verifier while private mode is on.
     pub fn verifier(&self) -> Option<Arc<jwt::Verifier>> {
-        self.verifier.read().expect("private lock").clone()
+        crate::sync::read(&self.verifier).clone()
     }
 
     pub fn is_on(&self) -> bool {
@@ -214,16 +214,16 @@ impl Runtime {
     }
 
     fn set_verifier(&self, v: Option<jwt::Verifier>) {
-        *self.verifier.write().expect("private lock") = v.map(Arc::new);
+        *crate::sync::write(&self.verifier) = v.map(Arc::new);
     }
 
     pub fn hooks(&self) -> Hooks {
-        self.hooks.read().expect("private lock").clone()
+        crate::sync::read(&self.hooks).clone()
     }
 
     /// Replaces the key source, probe, node agent or timings (tests).
     pub fn set_hooks(&self, f: impl FnOnce(&mut Hooks)) {
-        f(&mut self.hooks.write().expect("private lock"));
+        f(&mut crate::sync::write(&self.hooks));
     }
 
     /// Whether a node connection from `peer` is accepted: in private mode only
@@ -234,7 +234,7 @@ impl Runtime {
 
     /// Hand a node's AccessStatus to whoever waits for it.
     pub fn deliver(&self, node: Id, s: pb::AccessStatus) {
-        let mut pending = self.pending.lock().expect("private lock");
+        let mut pending = crate::sync::lock(&self.pending);
         if pending
             .get(&s.request_id)
             .is_some_and(|(owner, _)| *owner == node)

@@ -77,22 +77,22 @@ impl RotatingCert {
 
     /// Reissue if the current certificate is close to expiry. Returns whether it did.
     pub fn refresh_if_due(&self, pki: &Pki, now: OffsetDateTime) -> anyhow::Result<bool> {
-        let due = self.current.read().expect("cert lock").not_after - now < RENEW_BEFORE;
+        let due = crate::sync::read(&self.current).not_after - now < RENEW_BEFORE;
         if due {
             let fresh = Self::issue(pki, &self.hosts, &self.provider)?;
-            *self.current.write().expect("cert lock") = fresh;
+            *crate::sync::write(&self.current) = fresh;
         }
         Ok(due)
     }
 
     pub fn not_after(&self) -> OffsetDateTime {
-        self.current.read().expect("cert lock").not_after
+        crate::sync::read(&self.current).not_after
     }
 }
 
 impl ResolvesServerCert for RotatingCert {
     fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(self.current.read().expect("cert lock").key.clone())
+        Some(crate::sync::read(&self.current).key.clone())
     }
 }
 

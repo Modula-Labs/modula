@@ -7,7 +7,7 @@ import { Alert } from "@/components/ui/misc";
 import { api, type Instance, type NodeInfo } from "@/lib/api";
 import { flagEmoji } from "@/lib/flags";
 import { AddServerDialog } from "@/pages/servers/AddServerDialog";
-import { CPU_STEP, MEM_STEP, capacity, formatCpu, formatMemory, fromSlider, serverLabel, stepsFor, toSlider } from "./resources";
+import { CPU_STEP, DEFAULT_CPU_MILLIS, DEFAULT_MEMORY_MB, MEM_STEP, capacity, formatCpu, formatMemory, fromSlider, serverLabel, stepsFor, toSlider } from "./resources";
 
 export interface RailItem {
   id: string;
@@ -76,6 +76,7 @@ function LimitSlider({
   maxValue,
   step,
   format,
+  fallback,
   disabled,
   onChange,
 }: {
@@ -85,6 +86,8 @@ function LimitSlider({
   maxValue: number;
   step: number;
   format: (v: string) => string;
+  /** Where an unset limit sits: the server's default. */
+  fallback: number;
   disabled: boolean;
   onChange: (v: string) => void;
 }) {
@@ -105,7 +108,7 @@ function LimitSlider({
         max={steps}
         step={1}
         disabled={disabled}
-        value={toSlider(value, maxValue, step)}
+        value={toSlider(value, maxValue, step, fallback)}
         onChange={(e) => onChange(fromSlider(Number(e.target.value), maxValue, step))}
         className="h-1.5 w-full cursor-pointer accent-foreground disabled:cursor-not-allowed disabled:opacity-50"
       />
@@ -113,7 +116,7 @@ function LimitSlider({
   );
 }
 
-/** CPU and memory limits as sliders; all the way right means no limit. */
+/** CPU and memory limits as sliders; unset shows the default, all the way right is the whole server. */
 export function ResourceSliders({
   node,
   cpuMillis,
@@ -139,6 +142,7 @@ export function ResourceSliders({
         maxValue={cap.cpuMillis}
         step={CPU_STEP}
         format={(v) => formatCpu(v)}
+        fallback={DEFAULT_CPU_MILLIS}
         disabled={!canEdit}
         onChange={onCpu}
       />
@@ -149,6 +153,7 @@ export function ResourceSliders({
         maxValue={cap.memoryMb}
         step={MEM_STEP}
         format={(v) => formatMemory(v)}
+        fallback={DEFAULT_MEMORY_MB}
         disabled={!canEdit}
         onChange={onMemory}
       />

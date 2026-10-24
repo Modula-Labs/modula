@@ -52,7 +52,7 @@ impl Hub {
             kick: conn.kick.clone(),
             cancel: conn.cancel.clone(),
         };
-        if let Some(old) = self.conns.lock().expect("hub lock").insert(node, conn) {
+        if let Some(old) = crate::sync::lock(&self.conns).insert(node, conn) {
             old.cancel.cancel();
         }
         reg
@@ -60,15 +60,12 @@ impl Hub {
 
     /// Remove the connection if it is still the current one for `node`.
     pub fn unregister(&self, node: Id, conn_id: u64) -> bool {
-        let mut conns = self.conns.lock().expect("hub lock");
+        let mut conns = crate::sync::lock(&self.conns);
         if conns.get(&node).is_some_and(|c| c.id == conn_id) {
             if let Some(c) = conns.remove(&node) {
                 c.cancel.cancel();
             }
-            self.logs
-                .lock()
-                .expect("hub lock")
-                .retain(|_, (n, _)| *n != node);
+            crate::sync::lock(&self.logs).retain(|_, (n, _)| *n != node);
             self.forget_db(node);
             return true;
         }
@@ -76,22 +73,19 @@ impl Hub {
     }
 
     pub fn disconnect(&self, node: Id) {
-        if let Some(c) = self.conns.lock().expect("hub lock").remove(&node) {
+        if let Some(c) = crate::sync::lock(&self.conns).remove(&node) {
             c.cancel.cancel();
         }
-        self.logs
-            .lock()
-            .expect("hub lock")
-            .retain(|_, (n, _)| *n != node);
+        crate::sync::lock(&self.logs).retain(|_, (n, _)| *n != node);
         self.forget_db(node);
     }
 
     pub fn is_connected(&self, node: Id) -> bool {
-        self.conns.lock().expect("hub lock").contains_key(&node)
+        crate::sync::lock(&self.conns).contains_key(&node)
     }
 
     pub fn kick(&self, node: Id) {
-        if let Some(c) = self.conns.lock().expect("hub lock").get(&node) {
+        if let Some(c) = crate::sync::lock(&self.conns).get(&node) {
             c.kick.notify_one();
         }
     }
@@ -103,9 +97,7 @@ impl Hub {
     }
 
     fn sender(&self, node: Id) -> Option<Outbound> {
-        self.conns
-            .lock()
-            .expect("hub lock")
+        crate::sync::lock(&self.conns)
             .get(&node)
             .map(|c| c.tx.clone())
     }
@@ -133,10 +125,7 @@ impl Hub {
         let tx = self.sender(node)?;
         let request_id = Id::new().to_string();
         let (ctx, crx) = mpsc::channel(64);
-        self.logs
-            .lock()
-            .expect("hub lock")
-            .insert(request_id.clone(), (node, ctx));
+        crate::sync::lock(&self.logs).insert(request_id.clone(), (node, ctx));
         let msg = pb::ServerMessage {
             msg: Some(pb::server_message::Msg::Logs(pb::LogRequest {
                 request_id: request_id.clone(),
@@ -147,14 +136,14 @@ impl Hub {
             })),
         };
         if tx.send(Ok(msg)).await.is_err() {
-            self.logs.lock().expect("hub lock").remove(&request_id);
+            crate::sync::lock(&self.logs).remove(&request_id);
             return None;
         }
         Some((request_id, crx))
     }
 
     pub async fn close_logs(&self, request_id: &str) {
-        let Some((node, _)) = self.logs.lock().expect("hub lock").remove(request_id) else {
+        let Some((node, _)) = crate::sync::lock(&self.logs).remove(request_id) else {
             return;
         };
         if let Some(tx) = self.sender(node) {
@@ -173,7 +162,7 @@ impl Hub {
     /// other message from that node (deployment events included) behind one
     /// slow browser. Chunks for requests another node owns are ignored.
     pub fn deliver_logs(&self, node: Id, chunk: pb::LogChunk) -> Option<String> {
-        let mut logs = self.logs.lock().expect("hub lock");
+        let mut logs = crate::sync::lock(&self.logs);
         let id = chunk.request_id.clone();
         let tx = match logs.get(&id) {
             Some((owner, tx)) if *owner == node => tx,
@@ -215,10 +204,7 @@ impl Hub {
         let request_id = Id::new().to_string();
         req.request_id = request_id.clone();
         let (rtx, rrx) = oneshot::channel();
-        self.db
-            .lock()
-            .expect("hub lock")
-            .insert(request_id.clone(), (node, rtx));
+        crate::sync::lock(&self.db).insert(request_id.clone(), (node, rtx));
         let msg = pb::ServerMessage {
             msg: Some(pb::server_message::Msg::Db(req)),
         };
@@ -231,14 +217,14 @@ impl Hub {
                 Err(_) => Err(DbCallError::TimedOut),
             }
         };
-        self.db.lock().expect("hub lock").remove(&request_id);
+        crate::sync::lock(&self.db).remove(&request_id);
         outcome
     }
 
     /// Hand a node's answer to the waiting caller. Answers for requests another
     /// node owns (or that already gave up) are dropped.
     pub fn deliver_db(&self, node: Id, r: pb::DbResponse) {
-        let mut db = self.db.lock().expect("hub lock");
+        let mut db = crate::sync::lock(&self.db);
         if db
             .get(&r.request_id)
             .is_some_and(|(owner, _)| *owner == node)
@@ -250,9 +236,6 @@ impl Hub {
 
     /// Fail every request waiting on `node` (dropping the senders wakes them).
     fn forget_db(&self, node: Id) {
-        self.db
-            .lock()
-            .expect("hub lock")
-            .retain(|_, (n, _)| *n != node);
+        crate::sync::lock(&self.db).retain(|_, (n, _)| *n != node);
     }
 }

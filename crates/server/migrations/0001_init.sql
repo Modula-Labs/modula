@@ -176,6 +176,7 @@ CREATE TABLE nodes (
     name                text NOT NULL,
     status              text NOT NULL DEFAULT 'offline'
                         CHECK (status IN ('online', 'offline', 'revoked')),
+    -- Prefixed "revoked:" on revoke, so the old certificate never matches.
     cert_serial         text NOT NULL,
     cert_expires_at     timestamptz NOT NULL,
     node_version        text,
@@ -201,6 +202,9 @@ CREATE TABLE node_join_tokens (
     id          id PRIMARY KEY,
     token_hash  bytea NOT NULL UNIQUE,
     created_by  id REFERENCES users (id) ON DELETE SET NULL,
+    -- The node it enrolls belongs to this workspace (Hetzner provisioning);
+    -- NULL = shared (an instance admin's manual or CLI token).
+    workspace_id id REFERENCES workspaces (id) ON DELETE CASCADE,
     expires_at  timestamptz NOT NULL,
     used_at     timestamptz,
     node_id     id REFERENCES nodes (id) ON DELETE SET NULL,
@@ -359,6 +363,8 @@ CREATE TABLE source_uploads (
 );
 CREATE INDEX source_uploads_instance_idx ON source_uploads (service_instance_id, created_at DESC);
 CREATE INDEX source_uploads_kept_idx ON source_uploads (created_at) WHERE purged_at IS NULL;
+-- The per-workspace daily upload quota sums the last day's sizes.
+CREATE INDEX source_uploads_workspace_idx ON source_uploads (workspace_id, created_at);
 
 CREATE TABLE deployments (
     id                  id PRIMARY KEY,

@@ -28,7 +28,13 @@ you own. Backups are encrypted before they leave the server.
 | `minio` | required | default `us-east-1` |
 
 The credentials are checked by writing and deleting a small probe object before
-the target is saved. Use a bucket (and optional prefix) dedicated to backups and
+the target is saved.
+
+Endpoints must be public addresses. For a MinIO on your own network (a private
+or loopback address), set `MODULA_BACKUP_ALLOW_PRIVATE_ENDPOINTS=1` in
+`/etc/modula/server.env` (and in `/etc/modula/node.env` on servers for a
+loopback endpoint), then restart. Cloud metadata addresses are always refused.
+Storage errors show only the provider's error code and HTTP status. Use a bucket (and optional prefix) dedicated to backups and
 a key limited to it.
 
 ```bash

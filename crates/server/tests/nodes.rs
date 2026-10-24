@@ -306,12 +306,12 @@ async fn deploy_redeploy_logs_and_revoke(pool: PgPool) {
             Method::PATCH,
             &format!("/api/service-instances/{instance}/variables"),
             Some(&c.admin),
-            Some(json!({ "set": { "API_KEY": "sk_live_abcdef123456", "MODE": "production" }, "sealed": ["API_KEY"] })),
+            Some(json!({ "set": { "API_KEY": "sk_test_fake_abcdef123456", "MODE": "production" }, "sealed": ["API_KEY"] })),
         )
         .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     assert!(
-        !r.json.to_string().contains("sk_live"),
+        !r.json.to_string().contains("sk_test_fake"),
         "values are never returned"
     );
 
@@ -331,7 +331,7 @@ async fn deploy_redeploy_logs_and_revoke(pool: PgPool) {
     assert!(body.contains("started"), "{body}");
     assert!(body.contains("API_KEY=••••••"), "{body}");
     assert!(
-        !body.contains("sk_live_abcdef123456"),
+        !body.contains("sk_test_fake_abcdef123456"),
         "secret leaked into logs: {body}"
     );
     assert!(body.contains("event: end"));

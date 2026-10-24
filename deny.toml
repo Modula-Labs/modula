@@ -11,6 +11,7 @@ ignore = [
     # age's i18n proc macro, which reads age's own bundled i18n.toml at compile
     # time; it never parses input at runtime. Drop once age moves off it.
     { id = "RUSTSEC-2026-0374", reason = "compile-time only, via age's i18n-embed-fl macro" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint timing: only reachable through age's p256/hpke plugin recipients; we use x25519 recipients and identities only. Drop when age moves to elliptic-curve 0.14" },
 ]
 
 [licenses]

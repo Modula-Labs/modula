@@ -9,3 +9,7 @@
 /docs/ui-ref/
 /.dev/
 /dist/
+
+# Local-only material (design notes, specs, references); never committed
+/docs/
+/design/

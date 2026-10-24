@@ -120,6 +120,7 @@ async fn mock_s3() -> (String, Arc<MockS3>) {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     // The SSRF guard refuses loopback endpoints unless told otherwise.
     backup::s3::allow_local_endpoints(true);
+    modula_node::backup::allow_loopback_endpoints(true);
     (format!("http://{addr}"), s3)
 }
 
@@ -549,6 +550,7 @@ async fn the_control_plane_backs_itself_up(pool: PgPool) {
 fn real_target() -> backup::s3::Target {
     let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("set {name}"));
     backup::s3::allow_local_endpoints(true);
+    modula_node::backup::allow_loopback_endpoints(true);
     backup::s3::Target {
         provider: backup::s3::Provider::Minio,
         endpoint: var("MODULA_TEST_S3_ENDPOINT").parse().unwrap(),

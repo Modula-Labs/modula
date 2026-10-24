@@ -53,6 +53,7 @@ pub fn tunnel_url(base: &Url, instance: &str, port: Option<u16>) -> anyhow::Resu
 
 impl Target {
     pub fn new(login: &Login, instance: &str, port: Option<u16>) -> anyhow::Result<Self> {
+        crate::config::check_transport(&login.url)?;
         let url = tunnel_url(&login.url, instance, port)?;
         let tls = if url.scheme() == "wss" {
             install_crypto();

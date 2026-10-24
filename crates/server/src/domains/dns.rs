@@ -111,16 +111,14 @@ pub enum RecordKind {
 
 impl StaticDns {
     pub fn set(&self, kind: RecordKind, name: &str, values: &[&str]) {
-        self.records.lock().expect("dns lock").insert(
+        crate::sync::lock(&self.records).insert(
             (kind, name.to_owned()),
             values.iter().map(|v| (*v).to_owned()).collect(),
         );
     }
 
     fn get(&self, kind: RecordKind, name: &str) -> Vec<String> {
-        self.records
-            .lock()
-            .expect("dns lock")
+        crate::sync::lock(&self.records)
             .get(&(kind, name.to_owned()))
             .cloned()
             .unwrap_or_default()

@@ -2,14 +2,16 @@
 # Modula Deploy installer for Ubuntu 22.04+/Debian 12+ (amd64, arm64).
 #
 #   Main server (dashboard + the first server for apps); asks for an email
-#   and a server name, and for sudo when not run as root. The dashboard
-#   starts at https://<public IP>; add a domain there later:
+#   and a server name, and for sudo when not run as root. Without --domain
+#   the dashboard is served at https://<public IP>; add a domain later:
 #     curl -fsSL https://usemodula.org/install.sh | bash
 #
 #   The same without questions (automation, cloud-init):
-#     curl -fsSL https://usemodula.org/install.sh | sudo bash -s -- --email you@example.com [--name NAME] [--domain deploy.example.com]
+#     curl -fsSL https://usemodula.org/install.sh | sudo bash -s -- --email you@example.com [--domain deploy.example.com] [--name NAME]
 #
-#   Another server, joining an instance (the dashboard prints this line):
+#   Another server, joining an instance (the dashboard prints this line; the
+#   token may also come in MODULA_JOIN_TOKEN, the Access secret in
+#   MODULA_ACCESS_SECRET):
 #     curl -fsSL https://deploy.example.com/api/install.sh | sudo bash -s -- join --server … --token … --ca …
 #
 #   Upgrade whatever is installed here (or from the dashboard; other servers
@@ -30,16 +32,21 @@
 #
 # MODULA_INSTALL_DRY_RUN=1 stops after the questions and root check, before
 # anything is changed (for testing the installer itself).
+#
+# Everything runs from `main` on the last line, so a download cut short runs
+# nothing at all.
 set -euo pipefail
-ORIG_ARGS=("$@")
 
 # Filled in when an instance serves this script, so joining servers install
 # the instance's own version and fetch binaries from it first.
 VERSION="${MODULA_VERSION:-__MODULA_VERSION__}"
 SERVER_RELEASES="__MODULA_SERVER_RELEASES__"
+# A verified copy of this script run by upgrade.sh gets the instance from it.
+if [[ -n ${MODULA_SERVER_RELEASES:-} ]]; then SERVER_RELEASES=$MODULA_SERVER_RELEASES; fi
 RELEASE_URL="${MODULA_RELEASE_URL:-https://downloads.usemodula.org/releases}"
-# Ed25519 key that signs SHA256SUMS (deploy/release.pub.pem).
-RELEASE_PUBKEY="${MODULA_RELEASE_PUBKEY:-MCowBQYDK2VwAyEAEofOHNvogrpURvg/JDfOV83WE6+yAoXsdXvjJlOp/xI=}"
+# Ed25519 key that signs SHA256SUMS (deploy/release.pub.pem). The override is
+# for development installs only; upgrades use $CONF/release.pub.pem.
+RELEASE_PUBKEY="${MODULA_RELEASE_PUBKEY:-MCowBQYDK2VwAyEAVl1B0m1qDZY+gGHSLVry769Tl1KmGKKFhFiav9ccXCE=}"
 
 PREFIX=/opt/modula
 CONF=/etc/modula
@@ -94,8 +101,7 @@ card_end() { printf '  %s╰─%s %s\n\n' "$A" "$N" "$1"; }
 # in this shell (so they can set variables) with errexit on; if one fails, the
 # EXIT trap prints its output. A step that exits (die) does so with its output
 # still redirected, so the trap writes to copies of the original stdout and
-# stderr (fds 3 and 4).
-exec 3>&1 4>&2
+# stderr (fds 3 and 4, opened by main).
 step() {
   STEP_LABEL=$1; shift
   local t; t=$(date +%s%N)
@@ -122,7 +128,6 @@ on_exit() {
     printf '\n  %s\n\n' "Once that's sorted, run the same command again; finished steps are skipped." >&4
   fi
 }
-trap on_exit EXIT
 
 # ---------------------------------------------------------------- progress
 # --progress-token (from `modula server create`): while the server has no
@@ -188,7 +193,7 @@ progress_stop() {
 }
 
 usage() {
-  sed -n '2,20p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
+  sed -n '2,23p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
   cat <<'EOF'
 Options (main server; asked for interactively when missing):
   --domain HOST        optional: a dashboard hostname that already points here. Without
@@ -205,8 +210,10 @@ Options (main server; asked for interactively when missing):
   --version X.Y.Z      install this version instead of the latest
 Options (join):
   --server URL --token TOKEN --ca FINGERPRINT [--name NAME]
+                       (or the token in MODULA_JOIN_TOKEN instead of --token)
   --access-host HOST --access-id ID --access-secret SECRET
                        private mode: reach the instance through Cloudflare Access
+                       (or the secret in MODULA_ACCESS_SECRET)
 Host setup (main and join; upgrade never touches it):
   --no-harden          skip all host setup below
   --no-firewall        skip the firewall (ufw) only
@@ -219,34 +226,50 @@ EOF
 MODE=main DOMAIN="" EMAIL="" APPS_DOMAIN="" JOIN_SERVER="" JOIN_TOKEN="" JOIN_CA="" NODE_NAME=""
 SETUP_TOKEN="" SETUP_TOKEN_HASH=""
 HARDEN=1 FIREWALL=1 AUTO_REBOOT=0 HARDEN_ASKED=0 HARDEN_WHY=""
-case "${1:-}" in
-  join | upgrade) MODE=$1; shift ;;
-  main) shift ;;
-esac
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --domain) DOMAIN=${2:?}; shift 2 ;;
-    --email) EMAIL=${2:?}; shift 2 ;;
-    --apps-domain) APPS_DOMAIN=${2:?}; shift 2 ;;
-    --version) VERSION=${2:?}; shift 2 ;;
-    --server) JOIN_SERVER=${2:?}; shift 2 ;;
-    --token) JOIN_TOKEN=${2:?}; shift 2 ;;
-    --ca) JOIN_CA=${2:?}; shift 2 ;;
-    --name) NODE_NAME=${2:?}; shift 2 ;;
-    --access-host) ACCESS_HOST=${2:?}; shift 2 ;;
-    --access-id) ACCESS_ID=${2:?}; shift 2 ;;
-    --access-secret) ACCESS_SECRET=${2:?}; shift 2 ;;
-    --setup-token) SETUP_TOKEN=${2:?}; shift 2 ;;
-    --progress-token) PROGRESS_TOKEN=${2:?}; shift 2 ;;
-    --no-harden) HARDEN=0; HARDEN_ASKED=1; shift ;;
-    --no-firewall) FIREWALL=0; shift ;;
-    --auto-reboot) AUTO_REBOOT=1; shift ;;
-    -h | --help) usage; exit 0 ;;
-    *) usage >&2; die "unknown option $1" "The options are listed above; --help shows them again." ;;
+# The arguments to run this again with as root: all but the secrets, which
+# travel in the environment (never on a command line others can read).
+REEXEC_ARGS=()
+
+parse_args() {
+  # Secrets may come from the environment instead of flags.
+  JOIN_TOKEN=${MODULA_JOIN_TOKEN:-}
+  ACCESS_SECRET=${MODULA_ACCESS_SECRET:-}
+  case "${1:-}" in
+    join | upgrade) MODE=$1; REEXEC_ARGS+=("$1"); shift ;;
+    main) REEXEC_ARGS+=("$1"); shift ;;
   esac
-done
-[[ $VERSION == __* ]] && VERSION=latest
-[[ $SERVER_RELEASES == __* ]] && SERVER_RELEASES=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --token) JOIN_TOKEN=${2:?}; shift 2; continue ;;
+      --access-secret) ACCESS_SECRET=${2:?}; shift 2; continue ;;
+    esac
+    case "$1" in
+      --no-harden | --no-firewall | --auto-reboot | -h | --help) REEXEC_ARGS+=("$1") ;;
+      *) REEXEC_ARGS+=("$1" "${2:-}") ;;
+    esac
+    case "$1" in
+      --domain) DOMAIN=${2:?}; shift 2 ;;
+      --email) EMAIL=${2:?}; shift 2 ;;
+      --apps-domain) APPS_DOMAIN=${2:?}; shift 2 ;;
+      --version) VERSION=${2:?}; shift 2 ;;
+      --server) JOIN_SERVER=${2:?}; shift 2 ;;
+      --ca) JOIN_CA=${2:?}; shift 2 ;;
+      --name) NODE_NAME=${2:?}; shift 2 ;;
+      --access-host) ACCESS_HOST=${2:?}; shift 2 ;;
+      --access-id) ACCESS_ID=${2:?}; shift 2 ;;
+      --setup-token) SETUP_TOKEN=${2:?}; shift 2 ;;
+      --progress-token) PROGRESS_TOKEN=${2:?}; shift 2 ;;
+      --no-harden) HARDEN=0; HARDEN_ASKED=1; shift ;;
+      --no-firewall) FIREWALL=0; shift ;;
+      --auto-reboot) AUTO_REBOOT=1; shift ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage >&2; die "unknown option $1" "The options are listed above; --help shows them again." ;;
+    esac
+  done
+  [[ $VERSION == __* ]] && VERSION=latest
+  [[ $SERVER_RELEASES == __* ]] && SERVER_RELEASES=""
+  return 0
+}
 
 valid_host() { [[ ${1,,} =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; }
 valid_ipv4() {
@@ -262,81 +285,95 @@ valid_name() { [[ $1 =~ ^[A-Za-z0-9._-]{1,63}$ ]]; }
 # Answers to the main install's questions come from the terminal: when piped
 # into bash, stdin is this script. PROMPT is set when they need asking.
 PROMPT=0 PROMPT_FD=""
-case $MODE in
-  main)
-    DOMAIN=${DOMAIN,,}; APPS_DOMAIN=${APPS_DOMAIN,,}
-    [[ -z $DOMAIN ]] || valid_dashboard "$DOMAIN" || die "--domain must be a hostname like deploy.example.com, or this server's IPv4" "Just the name or address, without https:// or a path."
-    [[ -z $APPS_DOMAIN ]] || valid_host "$APPS_DOMAIN" || die "--apps-domain must be a hostname like apps.example.com" "Just the name, without https:// or a path."
-    [[ -z $EMAIL ]] || valid_email "$EMAIL" || die "--email is not an email address" "Let's Encrypt uses it to tell you about expiring certificates."
-    [[ -z $NODE_NAME ]] || valid_name "$NODE_NAME" || die "--name may use letters, digits, . _ -" "Up to 63 characters, e.g. --name web-1."
-    if [[ -n $SETUP_TOKEN ]]; then
-      [[ $SETUP_TOKEN =~ ^mcsetup_[A-Za-z0-9_-]{43}$ ]] || die "--setup-token must be a setup token (mcsetup_…)" "modula server create generates it; leave it out to get a random one."
-      # Only its hash reaches the server (MODULA_SETUP_TOKEN_HASH): the
-      # same domain-separated SHA-256 as modula-server's token hashes.
-      SETUP_TOKEN_HASH=$(printf 'modula/token/v1\0%s' "$SETUP_TOKEN" | sha256sum | awk '{print $1}')
-    fi
-    [[ -z $PROGRESS_TOKEN || $PROGRESS_TOKEN =~ ^[A-Za-z0-9_-]{32,64}$ ]] || die "--progress-token must be 32–64 letters, digits, _ or -" "modula server create generates it; leave it out otherwise."
-    # No domain needed: the dashboard starts at https://<public IP> and a
-    # domain is added later in the dashboard (or `modula instance domain`).
-    if [[ -z $DOMAIN ]]; then
-      DOMAIN=$(public_ip)
-      [[ -n $DOMAIN ]] || die "couldn't find this server's public IPv4" "Pass it (or a domain that points here) with --domain."
-    fi
-    if [[ -z $EMAIL ]]; then
-      if { exec 5</dev/tty; } 2>/dev/null; then
-        PROMPT=1 PROMPT_FD=5
-      else
-        die "no terminal to ask for an email" "Pass it as a flag instead: … | sudo bash -s -- --email you@example.com [--name web-1]"
+validate_args() {
+  case $MODE in
+    main)
+      DOMAIN=${DOMAIN,,}; APPS_DOMAIN=${APPS_DOMAIN,,}
+      [[ -z $DOMAIN ]] || valid_dashboard "$DOMAIN" || die "--domain must be a hostname like deploy.example.com, or this server's IPv4" "Just the name or address, without https:// or a path."
+      [[ -z $APPS_DOMAIN ]] || valid_host "$APPS_DOMAIN" || die "--apps-domain must be a hostname like apps.example.com" "Just the name, without https:// or a path."
+      [[ -z $EMAIL ]] || valid_email "$EMAIL" || die "--email is not an email address" "Let's Encrypt uses it to tell you about expiring certificates."
+      [[ -z $NODE_NAME ]] || valid_name "$NODE_NAME" || die "--name may use letters, digits, . _ -" "Up to 63 characters, e.g. --name web-1."
+      if [[ -n $SETUP_TOKEN ]]; then
+        [[ $SETUP_TOKEN =~ ^mcsetup_[A-Za-z0-9_-]{43}$ ]] || die "--setup-token must be a setup token (mcsetup_…)" "modula server create generates it; leave it out to get a random one."
+        # Only its hash reaches the server (MODULA_SETUP_TOKEN_HASH): the
+        # same domain-separated SHA-256 as modula-server's token hashes.
+        SETUP_TOKEN_HASH=$(printf 'modula/token/v1\0%s' "$SETUP_TOKEN" | sha256sum | awk '{print $1}')
       fi
-    fi
-    ;;
-  join)
-    [[ $JOIN_SERVER =~ ^https://[^[:space:]]+$ ]] || die "--server must be an https:// URL" "Copy the whole join command from the dashboard (Servers → Add server)."
-    [[ $JOIN_TOKEN =~ ^mcj_[A-Za-z0-9_-]+$ ]] || die "--token must be a join token (mcj_…)" "Copy the whole join command from the dashboard (Servers → Add server)."
-    [[ $JOIN_CA =~ ^sha256:[0-9a-f]{64}$ ]] || die "--ca must be sha256:<64 hex>" "Copy the whole join command from the dashboard (Servers → Add server)."
-    [[ -z $NODE_NAME ]] || valid_name "$NODE_NAME" || die "--name may use letters, digits, . _ -" "Up to 63 characters, e.g. --name web-1."
-    [[ -z ${ACCESS_HOST:-} ]] || { valid_host "$ACCESS_HOST" && [[ ${ACCESS_ID:-} =~ ^[A-Za-z0-9._-]+$ && ${ACCESS_SECRET:-} =~ ^[A-Za-z0-9._-]+$ ]]; } \
-      || die "--access-host, --access-id and --access-secret go together" "Copy the whole join command from the dashboard (Servers → Add server)."
-    ;;
-esac
+      [[ -z $PROGRESS_TOKEN || $PROGRESS_TOKEN =~ ^[A-Za-z0-9_-]{32,64}$ ]] || die "--progress-token must be 32–64 letters, digits, _ or -" "modula server create generates it; leave it out otherwise."
+      # No domain needed: the dashboard starts at https://<public IP> and a
+      # domain is added later in the dashboard (or `modula instance domain`).
+      if [[ -z $DOMAIN ]]; then
+        DOMAIN=$(public_ip)
+        [[ -n $DOMAIN ]] || die "couldn't find this server's public IPv4" "Pass it (or a domain that points here) with --domain."
+      fi
+      if [[ -z $EMAIL ]]; then
+        if { exec 5</dev/tty; } 2>/dev/null; then
+          PROMPT=1 PROMPT_FD=5
+        else
+          die "no terminal to ask for an email" "Pass it as a flag instead: … | sudo bash -s -- --email you@example.com [--name web-1]"
+        fi
+      fi
+      ;;
+    join)
+      [[ $JOIN_SERVER =~ ^https://[^[:space:]]+$ ]] || die "--server must be an https:// URL" "Copy the whole join command from the dashboard (Servers → Add server)."
+      [[ $JOIN_TOKEN =~ ^mcj_[A-Za-z0-9_-]+$ ]] || die "--token (or MODULA_JOIN_TOKEN) must be a join token (mcj_…)" "Copy the whole join command from the dashboard (Servers → Add server)."
+      [[ $JOIN_CA =~ ^sha256:[0-9a-f]{64}$ ]] || die "--ca must be sha256:<64 hex>" "Copy the whole join command from the dashboard (Servers → Add server)."
+      [[ -z $NODE_NAME ]] || valid_name "$NODE_NAME" || die "--name may use letters, digits, . _ -" "Up to 63 characters, e.g. --name web-1."
+      [[ -z ${ACCESS_HOST:-} ]] || { valid_host "$ACCESS_HOST" && [[ ${ACCESS_ID:-} =~ ^[A-Za-z0-9._-]+$ && ${ACCESS_SECRET:-} =~ ^[A-Za-z0-9._-]+$ ]]; } \
+        || die "--access-host, --access-id and --access-secret go together" "Copy the whole join command from the dashboard (Servers → Add server)."
+      ;;
+  esac
+  return 0
+}
 
 # ---------------------------------------------------------------- root
 # The one-liner runs as a regular user, so ask sudo to run this again as root.
 # A piped script has no file to hand over: fetch it again from where it is
 # served (an instance serves its own copy; the root of its release URL says where).
-if [[ -n ${MODULA_INSTALL_URL:-} ]]; then
-  INSTALL_URL=$MODULA_INSTALL_URL
-elif [[ -n $SERVER_RELEASES ]]; then
-  INSTALL_URL="${SERVER_RELEASES%"/api/releases?file="}/api/install.sh"
-else
-  INSTALL_URL=https://usemodula.org/install.sh
-fi
+INSTALL_URL=""
+install_url() {
+  if [[ -n ${MODULA_INSTALL_URL:-} ]]; then
+    INSTALL_URL=$MODULA_INSTALL_URL
+  elif [[ -n $SERVER_RELEASES ]]; then
+    INSTALL_URL="${SERVER_RELEASES%"/api/releases?file="}/api/install.sh"
+  else
+    INSTALL_URL=https://usemodula.org/install.sh
+  fi
+}
 
 elevate() {
   [[ $EUID -eq 0 ]] && return 0
   command -v sudo >/dev/null || die "this needs root, and sudo isn't installed" "Run it again as root (su -, then the same command)."
   printf '\n  %s◆%s Modula needs root to install system services — asking sudo…\n' "$A" "$N"
-  local self="" tmp="" v rc=0 keep=()
+  local self="" tmp="" v rc=0 keep=() secrets=() preserve=()
   if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]]; then
     self=${BASH_SOURCE[0]}
   else
     tmp=$(mktemp "${TMPDIR:-/tmp}/modula-install.XXXXXX")
     curl -fsSL --retry 2 -o "$tmp" "$INSTALL_URL" \
-      || { rm -f "$tmp"; die "couldn't fetch the installer again from $INSTALL_URL" "Run it as root instead: curl -fsSL $INSTALL_URL | sudo bash${ORIG_ARGS[*]:+ -s -- …}"; }
+      || { rm -f "$tmp"; die "couldn't fetch the installer again from $INSTALL_URL" "Run it as root instead: curl -fsSL $INSTALL_URL | sudo bash${REEXEC_ARGS[*]:+ -s -- …}"; }
     self=$tmp
   fi
   # sudo starts with a clean environment; carry over what this run was given.
   # SSH_CONNECTION names the port this session came in on (kept open by the firewall).
-  for v in MODULA_RELEASE_URL MODULA_RELEASE_PUBKEY MODULA_INSTALL_DRY_RUN NO_COLOR COLORTERM TERM SSH_CONNECTION; do
+  for v in MODULA_RELEASE_URL MODULA_RELEASE_PUBKEY MODULA_INSTALL_DRY_RUN MODULA_ALLOW_DOWNGRADE NO_COLOR COLORTERM TERM SSH_CONNECTION; do
     [[ -n ${!v:-} ]] && keep+=("$v=${!v}")
   done
   keep+=("MODULA_INSTALL_URL=$INSTALL_URL")
   [[ $VERSION != latest ]] && keep+=("MODULA_VERSION=$VERSION")
-  sudo env "${keep[@]}" bash "$self" "${ORIG_ARGS[@]}" || rc=$?
+  # The join token and Access secret go through sudo's preserved environment,
+  # not `env NAME=value` (which would put them on a command line).
+  [[ -n $JOIN_TOKEN ]] && { export MODULA_JOIN_TOKEN=$JOIN_TOKEN; secrets+=(MODULA_JOIN_TOKEN); }
+  [[ -n $ACCESS_SECRET ]] && { export MODULA_ACCESS_SECRET=$ACCESS_SECRET; secrets+=(MODULA_ACCESS_SECRET); }
+  if [[ ${#secrets[@]} -gt 0 ]]; then
+    preserve=("--preserve-env=$(IFS=,; printf '%s' "${secrets[*]}")")
+    sudo "${preserve[@]}" true 2>/dev/null \
+      || die "sudo won't pass the join token on to root" "Become root first (sudo -i, or su -), then run the same command."
+  fi
+  sudo "${preserve[@]}" env "${keep[@]}" bash "$self" "${REEXEC_ARGS[@]}" || rc=$?
   [[ -n $tmp ]] && rm -f "$tmp"
   exit "$rc"
 }
-elevate
 
 # ---------------------------------------------------------------- checks
 
@@ -432,8 +469,22 @@ other_firewall() {
 firewall_rules() {
   local p
   for p in $(ssh_ports); do echo "$p/tcp"; done
-  echo 80/tcp 443/tcp 443/udp 20000:29999/tcp | tr ' ' '\n'
+  echo 80/tcp 443/tcp 443/udp | tr ' ' '\n'
   [[ $MODE == main ]] && echo "$NODE_PORT/tcp"
+  return 0
+}
+
+# Earlier installers opened all of 20000–29999 for TCP proxies; modula-node
+# now opens each allocated port itself, so the blanket rule goes.
+LEGACY_RANGE=20000:29999/tcp
+firewall_legacy_range() {
+  ufw_active || return 0
+  [[ $(ufw status 2>/dev/null) == *"20000:29999/tcp"* ]] || return 0
+  ufw delete allow "$LEGACY_RANGE" >/dev/null 2>&1 || true
+  # (Matching can depend on the comment in some ufw versions.)
+  if [[ $(ufw status 2>/dev/null) == *"20000:29999/tcp"* ]]; then
+    ufw delete allow "$LEGACY_RANGE" comment modula >/dev/null 2>&1 || true
+  fi
   return 0
 }
 
@@ -463,7 +514,8 @@ firewall() {
   done < <(firewall_rules)
   [[ $active == 1 ]] || ufw --force enable
   ufw_active
-  SECURITY+=("firewall on (${ports[*]})")
+  firewall_legacy_range
+  SECURITY+=("firewall on (${ports[*]}; app TCP ports as allocated)")
 }
 
 # Security updates only, installed daily; no reboots unless --auto-reboot.
@@ -687,6 +739,10 @@ download() {
   # Small files first; the binaries download in parallel.
   artifact SHA256SUMS "$tmp/SHA256SUMS"
   artifact SHA256SUMS.sig "$tmp/SHA256SUMS.sig"
+  artifact VERSION "$tmp/VERSION"
+  # The installer itself, so this server can hand it on (older releases
+  # don't list it; then it is left out).
+  artifact install.sh "$tmp/install.sh" 2>/dev/null || rm -f "$tmp/install.sh"
   local pids=()
   for n in "${names[@]}"; do artifact "$n" "$tmp/$n" "$tmp/SHA256SUMS" & pids+=($!); done
   for p in "${pids[@]}"; do wait "$p" || { rm -rf "$tmp"; return 1; }; done
@@ -695,17 +751,39 @@ download() {
   openssl pkeyutl -verify -pubin -inkey "$tmp/release.pub.pem" -rawin \
     -in "$tmp/SHA256SUMS" -sigfile "$tmp/SHA256SUMS.sig" >/dev/null \
     || { rm -rf "$tmp"; echo "SHA256SUMS signature is not valid; refusing to install" >&2; return 1; }
+  rm -f "$tmp/release.pub.pem"
+  # sha256sum --ignore-missing skips files SHA256SUMS doesn't list, so every
+  # file kept must be listed.
+  listed() { grep -qE "^[0-9a-f]{64}  $1\$" "$tmp/SHA256SUMS"; }
+  [[ -f $tmp/install.sh ]] && ! listed install.sh && rm -f "$tmp/install.sh"
+  for n in VERSION "${names[@]}"; do
+    listed "$n" || { rm -rf "$tmp"; echo "$n is not in SHA256SUMS" >&2; return 1; }
+  done
   (cd "$tmp" && sha256sum --check --ignore-missing --quiet SHA256SUMS) \
     || { rm -rf "$tmp"; echo "checksum mismatch; refusing to install" >&2; return 1; }
   for n in "${names[@]}"; do
-    (cd "$tmp" && grep -q "  $n\$" SHA256SUMS) || { rm -rf "$tmp"; echo "$n is not in SHA256SUMS" >&2; return 1; }
     chmod 755 "$tmp/$n"
     ln -s "$n" "$tmp/${n%-linux-"$ARCH"}"
   done
-  rm -f "$tmp/release.pub.pem"
 
-  local v; v=$("$tmp/modula-node" --version | awk '{print $2}')
-  [[ $v =~ ^[0-9A-Za-z.+-]+$ ]] || { rm -rf "$tmp"; echo "unexpected version string" >&2; return 1; }
+  # The signed VERSION says which release this is: the one asked for, and
+  # never older than what runs here (an old, validly signed release served
+  # as "latest" would otherwise roll this server back).
+  local v; v=$(tr -d '[:space:]' <"$tmp/VERSION")
+  [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]] || { rm -rf "$tmp"; echo "unexpected version string in VERSION" >&2; return 1; }
+  if [[ $VERSION != latest && $v != "$VERSION" ]]; then
+    rm -rf "$tmp"; echo "asked for $VERSION but the release is $v; refusing to install" >&2; return 1
+  fi
+  local bin_v; bin_v=$("$tmp/modula-node" --version | awk '{print $2}')
+  [[ $bin_v == "$v" ]] || { rm -rf "$tmp"; echo "modula-node says $bin_v but the release is $v; refusing to install" >&2; return 1; }
+  if [[ -L $PREFIX/current && -z ${MODULA_ALLOW_DOWNGRADE:-} ]]; then
+    local cur; cur=$(basename "$(readlink -f "$PREFIX/current")")
+    if [[ $(printf '%s\n%s\n' "$cur" "$v" | sort -V | tail -1) != "$v" ]]; then
+      rm -rf "$tmp"
+      echo "$v is older than the installed $cur; refusing to downgrade (MODULA_ALLOW_DOWNGRADE=1 allows it)" >&2
+      return 1
+    fi
+  fi
   RELEASE=$PREFIX/releases/$v
   if [[ -d $RELEASE ]]; then rm -rf "$tmp"; else mv "$tmp" "$RELEASE"; fi
 }
@@ -743,10 +821,36 @@ accounts() {
   install -d -m 0750 -o modula-caddy -g modula-caddy "$CADDY_STATE"
   install -d -m 0700 "$NODE_STATE"
   install -d -m 0755 "$CONF"
+  build_account
   if [[ $MODE == main ]]; then
     id modula >/dev/null 2>&1 || useradd --system --home "$STATE" --shell /usr/sbin/nologin modula
     install -d -m 0700 -o modula -g modula "$STATE"
+    oom_dropins
   fi
+}
+
+# modula-node runs build planning (railpack, which reads the app's own
+# repository) as this user rather than root. No login, no home of its own:
+# the node gives it a HOME for each build.
+build_account() {
+  id modula-build >/dev/null 2>&1 \
+    || useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin modula-build
+}
+
+# Under memory pressure the kernel kills app containers before the control
+# plane and its databases. Takes effect when each service next (re)starts.
+oom_dropins() {
+  local u d changed=0 conf=$'# Written by the Modula Deploy installer.\n[Service]\nOOMScoreAdjust=-500'
+  # postgresql.service is a wrapper on Debian/Ubuntu; the clusters run as postgresql@.
+  for u in postgresql@.service redis-server.service; do
+    d=/etc/systemd/system/$u.d
+    if [[ ! -f $d/modula.conf || $(cat "$d/modula.conf") != "$conf" ]]; then
+      install -d -m 0755 "$d"
+      printf '%s\n' "$conf" >"$d/modula.conf"
+      changed=1
+    fi
+  done
+  [[ $changed == 0 ]] || systemctl daemon-reload
 }
 
 database() {
@@ -853,9 +957,74 @@ EOF_AA
     || TIPS+=("Couldn't load the modula-buildkit AppArmor profile; builds may fail to start (docker logs modula-buildkit).")
 }
 
+# The key upgrade.sh checks the next installer against. Written by every
+# install and upgrade (whose installer was itself verified), so a signed
+# installer can rotate it.
+RELEASE_KEY_FILE=$CONF/release.pub.pem
+release_key() {
+  install -d -m 0755 "$CONF"
+  local tmp; tmp=$(mktemp "$CONF/.release.pub.pem.XXXXXX")
+  printf -- "-----BEGIN PUBLIC KEY-----\n%s\n-----END PUBLIC KEY-----\n" "$RELEASE_PUBKEY" >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$RELEASE_KEY_FILE"
+}
+
+# Containers never reach the cloud's metadata service (instance credentials,
+# user data with join tokens): a DROP at the top of Docker's DOCKER-USER chain,
+# put back whenever Docker (re)starts. Plain commands, no shell; the first
+# line of each pair removes an older copy so restarts don't stack rules.
+# modula-node also re-asserts it at startup.
+metadata_firewall_unit() {
+  local ipt ip6t v6=""
+  ipt=$(command -v iptables || true)
+  ip6t=$(command -v ip6tables || true)
+  if [[ -z $ipt ]]; then
+    no_unit modula-firewall.service
+    TIPS+=("iptables isn't installed, so containers can reach the cloud metadata service (169.254.169.254).")
+    return 0
+  fi
+  # Docker only creates the IPv6 chain with IPv6 on, hence the "-" (ignore failure).
+  if [[ -n $ip6t ]]; then
+    v6=$'\n'"ExecStartPre=-$ip6t -w -D DOCKER-USER -d fd00:ec2::254/128 -j DROP"
+    v6+=$'\n'"ExecStart=-$ip6t -w -I DOCKER-USER -d fd00:ec2::254/128 -j DROP"
+    v6+=$'\n'"ExecStop=-$ip6t -w -D DOCKER-USER -d fd00:ec2::254/128 -j DROP"
+  fi
+  unit modula-firewall.service <<EOF
+[Unit]
+Description=Modula Deploy: keep containers away from the cloud metadata service
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-$ipt -w -D DOCKER-USER -d 169.254.169.254/32 -j DROP
+ExecStart=$ipt -w -I DOCKER-USER -d 169.254.169.254/32 -j DROP
+ExecStop=-$ipt -w -D DOCKER-USER -d 169.254.169.254/32 -j DROP$v6
+
+[Install]
+WantedBy=multi-user.target docker.service
+EOF
+}
+
+metadata_firewall_start() {
+  [[ -f /etc/systemd/system/modula-firewall.service ]] || return 0
+  systemctl enable modula-firewall.service >/dev/null 2>&1 || true
+  if changed modula-firewall.service || ! systemctl is-active --quiet modula-firewall.service; then
+    systemctl restart modula-firewall.service \
+      || TIPS+=("Couldn't block the cloud metadata service for containers (systemctl status modula-firewall).")
+  fi
+  return 0
+}
+
 units() {
   CHANGED=" "
   buildkit_apparmor
+  # (Upgrades never run accounts; releases from here on expect these.)
+  build_account
+  [[ -f $CONF/server.env ]] && oom_dropins
+  release_key
+  metadata_firewall_unit
   local caddy_sockets=0 server_sockets=0 upgrades=0
   has_feature modula-node caddy-sockets && caddy_sockets=1
   if [[ -f $CONF/server.env ]]; then
@@ -938,13 +1107,20 @@ After=network-online.target docker.service modula-caddy.service
 Wants=network-online.target docker.service modula-caddy.service
 
 [Service]
-# Manages Docker and Caddy, which is root-equivalent anyway.
+# Manages Docker, Caddy, ufw and iptables, which is root-equivalent anyway;
+# the sandboxing below only takes away what it never needs.
 EnvironmentFile=-$CONF/node.env
 ExecStart=$PREFIX/current/modula-node --data-dir $NODE_STATE run --caddy-admin unix:$CADDY_SOCKET --buildctl $PREFIX/current/buildctl --railpack $PREFIX/current/railpack$args
 Restart=always
 RestartSec=2
 KillMode=mixed
 TimeoutStopSec=10
+# Apps go first when memory runs out, not the node that restarts them.
+OOMScoreAdjust=-500
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target
@@ -987,6 +1163,7 @@ Restart=always
 RestartSec=2
 # In-flight requests get up to 20 s to finish (streams end right away).
 TimeoutStopSec=30
+OOMScoreAdjust=-500
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -1014,6 +1191,7 @@ EOF
   fi
   [[ $CHANGED != " " ]] && systemctl daemon-reload
   if [[ $upgrades == 1 ]]; then systemctl enable --now modula-upgrade.path >/dev/null 2>&1; fi
+  metadata_firewall_start
   return 0
 }
 
@@ -1032,17 +1210,20 @@ upgrade_unit() {
   fi
   # Joined servers get the installer (and so the version) from their
   # instance; a later upgrade with the public installer keeps that.
-  local url=$INSTALL_URL
+  local url=$INSTALL_URL releases=$SERVER_RELEASES
   if [[ ! -f $CONF/server.env && -z $SERVER_RELEASES && -f $CONF/upgrade.env ]]; then
-    url=$(sed -n 's/^INSTALL_URL=//p' "$CONF/upgrade.env")
+    url=$(sed -n 's/^INSTALL_URL=//p' "$CONF/upgrade.env" | tail -1)
+    releases=$(sed -n 's/^MODULA_SERVER_RELEASES=//p' "$CONF/upgrade.env" | tail -1)
+    # (Written before MODULA_SERVER_RELEASES was: the instance's installer URL says where.)
+    if [[ -z $releases && $url == https://*/api/install.sh ]]; then releases="${url%/api/install.sh}/api/releases?file="; fi
   fi
-  local v
+  [[ -f $CONF/server.env ]] && releases=""
+  # Never the release key: upgrade.sh only trusts $RELEASE_KEY_FILE.
   {
     echo "# Written by the Modula Deploy installer; read by $PREFIX/upgrade.sh."
     echo "INSTALL_URL=$url"
-    for v in MODULA_RELEASE_URL MODULA_RELEASE_PUBKEY; do
-      if [[ -n ${!v:-} ]]; then echo "$v=${!v}"; fi
-    done
+    if [[ -n $releases ]]; then echo "MODULA_SERVER_RELEASES=$releases"; fi
+    if [[ -n ${MODULA_RELEASE_URL:-} ]]; then echo "MODULA_RELEASE_URL=$MODULA_RELEASE_URL"; fi
   } >"$CONF/upgrade.env"
   chmod 0644 "$CONF/upgrade.env"
 
@@ -1051,6 +1232,10 @@ upgrade_unit() {
 # Runs one upgrade that modula-server or modula-node asked for
 # (modula-upgrade.path → modula-upgrade.service), then reports the result in
 # /var/lib/modula-upgrade/result for the requester to read.
+#
+# The installer that performs it comes from the requested release and runs
+# only once its signature checks out against /etc/modula/release.pub.pem:
+# SHA256SUMS signed by the release key, install.sh's hash listed in it.
 set -uo pipefail
 dir=/var/lib/modula-upgrade
 req=$dir/request
@@ -1059,6 +1244,7 @@ version=$(head -c 64 "$req" | tr -d '[:space:]')
 rm -f "$req" # first: the path unit fires again while it exists
 from=$(basename "$(readlink -f /opt/modula/current)")
 log=$(mktemp)
+work=""
 report() { # report STATUS — written atomically: the requester can write to $dir
   local tmp; tmp=$(mktemp "$dir/.result.XXXXXX")
   {
@@ -1073,24 +1259,47 @@ report() { # report STATUS — written atomically: the requester can write to $d
   chmod 0640 "$tmp"
   mv -fT "$tmp" "$dir/result"
   rm -f "$log"
+  [[ -z $work ]] || rm -rf "$work"
 }
+fail() { echo "$1" >>"$log"; report failed; exit 1; }
 if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]; then
-  echo "not a release version: $version" >"$log"; report failed; exit 1
+  fail "not a release version: $version"
 fi
 if [[ $(printf '%s\n%s\n' "$from" "$version" | sort -V | tail -1) != "$version" ]]; then
-  echo "refusing to downgrade from $from to $version" >"$log"; report failed; exit 1
+  fail "refusing to downgrade from $from to $version"
 fi
-set -a
-# shellcheck source=/dev/null
-. /etc/modula/upgrade.env
-set +a
-script=$(mktemp)
-if ! curl -fsSL --retry 3 -o "$script" "$INSTALL_URL" >>"$log" 2>&1; then
-  echo "cannot download the installer from $INSTALL_URL" >>"$log"; report failed; rm -f "$script"; exit 1
-fi
+# Read, never sourced: only these three settings, and never a key.
+setting() { sed -n "s/^$1=//p" /etc/modula/upgrade.env 2>/dev/null | tail -1; }
+install_url=$(setting INSTALL_URL)
+server_releases=$(setting MODULA_SERVER_RELEASES)
+release_url=$(setting MODULA_RELEASE_URL)
+pubkey=/etc/modula/release.pub.pem
+[[ -s $pubkey ]] || fail "no release key at $pubkey; upgrade by hand: curl -fsSL ${install_url:-https://usemodula.org/install.sh} | sudo bash -s -- upgrade"
+work=$(mktemp -d)
+# verified SOURCE — fetches install.sh, SHA256SUMS and its signature from one
+# place (the instance's release files, or the public release) and checks them.
+verified() {
+  local f
+  rm -f "$work"/*
+  for f in SHA256SUMS SHA256SUMS.sig install.sh; do
+    curl -fsSL --retry 3 -o "$work/$f" "$1$f" 2>>"$log" || return 1
+  done
+  openssl pkeyutl -verify -pubin -inkey "$pubkey" -rawin \
+    -in "$work/SHA256SUMS" -sigfile "$work/SHA256SUMS.sig" >/dev/null 2>>"$log" \
+    || { echo "SHA256SUMS from $1 is not signed by the release key" >>"$log"; return 1; }
+  grep -qE '^[0-9a-f]{64}  install\.sh$' "$work/SHA256SUMS" \
+    || { echo "install.sh is not in SHA256SUMS from $1" >>"$log"; return 1; }
+  (cd "$work" && grep -E '^[0-9a-f]{64}  install\.sh$' SHA256SUMS | sha256sum --check --quiet --strict -) >>"$log" 2>&1 \
+    || { echo "install.sh from $1 does not match SHA256SUMS" >>"$log"; return 1; }
+}
+ok=0
+if [[ -n $server_releases ]] && verified "$server_releases"; then ok=1; fi
+if [[ $ok == 0 ]] && verified "${release_url:-https://downloads.usemodula.org/releases}/download/v$version/"; then ok=1; fi
+[[ $ok == 1 ]] || fail "couldn't get a verified installer for $version"
 rc=0
-NO_COLOR=1 bash "$script" upgrade --version "$version" >>"$log" 2>&1 || rc=$?
-rm -f "$script"
+# (An empty MODULA_RELEASE_URL means the default.)
+env NO_COLOR=1 MODULA_INSTALL_URL="$install_url" MODULA_SERVER_RELEASES="$server_releases" \
+  MODULA_RELEASE_URL="$release_url" bash "$work/install.sh" upgrade --version "$version" >>"$log" 2>&1 || rc=$?
 case $rc in
   0) report succeeded ;;
   3) report rolled_back ;; # the new version didn't start; the previous one runs again
@@ -1173,21 +1382,26 @@ join_local() {
   [[ -n $(ls -A "$NODE_STATE" 2>/dev/null) ]] && return 0 # already joined
   local cmd; cmd=$(server_cli join-token --ttl-minutes 5 2>/dev/null)
   local server token ca
-  server=$(sed -E 's/.*--server ([^ ]+).*/\1/' <<<"$cmd")
-  token=$(sed -E 's/.*--token ([^ ]+).*/\1/' <<<"$cmd")
-  ca=$(sed -E 's/.*--ca ([^ ]+).*/\1/' <<<"$cmd")
+  server=$(sed -nE 's/.*--server ([^ ]+).*/\1/p' <<<"$cmd")
+  # The token as `--token mcj_…` or `MODULA_JOIN_TOKEN=mcj_…`.
+  token=$(grep -oE '(--token |MODULA_JOIN_TOKEN=)'"'"'?mcj_[A-Za-z0-9_-]+' <<<"$cmd" | grep -oE 'mcj_[A-Za-z0-9_-]+' | head -1 || true)
+  ca=$(sed -nE 's/.*--ca ([^ ]+).*/\1/p' <<<"$cmd")
+  [[ -n $server && -n $token && -n $ca ]] || { echo "unexpected output from modula-server join-token" >&2; return 1; }
   # This server dials itself over loopback; the certificate covers 127.0.0.1.
-  "$PREFIX/current/modula-node" --data-dir "$NODE_STATE" join \
-    --server "https://127.0.0.1:${server##*:}" --token "$token" --ca "$ca" --name "${NODE_NAME:-$(hostname -s)}"
+  # The token goes in the environment, not on modula-node's command line.
+  MODULA_JOIN_TOKEN=$token "$PREFIX/current/modula-node" --data-dir "$NODE_STATE" join \
+    --server "https://127.0.0.1:${server##*:}" --ca "$ca" --name "${NODE_NAME:-$(hostname -s)}"
 }
 
 join_remote() {
   [[ -n $(ls -A "$NODE_STATE" 2>/dev/null) ]] && return 0 # already joined
-  local args=(--server "$JOIN_SERVER" --token "$JOIN_TOKEN" --ca "$JOIN_CA")
+  local args=(--server "$JOIN_SERVER" --ca "$JOIN_CA")
   [[ -n $NODE_NAME ]] && args+=(--name "$NODE_NAME")
-  # Private mode: modula-node sets up `cloudflared access tcp` before joining (secret via env).
+  # Private mode: modula-node sets up `cloudflared access tcp` before joining.
   [[ -n ${ACCESS_HOST:-} ]] && args+=(--access-host "$ACCESS_HOST" --access-id "$ACCESS_ID")
-  MODULA_ACCESS_SECRET=${ACCESS_SECRET:-} "$PREFIX/current/modula-node" --data-dir "$NODE_STATE" join "${args[@]}"
+  # Secrets via the environment, never modula-node's command line.
+  MODULA_JOIN_TOKEN=$JOIN_TOKEN MODULA_ACCESS_SECRET=${ACCESS_SECRET:-} \
+    "$PREFIX/current/modula-node" --data-dir "$NODE_STATE" join "${args[@]}"
 }
 
 start_node() {
@@ -1434,6 +1648,7 @@ upgrade() {
   local previous; previous=$(readlink -f "$PREFIX/current")
   header "Upgrading Modula on $(this_host) ${D}(currently $(basename "$previous"))${N}"
   step "Checking this server" preflight
+  firewall_legacy_range
   step "Downloading release ($VERSION)" download
   if [[ $(readlink -f "$RELEASE") == "$previous" ]]; then
     printf '\n  %s✓%s Already on %s%s%s; nothing to do. Enjoy!\n\n' "$A" "$N" "$B" "$(basename "$previous")" "$N"
@@ -1482,8 +1697,18 @@ upgrade() {
   printf '\n  %s✓%s Upgraded to %s%s%s in %s. Fresh and ready!\n\n' "$A" "$N" "$B" "$(basename "$RELEASE")" "$N" "$(fmt_ms "$(ms_since "$T0")")"
 }
 
-case $MODE in
-  main) install_main ;;
-  join) install_join ;;
-  upgrade) upgrade ;;
-esac
+main() {
+  exec 3>&1 4>&2
+  trap on_exit EXIT
+  parse_args "$@"
+  validate_args
+  install_url
+  elevate
+  case $MODE in
+    main) install_main ;;
+    join) install_join ;;
+    upgrade) upgrade ;;
+  esac
+}
+
+main "$@"

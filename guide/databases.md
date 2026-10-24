@@ -107,9 +107,19 @@ server never connects to your database itself: each request is run by the
 server hosting the database, over the environment's private network, with the
 database's own credentials.
 
-Every route needs the **Member** role (Viewers and Deployers can't read rows),
-works only on services created from the Postgres template, and needs an active
-deployment. Every write and every query is written to the audit log (the first
+Reading (tables, rows, read-only queries, stats, extensions, credentials) needs
+the **Member** role (Viewers and Deployers can't read rows). Writing (editing
+rows, writable SQL, vacuum, installing extensions) needs **Admin** and a recent
+re-authentication (sudo), so it's dashboard-only: API tokens never get sudo.
+Every route works only on services created from the Postgres template and
+needs an active deployment.
+
+Reads run as a `modula_reader` role that the server hosting the database
+creates on first use (`pg_read_all_data` and `pg_monitor`, no superuser,
+read-only transactions by default), so a read can't change anything even if it
+gets past the read-only checks. Tables with row-level security show only what
+that role's policies allow. On Postgres older than 14, reads fall back to the
+database's own user. Every write and every query is written to the audit log (the first
 500 characters of the SQL, never results).
 
 | Route | Body / query | Returns |
@@ -131,13 +141,14 @@ deployment. Every write and every query is written to the audit log (the first
 
 Query notes:
 
-- The SQL runs as the database's superuser with a 30-second statement
+- Read-only SQL runs as `modula_reader`; writable SQL runs as the database's
+  own user (the template's superuser). Both have a 30-second statement
   timeout. The result is the last statement that returned rows (at most 1000
   rows; `truncated` tells you).
 - Send `"readOnly": true` (the default for `modula db query`) to run a
   single read statement (`SELECT`, `WITH`, `VALUES`, `TABLE`, `EXPLAIN`,
   `SHOW`) inside a read-only transaction that is always rolled back. Without
-  it the SQL runs as a writable script and needs the write permission.
+  it the SQL runs as a writable script and needs Admin and sudo.
 
 - Postgres errors come back as `400` with Postgres's message.
 

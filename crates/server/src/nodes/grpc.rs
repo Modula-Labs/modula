@@ -98,23 +98,26 @@ impl pb::node_server::Node for NodeService {
         let version: String = req.node_version.chars().take(64).collect();
 
         let mut tx = self.state.db.begin().await.map_err(internal)?;
-        let token_id: Option<Id> = sqlx::query_scalar(
+        // A workspace's token (Hetzner provisioning) enrolls a server only
+        // that workspace places on; NULL = shared.
+        let token: Option<(Id, Option<Id>)> = sqlx::query_as(
             "UPDATE node_join_tokens SET used_at = now()
              WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now()
-             RETURNING id",
+             RETURNING id, workspace_id",
         )
         .bind(token::hash(&req.join_token).as_bytes())
         .fetch_optional(&mut *tx)
         .await
         .map_err(internal)?;
-        let Some(token_id) = token_id else {
+        let Some((token_id, workspace)) = token else {
             return Err(Status::permission_denied("invalid or expired join token"));
         };
         sqlx::query(
-            "INSERT INTO nodes (id, name, cert_serial, cert_expires_at, node_version)
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO nodes (id, workspace_id, name, cert_serial, cert_expires_at, node_version)
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(node_id)
+        .bind(workspace)
         .bind(&name)
         .bind(&issued.serial_hex)
         .bind(issued.not_after)
@@ -178,9 +181,7 @@ impl pb::node_server::Node for NodeService {
         .await
         .map_err(internal)?;
         if ok != Some(true) {
-            return Err(Status::unauthenticated(
-                "node is revoked or its certificate was replaced",
-            ));
+            return Err(revoked());
         }
 
         let mut inbound = req.into_inner();
@@ -200,12 +201,14 @@ impl pb::node_server::Node for NodeService {
         let info = hello.info.clone().unwrap_or_default();
         let location =
             crate::locations::resolve(&info.cloud_provider, &info.cloud_region, &info.edge_colo);
-        sqlx::query(
+        // Guarded again: a revoke (or renewal) may have landed since the
+        // check above.
+        let hello_ok = sqlx::query(
             "UPDATE nodes SET status = 'online', node_version = $2, protocol = $3, runtime = $4,
                     applied_generation = $5, info = $6, last_seen_at = now(),
                     location = CASE WHEN location_pinned THEN location ELSE coalesce($7, location) END,
                     public_ip = coalesce($8, public_ip)
-             WHERE id = $1",
+             WHERE id = $1 AND status <> 'revoked' AND cert_serial = $9",
         )
         .bind(node)
         .bind(hello.node_version.chars().take(64).collect::<String>())
@@ -225,12 +228,27 @@ impl pb::node_server::Node for NodeService {
         }))
         .bind(location.map(|l| l.id))
         .bind(info.public_ip.parse::<std::net::Ipv4Addr>().ok().map(|ip| ip.to_string()))
+        .bind(&serial)
         .execute(&state.db)
         .await
-        .map_err(internal)?;
+        .map_err(internal)?
+        .rows_affected()
+            == 1;
+        if !hello_ok {
+            return Err(revoked());
+        }
 
         let (tx, rx) = mpsc::channel(256);
         let reg = state.hub.register(node, tx.clone());
+        // A revoke that committed between the update above and `register`
+        // disconnected nothing; drop this stream ourselves.
+        match current(&state, node, &serial).await {
+            Ok(true) => {}
+            r => {
+                state.hub.unregister(node, reg.conn_id);
+                return Err(r.map_or_else(internal, |_| revoked()));
+            }
+        }
         let ack = pb::ServerMessage {
             msg: Some(Out::HelloAck(pb::HelloAck {
                 protocol: proto,
@@ -274,6 +292,7 @@ impl pb::node_server::Node for NodeService {
         {
             let (state, tx, cancel, conn_id) = (state.clone(), tx, reg.cancel, reg.conn_id);
             tokio::spawn(async move {
+                let mut limits = Limits::new();
                 loop {
                     let msg = tokio::select! {
                         m = inbound.message() => m,
@@ -281,8 +300,17 @@ impl pb::node_server::Node for NodeService {
                     };
                     match msg {
                         Ok(Some(pb::NodeMessage { msg: Some(m) })) => {
-                            if let Err(e) = handle(&state, node, &tx, m).await {
-                                tracing::warn!(%node, error = ?e, "node message failed");
+                            if !limits.admit(&m) {
+                                limits.warn(node);
+                                continue;
+                            }
+                            match handle(&state, node, &serial, &tx, m).await {
+                                Ok(Flow::Continue) => {}
+                                Ok(Flow::Drop) => {
+                                    tracing::warn!(%node, "node is revoked; dropping its stream");
+                                    break;
+                                }
+                                Err(e) => tracing::warn!(%node, error = ?e, "node message failed"),
                             }
                         }
                         Ok(Some(_)) => {}
@@ -309,31 +337,153 @@ impl pb::node_server::Node for NodeService {
     }
 }
 
+fn revoked() -> Status {
+    Status::unauthenticated("node is revoked or its certificate was replaced")
+}
+
+/// Whether `serial` is still the certificate of a node that is not revoked.
+async fn current(state: &AppState, node: Id, serial: &str) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM nodes WHERE id = $1 AND status <> 'revoked' AND cert_serial = $2)",
+    )
+    .bind(node)
+    .bind(serial)
+    .fetch_one(&state.db)
+    .await
+}
+
+/// What the reader does after a message.
+enum Flow {
+    Continue,
+    /// The node was revoked under this stream.
+    Drop,
+}
+
+/// Messages per second (and burst) a stream may send of the kinds that can
+/// be dropped: logs, metrics and deployment events. A node over it loses
+/// them; heartbeats, reports and replies are never limited.
+const MSG_RATE: f64 = 200.0;
+const MSG_BURST: f64 = 1000.0;
+/// Shipped log bytes per second (and burst) per stream.
+const LOG_BYTES_RATE: f64 = 4.0 * 1024.0 * 1024.0;
+const LOG_BYTES_BURST: f64 = 8.0 * 1024.0 * 1024.0;
+const WARN_EVERY: Duration = Duration::from_secs(10);
+
+struct Bucket {
+    tokens: f64,
+    rate: f64,
+    burst: f64,
+    at: std::time::Instant,
+}
+
+impl Bucket {
+    fn new(rate: f64, burst: f64) -> Self {
+        Self {
+            tokens: burst,
+            rate,
+            burst,
+            at: std::time::Instant::now(),
+        }
+    }
+
+    fn refill(&mut self) {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.at).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.rate).min(self.burst);
+        self.at = now;
+    }
+}
+
+/// Per-stream token buckets for what a node sends.
+struct Limits {
+    msgs: Bucket,
+    log_bytes: Bucket,
+    dropped: u64,
+    warned: Option<std::time::Instant>,
+}
+
+impl Limits {
+    fn new() -> Self {
+        Self {
+            msgs: Bucket::new(MSG_RATE, MSG_BURST),
+            log_bytes: Bucket::new(LOG_BYTES_RATE, LOG_BYTES_BURST),
+            dropped: 0,
+            warned: None,
+        }
+    }
+
+    /// False when `m` should be dropped.
+    fn admit(&mut self, m: &In) -> bool {
+        let bytes = match m {
+            In::LogBatch(b) => b
+                .lines
+                .iter()
+                .map(|l| l.text.len() + l.deployment_id.len())
+                .sum::<usize>() as f64,
+            In::Metrics(_) | In::Event(_) => 0.0,
+            _ => return true,
+        };
+        self.msgs.refill();
+        self.log_bytes.refill();
+        if self.msgs.tokens < 1.0 || self.log_bytes.tokens < bytes.min(LOG_BYTES_BURST) {
+            self.dropped += 1;
+            return false;
+        }
+        self.msgs.tokens -= 1.0;
+        self.log_bytes.tokens -= bytes.min(LOG_BYTES_BURST);
+        true
+    }
+
+    /// At most one warning per [`WARN_EVERY`], with the count since the last.
+    fn warn(&mut self, node: Id) {
+        if self.warned.is_some_and(|t| t.elapsed() < WARN_EVERY) {
+            return;
+        }
+        tracing::warn!(%node, dropped = self.dropped, "node is over its message rate; dropping");
+        self.dropped = 0;
+        self.warned = Some(std::time::Instant::now());
+    }
+}
+
+/// Renew only once less than this much lifetime is left: a third of it, as
+/// the node asks (its `RENEW_BEFORE`), plus a margin for clock skew.
+const RENEW_WITHIN: time::Duration =
+    time::Duration::seconds(crate::pki::NODE_CERT_TTL.whole_seconds() / 3 + 3600);
+
 async fn handle(
     state: &AppState,
     node: Id,
+    serial: &str,
     tx: &crate::nodes::hub::Outbound,
     msg: In,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Flow> {
     match msg {
         In::Hello(_) => {}
         In::Heartbeat(_) => {
-            sqlx::query("UPDATE nodes SET last_seen_at = now() WHERE id = $1")
-                .bind(node)
-                .execute(&state.db)
-                .await?;
+            let r = sqlx::query(
+                "UPDATE nodes SET last_seen_at = now() WHERE id = $1 AND status <> 'revoked'",
+            )
+            .bind(node)
+            .execute(&state.db)
+            .await?;
+            if r.rows_affected() == 0 {
+                return Ok(Flow::Drop);
+            }
         }
         In::Metrics(r) => crate::metrics::record(&state.db, node, &r).await?,
         In::LogBatch(b) => crate::logs::record(&state.db, node, &b).await?,
         In::Report(r) => {
-            sqlx::query(
+            let r = sqlx::query(
                 "UPDATE nodes SET applied_generation = GREATEST(applied_generation, $2), last_seen_at = now()
-                 WHERE id = $1",
+                 WHERE id = $1 AND status <> 'revoked'",
             )
             .bind(node)
             .bind(r.generation as i64)
             .execute(&state.db)
             .await?;
+            if r.rows_affected() == 0 {
+                return Ok(Flow::Drop);
+            }
         }
         In::Event(ev) => {
             let kick = deploy::state::apply_event(&state.db, node, &ev)
@@ -362,12 +512,23 @@ async fn handle(
         In::Renew(r) => {
             let pki = state.pki().await.map_err(|e| anyhow::anyhow!("{e:?}"))?;
             let issued = pki.issue_node_cert(node, &r.csr_der)?;
-            sqlx::query("UPDATE nodes SET cert_serial = $2, cert_expires_at = $3 WHERE id = $1 AND status <> 'revoked'")
-                .bind(node)
-                .bind(&issued.serial_hex)
-                .bind(issued.not_after)
-                .execute(&state.db)
-                .await?;
+            // Only for this stream's (current) certificate, and only when it
+            // is due: otherwise no reply, and the node asks again next connect.
+            let r = sqlx::query(
+                "UPDATE nodes SET cert_serial = $2, cert_expires_at = $3
+                 WHERE id = $1 AND status <> 'revoked' AND cert_serial = $4 AND cert_expires_at < $5",
+            )
+            .bind(node)
+            .bind(&issued.serial_hex)
+            .bind(issued.not_after)
+            .bind(serial)
+            .bind(time::OffsetDateTime::now_utc() + RENEW_WITHIN)
+            .execute(&state.db)
+            .await?;
+            if r.rows_affected() == 0 {
+                tracing::warn!(%node, "ignoring a certificate renewal that is not due");
+                return Ok(Flow::Continue);
+            }
             let msg = pb::ServerMessage {
                 msg: Some(Out::Renewed(pb::RenewResponse {
                     cert_der: issued.der,
@@ -377,5 +538,5 @@ async fn handle(
             tracing::info!(%node, "node certificate renewed");
         }
     }
-    Ok(())
+    Ok(Flow::Continue)
 }

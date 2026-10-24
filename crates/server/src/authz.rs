@@ -152,10 +152,12 @@ pub enum Action {
     CloudflareConnect,
     CloudflareDisconnect,
     /// Database tab (Postgres services): browse tables and rows, read-only
-    /// queries, stats, extensions; and any database's connection credentials.
+    /// queries, stats, extensions.
     DatabaseRead,
     /// Run SQL, edit rows, vacuum, install or remove extensions.
     DatabaseWrite,
+    /// Any database's connection credentials (full access to its data).
+    DatabaseCredentials,
     /// Regenerate the database password.
     DatabasePassword,
     /// A workspace's Hetzner connection (never the token), caps and usage.
@@ -235,7 +237,10 @@ impl Action {
             Self::CloudflareRead | Self::CloudflareConnect | Self::CloudflareDisconnect => {
                 K::Workspace
             }
-            Self::DatabaseRead | Self::DatabaseWrite | Self::DatabasePassword => K::ServiceInstance,
+            Self::DatabaseRead
+            | Self::DatabaseWrite
+            | Self::DatabaseCredentials
+            | Self::DatabasePassword => K::ServiceInstance,
             Self::HetznerRead
             | Self::HetznerConnect
             | Self::HetznerDisconnect
@@ -318,7 +323,9 @@ impl Action {
             Self::CloudflareConnect | Self::CloudflareDisconnect => Role::Admin,
             // Rows hold application data and credentials grant full access, so
             // even reading is Member+ (Viewers and Deployers see neither).
-            Self::DatabaseRead | Self::DatabaseWrite | Self::DatabasePassword => Role::Member,
+            // Changing data bypasses the app's own rules: Admin+ (and sudo).
+            Self::DatabaseRead | Self::DatabaseCredentials | Self::DatabasePassword => Role::Member,
+            Self::DatabaseWrite => Role::Admin,
             Self::HetznerRead | Self::ServerList | Self::ServerRead => Role::Viewer,
             Self::ServerSuggest => Role::Member,
             Self::HetznerConnect
@@ -362,8 +369,7 @@ impl Action {
             | Self::VariablesWrite
             | Self::SharedVariablesRead
             | Self::SharedVariablesWrite
-            // Members can already read database credentials; API tokens
-            // (never sudo) must be able to pull and plan.
+            // API tokens (never sudo) must be able to pull and plan.
             | Self::EnvironmentConfigRead
             | Self::EnvironmentDeploy
             | Self::EnvironmentDiscard
@@ -398,8 +404,10 @@ impl Action {
             Self::TokenRevoke | Self::TunnelOpen => false,
             Self::CloudflareRead => false,
             Self::CloudflareConnect | Self::CloudflareDisconnect => true,
-            Self::DatabaseRead | Self::DatabaseWrite => false,
-            Self::DatabasePassword => true,
+            // Credentials: API tokens (never sudo) need them for `modula connect`;
+            // every read is audited instead.
+            Self::DatabaseRead | Self::DatabaseCredentials => false,
+            Self::DatabaseWrite | Self::DatabasePassword => true,
             Self::HetznerRead
             | Self::HetznerCatalog
             | Self::ServerList
@@ -679,6 +687,16 @@ mod tests {
             assert_eq!(Role::parse(r.as_str()), Some(r));
         }
         assert_eq!(Role::parse("owner"), None);
+    }
+
+    #[test]
+    fn database_writes_and_credentials_need_more() {
+        assert_eq!(Action::DatabaseRead.min_role(), Role::Member);
+        assert!(!Action::DatabaseRead.requires_sudo());
+        assert_eq!(Action::DatabaseWrite.min_role(), Role::Admin);
+        assert!(Action::DatabaseWrite.requires_sudo());
+        assert_eq!(Action::DatabaseCredentials.min_role(), Role::Member);
+        assert!(!Action::DatabaseCredentials.requires_sudo());
     }
 
     #[test]

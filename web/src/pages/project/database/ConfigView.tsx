@@ -149,7 +149,10 @@ function ValueField({ label, value, secret }: { label: string; value: string; se
 function Connection({ instance, canEdit }: { instance: Instance; canEdit: boolean }) {
   const qc = useQueryClient();
   const key = ["db-credentials", instance.id];
-  const q = useQuery({ queryKey: key, queryFn: () => api.dbCredentials(instance.id), ...dbQueryOpts });
+  // Every read of the credentials is audited: fetch on request, so merely
+  // opening the tab doesn't record one.
+  const [reveal, setReveal] = useState(false);
+  const q = useQuery({ queryKey: key, queryFn: () => api.dbCredentials(instance.id), ...dbQueryOpts, enabled: reveal });
   const [confirm, setConfirm] = useState(false);
   const regen = useMutation({
     mutationFn: () => api.dbRegeneratePassword(instance.id),
@@ -159,6 +162,16 @@ function Connection({ instance, canEdit }: { instance: Instance; canEdit: boolea
       setConfirm(false);
     },
   });
+  if (!reveal) {
+    return (
+      <Card className="flex items-center justify-between gap-4 p-4">
+        <p className="text-sm text-muted-foreground">Credentials give full access to this database. Viewing them is recorded in the audit log.</p>
+        <Button variant="outline" size="sm" onClick={() => setReveal(true)}>
+          Show credentials
+        </Button>
+      </Card>
+    );
+  }
   return (
     <QueryBoundary q={q}>
       {(c) => (

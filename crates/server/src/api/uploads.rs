@@ -31,6 +31,10 @@ pub const SHA256_HEADER: &str = "x-content-sha256";
 /// Uploads per user per hour.
 const RATE: Limit = Limit::per(60, Duration::from_secs(3600));
 
+/// Bytes a workspace may upload per rolling 24 hours, across all its users
+/// (the per-user rate alone lets many members fill the disk).
+pub const WORKSPACE_DAILY_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
 /// A stalled upload is abandoned after this long without data.
 const IDLE: Duration = Duration::from_secs(60);
 
@@ -93,6 +97,23 @@ pub async fn create(
     let _slot = Slot::acquire(&state, workspace).ok_or(AppError::TooManyRequests {
         retry_after_secs: 10,
     })?;
+    let used: i64 = sqlx::query_scalar(
+        "SELECT coalesce(sum(size_bytes), 0)::bigint FROM source_uploads
+         WHERE workspace_id = $1 AND created_at > now() - interval '1 day'",
+    )
+    .bind(workspace)
+    .fetch_one(&state.db)
+    .await?;
+    let remaining = WORKSPACE_DAILY_BYTES.saturating_sub(u64::try_from(used).unwrap_or(0));
+    let over_quota = || {
+        AppError::PayloadTooLarge(format!(
+            "this workspace has used its {} GB of uploads for the last 24 hours; try again later",
+            WORKSPACE_DAILY_BYTES / 1024 / 1024 / 1024
+        ))
+    };
+    if remaining == 0 || declared.is_some_and(|n| n > remaining) {
+        return Err(over_quota());
+    }
 
     let id = Id::new();
     let part = upload::partial(&state, id);
@@ -100,12 +121,16 @@ pub async fn create(
         .await
         .map_err(anyhow::Error::from)?;
     // Whatever goes wrong below, no partial file is left behind.
-    let received = receive(body, &part, max).await;
+    let received = receive(body, &part, max.min(remaining)).await;
     let (sha256, size) = match received {
         Ok(Some(done)) => done,
         Ok(None) => {
             let _ = tokio::fs::remove_file(&part).await;
-            return Err(too_large());
+            return Err(if remaining < max {
+                over_quota()
+            } else {
+                too_large()
+            });
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&part).await;

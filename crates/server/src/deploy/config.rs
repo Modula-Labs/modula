@@ -347,6 +347,24 @@ pub fn validate_rel_path(p: &str, what: &str) -> AppResult<()> {
     }
 }
 
+/// A registry given as an IP literal (`10.0.0.5:5000`) must not be loopback,
+/// link-local, cloud metadata or unspecified: the node's Docker daemon would
+/// fetch from its own host. Private (LAN) registries are legitimate and stay
+/// allowed; so do names (`localhost:5000` included: a registry beside each
+/// node is a common setup, and names are resolved by Docker, not us).
+fn registry_ip_ok(host_port: &str) -> bool {
+    let host = host_port.split(':').next().unwrap_or_default();
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => {
+            !(modula_backup::net::loopback(ip)
+                || modula_backup::net::link_local_or_metadata(ip)
+                || ip.is_unspecified()
+                || ip.is_multicast())
+        }
+        Err(_) => true,
+    }
+}
+
 /// Docker reference grammar, conservatively: [registry[:port]/]path[:tag][@sha256:hex].
 pub fn validate_image_ref(r: &str) -> AppResult<()> {
     let bad = || Err(AppError::bad_request("invalid image reference"));
@@ -400,6 +418,7 @@ pub fn validate_image_ref(r: &str) -> AppResult<()> {
                 && !p.contains("..")
                 && p.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b".-:".contains(&b))
+                && registry_ip_ok(p)
         } else {
             !p.is_empty()
                 && p.bytes()
@@ -426,6 +445,9 @@ mod tests {
             "ghcr.io/acme/api:v1.2.3",
             "localhost:5000/app",
             "registry.example.com:8443/team/app_name:latest",
+            // LAN registries are fine.
+            "10.0.0.5:5000/team/app",
+            "192.168.1.2/app:v1",
             "nginx@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         ] {
             assert!(validate_image_ref(ok).is_ok(), "{ok}");
@@ -442,6 +464,10 @@ mod tests {
             "nginx@sha256:short",
             "nginx@md5:0123",
             "../etc",
+            // The node's own host and cloud metadata are not registries.
+            "127.0.0.1:5000/app",
+            "169.254.169.254/latest",
+            "0.0.0.0:5000/app",
         ] {
             assert!(validate_image_ref(bad).is_err(), "{bad}");
         }

@@ -42,12 +42,7 @@ impl Agent for HubAgent {
             let request_id = Id::new().to_string();
             cfg.request_id = request_id.clone();
             let (tx, rx) = oneshot::channel();
-            state
-                .private
-                .pending
-                .lock()
-                .expect("private lock")
-                .insert(request_id.clone(), (node, tx));
+            crate::sync::lock(&state.private.pending).insert(request_id.clone(), (node, tx));
             let sent = state
                 .hub
                 .send(node, pb::server_message::Msg::Access(cfg))
@@ -62,12 +57,7 @@ impl Agent for HubAgent {
                     Err(_) => Err("the server did not answer in time".to_owned()),
                 }
             };
-            state
-                .private
-                .pending
-                .lock()
-                .expect("private lock")
-                .remove(&request_id);
+            crate::sync::lock(&state.private.pending).remove(&request_id);
             outcome
         })
     }

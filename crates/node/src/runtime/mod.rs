@@ -4,6 +4,7 @@
 pub mod docker;
 mod docker_exec;
 pub mod fake;
+pub mod firewall;
 
 use async_trait::async_trait;
 use bytes::Bytes;

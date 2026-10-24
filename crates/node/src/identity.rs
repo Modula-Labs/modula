@@ -119,22 +119,44 @@ pub fn pem_blocks(pem: &str, label: &str) -> Vec<Vec<u8>> {
     out
 }
 
-fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<()> {
+/// Writes `bytes` to a fresh temp file next to `path` (unique name, created
+/// exclusively with `mode`, so nothing else can hold it open) and renames it
+/// over `path`.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<()> {
     use std::io::Write;
-    let tmp = path.with_extension("tmp");
+    let name = path
+        .file_name()
+        .context("path without a file name")?
+        .to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", Id::new()));
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(mode);
     }
+    #[cfg(not(unix))]
+    let _ = mode;
     let mut f = opts
         .open(&tmp)
         .with_context(|| format!("cannot write {}", tmp.display()))?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)?;
+    let written = (|| {
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        // The umask may have narrowed the mode; never widened it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("cannot write {}", path.display()));
+    }
     Ok(())
 }
 
@@ -155,4 +177,44 @@ fn check_private(path: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_atomically_with_its_own_temp_file() {
+        let dir = std::env::temp_dir().join(format!("modula-id-{}", Id::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A planted file at the old shared temp name is left alone.
+        std::fs::write(dir.join("node.tmp"), b"planted").unwrap();
+        write_atomic(&dir.join(KEY), b"key", 0o600).unwrap();
+        write_atomic(&dir.join(CERT), b"cert", 0o644).unwrap();
+        assert_eq!(std::fs::read(dir.join(KEY)).unwrap(), b"key");
+        assert_eq!(std::fs::read(dir.join(CERT)).unwrap(), b"cert");
+        assert_eq!(std::fs::read(dir.join("node.tmp")).unwrap(), b"planted");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.join(KEY))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+            check_private(&dir.join(KEY)).unwrap();
+        }
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
+            .count();
+        assert_eq!(leftovers, 1, "only the planted file");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

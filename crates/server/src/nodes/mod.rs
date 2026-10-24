@@ -19,24 +19,53 @@ use crate::error::AppResult;
 use crate::state::AppState;
 
 /// Join tokens: `mcj_…`, single use, short-lived; only the hash is stored.
+/// A token with a `workspace` enrolls a server private to that workspace;
+/// without one (an instance admin's) the server is shared.
 pub async fn create_join_token(
-    db: &sqlx::PgPool,
+    db: impl sqlx::PgExecutor<'_>,
     created_by: Option<modula_id::Id>,
+    workspace: Option<modula_id::Id>,
     ttl: time::Duration,
-) -> AppResult<(secrecy::SecretString, time::OffsetDateTime)> {
+) -> AppResult<(modula_id::Id, secrecy::SecretString, time::OffsetDateTime)> {
     use modula_crypto::token::{self, prefix};
     let t = token::generate(prefix::NODE_JOIN)?;
+    let id = modula_id::Id::new();
     let expires = time::OffsetDateTime::now_utc() + ttl;
     sqlx::query(
-        "INSERT INTO node_join_tokens (id, token_hash, created_by, expires_at) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO node_join_tokens (id, token_hash, created_by, workspace_id, expires_at)
+         VALUES ($1, $2, $3, $4, $5)",
     )
-    .bind(modula_id::Id::new())
+    .bind(id)
     .bind(t.hash.as_bytes())
     .bind(created_by)
+    .bind(workspace)
     .bind(expires)
     .execute(db)
     .await?;
-    Ok((t.plaintext, expires))
+    Ok((id, t.plaintext, expires))
+}
+
+/// Revoke a node: it stops counting for placement, loses what ran on it,
+/// and its certificate serial is tombstoned so that certificate can never
+/// attach again (a revoked server re-joins with a new token). False when it
+/// was already revoked. The caller disconnects it after committing.
+pub async fn revoke(tx: &mut sqlx::PgConnection, node: modula_id::Id) -> AppResult<bool> {
+    let r = sqlx::query(
+        "UPDATE nodes SET status = 'revoked', revoked_at = now(), cert_serial = 'revoked:' || cert_serial
+         WHERE id = $1 AND status <> 'revoked'",
+    )
+    .bind(node)
+    .execute(&mut *tx)
+    .await?;
+    if r.rows_affected() == 0 {
+        return Ok(false);
+    }
+    crate::deploy::remove_live(&mut *tx, crate::deploy::LiveFilter::Node, node).await?;
+    sqlx::query("UPDATE service_instances SET node_id = NULL WHERE node_id = $1")
+        .bind(node)
+        .execute(&mut *tx)
+        .await?;
+    Ok(true)
 }
 
 /// The command a new server runs to join this control plane.

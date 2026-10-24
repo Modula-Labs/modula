@@ -61,7 +61,7 @@ impl RateLimiter {
                 (n, ttl.max(0) as u64)
             }
             Self::Memory(map) => {
-                let mut map = map.lock().expect("ratelimit lock");
+                let mut map = crate::sync::lock(map);
                 let now = Instant::now();
                 let entry = map.entry(k).or_insert((0, now + limit.window));
                 if entry.1 <= now {
@@ -78,6 +78,69 @@ impl RateLimiter {
             return Err(AppError::TooManyRequests {
                 retry_after_secs: ttl_ms.div_ceil(1000).max(1),
             });
+        }
+        Ok(())
+    }
+
+    /// Error with 429 if `bucket`/`key` already has `limit.max` hits in the
+    /// window, without counting this call. With [`hit`](Self::hit), counts
+    /// only some outcomes (e.g. failed logins) while still refusing early.
+    pub async fn peek(&self, bucket: &str, key: &str, limit: Limit) -> AppResult<()> {
+        let k = format!("modula:rl:{bucket}:{key}");
+        let (count, ttl_ms) = match self {
+            Self::Redis(conn) => {
+                let mut conn = conn.clone();
+                let (n, ttl): (Option<u32>, i64) = redis::pipe()
+                    .cmd("GET")
+                    .arg(&k)
+                    .cmd("PTTL")
+                    .arg(&k)
+                    .query_async(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.into()))?;
+                (n.unwrap_or(0), ttl.max(0) as u64)
+            }
+            Self::Memory(map) => {
+                let map = crate::sync::lock(map);
+                let now = Instant::now();
+                match map.get(&k) {
+                    Some(&(n, until)) if until > now => {
+                        (n, until.saturating_duration_since(now).as_millis() as u64)
+                    }
+                    _ => (0, 0),
+                }
+            }
+        };
+        if count >= limit.max {
+            return Err(AppError::TooManyRequests {
+                retry_after_secs: ttl_ms.div_ceil(1000).max(1),
+            });
+        }
+        Ok(())
+    }
+
+    /// Count a hit for `bucket`/`key` without checking it (see [`peek`](Self::peek)).
+    pub async fn hit(&self, bucket: &str, key: &str, limit: Limit) -> AppResult<()> {
+        let k = format!("modula:rl:{bucket}:{key}");
+        match self {
+            Self::Redis(conn) => {
+                let mut conn = conn.clone();
+                let _: (u32, i64) = redis::Script::new(SCRIPT)
+                    .key(&k)
+                    .arg(limit.window.as_millis() as u64)
+                    .invoke_async(&mut conn)
+                    .await
+                    .map_err(|e| AppError::Internal(e.into()))?;
+            }
+            Self::Memory(map) => {
+                let mut map = crate::sync::lock(map);
+                let now = Instant::now();
+                let entry = map.entry(k).or_insert((0, now + limit.window));
+                if entry.1 <= now {
+                    *entry = (0, now + limit.window);
+                }
+                entry.0 += 1;
+            }
         }
         Ok(())
     }
@@ -110,5 +173,20 @@ mod tests {
         assert!(rl.check("b", "k", lim).await.is_err());
         tokio::time::sleep(Duration::from_millis(40)).await;
         rl.check("b", "k", lim).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn peek_does_not_count_and_hit_does() {
+        let rl = RateLimiter::memory();
+        let lim = Limit::per_minute(2);
+        for _ in 0..5 {
+            rl.peek("fail", "k", lim).await.unwrap();
+        }
+        rl.hit("fail", "k", lim).await.unwrap();
+        rl.peek("fail", "k", lim).await.unwrap();
+        rl.hit("fail", "k", lim).await.unwrap();
+        let err = rl.peek("fail", "k", lim).await.unwrap_err();
+        assert!(matches!(err, AppError::TooManyRequests { .. }));
+        rl.peek("fail", "other", lim).await.unwrap();
     }
 }

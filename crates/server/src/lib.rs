@@ -27,6 +27,7 @@ pub mod private;
 pub mod provision;
 pub mod ratelimit;
 pub mod state;
+pub mod sync;
 pub mod templates;
 pub mod tunnel;
 pub mod updates;

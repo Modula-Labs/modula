@@ -180,7 +180,7 @@ pub async fn installation_token(
 ) -> AppResult<SecretString> {
     let key = (installation, scope);
     let now = OffsetDateTime::now_utc();
-    if let Some(t) = state.github.tokens.lock().expect("token cache").get(&key)
+    if let Some(t) = crate::sync::lock(&state.github.tokens).get(&key)
         && t.expires_at - TOKEN_MARGIN > now
     {
         return Ok(t.token.clone());
@@ -222,7 +222,7 @@ pub async fn installation_token(
         expires_at: OffsetDateTime,
     }
     let r: Resp = resp.json().await.map_err(anyhow::Error::from)?;
-    let mut cache = state.github.tokens.lock().expect("token cache");
+    let mut cache = crate::sync::lock(&state.github.tokens);
     cache.retain(|_, t| t.expires_at - TOKEN_MARGIN > now);
     cache.insert(
         key,
@@ -236,12 +236,7 @@ pub async fn installation_token(
 
 /// Forget an installation's cached tokens (it was uninstalled).
 pub fn forget_installation(state: &AppState, installation: i64) {
-    state
-        .github
-        .tokens
-        .lock()
-        .expect("token cache")
-        .retain(|(id, _), _| *id != installation);
+    crate::sync::lock(&state.github.tokens).retain(|(id, _), _| *id != installation);
 }
 
 /// The installation in `workspace` that covers `repo`'s owner, if any.
@@ -444,6 +439,121 @@ pub async fn installation(state: &AppState, id: i64) -> AppResult<Installation> 
     })
 }
 
+/// Where GitHub's web UI (and OAuth) lives for the configured API: github.com
+/// for api.github.com, the same host for GitHub Enterprise Server
+/// (`https://ghe.example/api/v3` → `https://ghe.example`) and test mocks.
+pub fn web_origin(state: &AppState) -> url::Url {
+    let api = &state.github.api;
+    if api.host_str() == Some("api.github.com") {
+        return "https://github.com".parse().expect("static URL");
+    }
+    let mut web = api.clone();
+    web.set_path("");
+    web.set_query(None);
+    web
+}
+
+/// Whether `raw` is an https URL on GitHub's web host (github.com or the
+/// configured Enterprise host), so it is safe to send a browser to.
+pub fn is_github_web_url(state: &AppState, raw: &str) -> bool {
+    let Ok(url) = raw.parse::<url::Url>() else {
+        return false;
+    };
+    let web = web_origin(state);
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url
+            .host_str()
+            .is_some_and(|h| h == "github.com" || Some(h) == web.host_str())
+}
+
+/// Whether the GitHub user who just authorized the App (`code`, from the
+/// installation's OAuth step) can access `installation`: the callback's
+/// `installation_id` is attacker-controlled, the user's own list isn't.
+/// The user token is used for this one check and dropped.
+pub async fn user_has_installation(
+    state: &AppState,
+    code: &str,
+    installation: i64,
+) -> AppResult<bool> {
+    let ok = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+    if code.is_empty() || code.len() > 100 || !code.bytes().all(ok) {
+        return Err(AppError::bad_request("invalid code"));
+    }
+    let row: Option<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT client_id, client_secret_sealed FROM github_app")
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((client_id, sealed)) = row else {
+        return Err(AppError::Unavailable(
+            "the GitHub App has not been set up on this instance".into(),
+        ));
+    };
+    let secret = state
+        .keys
+        .open(&state.db, &sealed, aad("client_secret"))
+        .await?;
+    let secret =
+        zeroize::Zeroizing::new(String::from_utf8(secret.to_vec()).map_err(anyhow::Error::from)?);
+    let mut url = web_origin(state);
+    url.set_path("/login/oauth/access_token");
+    let resp = state
+        .github
+        .http
+        .post(url)
+        .header("Accept", "application/json")
+        .json(&json!({ "client_id": client_id, "client_secret": secret.as_str(), "code": code }))
+        .send()
+        .await
+        .map_err(unreachable)?;
+    if !resp.status().is_success() {
+        return Err(unexpected(resp.status().as_u16(), "OAuth code exchange"));
+    }
+    // GitHub answers 200 with `error` for a bad or expired code.
+    #[derive(Deserialize)]
+    struct Exchange {
+        access_token: Option<SecretString>,
+    }
+    let ex: Exchange = resp.json().await.map_err(anyhow::Error::from)?;
+    let token = ex.access_token.ok_or_else(|| {
+        AppError::bad_request("GitHub rejected the authorization; connect GitHub again")
+    })?;
+    #[derive(Deserialize)]
+    struct Page {
+        installations: Vec<Inst>,
+    }
+    #[derive(Deserialize)]
+    struct Inst {
+        id: i64,
+    }
+    for page in 1..=MAX_REPO_PAGES {
+        let resp = state
+            .github
+            .request(
+                Method::GET,
+                &format!("/user/installations?per_page=100&page={page}"),
+            )
+            .bearer_auth(token.expose_secret())
+            .send()
+            .await
+            .map_err(unreachable)?;
+        match resp.status().as_u16() {
+            200 => {}
+            s => return Err(unexpected(s, "user installations")),
+        }
+        let p: Page = resp.json().await.map_err(anyhow::Error::from)?;
+        if p.installations.iter().any(|i| i.id == installation) {
+            return Ok(true);
+        }
+        if p.installations.len() < 100 {
+            break;
+        }
+    }
+    Ok(false)
+}
+
 /// How long the pickers' repository and branch listings are reused.
 const LIST_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// GitHub calls the pickers may make per workspace (cache misses only).
@@ -462,7 +572,7 @@ pub struct ListCache {
 
 /// Drop every cached listing: installations or their repositories changed.
 pub fn forget_lists(state: &AppState) {
-    *state.github.lists.lock().expect("list cache") = ListCache::default();
+    *crate::sync::lock(&state.github.lists) = ListCache::default();
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -493,13 +603,7 @@ fn avatar(url: Option<String>) -> Option<String> {
 /// recently pushed first. Cached for a minute; an installation GitHub won't
 /// mint a token for (suspended, removed) is skipped rather than failing all.
 pub async fn workspace_repos(state: &AppState, workspace: Id) -> AppResult<Arc<Vec<Repo>>> {
-    if let Some((at, repos)) = state
-        .github
-        .lists
-        .lock()
-        .expect("list cache")
-        .repos
-        .get(&workspace)
+    if let Some((at, repos)) = crate::sync::lock(&state.github.lists).repos.get(&workspace)
         && at.elapsed() < LIST_TTL
     {
         return Ok(repos.clone());
@@ -595,11 +699,7 @@ pub async fn workspace_repos(state: &AppState, workspace: Id) -> AppResult<Arc<V
             .then_with(|| a.full_name.to_lowercase().cmp(&b.full_name.to_lowercase()))
     });
     let out = Arc::new(out);
-    state
-        .github
-        .lists
-        .lock()
-        .expect("list cache")
+    crate::sync::lock(&state.github.lists)
         .repos
         .insert(workspace, (Instant::now(), out.clone()));
     Ok(out)
@@ -615,13 +715,7 @@ pub async fn workspace_branches(
 ) -> AppResult<Arc<Vec<Branch>>> {
     validate_repo(repo)?;
     let key = (workspace, repo.to_lowercase());
-    if let Some((at, branches)) = state
-        .github
-        .lists
-        .lock()
-        .expect("list cache")
-        .branches
-        .get(&key)
+    if let Some((at, branches)) = crate::sync::lock(&state.github.lists).branches.get(&key)
         && at.elapsed() < LIST_TTL
     {
         return Ok(branches.clone());
@@ -666,7 +760,7 @@ pub async fn workspace_branches(
         }
     }
     let out = Arc::new(out);
-    let mut cache = state.github.lists.lock().expect("list cache");
+    let mut cache = crate::sync::lock(&state.github.lists);
     cache.branches.retain(|_, (at, _)| at.elapsed() < LIST_TTL);
     cache.branches.insert(key, (Instant::now(), out.clone()));
     Ok(out)

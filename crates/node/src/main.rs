@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use modula_node::build::buildkit::BuildkitBuilder;
+use modula_node::build::buildkit::{BuildkitBuilder, Limits};
 use modula_node::build::{BuildLogs, BuildSupport};
 use modula_node::edge::EdgeSink;
 use modula_node::edge::ask::{self, Allowlist};
@@ -91,9 +91,19 @@ enum Command {
         /// Railpack binary.
         #[arg(long, env = "MODULA_RAILPACK", default_value = "railpack")]
         railpack: PathBuf,
-        /// Directory for BuildKit's socket (shared with its container).
+        /// Directory for BuildKit's sockets (one subdirectory per workspace,
+        /// shared with that workspace's build container).
         #[arg(long, default_value = "/run/modula-buildkit")]
         buildkit_dir: PathBuf,
+        /// Memory limit of each workspace's build engine, in MiB.
+        #[arg(long, env = "MODULA_BUILD_MEMORY_MB", default_value_t = 2048)]
+        build_memory_mb: u32,
+        /// CPU limit of each workspace's build engine, in cores.
+        #[arg(long, env = "MODULA_BUILD_CPUS", default_value_t = 2.0)]
+        build_cpus: f64,
+        /// How many builds run on this server at once.
+        #[arg(long, env = "MODULA_BUILD_CONCURRENCY", default_value_t = 2)]
+        build_concurrency: usize,
         /// Caddy runs socket-activated (modula-caddy.socket passes TCP 80,
         /// TCP 443 and UDP 443 as fds 3–5), so its ports stay open across restarts.
         #[arg(long, env = "MODULA_CADDY_SOCKETS")]
@@ -162,10 +172,15 @@ async fn main() -> anyhow::Result<()> {
             buildctl,
             railpack,
             buildkit_dir,
+            build_memory_mb,
+            build_cpus,
+            build_concurrency,
             caddy_sockets,
             upgrade_dir,
         } => {
             let runtime = Arc::new(DockerRuntime::connect()?);
+            // Containers must not reach the cloud's metadata service.
+            tokio::spawn(modula_node::runtime::firewall::block_metadata());
             // Only the main server serves routes of its own (the dashboard).
             let serves_dashboard = !routes.is_empty();
             let stop = CancellationToken::new();
@@ -206,14 +221,25 @@ async fn main() -> anyhow::Result<()> {
                 None
             } else {
                 let logs = BuildLogs::new(cli.data_dir.join("build-logs"))?;
+                anyhow::ensure!(
+                    build_memory_mb >= 256 && build_cpus > 0.0 && build_concurrency > 0,
+                    "build limits must be at least 256 MiB, some CPU and one build"
+                );
+                let limits = Limits {
+                    memory_bytes: i64::from(build_memory_mb) << 20,
+                    nano_cpus: (build_cpus * 1e9) as i64,
+                    concurrency: build_concurrency,
+                    ..Limits::default()
+                };
                 let builder =
-                    BuildkitBuilder::new(&cli.data_dir, buildkit_dir, buildctl, railpack)?;
+                    BuildkitBuilder::new(&cli.data_dir, buildkit_dir, buildctl, railpack, limits)?;
                 Some(BuildSupport {
                     builder: Arc::new(builder),
                     logs,
                 })
             };
-            let db: Arc<dyn modula_node::db::Executor> = Arc::new(modula_node::db::pg::Postgres);
+            let db: Arc<dyn modula_node::db::Executor> =
+                Arc::new(modula_node::db::pg::Postgres::new(&cli.data_dir));
             let upgrade = modula_node::upgrade::SystemdUpgrader::detect(&upgrade_dir)
                 .map(|u| Arc::new(u) as Arc<dyn modula_node::upgrade::Upgrader>);
             modula_node::access::register(Arc::new(modula_node::access::SystemdAccess::new(

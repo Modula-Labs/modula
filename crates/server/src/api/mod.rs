@@ -175,7 +175,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .post("/api/service-instances/{instance_id}/database/vacuum", Resource(Action::DatabaseWrite), database::vacuum)
         .get("/api/service-instances/{instance_id}/database/extensions", Resource(Action::DatabaseRead), database::extensions)
         .post("/api/service-instances/{instance_id}/database/extensions", Resource(Action::DatabaseWrite), database::extension)
-        .get("/api/service-instances/{instance_id}/database/credentials", Resource(Action::DatabaseRead), database::credentials)
+        .get("/api/service-instances/{instance_id}/database/credentials", Resource(Action::DatabaseCredentials), database::credentials)
         .post("/api/service-instances/{instance_id}/database/password", Resource(Action::DatabasePassword), database::regenerate_password)
         // Servers (instance admins)
         .get("/api/nodes", Instance(Action::NodeList), nodes::list)

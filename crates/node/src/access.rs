@@ -343,32 +343,12 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<bool> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
-    {
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(mode);
-        }
-        let mut f = opts
-            .open(&tmp)
-            .with_context(|| format!("cannot write {}", tmp.display()))?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
-    }
-    std::fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()))?;
+    crate::identity::write_atomic(path, bytes, mode)?;
     Ok(true)
 }
 
-async fn run(bin: &str, args: &[&str]) -> anyhow::Result<String> {
+/// Run `bin` with `args` (argv only); its stdout, or an error with stderr.
+pub(crate) async fn run(bin: &str, args: &[&str]) -> anyhow::Result<String> {
     let out = tokio::process::Command::new(bin)
         .args(args)
         .output()
@@ -422,6 +402,64 @@ async fn ufw_has_rule(port: u16) -> bool {
         && out
             .lines()
             .any(|l| l.split_whitespace().next() == Some(&format!("{port}/tcp")))
+}
+
+/// The comment on the ufw rules modula adds (install.sh uses it too).
+const UFW_TAG: &str = "modula";
+
+/// ufw is installed and active (and we may run it).
+pub(crate) async fn ufw_active() -> bool {
+    run("ufw", &["status"])
+        .await
+        .is_ok_and(|out| out.starts_with("Status: active"))
+}
+
+/// `ufw allow <port>/tcp comment modula`.
+pub(crate) async fn ufw_open(port: u16) -> anyhow::Result<()> {
+    let spec = format!("{port}/tcp");
+    run("ufw", &["allow", &spec, "comment", UFW_TAG]).await?;
+    Ok(())
+}
+
+/// Deletes the rule [`ufw_open`] added (matching may depend on the comment
+/// in some ufw versions, so both forms are tried).
+pub(crate) async fn ufw_close(port: u16) -> anyhow::Result<()> {
+    let spec = format!("{port}/tcp");
+    if run("ufw", &["delete", "allow", &spec, "comment", UFW_TAG])
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+    run("ufw", &["delete", "allow", &spec]).await?;
+    Ok(())
+}
+
+/// TCP ports in `range` with a modula-tagged rule in `ufw status` output.
+pub(crate) fn ufw_tagged_ports(status: &str, range: std::ops::RangeInclusive<u16>) -> Vec<u16> {
+    let mut ports: Vec<u16> = status
+        .lines()
+        .filter(|l| l.trim_end().ends_with(&format!("# {UFW_TAG}")))
+        .filter_map(|l| {
+            l.split_whitespace()
+                .next()?
+                .strip_suffix("/tcp")?
+                .parse()
+                .ok()
+        })
+        .filter(|p| range.contains(p))
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+/// The modula-tagged TCP ports in `range` that ufw allows now.
+pub(crate) async fn ufw_open_ports(range: std::ops::RangeInclusive<u16>) -> Vec<u16> {
+    match run("ufw", &["status"]).await {
+        Ok(out) if out.starts_with("Status: active") => ufw_tagged_ports(&out, range),
+        _ => vec![],
+    }
 }
 
 fn deb_arch() -> anyhow::Result<&'static str> {
@@ -539,6 +577,18 @@ mod tests {
         assert!(valid_host("a-nodes.example.com"));
         assert!(!valid_host("A.example.com"));
         assert!(!valid_host("x --url y"));
+    }
+
+    #[test]
+    fn tagged_ufw_ports() {
+        let status = "Status: active\n\nTo                         Action      From\n\
+--                         ------      ----\n\
+22/tcp                     ALLOW       Anywhere                   # modula\n\
+20001/tcp                  ALLOW       Anywhere                   # modula\n\
+20002/tcp                  ALLOW       Anywhere\n\
+20000:29999/tcp            ALLOW       Anywhere                   # modula\n\
+20001/tcp (v6)             ALLOW       Anywhere (v6)              # modula\n";
+        assert_eq!(ufw_tagged_ports(status, 20000..=29999), [20001]);
     }
 
     #[test]

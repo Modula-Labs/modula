@@ -190,14 +190,158 @@ pub fn write_link(dir: &Path, link: &Link) -> anyhow::Result<PathBuf> {
 }
 
 /// The nearest `.modula/token` at or above `start`, and the login in it.
-pub fn find_local_login(start: &Path) -> anyhow::Result<Option<(PathBuf, Config)>> {
+/// A token file that isn't safe to trust (see [`local_token_problem`]) is
+/// ignored: the result is then `None`, with a warning saying why.
+pub fn find_local_login(start: &Path) -> anyhow::Result<LocalLogin> {
     for dir in start.ancestors() {
         let path = dir.join(LINK_DIR).join(TOKEN_FILE);
-        if path.is_file() {
-            return Ok(Some((path.clone(), load(&path)?)));
+        // Not `exists()`: that follows symlinks, and a symlink is refused below.
+        if std::fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        if let Some(problem) = local_token_problem(&path) {
+            return Ok(LocalLogin {
+                found: None,
+                warning: Some(format!(
+                    "warning: ignoring {}: it {problem}",
+                    path.display()
+                )),
+            });
+        }
+        let cfg = load(&path)?;
+        return Ok(LocalLogin {
+            found: Some((path, cfg)),
+            warning: None,
+        });
+    }
+    Ok(LocalLogin::default())
+}
+
+/// What [`find_local_login`] found.
+#[derive(Debug, Default)]
+pub struct LocalLogin {
+    /// The token file and the login in it.
+    pub found: Option<(PathBuf, Config)>,
+    /// Why a token file was ignored.
+    pub warning: Option<String>,
+}
+
+/// Why a `.modula/token` must not be used, if it mustn't. A checked-out
+/// repository (or anyone else on this machine) could otherwise point every
+/// command run in it at another instance, with a token of its choosing: the
+/// file has to be a regular file (not a symlink), owned by this user,
+/// readable by this user only, and not tracked by git.
+pub fn local_token_problem(path: &Path) -> Option<String> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) => return Some(format!("cannot be read ({e})")),
+    };
+    if !meta.file_type().is_file() {
+        return Some("is not a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != current_uid() {
+            return Some("belongs to another user".into());
+        }
+        if meta.mode() & 0o077 != 0 {
+            return Some(format!(
+                "can be read or written by others (mode {:o}; chmod 600 it)",
+                meta.mode() & 0o777
+            ));
         }
     }
-    Ok(None)
+    if tracked_by_git(path) {
+        return Some(
+            "is tracked by git (a token must never be committed; git rm --cached it and revoke it)"
+                .into(),
+        );
+    }
+    None
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    // uid_t is a u32 on every unix Rust supports; geteuid never fails.
+    unsafe extern "C" {
+        safe fn geteuid() -> u32;
+    }
+    geteuid()
+}
+
+/// `git ls-files --error-unmatch` in the file's directory: true only when
+/// git runs and says the file is tracked (no git, or no repository: false).
+fn tracked_by_git(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(name)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Process-wide: `--allow-insecure-http` was given.
+static ALLOW_INSECURE_HTTP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_allow_insecure_http(allow: bool) {
+    ALLOW_INSECURE_HTTP.store(allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `url` is this machine: localhost, `*.localhost` or a loopback IP.
+pub fn is_local(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(d)) => {
+            let d = d.to_ascii_lowercase();
+            d == "localhost" || d.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// Before credentials go to `url`: plain http is fine to this machine only,
+/// unless `--allow-insecure-http` (or `MODULA_ALLOW_INSECURE_HTTP=1`) says
+/// otherwise, and then with a warning.
+pub fn check_transport(url: &Url) -> anyhow::Result<()> {
+    let env = std::env::var("MODULA_ALLOW_INSECURE_HTTP").ok();
+    check_transport_with(
+        url,
+        ALLOW_INSECURE_HTTP.load(std::sync::atomic::Ordering::Relaxed)
+            || matches!(env.as_deref(), Some("1" | "true" | "yes")),
+    )
+    .map(|warning| {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        if let Some(w) = warning {
+            WARNED.call_once(|| eprintln!("{w}"));
+        }
+    })
+}
+
+/// [`check_transport`]'s decision: an error, or a warning to print.
+fn check_transport_with(url: &Url, allow: bool) -> anyhow::Result<Option<String>> {
+    if url.scheme() != "http" || is_local(url) {
+        return Ok(None);
+    }
+    let host = url.host_str().unwrap_or_default();
+    if !allow {
+        bail!(
+            "refusing to send your API token to {host} over plain http; use https://{host}, \
+             or pass --allow-insecure-http (MODULA_ALLOW_INSECURE_HTTP=1) if you really mean it"
+        );
+    }
+    Ok(Some(format!(
+        "warning: {url} is plain http: your API token travels unencrypted"
+    )))
 }
 
 /// Write `<dir>/.modula/token` (mode 0600); returns its path.
@@ -457,7 +601,7 @@ mod tests {
         let root = temp_dir();
         let nested = root.join("a/b");
         std::fs::create_dir_all(&nested).unwrap();
-        assert!(find_local_login(&nested).unwrap().is_none());
+        assert!(find_local_login(&nested).unwrap().found.is_none());
         let cfg = Config {
             url: Some("https://cloud.example.com/".into()),
             token: Some("mdt_local".into()),
@@ -465,13 +609,120 @@ mod tests {
         };
         let path = save_local_login(&root, &cfg).unwrap();
         assert_eq!(path, root.join(".modula/token"));
-        let (found, got) = find_local_login(&nested).unwrap().unwrap();
-        assert_eq!((found, got), (path.clone(), cfg));
+        let local = find_local_login(&nested).unwrap();
+        assert_eq!(local.found, Some((path.clone(), cfg)));
+        assert!(local.warning.is_none());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    fn local_token(root: &Path) -> PathBuf {
+        let cfg = Config {
+            url: Some("https://evil.example.com/".into()),
+            token: Some("mdt_local".into()),
+            ..Default::default()
+        };
+        save_local_login(root, &cfg).unwrap()
+    }
+
+    fn ignored_because(root: &Path) -> String {
+        let local = find_local_login(root).unwrap();
+        assert!(local.found.is_none(), "the token file was used");
+        local.warning.expect("a warning")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_tokens_readable_by_others_are_ignored() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_dir();
+        let path = local_token(&root);
+        for mode in [0o640, 0o604, 0o620, 0o644] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let w = ignored_because(&root);
+            assert!(w.contains("read or written by others"), "{mode:o}: {w}");
+            assert!(w.contains(&path.display().to_string()), "{w}");
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        assert!(find_local_login(&root).unwrap().found.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_tokens_must_be_regular_files() {
+        let root = temp_dir();
+        let elsewhere = temp_dir();
+        let target = local_token(&elsewhere);
+        std::fs::create_dir_all(root.join(LINK_DIR)).unwrap();
+        std::os::unix::fs::symlink(&target, root.join(LINK_DIR).join(TOKEN_FILE)).unwrap();
+        assert!(ignored_because(&root).contains("not a regular file"));
+
+        // A directory named token: also not used, and no ancestor's instead.
+        let root = temp_dir();
+        local_token(&root);
+        let nested = root.join("sub");
+        std::fs::create_dir_all(nested.join(LINK_DIR).join(TOKEN_FILE)).unwrap();
+        assert!(ignored_because(&nested).contains("not a regular file"));
+    }
+
+    #[test]
+    fn local_tokens_tracked_by_git_are_ignored() {
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        let root = temp_dir();
+        if !git(&root, &["init", "-q"]) {
+            eprintln!("git isn't available; skipping");
+            return;
+        }
+        let path = local_token(&root);
+        // In a repository but untracked: used.
+        assert!(find_local_login(&root).unwrap().found.is_some());
+        assert!(git(&root, &["add", "-f", ".modula/token"]));
+        let w = ignored_because(&root);
+        assert!(w.contains("tracked by git"), "{w}");
+        assert!(local_token_problem(&path).is_some());
+    }
+
+    #[test]
+    fn plain_http_only_to_this_machine() {
+        for local in [
+            "http://localhost:8080",
+            "http://127.0.0.1",
+            "http://[::1]:3000",
+            "http://app.localhost",
+            "http://LOCALHOST",
+        ] {
+            let url = parse_url(local).unwrap();
+            assert!(is_local(&url), "{local}");
+            assert_eq!(check_transport_with(&url, false).unwrap(), None, "{local}");
+        }
+        let https = parse_url("https://cloud.example.com").unwrap();
+        assert_eq!(check_transport_with(&https, false).unwrap(), None);
+        for remote in [
+            "http://cloud.example.com",
+            "http://10.0.0.5",
+            "http://localhost.example.com",
+        ] {
+            let url = parse_url(remote).unwrap();
+            assert!(!is_local(&url), "{remote}");
+            let e = check_transport_with(&url, false).unwrap_err().to_string();
+            assert!(e.contains("--allow-insecure-http"), "{e}");
+            let w = check_transport_with(&url, true)
+                .unwrap()
+                .expect("a warning");
+            assert!(w.contains("plain http"), "{w}");
         }
     }
 }

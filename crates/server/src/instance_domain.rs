@@ -45,7 +45,7 @@ impl Hosts {
 
 impl AppState {
     pub fn hosts(&self) -> Hosts {
-        self.hosts_lock().read().expect("hosts lock").clone()
+        crate::sync::read(self.hosts_lock()).clone()
     }
 
     /// The dashboard's canonical URL: its domain once set, else the address
@@ -83,7 +83,7 @@ pub async fn load(state: &AppState) -> anyhow::Result<()> {
     if apps.is_some() {
         h.apps = apps;
     }
-    *state.hosts_lock().write().expect("hosts lock") = h;
+    *crate::sync::write(state.hosts_lock()) = h;
     Ok(())
 }
 
@@ -275,7 +275,7 @@ pub async fn put(
         if apps.is_some() {
             h.apps = apps;
         }
-        *state.hosts_lock().write().expect("hosts lock") = h;
+        *crate::sync::write(state.hosts_lock()) = h;
     }
     state.hub.kick_all(&nodes);
     crate::github::app::queue_hook_sync(&state.db).await?;

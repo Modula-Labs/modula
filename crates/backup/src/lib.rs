@@ -7,4 +7,5 @@
 //! dump is never buffered in memory or written to disk.
 
 pub mod keys;
+pub mod net;
 pub mod stream;

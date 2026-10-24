@@ -30,6 +30,7 @@ use crate::error::{AppError, AppResult};
 use crate::github::app::{self, Branch, Repo, aad};
 use crate::github::push;
 use crate::http::meta::RequestMeta;
+use crate::ratelimit::Limit;
 use crate::state::AppState;
 
 /// Where GitHub's web UI lives (App creation and installation pages).
@@ -42,6 +43,11 @@ const MAX_WEBHOOK_BODY: usize = 2 * 1024 * 1024;
 /// GitHub App names are at most 34 characters.
 const MAX_APP_NAME: usize = 34;
 pub const WEBHOOK_PATH: &str = "/api/github/webhook";
+/// Webhook deliveries per source IP, checked before any work (GitHub sends
+/// from a handful of addresses; a busy org stays far below this).
+const WEBHOOK_PER_IP: Limit = Limit::per_minute(120);
+/// Installation callbacks per user (each costs GitHub API calls).
+const INSTALL_CALLBACK_PER_USER: Limit = Limit::per_minute(10);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -184,6 +190,12 @@ async fn workspace_admin(state: &AppState, workspace: Id, user: Id) -> AppResult
 
 /// The App's installation page, with a fresh `install` state for `flow`.
 async fn install_url(state: &AppState, html_url: &str, user: Id, flow: &Flow) -> AppResult<String> {
+    // Checked when stored; again here for rows stored before that check.
+    if !app::is_github_web_url(state, html_url) {
+        return Err(AppError::Conflict(
+            "the stored GitHub App URL is not on GitHub; remove the App and create it again".into(),
+        ));
+    }
     // select_target: GitHub's account picker (personal account or any org).
     let mut url: Url = format!(
         "{}/installations/select_target",
@@ -276,10 +288,15 @@ pub async fn manifest(
         "redirect_url": format!("{origin}/api/github/app/callback"),
         "setup_url": format!("{origin}/api/github/install/callback"),
         "setup_on_update": true,
+        // The installing user authorizes the App on the way back, so the
+        // callback can prove they can access the installation it names.
+        "request_oauth_on_install": true,
+        "callback_urls": [format!("{origin}/api/github/install/callback")],
         // Public: installable on any account or organization the admin picks
         // (a private App only installs on its owner's account). Installs
         // nobody started from this dashboard are never bound to a workspace:
-        // binding needs the signed state of a flow started here.
+        // binding needs the signed state of a flow started here, and the
+        // OAuth proof above.
         "public": true,
         "default_permissions": {
             "contents": "read",
@@ -338,6 +355,13 @@ pub async fn app_callback(
         return Err(AppError::Forbidden);
     }
     let c = app::convert_manifest(&state, &q.code).await?;
+    // Stored and later used as a link and redirect target: GitHub's own web
+    // host only.
+    if !app::is_github_web_url(&state, &c.html_url) {
+        return Err(AppError::Unavailable(
+            "GitHub returned an unexpected App URL; try again".into(),
+        ));
+    }
     let webhook_secret = c
         .webhook_secret
         .ok_or_else(|| anyhow::anyhow!("GitHub returned an App without a webhook secret"))?;
@@ -436,10 +460,14 @@ pub struct InstallCallback {
     installation_id: Option<i64>,
     setup_action: Option<String>,
     state: Option<String>,
+    /// From the App's OAuth-on-install step: proves which installations the
+    /// returning GitHub user can access.
+    code: Option<String>,
 }
 
-/// GitHub redirects here after an installation: verify it with the App and
-/// bind it to the workspace the flow was started from.
+/// GitHub redirects here after an installation: check that the GitHub user
+/// coming back can access it and that it is our App's, then bind it to the
+/// workspace the flow was started from.
 pub async fn install_callback(
     State(state): State<AppState>,
     actor: Actor,
@@ -448,6 +476,14 @@ pub async fn install_callback(
 ) -> AppResult<Redirect> {
     // Changes made on GitHub (repository selection) arrive without our state;
     // there is nothing to record for them.
+    state
+        .limiter
+        .check(
+            "github-install-callback",
+            &actor.user_id.to_string(),
+            INSTALL_CALLBACK_PER_USER,
+        )
+        .await?;
     let Some(presented) = q.state.as_deref() else {
         let outcome = if q.setup_action.as_deref() == Some("request") {
             "requested"
@@ -473,7 +509,22 @@ pub async fn install_callback(
     if !workspace_admin(&state, workspace, actor.user_id).await? {
         return Err(AppError::Forbidden);
     }
-    let inst = app::installation(&state, id).await?;
+    // `installation_id` is just a query parameter: anyone could paste
+    // another account's. Only one the returning GitHub user can access binds.
+    let not_found = || AppError::bad_request("installation not found");
+    let code = q.code.as_deref().ok_or_else(|| {
+        AppError::bad_request(
+            "GitHub did not send an authorization code; the App needs \"Request user \
+             authorization (OAuth) during installation\" turned on",
+        )
+    })?;
+    if !app::user_has_installation(&state, code, id).await? {
+        return Err(not_found());
+    }
+    let inst = match app::installation(&state, id).await {
+        Err(AppError::BadRequest(_)) => return Err(not_found()),
+        r => r?,
+    };
     let mut tx = state.db.begin().await?;
     // Re-installing refreshes the account; it never moves to another workspace.
     let bound = sqlx::query(
@@ -609,6 +660,10 @@ pub async fn webhook(
     headers: HeaderMap,
     body: Body,
 ) -> AppResult<(StatusCode, Json<Value>)> {
+    state
+        .limiter
+        .check("github-webhook", &meta.ip_string(), WEBHOOK_PER_IP)
+        .await?;
     let header = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
     let sealed: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT webhook_secret_sealed FROM github_app")

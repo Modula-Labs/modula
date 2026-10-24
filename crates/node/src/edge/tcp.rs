@@ -2,9 +2,15 @@
 //! container (databases reached from outside). Each port has a listener task;
 //! its upstream is swapped in place when a new deployment takes over, so
 //! clients reconnect to the same address after a redeploy.
+//!
+//! With an active ufw, each listening port gets its own `allow` rule
+//! (comment `modula`), deleted when the listener stops; the first apply
+//! also deletes tagged rules in the proxy range left by an earlier run.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::ops::RangeInclusive;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::io::copy_bidirectional;
@@ -16,10 +22,15 @@ struct Proxy {
     task: JoinHandle<()>,
 }
 
+/// Public ports the server allocates for TCP proxies.
+pub const PORT_RANGE: RangeInclusive<u16> = 20000..=29999;
+
 #[derive(Default)]
 pub struct TcpProxies {
     /// public port → its listener.
     proxies: Mutex<HashMap<u16, Proxy>>,
+    /// Stale ufw rules were looked for (first apply).
+    swept: AtomicBool,
 }
 
 impl TcpProxies {
@@ -27,13 +38,14 @@ impl TcpProxies {
     /// None while the service has no running container: connections are
     /// refused until it does).
     pub async fn apply(&self, wanted: &HashMap<u16, Option<SocketAddr>>) {
-        let mut to_bind = Vec::new();
+        let (mut to_bind, mut closed, mut opened) = (Vec::new(), Vec::new(), Vec::new());
         {
             let mut proxies = self.proxies.lock().expect("tcp proxies lock");
             proxies.retain(|port, p| {
                 let keep = wanted.contains_key(port) && !p.task.is_finished();
                 if !keep {
                     p.task.abort();
+                    closed.push(*port);
                 }
                 keep
             });
@@ -54,10 +66,27 @@ impl TcpProxies {
                         .lock()
                         .expect("tcp proxies lock")
                         .insert(port, Proxy { upstream, task });
+                    opened.push(port);
                 }
                 // Retried on the next apply (e.g. the port is briefly busy).
                 Err(e) => tracing::warn!(port, error = %e, "cannot listen for a tcp proxy"),
             }
+        }
+        let sweep = !self.swept.swap(true, Ordering::Relaxed);
+        if (sweep || !opened.is_empty() || !closed.is_empty()) && crate::access::ufw_active().await
+        {
+            if sweep {
+                let listening = self.ports();
+                closed.extend(
+                    crate::access::ufw_open_ports(PORT_RANGE)
+                        .await
+                        .into_iter()
+                        .filter(|p| !listening.contains(p)),
+                );
+                // Listeners from before this process may lack their rule.
+                opened = listening;
+            }
+            update_ufw(&opened, &closed).await;
         }
     }
 
@@ -78,6 +107,29 @@ impl Drop for TcpProxies {
     fn drop(&mut self) {
         for p in self.proxies.lock().expect("tcp proxies lock").values() {
             p.task.abort();
+        }
+    }
+}
+
+/// Allow `opened` and delete `closed` in ufw (proxy ports only); failures warn.
+async fn update_ufw(opened: &[u16], closed: &[u16]) {
+    for &port in closed.iter().filter(|p| PORT_RANGE.contains(p)) {
+        match crate::access::ufw_close(port).await {
+            Ok(()) => tracing::info!(port, "closed a tcp proxy port in ufw"),
+            Err(e) => tracing::warn!(
+                port,
+                error = format!("{e:#}"),
+                "cannot close a tcp proxy port in ufw"
+            ),
+        }
+    }
+    for &port in opened.iter().filter(|p| PORT_RANGE.contains(p)) {
+        if let Err(e) = crate::access::ufw_open(port).await {
+            tracing::warn!(
+                port,
+                error = format!("{e:#}"),
+                "cannot open a tcp proxy port in ufw"
+            );
         }
     }
 }

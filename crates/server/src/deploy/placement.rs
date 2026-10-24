@@ -1,5 +1,6 @@
 //! Which node runs a service instance. Single-node for now: sticky to the
-//! instance's node while it exists, else the least-loaded usable node.
+//! instance's node while it exists, else the least-loaded usable node. Only
+//! shared servers and the instance's own workspace's servers are usable.
 
 use modula_id::Id;
 use sqlx::PgConnection;
@@ -8,8 +9,12 @@ use crate::error::{AppError, AppResult};
 
 pub async fn choose(tx: &mut PgConnection, instance: Id) -> AppResult<Id> {
     let sticky: Option<Id> = sqlx::query_scalar(
-        "SELECT n.id FROM service_instances i JOIN nodes n ON n.id = i.node_id
-         WHERE i.id = $1 AND n.status <> 'revoked'",
+        "SELECT n.id FROM service_instances i
+         JOIN services s ON s.id = i.service_id
+         JOIN projects p ON p.id = s.project_id
+         JOIN nodes n ON n.id = i.node_id
+         WHERE i.id = $1 AND n.status <> 'revoked'
+           AND (n.workspace_id IS NULL OR n.workspace_id = p.workspace_id)",
     )
     .bind(instance)
     .fetch_optional(&mut *tx)
@@ -22,10 +27,16 @@ pub async fn choose(tx: &mut PgConnection, instance: Id) -> AppResult<Id> {
         "SELECT n.id FROM nodes n
          LEFT JOIN deployments d ON d.node_id = n.id AND d.status IN ('building', 'deploying', 'active', 'crashed')
          WHERE n.status <> 'revoked'
+           AND (n.workspace_id IS NULL OR n.workspace_id = (
+                 SELECT p.workspace_id FROM service_instances i
+                 JOIN services s ON s.id = i.service_id
+                 JOIN projects p ON p.id = s.project_id
+                 WHERE i.id = $1))
          GROUP BY n.id, n.status
          ORDER BY (n.status = 'online') DESC, count(d.id), n.created_at
          LIMIT 1",
     )
+    .bind(instance)
     .fetch_optional(&mut *tx)
     .await?;
     let node = picked

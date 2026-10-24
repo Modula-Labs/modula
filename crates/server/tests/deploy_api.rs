@@ -89,12 +89,12 @@ impl Fixture {
 async fn variables_are_write_only_and_reveals_are_audited(pool: PgPool) {
     let f = fixture(pool).await;
     let r = f
-        .set_vars(&f.admin, json!({ "set": { "DATABASE_URL": "postgres://u:hunter2@db/x", "STRIPE_KEY": "sk_live_123456" }, "sealed": ["STRIPE_KEY"] }))
+        .set_vars(&f.admin, json!({ "set": { "DATABASE_URL": "postgres://u:hunter2@db/x", "STRIPE_KEY": "sk_test_fake_123456" }, "sealed": ["STRIPE_KEY"] }))
         .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     let listed = r.json.to_string();
     assert!(
-        !listed.contains("hunter2") && !listed.contains("sk_live"),
+        !listed.contains("hunter2") && !listed.contains("sk_test_fake"),
         "{listed}"
     );
     assert_eq!(r.json.as_array().unwrap().len(), 2);
@@ -155,7 +155,7 @@ async fn variables_are_write_only_and_reveals_are_audited(pool: PgPool) {
     // Sealed is permanent, even when the value is replaced.
     f.set_vars(
         &fresh,
-        json!({ "set": { "STRIPE_KEY": "sk_live_rotated" } }),
+        json!({ "set": { "STRIPE_KEY": "sk_test_fake_rotated" } }),
     )
     .await;
     let r = f
@@ -184,7 +184,7 @@ async fn variables_are_write_only_and_reveals_are_audited(pool: PgPool) {
     );
     let all = serde_json::to_string(&audit).unwrap();
     assert!(
-        !all.contains("hunter2") && !all.contains("sk_live"),
+        !all.contains("hunter2") && !all.contains("sk_test_fake"),
         "{all}"
     );
 }

@@ -8,8 +8,9 @@ Caddy). More servers can [join](servers.md) later.
 
 - A fresh **Ubuntu 22.04+** or **Debian 12+** server with systemd, `amd64` or
   `arm64`, and root or `sudo` access.
-- A hostname for the dashboard, e.g. `deploy.example.com`, with an `A` record
-  pointing at the server.
+- Optional: a hostname for the dashboard, e.g. `deploy.example.com`, with an
+  `A` record pointing at the server. Without one the dashboard is served at
+  `https://<public IP>` and you can add a domain later in **Settings → Domain**.
 - Optional, for generated app domains: a parent domain such as
   `apps.example.com` with a wildcard record `*.apps.example.com` pointing at
   the server.
@@ -28,7 +29,7 @@ packages.
 | 80, 443 (TCP) | Everyone: dashboard, your apps' domains, certificate issuance. |
 | 443 (UDP) | HTTP/3 for the dashboard and your apps. |
 | 7101 (TCP) | Servers joining this instance (mutual TLS). Only the main server. |
-| 20000–29999 (TCP) | Only if you enable [TCP proxies](databases.md#public-access-tcp-proxy) for databases. |
+| 20000–29999 (TCP) | Only if you enable [TCP proxies](databases.md#public-access-tcp-proxy) for databases. `modula-node` opens each allocated port in ufw while it's in use; a cloud firewall in front of the server needs the range (or the ports you use) opened by you. |
 
 Other servers need the same, minus 7101: they only dial out to the main
 server. The API itself listens on `127.0.0.1:7100` behind Caddy; Postgres and
@@ -44,8 +45,9 @@ curl -fsSL https://usemodula.org/install.sh | bash
 
 It asks for:
 
-- the **dashboard domain**, e.g. `deploy.example.com` (it shows this server's
-  public IP for the `A` record and warns if the domain doesn't point here yet),
+- optionally the **dashboard domain**, e.g. `deploy.example.com` (it shows this
+  server's public IP for the `A` record and warns if the domain doesn't point
+  here yet); leave it empty to use `https://<public IP>`,
 - an **email** for TLS certificates (Let's Encrypt),
 - a **server name** for the Servers page (default: the short hostname),
 
@@ -53,8 +55,8 @@ then confirms before changing anything. Not running as root? It asks `sudo`
 to run itself again as root (fetching the script once more from
 `https://usemodula.org/install.sh`, since a piped script has no file).
 
-For automation (cloud-init, CI) pass the answers as flags; with `--domain` and
-`--email` it asks nothing:
+For automation (cloud-init, CI) pass the answers as flags; with `--email` it
+asks nothing:
 
 ```bash
 curl -fsSL https://usemodula.org/install.sh \
@@ -63,7 +65,7 @@ curl -fsSL https://usemodula.org/install.sh \
 
 | Option | Description |
 |---|---|
-| `--domain HOST` | Dashboard hostname (asked when missing). DNS must point here. |
+| `--domain HOST` | Dashboard hostname. DNS must point here. Without it the dashboard is on `https://<public IP>`. |
 | `--email ADDRESS` | Contact for Let's Encrypt (asked when missing). |
 | `--name NAME` | This server's name on the Servers page: letters, digits, `.` `_` `-` (default: short hostname). |
 | `--apps-domain HOST` | Parent for generated app domains. Needs `*.HOST` pointing here. Without it, only custom domains work. |
@@ -100,6 +102,8 @@ existing settings alone where noted.
 | Swap | With less than 2 GiB of memory and no swap, a 2 GiB `/swapfile` (in `/etc/fstab`) and `vm.swappiness = 10`. |
 | Clock | Makes sure systemd-timesyncd (or chrony/ntp, if present) keeps the clock in sync; certificates and mutual TLS depend on it. |
 | Kernel | `/etc/sysctl.d/90-modula.conf`: `net.core.somaxconn = 4096`, `fs.inotify.max_user_watches = 524288`, `fs.inotify.max_user_instances = 1024`, `net.ipv4.ip_forward = 1` (containers reach the internet through the host). |
+| Cloud metadata | `modula-firewall.service` adds `DOCKER-USER` rules that drop container and build traffic to `169.254.169.254` and `fd00:ec2::254`, so apps can't read the server's cloud-init data or cloud credentials. `modula-node` re-asserts them when it starts. The host itself can still reach the metadata service. |
+| Memory pressure | `OOMScoreAdjust=-500` for `modula-server`, `modula-node`, Postgres and Redis, so the kernel kills an app container before the platform. |
 | SSH | Never changed. If it accepts passwords, the installer prints how to switch to key-only logins. |
 
 The closing summary lists what was set up under **Security**.
@@ -119,7 +123,8 @@ the same ports open.
 |---|---|---|
 | `modula-server` | `modula` (system user, no shell) | Control plane; peer-authenticated to Postgres as the `modula` role. |
 | `modula-caddy` | `modula-caddy` (system user, no shell) | Binds 80/443 with `CAP_NET_BIND_SERVICE` only. |
-| `modula-node` | `root` | Drives Docker and Caddy's admin socket, which is root-equivalent anyway. |
+| `modula-node` | `root` (`PrivateTmp`, `ProtectHome`, `NoNewPrivileges`) | Drives Docker, the firewall and Caddy's admin socket, which is root-equivalent anyway. |
+| Railpack (build planning) | `modula-build` (system user, no shell) | Reads untrusted repositories, so it doesn't run as root. Builds themselves run in a rootless, sandboxed BuildKit per workspace. |
 
 ## Recovery kit
 
@@ -186,8 +191,11 @@ curl -fsSL https://usemodula.org/install.sh \
   | sudo bash -s -- upgrade [--version X.Y.Z]
 ```
 
-Either way the release is downloaded, its signature checked, and switched
-atomically; if the new control plane doesn't become healthy within a minute,
+Either way the release is downloaded, its signature checked against
+`/etc/modula/release.pub.pem` (the signed `VERSION` must match the version
+asked for), and switched atomically. Downgrades are refused unless you set
+`MODULA_ALLOW_DOWNGRADE=1`. Upgrades started from the dashboard also verify the
+installer script itself against the signed checksums before running it; if the new control plane doesn't become healthy within a minute,
 the previous release is switched back and restarted (the installer exits with
 status 3). Running apps keep running throughout.
 

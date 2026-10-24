@@ -28,10 +28,17 @@ impl FromRequestParts<AppState> for RequestMeta {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // As axum's ConnectInfo extractor does (MockConnectInfo in tests).
         let peer = parts
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
-            .map(|c| c.0.ip());
+            .map(|c| c.0.ip())
+            .or_else(|| {
+                parts
+                    .extensions
+                    .get::<axum::extract::connect_info::MockConnectInfo<SocketAddr>>()
+                    .map(|c| c.0.ip())
+            });
         let xff = parts
             .headers
             .get("x-forwarded-for")
