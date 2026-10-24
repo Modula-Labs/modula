@@ -24,6 +24,9 @@ export interface ProjectSearch {
   env?: string;
   service?: string;
   tab?: ServiceTab;
+  /** Logs page: preselected time window, epoch milliseconds. */
+  since?: number;
+  until?: number;
   deployment?: string;
   /** Reopen the New Service dialog on this step (back from "Connect GitHub"). */
   add?: "repo";
@@ -79,6 +82,7 @@ export function ProjectPage({
         image: i?.sourceType === "image" ? i.image : undefined,
         dependsOn: i?.dependsOn,
         pendingChanges: pending?.services.find((x) => x.serviceId === s.id)?.changes.length ?? 0,
+        cron: i?.cronSchedule ? { nextAt: i.cronNextAt } : undefined,
         r2: s.template === "r2" ? { bucket: i?.bucket ?? null } : undefined,
       };
     });

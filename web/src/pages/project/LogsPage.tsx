@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useSearch } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
@@ -29,10 +30,14 @@ export function LogsPage() {
   const envId = env?.id;
   const [input, setInput] = useState("");
   const [query, setQuery] = useState("");
-  const [service, setService] = useState("");
+  // A link (e.g. a cron run's logs) can preselect the service and a time window.
+  const initial = useSearch({ strict: false }) as { service?: string; since?: number; until?: number };
+  const [service, setService] = useState(initial.service ?? "");
   const [rangeId, setRangeId] = useState<LogRangeId>("1h");
   // A histogram bar narrows the window to its bucket; changing the range resets it.
-  const [custom, setCustom] = useState<{ since: number; until: number }>();
+  const [custom, setCustom] = useState<{ since: number; until: number } | undefined>(
+    initial.since && initial.until ? { since: initial.since, until: initial.until } : undefined,
+  );
   const [live, setLive] = useState(false);
   const [extra, setExtra] = useState<LogLine[]>([]);
   const box = useRef<HTMLDivElement>(null);

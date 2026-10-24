@@ -181,6 +181,10 @@ export interface InstanceSummary {
   volume?: { id: string; mountPath: string; createdAt: string } | null;
   /** An R2 bucket service's bucket in this environment (null = none yet). */
   bucket?: string | null;
+  /** The configured cron schedule, if the service is a cron job. */
+  cronSchedule: string | null;
+  /** The next due time (RFC3339) of the deployed schedule. */
+  cronNextAt: string | null;
 }
 export interface ProjectDetail extends Project {
   environments: Environment[];
@@ -238,6 +242,10 @@ export interface ServiceConfig {
   preDeployCommand?: string[];
   /** SIGTERM → SIGKILL grace for a retired container, 0–300 (unset = 10s default). */
   drainingSeconds?: number;
+  /** 5-field cron expression in UTC (or `@daily` etc.): the service runs to completion at each due time instead of continuously. */
+  cronSchedule?: string;
+  /** Seconds a cron run may take before it is stopped, 1–86400 (unset = 3600). Only with `cronSchedule`. */
+  cronTimeoutSecs?: number;
   memoryMb?: number;
   cpuMillis?: number;
   /** Each replica runs on a different server. */
@@ -264,6 +272,39 @@ export interface LocationOption extends Location {
   city: string;
 }
 export type InstanceState = "online" | "offline" | "deploying" | "crashed";
+export interface CronPreview {
+  valid: boolean;
+  error: string | null;
+  description: string | null;
+  /** Up to 3 upcoming run times, RFC3339 UTC. */
+  upcoming: string[];
+}
+export type CronRunStatus = "queued" | "running" | "succeeded" | "failed" | "timed_out" | "skipped";
+export interface CronRun {
+  id: string;
+  deploymentId: string | null;
+  trigger: "schedule" | "manual";
+  status: CronRunStatus;
+  scheduledFor: string | null;
+  timeoutSecs: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  exitCode: number | null;
+  error: string | null;
+}
+export interface CronRuns {
+  schedule: {
+    expression: string;
+    description: string;
+    upcoming: string[];
+    /** False while the schedule is only in settings and not deployed yet. */
+    deployed: boolean;
+    timeoutSecs: number;
+  } | null;
+  /** Newest first, at most 50. */
+  runs: CronRun[];
+}
 export interface Instance {
   id: string;
   serviceId: string;
@@ -906,6 +947,12 @@ export const api = {
       `/api/service-instances/${enc(id)}/server`,
       { nodeId },
     ),
+  cronPreview: (schedule: string) =>
+    get<CronPreview>(`/api/cron/preview?schedule=${encodeURIComponent(schedule)}`),
+  cronRuns: (instance: string) =>
+    get<CronRuns>(`/api/service-instances/${enc(instance)}/cron-runs`),
+  runCronNow: (instance: string) =>
+    post<CronRun>(`/api/service-instances/${enc(instance)}/cron-runs`),
   updateInstance: (id: string, config: ServiceConfig) =>
     patch<Instance>(`/api/service-instances/${enc(id)}`, { config }),
 

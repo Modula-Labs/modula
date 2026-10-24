@@ -15,6 +15,7 @@ import {
 } from "@/lib/api";
 import { projectReturnPath } from "@/lib/github";
 import { hostingError } from "@/lib/hosting";
+import { CronFields } from "./CronFields";
 import { DomainsSection } from "./DomainsSection";
 import { HostingFields } from "./HostingSection";
 import { parseRepo } from "./NewServiceDialog";
@@ -85,6 +86,8 @@ export interface Form {
   restartPolicy: RestartPolicy;
   maxRetries: string;
   drainingSeconds: string;
+  cronSchedule: string;
+  cronTimeout: string;
   memoryMb: string;
   cpuMillis: string;
   replicas: string;
@@ -116,6 +119,8 @@ export const toForm = (c: ServiceConfig): Form => ({
     ? String(c.restartPolicyMaxRetries)
     : "",
   drainingSeconds: c.drainingSeconds ? String(c.drainingSeconds) : "",
+  cronSchedule: c.cronSchedule ?? "",
+  cronTimeout: c.cronTimeoutSecs ? String(c.cronTimeoutSecs) : "",
   memoryMb: c.memoryMb ? String(c.memoryMb) : "",
   cpuMillis: c.cpuMillis ? String(c.cpuMillis) : "",
   replicas: String(c.replicas ?? 1),
@@ -167,6 +172,9 @@ export const toConfig = (f: Form): ServiceConfig => {
         ? optNum(f.maxRetries) || undefined
         : undefined,
     drainingSeconds: optNum(f.drainingSeconds) || undefined,
+    cronSchedule: f.cronSchedule.trim() || undefined,
+    // The timeout only exists with a schedule; empty means the server default.
+    cronTimeoutSecs: f.cronSchedule.trim() ? optNum(f.cronTimeout) || undefined : undefined,
     memoryMb: optNum(f.memoryMb),
     cpuMillis: optNum(f.cpuMillis),
     replicas: Math.max(1, Math.floor(Number(f.replicas)) || 1),
@@ -253,6 +261,7 @@ export function SettingsTab({
     ...(form.kind !== "image" ? ["Hosting"] : []),
     "Networking",
     "Deploy",
+    "Cron schedule",
     "Teardown",
     "Resources",
     "Regions & Replicas",
@@ -665,6 +674,19 @@ export function SettingsTab({
             </Field>
           ) : null}
         </div>
+      </Section>
+
+      <Section
+        title="Cron schedule"
+        description="Run the service on a schedule instead of continuously."
+      >
+        <CronFields
+          schedule={form.cronSchedule}
+          timeout={form.cronTimeout}
+          canEdit={canEdit}
+          onSchedule={(cronSchedule) => setForm((f) => ({ ...f, cronSchedule }))}
+          onTimeout={(cronTimeout) => setForm((f) => ({ ...f, cronTimeout }))}
+        />
       </Section>
 
       <Section

@@ -28,6 +28,8 @@ describe("branches of a new environment", () => {
     sourceType: repo ? "repo" : "image",
     repo,
     branch,
+    cronSchedule: null,
+    cronNextAt: null,
   });
   const project = {
     environments: [env("prod", true), env("staging")],

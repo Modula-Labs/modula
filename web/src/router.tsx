@@ -102,7 +102,8 @@ const serversRoute = createRoute({ getParentRoute: () => workspaceRoute, path: "
 // The canvas (React Flow) is the heaviest part of the app; load it on demand.
 const ProjectPage = lazy(() => import("./pages/project/ProjectPage").then((m) => ({ default: m.ProjectPage })));
 
-const tabs: ServiceTab[] = ["deployments", "metrics", "database", "bucket", "variables", "backups", "settings"];
+const tabs: ServiceTab[] = ["deployments", "cron", "metrics", "database", "bucket", "variables", "backups", "settings"];
+const ms = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
 const str = (v: unknown) => (typeof v === "string" && v.length <= 64 ? v : undefined);
 
 /** A project is full-bleed, outside the workspace sidebar: the shell (top bar + left icon rail)
@@ -114,6 +115,8 @@ const projectRoute = createRoute({
     env: str(s.env),
     service: str(s.service),
     tab: tabs.find((t) => t === s.tab),
+    since: ms(s.since),
+    until: ms(s.until),
     deployment: str(s.deployment),
     // Back from "Connect GitHub" in the New Service dialog.
     add: s.add === "repo" ? "repo" : undefined,
