@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod api;
+pub mod app_templates;
 pub mod audit;
 pub mod auth;
 pub mod authz;

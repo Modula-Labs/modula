@@ -92,6 +92,8 @@ pub struct Service {
     pub name: String,
     pub icon: Option<String>,
     pub template: Option<String>,
+    /// The gallery app it was deployed with (its services group on the canvas).
+    pub app_template: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -259,7 +261,7 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
     .fetch_all(&state.db)
     .await?;
     let services = sqlx::query_as(
-        "SELECT id, name, icon, template FROM services WHERE project_id = $1 ORDER BY created_at",
+        "SELECT id, name, icon, template, app_template FROM services WHERE project_id = $1 ORDER BY created_at",
     )
     .bind(id)
     .fetch_all(&state.db)

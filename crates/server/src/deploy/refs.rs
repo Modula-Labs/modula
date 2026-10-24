@@ -95,6 +95,24 @@ pub fn references(value: &str) -> Vec<Ref> {
     seen
 }
 
+/// `value` with each `${{service.NAME}}` whose service `rename` maps
+/// rewritten to the new service name (other text and references untouched).
+pub fn rename_services(value: &str, rename: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut last = 0;
+    for (range, r) in occurrences(value) {
+        if let Target::Service(s) = &r.target
+            && let Some(new) = rename(s)
+        {
+            out.push_str(&value[last..range.start]);
+            out.push_str(&format!("${{{{{new}.{}}}}}", r.name));
+            last = range.end;
+        }
+    }
+    out.push_str(&value[last..]);
+    out
+}
+
 /// A variable's identity across an environment: `(service name or None for
 /// shared, NAME)`.
 pub type VarKey = (Option<String>, String);
@@ -247,6 +265,18 @@ mod tests {
         );
         let keys: Vec<String> = refs.iter().map(Ref::key).collect();
         assert_eq!(keys, ["db.USER", "shared.PASS", "HOST"]);
+    }
+
+    #[test]
+    fn renames_only_mapped_services() {
+        let v = rename_services(
+            "postgres://${{db.USER}}:${{ db.PASS }}@${{HOST}}/${{shared.DB}}${{cache.URL}}",
+            |s| (s == "db").then(|| "postgres-2".to_owned()),
+        );
+        assert_eq!(
+            v,
+            "postgres://${{postgres-2.USER}}:${{postgres-2.PASS}}@${{HOST}}/${{shared.DB}}${{cache.URL}}"
+        );
     }
 
     #[test]

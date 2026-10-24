@@ -253,6 +253,9 @@ CREATE TABLE services (
     -- a self-hosted S3 bucket ('bucket') or a Cloudflare R2 bucket ('r2', no
     -- container: see r2_buckets).
     template    text CHECK (template IN ('postgres', 'mysql', 'redis', 'mongo', 'bucket', 'r2')),
+    -- The gallery app it was deployed with (see app_templates.rs), on every
+    -- service of the app; its databases also have their `template`.
+    app_template text,
     created_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (project_id, name)
 );
