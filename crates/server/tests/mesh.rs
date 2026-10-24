@@ -282,6 +282,78 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .find(|r| r.deployment_id == started.id.to_string())
         .unwrap();
     assert_eq!(route.remote_upstreams, ["10.80.1.2:80"]);
+    // Custom domains point at every server running a replica, minus one
+    // that has been offline past the grace period (unless none is left).
+    sqlx::query("UPDATE nodes SET public_ip = '203.0.113.1', status = 'online' WHERE id = $1")
+        .bind(a)
+        .execute(app.db())
+        .await
+        .unwrap();
+    let b_ip: String = sqlx::query_scalar("SELECT public_ip FROM nodes WHERE id = $1")
+        .bind(b)
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    let ips = |app: &TestApp| {
+        let db = app.db().clone();
+        let instance = chain.instance;
+        async move {
+            modula_server::domains::target(&db, instance)
+                .await
+                .unwrap()
+                .ips
+        }
+    };
+    assert_eq!(ips(&app).await, ["203.0.113.1".to_owned(), b_ip.clone()]);
+    let away = |node: Id, minutes: i32| {
+        let db = app.db().clone();
+        async move {
+            sqlx::query(
+                "UPDATE nodes SET status = 'offline', last_seen_at = now() - make_interval(mins => $2)
+                 WHERE id = $1",
+            )
+            .bind(node)
+            .bind(minutes)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+    };
+    away(b, 1).await;
+    assert_eq!(ips(&app).await.len(), 2, "within the grace period");
+    away(b, 10).await;
+    assert_eq!(ips(&app).await, ["203.0.113.1"]);
+    away(a, 10).await;
+    assert_eq!(ips(&app).await.len(), 2, "never no record at all");
+    sqlx::query("UPDATE nodes SET status = 'online'")
+        .execute(app.db())
+        .await
+        .unwrap();
+    // A server going away (or coming back) queues a resync of the instances
+    // with custom domains it runs.
+    sqlx::query(
+        "INSERT INTO domains (id, service_instance_id, hostname, kind, verification_token)
+         VALUES ($1, $2, 'shop.example', 'custom', 'modula-verify=0')",
+    )
+    .bind(Id::new())
+    .bind(chain.instance)
+    .execute(app.db())
+    .await
+    .unwrap();
+    let later = time::OffsetDateTime::now_utc() + time::Duration::minutes(6);
+    for _ in 0..2 {
+        modula_server::domains::resync_for_node(app.db(), b, Some(later))
+            .await
+            .unwrap();
+    }
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE kind = 'domains.resync_routing' AND run_at > now()",
+    )
+    .fetch_one(app.db())
+    .await
+    .unwrap();
+    assert_eq!(queued, 1, "deduplicated");
+
     // The address book: both replicas, healthy.
     let mesh = ds.mesh.unwrap();
     let env = &mesh.environments[0];

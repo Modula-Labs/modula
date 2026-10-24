@@ -259,8 +259,15 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
         }
         (DeploymentPhase::Active, "deploying" | "crashed") if config.get("hosting").is_none() => {
             let old = activate(&mut tx, instance, *dep).await?;
-            // Moved to other servers: custom domains' A records follow.
-            if old.iter().any(|n| *n != node) {
+            // Runs on other servers than before: custom domains' A records
+            // follow (one per server running a replica).
+            let mut before = old.clone();
+            before.sort();
+            before.dedup();
+            let mut now = replica_nodes(&mut tx, *dep).await?;
+            now.sort();
+            now.dedup();
+            if !before.is_empty() && before != now {
                 let job = NewJob {
                     kind: crate::domains::RESYNC_JOB,
                     payload: serde_json::json!({ "serviceInstanceId": instance }),

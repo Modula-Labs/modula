@@ -201,6 +201,16 @@ impl pb::node_server::Node for NodeService {
         let info = hello.info.clone().unwrap_or_default();
         let location =
             crate::locations::resolve(&info.cloud_provider, &info.cloud_region, &info.edge_colo);
+        // Away long enough to have left its services' A records.
+        let was_dropped: bool = sqlx::query_scalar(
+            "SELECT status <> 'online' AND coalesce(last_seen_at < now() - $2, true) FROM nodes WHERE id = $1",
+        )
+        .bind(node)
+        .bind(crate::domains::OFFLINE_GRACE)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?
+        .unwrap_or(false);
         // Guarded again: a revoke (or renewal) may have landed since the
         // check above.
         let hello_ok = sqlx::query(
@@ -236,6 +246,10 @@ impl pb::node_server::Node for NodeService {
             == 1;
         if !hello_ok {
             return Err(revoked());
+        }
+        if was_dropped && let Err(e) = crate::domains::resync_for_node(&state.db, node, None).await
+        {
+            tracing::warn!(%node, error = ?e, "cannot queue the DNS resync");
         }
         // Private networking: its key and addresses (a /24 the first time).
         // Its peers' tunnels to it change when they do.
@@ -334,6 +348,14 @@ impl pb::node_server::Node for NodeService {
                     .bind(node)
                     .execute(&state.db)
                     .await;
+                    // Still away after the grace period: out of the A records.
+                    let at = time::OffsetDateTime::now_utc()
+                        + crate::domains::OFFLINE_GRACE
+                        + time::Duration::seconds(30);
+                    if let Err(e) = crate::domains::resync_for_node(&state.db, node, Some(at)).await
+                    {
+                        tracing::warn!(%node, error = ?e, "cannot queue the DNS resync");
+                    }
                     tracing::info!(%node, "node detached");
                 }
                 // Tunnels through this stream are gone with it.
