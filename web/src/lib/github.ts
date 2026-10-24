@@ -14,6 +14,11 @@ export interface GithubApp {
   ownerLogin: string | null;
   public: boolean;
   createdAt: string;
+  /** Permissions (`name: level`) and events the App lacks: its owner approves them on GitHub. */
+  missingPermissions: string[];
+  missingEvents: string[];
+  /** Where the App's owner reviews its permissions and events. */
+  permissionsUrl: string;
 }
 export interface GithubApps {
   apps: GithubApp[];

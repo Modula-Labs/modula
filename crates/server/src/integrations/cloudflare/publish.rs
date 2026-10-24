@@ -22,13 +22,12 @@ use std::path::{Component, Path};
 
 use modula_id::Id;
 use secrecy::ExposeSecret;
-use serde_json::json;
 
 use super::client;
 use super::workers::{self, AssetFile, Binding, ManifestEntry};
 use crate::deploy::{config::ServiceConfig, env, output};
 use crate::error::AppResult;
-use crate::jobs::{self, Job, NewJob};
+use crate::jobs::Job;
 use crate::state::AppState;
 
 pub const JOB: &str = "cloudflare.publish";
@@ -562,17 +561,7 @@ async fn finish(
         crate::webhooks::Event::DeploymentFailed
     };
     crate::webhooks::enqueue(&mut tx, dep, hook).await?;
-    if row.reports_commit {
-        jobs::enqueue(
-            &mut *tx,
-            NewJob {
-                kind: crate::github::app::STATUS_JOB,
-                payload: json!({ "deploymentId": dep, "state": commit_state }),
-                ..Default::default()
-            },
-        )
-        .await?;
-    }
+    crate::github::report(&mut tx, dep, commit_state, row.reports_commit).await?;
     kick.sort();
     kick.dedup();
     for n in &kick {
@@ -691,6 +680,7 @@ fn human_size(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn script_names() {

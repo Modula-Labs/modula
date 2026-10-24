@@ -64,7 +64,7 @@ macro_rules! remove_live_sql {
                  UPDATE deployments d SET status = 'removed', finished_at = now(), updated_at = now()
                  FROM service_instances i, services s
                  WHERE i.id = d.service_instance_id AND s.id = i.service_id
-                   AND d.status IN ('queued', 'building', 'deploying', 'active', 'crashed') AND ",
+                   AND d.status IN ('waiting_ci', 'queued', 'building', 'deploying', 'active', 'crashed') AND ",
             $cond,
             " RETURNING d.id, i.environment_id)
              SELECT r.node_id FROM deployment_replicas r JOIN gone ON gone.id = r.deployment_id

@@ -9,6 +9,7 @@ export function words(key: string): string {
 }
 
 const deploymentVerb: Record<string, string> = {
+  waiting_ci: "is waiting for CI",
   queued: "queued",
   building: "started building",
   deploying: "is deploying",

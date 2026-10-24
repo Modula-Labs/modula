@@ -289,6 +289,9 @@ export function GithubIntegration({
           {installations.isPending && appList.length && !forbidden ? (
             <Skeleton className="h-8" />
           ) : null}
+          {appList.map((a) => (
+            <MissingPermissions key={a.id} app={a} />
+          ))}
           {list.length ? (
             <ul className="flex flex-col gap-1 pl-8">
               {list.map((i) => (
@@ -426,5 +429,24 @@ export function GithubIntegration({
         {remove.error ? <Alert>{remove.error.message}</Alert> : null}
       </Modal>
     </div>
+  );
+}
+
+/** An App created by an older version lacks permissions or events newer features need (pull
+ *  request previews, waiting for CI): its owner approves them on GitHub. */
+function MissingPermissions({ app }: { app: GithubApp }) {
+  const missing = [...app.missingPermissions, ...app.missingEvents.map((e) => `${e} events`)];
+  if (!missing.length) return null;
+  const href = safeHttpUrl(app.permissionsUrl, true);
+  return (
+    <Alert tone="warn" title={`${appOwner(app)}'s GitHub App needs new permissions`}>
+      Pull request previews and waiting for CI need {missing.join(", ")}. The App's owner approves them on GitHub,
+      then each installation accepts them.{" "}
+      {href ? (
+        <a href={href} target="_blank" rel="noreferrer" className="underline underline-offset-4">
+          Review permissions on GitHub
+        </a>
+      ) : null}
+    </Alert>
   );
 }

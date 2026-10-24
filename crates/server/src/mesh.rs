@@ -244,7 +244,7 @@ pub async fn allocate_ip(tx: &mut PgConnection, node: Id) -> AppResult<Option<St
     let taken: Vec<String> = sqlx::query_scalar(
         "SELECT r.mesh_ip FROM deployment_replicas r JOIN deployments d ON d.id = r.deployment_id
          WHERE r.node_id = $1 AND r.mesh_ip IS NOT NULL
-           AND (d.status IN ('queued', 'building', 'deploying', 'active', 'crashed')
+           AND (d.status IN ('waiting_ci', 'queued', 'building', 'deploying', 'active', 'crashed')
                 -- A retired container may still be draining (up to 5 min):
                 -- its address isn't free yet.
                 OR d.finished_at > now() - interval '15 minutes')",

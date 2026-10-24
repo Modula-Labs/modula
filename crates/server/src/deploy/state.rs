@@ -22,7 +22,12 @@
 //! address book to every node running something of it.
 //!
 //! Repository deployments report `pending` / `success` / `failure` on their
-//! commit through the job queue (never inline: GitHub must not slow this path).
+//! commit through the job queue (never inline: GitHub must not slow this path),
+//! and a pull request preview's on its comment.
+//!
+//! A push to a service with `waitForCi` starts at `waiting_ci`, placed but
+//! not on any node's desired state, until the commit's other checks pass
+//! (`building`) or fail or time out (`failed`); see `github::ci`.
 
 use modula_id::Id;
 use modula_proto::node::v1::{DeploymentEvent, DeploymentPhase};
@@ -271,13 +276,8 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
         }
         _ => {}
     }
-    if let (true, Some(s)) = (reports_commit, commit_status) {
-        let job = NewJob {
-            kind: crate::github::app::STATUS_JOB,
-            payload: serde_json::json!({ "deploymentId": dep, "state": s }),
-            ..Default::default()
-        };
-        jobs::enqueue(&mut *tx, job).await?;
+    if let Some(s) = commit_status {
+        crate::github::report(&mut tx, *dep, s, reports_commit).await?;
     }
     kick.sort();
     kick.dedup();

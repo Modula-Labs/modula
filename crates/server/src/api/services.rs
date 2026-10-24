@@ -88,7 +88,7 @@ pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
                   WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id AND status = 'active')
                     THEN 'online'
                   WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id
-                               AND status IN ('queued', 'building', 'deploying'))
+                               AND status IN ('waiting_ci', 'queued', 'building', 'deploying'))
                     THEN 'deploying'
                   WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id AND status = 'crashed')
                     THEN 'crashed'

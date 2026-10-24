@@ -1,5 +1,6 @@
 //! GitHub App: the manifest flow's single-use state, webhook authentication
-//! and replay protection, and push-to-deploy matching, against a mock GitHub.
+//! and replay protection, push-to-deploy matching, pull request previews and
+//! waiting for CI, against a mock GitHub.
 
 mod common;
 
@@ -72,15 +73,48 @@ async fn mock_github() -> url::Url {
     mock_github_counted().await.0
 }
 
-/// GitHub's App endpoints: manifest conversion, installations, tokens, repos,
-/// branches. The counter tracks calls to the listing endpoints.
 async fn mock_github_counted() -> (url::Url, Counter) {
+    let (url, calls, _) = mock_github_full().await;
+    (url, calls)
+}
+
+/// What the mock GitHub keeps for pull requests and CI, which tests read
+/// and set.
+#[derive(Default)]
+struct Gh {
+    /// Issue comments: (id, pull request, body).
+    comments: std::sync::Mutex<Vec<(i64, i64, String)>>,
+    /// `check_suites` and `statuses` reported for every commit.
+    suites: std::sync::Mutex<Value>,
+    statuses: std::sync::Mutex<Value>,
+    /// The files every pull request changes.
+    files: std::sync::Mutex<Vec<String>>,
+}
+
+/// GitHub's App endpoints: manifest conversion, installations, tokens, repos,
+/// branches, the App itself, pull request comments and files, check suites
+/// and statuses. The counter tracks calls to the listing endpoints.
+async fn mock_github_full() -> (url::Url, Counter, std::sync::Arc<Gh>) {
     use axum::extract::{Path, Query};
+    use axum::routing::patch;
     use axum::routing::{get, post};
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
     let calls = Counter::default();
     let (c1, c2) = (calls.clone(), calls.clone());
+    let gh = std::sync::Arc::new(Gh {
+        suites: std::sync::Mutex::new(json!([])),
+        statuses: std::sync::Mutex::new(json!([])),
+        ..Default::default()
+    });
+    let (g1, g2, g3, g4, g5, g6) = (
+        gh.clone(),
+        gh.clone(),
+        gh.clone(),
+        gh.clone(),
+        gh.clone(),
+        gh.clone(),
+    );
     let unauthorized = || (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
     let app = axum::Router::new()
         // Public App lookup: another instance already has the plain name.
@@ -188,11 +222,90 @@ async fn mock_github_counted() -> (url::Url, Counter) {
                 ]);
                 (StatusCode::OK, axum::Json(branches))
             }),
+        )
+        // An App created before previews: push only, no pull requests or checks.
+        .route(
+            "/app",
+            get(|h: axum::http::HeaderMap| async move {
+                if !app_jwt_ok(&h) {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                }
+                let permissions = json!({ "contents": "read", "metadata": "read", "statuses": "write" });
+                (StatusCode::OK, axum::Json(json!({ "id": 1001, "permissions": permissions, "events": ["push"] })))
+            }),
+        )
+        .route(
+            "/repos/{owner}/{name}/issues/{number}/comments",
+            get(move |h: axum::http::HeaderMap, Path((_, _, n)): Path<(String, String, i64)>| async move {
+                if !installation_auth_ok(&h) {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                }
+                let list: Vec<Value> = g1.comments.lock().unwrap().iter()
+                    .filter(|c| c.1 == n)
+                    .map(|c| json!({ "id": c.0, "body": c.2, "user": { "login": "modula[bot]", "type": "Bot" } }))
+                    .collect();
+                (StatusCode::OK, axum::Json(json!(list)))
+            })
+            .post(move |h: axum::http::HeaderMap, Path((_, _, n)): Path<(String, String, i64)>, axum::Json(b): axum::Json<Value>| async move {
+                if !installation_auth_ok(&h) {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                }
+                let mut c = g2.comments.lock().unwrap();
+                let id = 500 + c.len() as i64;
+                c.push((id, n, b["body"].as_str().unwrap().to_owned()));
+                (StatusCode::CREATED, axum::Json(json!({ "id": id })))
+            }),
+        )
+        .route(
+            "/repos/{owner}/{name}/issues/comments/{id}",
+            patch(move |h: axum::http::HeaderMap, Path((_, _, id)): Path<(String, String, i64)>, axum::Json(b): axum::Json<Value>| async move {
+                if !installation_auth_ok(&h) {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                }
+                let mut c = g3.comments.lock().unwrap();
+                match c.iter_mut().find(|c| c.0 == id) {
+                    Some(c) => {
+                        c.2 = b["body"].as_str().unwrap().to_owned();
+                        (StatusCode::OK, axum::Json(json!({ "id": id })))
+                    }
+                    None => (StatusCode::NOT_FOUND, axum::Json(json!({}))),
+                }
+            }),
+        )
+        .route(
+            "/repos/{owner}/{name}/pulls/{number}/files",
+            get(move |h: axum::http::HeaderMap| async move {
+                if !installation_auth_ok(&h) {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                }
+                let files: Vec<Value> = g4.files.lock().unwrap().iter().map(|f| json!({ "filename": f })).collect();
+                (StatusCode::OK, axum::Json(json!(files)))
+            }),
+        )
+        .route(
+            "/repos/{owner}/{name}/commits/{sha}/check-suites",
+            get(move |h: axum::http::HeaderMap| async move {
+                if !installation_auth_ok(&h) {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                }
+                let suites = g5.suites.lock().unwrap().clone();
+                (StatusCode::OK, axum::Json(json!({ "total_count": suites.as_array().unwrap().len(), "check_suites": suites })))
+            }),
+        )
+        .route(
+            "/repos/{owner}/{name}/commits/{sha}/status",
+            get(move |h: axum::http::HeaderMap| async move {
+                if !installation_auth_ok(&h) {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                }
+                let statuses = g6.statuses.lock().unwrap().clone();
+                (StatusCode::OK, axum::Json(json!({ "state": "pending", "statuses": statuses })))
+            }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (format!("http://{addr}").parse().unwrap(), calls)
+    (format!("http://{addr}").parse().unwrap(), calls, gh)
 }
 
 async fn app_with_github(pool: PgPool) -> (TestApp, String) {
@@ -385,9 +498,15 @@ async fn connect_creates_installs_and_returns(pool: PgPool) {
     let m = &r.json["manifest"];
     assert_eq!(
         m["default_permissions"],
-        json!({ "contents": "read", "metadata": "read", "statuses": "write" })
+        json!({
+            "checks": "read", "contents": "read", "issues": "write", "metadata": "read",
+            "pull_requests": "read", "statuses": "write",
+        })
     );
-    assert_eq!(m["default_events"], json!(["push"]));
+    assert_eq!(
+        m["default_events"],
+        json!(["check_suite", "pull_request", "push", "status"])
+    );
     // The installing user authorizes on the way back (see install_callback).
     assert_eq!(m["request_oauth_on_install"], true);
     assert_eq!(
@@ -1294,4 +1413,562 @@ async fn several_apps_stay_apart(pool: PgPool) {
     // Its webhooks no longer authenticate.
     let r = signed_as(&app, WEBHOOK_SECRET, Some(1001), "push", &body).await;
     assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+}
+
+const SHA2: &str = "1123456789abcdef0123456789abcdef01234567";
+const SHA3: &str = "2123456789abcdef0123456789abcdef01234567";
+
+/// An App (created through the manifest flow) and the mock's pull request
+/// and CI state.
+async fn app_with_gh(pool: PgPool) -> (TestApp, String, std::sync::Arc<Gh>) {
+    let mut cfg = config();
+    let (url, _, gh) = mock_github_full().await;
+    cfg.github_api = url;
+    let app = TestApp::with_config(pool, cfg);
+    let admin = app.setup_admin().await;
+    create_app(&app, &admin).await;
+    (app, admin, gh)
+}
+
+/// Run the queued jobs of `kind` once, as the worker would.
+async fn run_jobs(app: &TestApp, kind: &str) -> usize {
+    let jobs: Vec<modula_server::jobs::Job> = sqlx::query_as(
+        "DELETE FROM jobs WHERE kind = $1 AND status = 'queued'
+         RETURNING id, kind, payload, attempts, max_attempts",
+    )
+    .bind(kind)
+    .fetch_all(app.db())
+    .await
+    .unwrap();
+    let n = jobs.len();
+    for job in jobs {
+        let s = app.state.clone();
+        match kind {
+            modula_server::github::pull_request::COMMENT_JOB => {
+                modula_server::github::pull_request::comment_job(s, job)
+                    .await
+                    .unwrap()
+            }
+            modula_server::github::ci::TIMEOUT_JOB => {
+                modula_server::github::ci::timeout_job(s, job)
+                    .await
+                    .unwrap()
+            }
+            other => panic!("no runner for {other}"),
+        }
+    }
+    n
+}
+
+fn pull_request(action: &str, number: i64, sha: &str, association: &str, head: Value) -> Value {
+    json!({
+        "action": action,
+        "number": number,
+        "pull_request": {
+            "title": "Add login",
+            "author_association": association,
+            "user": { "login": "ada" },
+            "head": { "ref": "feature/login", "sha": sha, "repo": head },
+        },
+        "repository": { "full_name": "acme/App" },
+        "installation": { "id": INSTALLATION },
+    })
+}
+
+fn own_head() -> Value {
+    json!({ "full_name": "acme/App" })
+}
+
+/// The project and production environment of a seeded instance.
+async fn project_of(app: &TestApp, instance: Id) -> (Id, Id) {
+    sqlx::query_as(
+        "SELECT s.project_id, i.environment_id FROM service_instances i
+         JOIN services s ON s.id = i.service_id WHERE i.id = $1",
+    )
+    .bind(instance)
+    .fetch_one(app.db())
+    .await
+    .unwrap()
+}
+
+async fn previews(app: &TestApp) -> Vec<(Id, String, Option<String>)> {
+    sqlx::query_as(
+        "SELECT id, name, pr_head_sha FROM environments WHERE ephemeral ORDER BY created_at",
+    )
+    .fetch_all(app.db())
+    .await
+    .unwrap()
+}
+
+/// Service name and commit of each deployment in `env`, by name.
+async fn env_deployments(app: &TestApp, env: Id) -> Vec<(String, Option<String>)> {
+    sqlx::query_as(
+        "SELECT s.name, d.commit_sha FROM deployments d
+         JOIN service_instances i ON i.id = d.service_instance_id
+         JOIN services s ON s.id = i.service_id
+         WHERE i.environment_id = $1 ORDER BY s.name, d.created_at",
+    )
+    .bind(env)
+    .fetch_all(app.db())
+    .await
+    .unwrap()
+}
+
+/// A pull request gets a preview environment duplicated from production
+/// (without its sealed variables), deployed from its branch, with one comment
+/// that follows the deployments; closing it removes the preview.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn pull_requests_get_previews(pool: PgPool) {
+    let (app, admin, gh) = app_with_gh(pool).await;
+    let repo = |branch: &str| json!({ "type": "repo", "repo": "acme/app", "branch": branch });
+    let ids = seed(
+        &app,
+        &admin,
+        &[
+            (
+                "api",
+                json!({ "source": repo("main"), "watchPaths": ["services/api/"] }),
+            ),
+            ("web", json!({ "source": repo("main") })),
+            (
+                "cache",
+                json!({ "source": { "type": "image", "image": "redis:7" } }),
+            ),
+        ],
+    )
+    .await;
+    let db = app.db();
+    let (project, production) = project_of(&app, ids[0]).await;
+    // web is public in production; api has a secret and a plain variable.
+    sqlx::query(
+        "INSERT INTO domains (id, service_instance_id, hostname, kind)
+         VALUES ($1, $2, 'web.apps.test', 'generated')",
+    )
+    .bind(Id::new())
+    .bind(ids[1])
+    .execute(db)
+    .await
+    .unwrap();
+    for (name, value, sealed) in [("PLAIN", "hello", false), ("SECRET", "s3cret", true)] {
+        let id = Id::new();
+        let v =
+            modula_server::deploy::env::seal_variable(&app.state.keys, db, production, id, value)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO variables (id, environment_id, service_instance_id, name, value_sealed, sealed, refs)
+             VALUES ($1, $2, $3, $4, $5, $6, '{}')",
+        )
+        .bind(id)
+        .bind(production)
+        .bind(ids[0])
+        .bind(name)
+        .bind(v)
+        .bind(sealed)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    // Previews are off by default.
+    let opened = pull_request("opened", 7, SHA, "MEMBER", own_head());
+    let r = signed(&app, "pull_request", opened.clone()).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert!(previews(&app).await.is_empty());
+    let r = app
+        .call(
+            Method::PATCH,
+            &format!("/api/projects/{project}"),
+            Some(&admin),
+            Some(json!({ "prPreviews": { "enabled": true } })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(
+        r.json["prPreviews"],
+        json!({ "enabled": true, "baseEnvironmentId": null })
+    );
+
+    let r = signed(&app, "pull_request", opened).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let envs = previews(&app).await;
+    assert_eq!(envs.len(), 1, "{:?}", r.json);
+    let (env, name, head) = envs[0].clone();
+    assert_eq!((name.as_str(), head.as_deref()), ("pr-7", Some(SHA)));
+    let r = app
+        .call(
+            Method::GET,
+            &format!("/api/projects/{project}"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    let shown = r.json["environments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "pr-7")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (&shown["ephemeral"], &shown["prNumber"]),
+        (&json!(true), &json!(7))
+    );
+    // The repository's services follow the pull request's branch.
+    let branches: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT s.name, i.config->'source'->>'branch' FROM service_instances i
+         JOIN services s ON s.id = i.service_id WHERE i.environment_id = $1 ORDER BY s.name",
+    )
+    .bind(env)
+    .fetch_all(db)
+    .await
+    .unwrap();
+    let feature = Some("feature/login".to_owned());
+    assert_eq!(
+        branches,
+        [
+            ("api".into(), feature.clone()),
+            ("cache".into(), None),
+            ("web".into(), feature)
+        ]
+    );
+    // No sealed variables: the pull request's code never sees production's secrets.
+    let vars: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT name, sealed FROM variables WHERE environment_id = $1 ORDER BY name",
+    )
+    .bind(env)
+    .fetch_all(db)
+    .await
+    .unwrap();
+    assert_eq!(vars, [("PLAIN".to_owned(), false)]);
+    // A domain for the service production exposes.
+    let hosts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT s.name, d.hostname FROM domains d
+         JOIN service_instances i ON i.id = d.service_instance_id
+         JOIN services s ON s.id = i.service_id WHERE i.environment_id = $1",
+    )
+    .bind(env)
+    .fetch_all(db)
+    .await
+    .unwrap();
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].0, "web");
+    assert!(hosts[0].1.starts_with("web-pr-7-"), "{}", hosts[0].1);
+    // Everything starts in a new preview.
+    let sha = Some(SHA.to_owned());
+    assert_eq!(
+        env_deployments(&app, env).await,
+        [
+            ("api".into(), sha.clone()),
+            ("cache".into(), None),
+            ("web".into(), sha.clone())
+        ]
+    );
+
+    // One comment, with each service's URL and status.
+    assert_eq!(
+        run_jobs(&app, modula_server::github::pull_request::COMMENT_JOB).await,
+        1
+    );
+    let comments = gh.comments.lock().unwrap().clone();
+    assert_eq!(comments.len(), 1);
+    let (comment, number, body) = &comments[0];
+    assert_eq!(*number, 7);
+    assert!(body.starts_with(&format!("<!-- modula-preview:{project} -->")));
+    assert!(
+        body.contains(&format!("| web | https://{} | Building |", hosts[0].1)),
+        "{body}"
+    );
+    assert!(body.contains("| cache | — | Deploying |"), "{body}");
+
+    // A deployment failing updates the same comment.
+    let (dep, node): (Id, Id) = sqlx::query_as(
+        "SELECT d.id, d.node_id FROM deployments d JOIN service_instances i ON i.id = d.service_instance_id
+         JOIN services s ON s.id = i.service_id WHERE i.environment_id = $1 AND s.name = 'api'",
+    )
+    .bind(env)
+    .fetch_one(db)
+    .await
+    .unwrap();
+    let ev = modula_proto::node::v1::DeploymentEvent {
+        deployment_id: dep.to_string(),
+        phase: modula_proto::node::v1::DeploymentPhase::Failed as i32,
+        message: "build failed".into(),
+        ..Default::default()
+    };
+    modula_server::deploy::state::apply_event(db, node, &ev)
+        .await
+        .unwrap();
+    // The stored id is used: nothing is listed to find it again.
+    gh.comments.lock().unwrap()[0].2 = "edited on GitHub".into();
+    assert_eq!(
+        run_jobs(&app, modula_server::github::pull_request::COMMENT_JOB).await,
+        1
+    );
+    let comments = gh.comments.lock().unwrap().clone();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].0, *comment);
+    assert!(
+        comments[0].2.contains("| api | — | Failed |"),
+        "{}",
+        comments[0].2
+    );
+
+    // A push to the pull request redeploys the services it touches: web (no
+    // watch paths), not api (only services/api/).
+    *gh.files.lock().unwrap() = vec!["docs/README.md".into()];
+    let sync = pull_request("synchronize", 7, SHA2, "MEMBER", own_head());
+    let r = signed(&app, "pull_request", sync.clone()).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(previews(&app).await[0].2.as_deref(), Some(SHA2));
+    let sha2 = Some(SHA2.to_owned());
+    assert_eq!(
+        env_deployments(&app, env).await,
+        [
+            ("api".into(), sha.clone()),
+            ("cache".into(), None),
+            ("web".into(), sha.clone()),
+            ("web".into(), sha2.clone()),
+        ]
+    );
+    // A push to the branch itself deploys nothing more (the preview follows
+    // pull_request events), nor does a replayed event.
+    let mut branch_push = push("refs/heads/feature/login", INSTALLATION, &["x"]);
+    branch_push["after"] = json!(SHA2);
+    signed(&app, "push", branch_push).await;
+    signed(&app, "pull_request", sync).await;
+    assert_eq!(env_deployments(&app, env).await.len(), 4);
+
+    // Closing the pull request removes the preview and says so.
+    let r = signed(
+        &app,
+        "pull_request",
+        pull_request("closed", 7, SHA2, "MEMBER", own_head()),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert!(previews(&app).await.is_empty());
+    run_jobs(&app, modula_server::github::pull_request::COMMENT_JOB).await;
+    let comments = gh.comments.lock().unwrap().clone();
+    assert_eq!(comments.len(), 1);
+    assert!(comments[0].2.contains("removed"), "{}", comments[0].2);
+    // Production was never touched.
+    assert!(env_deployments(&app, production).await.is_empty());
+}
+
+/// Forks, authors without write access, and projects at their cap get no preview.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn untrusted_pull_requests_get_no_preview(pool: PgPool) {
+    let (app, admin, gh) = app_with_gh(pool).await;
+    let repo = json!({ "type": "repo", "repo": "acme/app", "branch": "main" });
+    let ids = seed(&app, &admin, &[("api", json!({ "source": repo }))]).await;
+    let (project, _) = project_of(&app, ids[0]).await;
+    sqlx::query("UPDATE projects SET pr_previews = true WHERE id = $1")
+        .bind(project)
+        .execute(app.db())
+        .await
+        .unwrap();
+    for body in [
+        pull_request(
+            "opened",
+            8,
+            SHA,
+            "MEMBER",
+            json!({ "full_name": "mallory/app" }),
+        ),
+        pull_request("opened", 8, SHA, "MEMBER", Value::Null),
+        pull_request("opened", 8, SHA, "CONTRIBUTOR", own_head()),
+        pull_request("synchronize", 8, SHA, "NONE", own_head()),
+    ] {
+        let r = signed(&app, "pull_request", body).await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+        assert!(r.json["ignored"].is_string(), "{:?}", r.json);
+    }
+    assert!(previews(&app).await.is_empty());
+    assert!(deployments(&app).await.is_empty());
+
+    // At the cap, a trusted pull request gets none either.
+    for n in 0..modula_server::github::pull_request::MAX_PREVIEWS {
+        sqlx::query(
+            "INSERT INTO environments (id, project_id, name, ephemeral, pr_repo, pr_number)
+             VALUES ($1, $2, $3, true, 'acme/app', $4)",
+        )
+        .bind(Id::new())
+        .bind(project)
+        .bind(format!("pr-{}", 100 + n))
+        .bind(100 + n as i32)
+        .execute(app.db())
+        .await
+        .unwrap();
+    }
+    let r = signed(
+        &app,
+        "pull_request",
+        pull_request("opened", 9, SHA, "OWNER", own_head()),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert!(deployments(&app).await.is_empty());
+    assert!(gh.comments.lock().unwrap().is_empty());
+}
+
+fn check_suite(sha: &str) -> Value {
+    json!({
+        "action": "completed",
+        "check_suite": { "head_sha": sha, "status": "completed", "conclusion": "success", "app": { "id": 15368 } },
+        "repository": { "full_name": "acme/App" },
+        "installation": { "id": INSTALLATION },
+    })
+}
+
+fn status_event(sha: &str, context: &str, state: &str) -> Value {
+    json!({
+        "sha": sha, "context": context, "state": state,
+        "repository": { "full_name": "acme/App" },
+        "installation": { "id": INSTALLATION },
+    })
+}
+
+async fn deployment_status(app: &TestApp, id: &Value) -> (String, Option<String>) {
+    sqlx::query_as("SELECT status, error FROM deployments WHERE id = $1")
+        .bind(id.as_str().unwrap())
+        .fetch_one(app.db())
+        .await
+        .unwrap()
+}
+
+/// With waitForCi a push waits at `waiting_ci` until the commit's other
+/// checks pass (our own statuses and App don't count), fails when one
+/// fails, and fails when CI takes too long.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn pushes_wait_for_ci(pool: PgPool) {
+    let (app, admin, gh) = app_with_gh(pool).await;
+    let repo = json!({ "type": "repo", "repo": "acme/app", "branch": "main" });
+    seed(
+        &app,
+        &admin,
+        &[("api", json!({ "source": repo, "waitForCi": true }))],
+    )
+    .await;
+    let push_at = |sha: &str| {
+        let mut b = push("refs/heads/main", INSTALLATION, &["src/a.rs"]);
+        b["after"] = json!(sha);
+        b
+    };
+    let r = signed(&app, "push", push_at(SHA)).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let first = r.json["deployments"][0].clone();
+    assert_eq!(deployment_status(&app, &first).await.0, "waiting_ci");
+
+    // Our own App's suite, a suite nothing ran in, and our own status don't
+    // count; GitHub Actions is still running.
+    let suite = |id: i64, app: i64, name: &str, status: &str, conclusion: Value, runs: i64| {
+        json!({
+            "id": id, "status": status, "conclusion": conclusion,
+            "app": { "id": app, "name": name }, "latest_check_runs_count": runs,
+        })
+    };
+    *gh.suites.lock().unwrap() = json!([
+        suite(1, 1001, "Modula", "queued", Value::Null, 1),
+        suite(2, 77, "Idle bot", "queued", Value::Null, 0),
+        suite(3, 15368, "GitHub Actions", "in_progress", Value::Null, 2),
+    ]);
+    *gh.statuses.lock().unwrap() = json!([{ "context": "modula/api", "state": "pending" }]);
+    let r = signed(&app, "status", status_event(SHA, "modula/api", "success")).await;
+    assert_eq!(r.json["settled"], json!([]), "{:?}", r.json);
+    let r = signed(&app, "check_suite", check_suite(SHA)).await;
+    assert_eq!(r.json["settled"], json!([]), "{:?}", r.json);
+    assert_eq!(deployment_status(&app, &first).await.0, "waiting_ci");
+
+    // Actions passes: the build starts.
+    gh.suites.lock().unwrap()[2] =
+        suite(3, 15368, "GitHub Actions", "completed", json!("success"), 2);
+    let r = signed(&app, "check_suite", check_suite(SHA)).await;
+    assert_eq!(r.json["settled"], json!([first.clone()]), "{:?}", r.json);
+    assert_eq!(deployment_status(&app, &first).await.0, "building");
+
+    // A failing check fails the next push's deployment, and says so on the commit.
+    let r = signed(&app, "push", push_at(SHA2)).await;
+    let second = r.json["deployments"][0].clone();
+    assert_eq!(deployment_status(&app, &second).await.0, "waiting_ci");
+    *gh.suites.lock().unwrap() = json!([suite(
+        3,
+        15368,
+        "GitHub Actions",
+        "completed",
+        json!("failure"),
+        2
+    )]);
+    let r = signed(&app, "status", status_event(SHA2, "ci/legacy", "success")).await;
+    assert_eq!(r.json["settled"], json!([second.clone()]), "{:?}", r.json);
+    let (status, error) = deployment_status(&app, &second).await;
+    assert_eq!(status, "failed");
+    assert!(error.unwrap().contains("GitHub Actions concluded failure"));
+    let reported: Vec<Value> =
+        sqlx::query_scalar("SELECT payload FROM jobs WHERE kind = 'github.commit_status'")
+            .fetch_all(app.db())
+            .await
+            .unwrap();
+    assert!(reported.contains(&json!({ "deploymentId": second, "state": "failure" })));
+
+    // CI that never finishes times out.
+    *gh.suites.lock().unwrap() =
+        json!([suite(3, 15368, "GitHub Actions", "queued", Value::Null, 2)]);
+    let r = signed(&app, "push", push_at(SHA3)).await;
+    let third = r.json["deployments"][0].clone();
+    // One timeout per waiting deployment; only the third still waits.
+    assert_eq!(
+        run_jobs(&app, modula_server::github::ci::TIMEOUT_JOB).await,
+        3
+    );
+    let (status, error) = deployment_status(&app, &third).await;
+    assert_eq!(status, "failed");
+    assert!(error.unwrap().contains("didn't finish"));
+    // A late pass changes nothing.
+    *gh.suites.lock().unwrap() = json!([suite(
+        3,
+        15368,
+        "GitHub Actions",
+        "completed",
+        json!("success"),
+        2
+    )]);
+    let r = signed(&app, "check_suite", check_suite(SHA3)).await;
+    assert_eq!(r.json["settled"], json!([]), "{:?}", r.json);
+    // The released first deployment was superseded by the next push, not
+    // failed by its timeout.
+    assert_eq!(deployment_status(&app, &first).await.0, "cancelled");
+}
+
+/// An App created before previews lacks their permissions and events: the
+/// settings show what to approve, and where.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn old_apps_show_missing_permissions(pool: PgPool) {
+    let (app, admin, _) = app_with_gh(pool).await;
+    let r = app
+        .call(Method::GET, "/api/github/apps", Some(&admin), None)
+        .await;
+    assert_eq!(r.json["apps"][0]["missingPermissions"], json!([]));
+    modula_server::github::app::check_permissions(&app.state, 1001)
+        .await
+        .unwrap();
+    let r = app
+        .call(Method::GET, "/api/github/apps", Some(&admin), None)
+        .await;
+    let a = &r.json["apps"][0];
+    assert_eq!(
+        a["missingPermissions"],
+        json!(["checks: read", "issues: write", "pull_requests: read"])
+    );
+    assert_eq!(
+        a["missingEvents"],
+        json!(["check_suite", "pull_request", "status"])
+    );
+    assert!(
+        a["permissionsUrl"]
+            .as_str()
+            .unwrap()
+            .ends_with("/settings/apps/modula-deploy-test/permissions"),
+        "{a:?}"
+    );
 }

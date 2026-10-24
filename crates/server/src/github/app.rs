@@ -38,6 +38,21 @@ pub fn aad<'a>(column: &'a str, row: &'a str) -> FieldAad<'a> {
     }
 }
 
+/// The permissions an App is created with (and that tokens ask for, one
+/// [`TokenScope`] at a time).
+pub const PERMISSIONS: &[(&str, &str)] = &[
+    ("checks", "read"),
+    ("contents", "read"),
+    ("issues", "write"),
+    ("metadata", "read"),
+    ("pull_requests", "read"),
+    ("statuses", "write"),
+];
+
+/// The events an App subscribes to. GitHub always sends Apps their
+/// installation and installation_repositories events.
+pub const EVENTS: &[&str] = &["check_suite", "pull_request", "push", "status"];
+
 /// What an installation token may do: least privilege per use.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TokenScope {
@@ -45,6 +60,12 @@ pub enum TokenScope {
     Contents(String),
     /// Post commit statuses on one repository.
     Statuses(String),
+    /// Read one repository's check suites and commit statuses (wait for CI).
+    Checks(String),
+    /// Read one repository's pull requests (changed files).
+    PullRequests(String),
+    /// Write comments on one repository's pull requests (preview links).
+    Issues(String),
     /// List the repositories the installation can access.
     Repos,
 }
@@ -130,8 +151,66 @@ pub async fn hook_sync_job(state: AppState, _job: crate::jobs::Job) -> anyhow::R
     );
     for app in apps {
         sync_hook(&state, app, &want).await?;
+        if let Err(e) = check_permissions(&state, app).await {
+            tracing::warn!(app, error = %e, "could not read the GitHub App's permissions");
+        }
     }
     Ok(())
+}
+
+/// Record which of [`PERMISSIONS`] and [`EVENTS`] the App lacks (`GET /app`
+/// as the App): an App created before they were added keeps its old set
+/// until its owner approves the new one on GitHub.
+pub async fn check_permissions(state: &AppState, app: i64) -> anyhow::Result<()> {
+    let jwt = app_jwt(&creds(state, app).await?)?;
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        permissions: HashMap<String, String>,
+        #[serde(default)]
+        events: Vec<String>,
+    }
+    let r: Resp = state
+        .github
+        .request(Method::GET, "/app")
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("GitHub unreachable: {e}"))?
+        .error_for_status()?
+        .json()
+        .await?;
+    let (missing_permissions, missing_events) = missing(&r.permissions, &r.events);
+    sqlx::query(
+        "UPDATE github_apps SET missing_permissions = $2, missing_events = $3 WHERE id = $1",
+    )
+    .bind(app)
+    .bind(&missing_permissions)
+    .bind(&missing_events)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+/// The permissions (`name: level`) and events an App with `have` lacks.
+/// `write` satisfies `read`.
+fn missing(have: &HashMap<String, String>, events: &[String]) -> (Vec<String>, Vec<String>) {
+    let perms = PERMISSIONS
+        .iter()
+        .filter(|(name, level)| {
+            !matches!(
+                (have.get(*name).map(String::as_str), *level),
+                (Some("write" | "admin"), _) | (Some("read"), "read")
+            )
+        })
+        .map(|(name, level)| format!("{name}: {level}"))
+        .collect();
+    let events = EVENTS
+        .iter()
+        .filter(|e| !events.iter().any(|h| h == *e))
+        .map(|e| e.to_string())
+        .collect();
+    (perms, events)
 }
 
 async fn sync_hook(state: &AppState, app: i64, want: &str) -> anyhow::Result<()> {
@@ -198,6 +277,16 @@ pub async fn installation_token(
         }
         TokenScope::Statuses(repo) => {
             json!({ "repositories": [repo_name(repo)], "permissions": { "statuses": "write" } })
+        }
+        TokenScope::Checks(repo) => json!({
+            "repositories": [repo_name(repo)],
+            "permissions": { "checks": "read", "statuses": "read" },
+        }),
+        TokenScope::PullRequests(repo) => {
+            json!({ "repositories": [repo_name(repo)], "permissions": { "pull_requests": "read" } })
+        }
+        TokenScope::Issues(repo) => {
+            json!({ "repositories": [repo_name(repo)], "permissions": { "issues": "write" } })
         }
         TokenScope::Repos => json!({ "permissions": { "metadata": "read" } }),
     };
@@ -874,4 +963,31 @@ pub async fn status_job(state: AppState, job: Job) -> anyhow::Result<()> {
         anyhow::bail!("GitHub answered {status} to a commit status");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_permissions_and_events() {
+        let have: HashMap<String, String> = [
+            ("contents", "read"),
+            ("metadata", "read"),
+            ("statuses", "write"),
+            ("checks", "write"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let (p, e) = missing(&have, &["push".to_owned()]);
+        assert_eq!(p, ["issues: write", "pull_requests: read"]);
+        assert_eq!(e, ["check_suite", "pull_request", "status"]);
+        let all: HashMap<String, String> = PERMISSIONS
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let events: Vec<String> = EVENTS.iter().map(|e| e.to_string()).collect();
+        assert_eq!(missing(&all, &events), (vec![], vec![]));
+    }
 }

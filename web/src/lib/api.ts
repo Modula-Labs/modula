@@ -185,6 +185,10 @@ export interface Environment {
   createdAt: string;
   /** The project's first environment (production): can't be deleted. */
   isDefault: boolean;
+  /** A pull request's preview, removed when the pull request closes. */
+  ephemeral: boolean;
+  prNumber: number | null;
+  prRepo: string | null;
 }
 export interface ServiceSummary {
   id: string;
@@ -196,6 +200,8 @@ export interface ServiceSummary {
   appTemplate?: string | null;
 }
 export type DeploymentStatus =
+  /** Placed, but not built until the commit's other GitHub checks pass. */
+  | "waiting_ci"
   | "queued"
   | "building"
   | "deploying"
@@ -231,7 +237,14 @@ export interface InstanceSummary {
   /** The next due time (RFC3339) of the deployed schedule. */
   cronNextAt: string | null;
 }
+/** Pull request previews: an environment per open pull request. */
+export interface PrPreviews {
+  enabled: boolean;
+  /** The environment previews duplicate; null = the default one. */
+  baseEnvironmentId: string | null;
+}
 export interface ProjectDetail extends Project {
+  prPreviews: PrPreviews;
   environments: Environment[];
   services: ServiceSummary[];
   instances: InstanceSummary[];
@@ -276,6 +289,8 @@ export interface ServiceConfig {
   buildCommand?: string;
   autoDeploy?: boolean;
   watchPaths?: string[];
+  /** A push waits for the commit's other GitHub checks to pass before it builds. */
+  waitForCi?: boolean;
   startCommand?: string[];
   port: number;
   healthcheckPath?: string;
@@ -957,7 +972,7 @@ export const api = {
     b: { name: string; description?: string },
   ) => post<ProjectDetail>(`/api/workspaces/${enc(workspace)}/projects`, b),
   project: (id: string) => get<ProjectDetail>(`/api/projects/${enc(id)}`),
-  updateProject: (id: string, b: { name?: string; description?: string }) =>
+  updateProject: (id: string, b: { name?: string; description?: string; prPreviews?: PrPreviews }) =>
     patch<Project>(`/api/projects/${enc(id)}`, b),
   deleteProject: (id: string) => del<{ ok: true }>(`/api/projects/${enc(id)}`),
   /** Without `duplicateFrom`, an empty environment (default environment's

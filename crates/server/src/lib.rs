@@ -104,6 +104,11 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 Ok(())
             })
             .on(github::app::STATUS_JOB, github::app::status_job)
+            .on(github::ci::TIMEOUT_JOB, github::ci::timeout_job)
+            .on(
+                github::pull_request::COMMENT_JOB,
+                github::pull_request::comment_job,
+            )
             .on(domains::RESYNC_JOB, domains::resync_job)
             .on(webhooks::DISPATCH_JOB, webhooks::dispatch_job)
             .on(github::app::HOOK_SYNC_JOB, github::app::hook_sync_job)

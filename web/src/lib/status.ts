@@ -3,6 +3,7 @@ import type { DeploymentStatus } from "./api";
 
 /** How a deployment status reads in badges. */
 export const deploymentBadge: Record<DeploymentStatus, { label: string; tone: Tone }> = {
+  waiting_ci: { label: "Waiting for CI", tone: "neutral" },
   queued: { label: "Queued", tone: "neutral" },
   building: { label: "Building", tone: "strong" },
   deploying: { label: "Deploying", tone: "strong" },
@@ -26,6 +27,8 @@ export function serviceState(status: DeploymentStatus | null): {
     case "deploying":
     case "queued":
       return { label: "Deploying", tone: "warn" };
+    case "waiting_ci":
+      return { label: "Waiting for CI", tone: "warn" };
     case "crashed":
       return { label: "Crashed", tone: "danger" };
     case "failed":
@@ -35,4 +38,5 @@ export function serviceState(status: DeploymentStatus | null): {
   }
 }
 
-export const isLive = (s: DeploymentStatus) => s === "queued" || s === "building" || s === "deploying";
+export const isLive = (s: DeploymentStatus) =>
+  s === "waiting_ci" || s === "queued" || s === "building" || s === "deploying";
