@@ -8,7 +8,6 @@ import { Field, Input, Select } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import {
-  ApiError,
   api,
   type BackupProvider,
   type BackupTarget,
@@ -37,7 +36,6 @@ export function BackupStorage({
   const targets = useQuery({
     queryKey: key,
     queryFn: () => api.backupTargets(workspaceId),
-    retry: (n, e) => !(e instanceof ApiError && e.status === 404) && n < 2,
   });
   const [adding, setAdding] = useState(false);
   const remove = useMutation({
@@ -45,9 +43,6 @@ export function BackupStorage({
     onSuccess: () => qc.invalidateQueries({ queryKey: key }),
   });
 
-  if (targets.error instanceof ApiError && targets.error.status === 404) {
-    return <Alert tone="warn">This server doesn't support backups yet.</Alert>;
-  }
   return (
     <>
       {remove.error ? <Alert>{remove.error.message}</Alert> : null}
@@ -351,7 +346,6 @@ export function SelfBackupCard({
   const cfg = useQuery({
     queryKey: ["self-backup"],
     queryFn: api.selfBackup,
-    retry: (n, e) => !(e instanceof ApiError && e.status === 404) && n < 2,
   });
   const targets = useQuery({
     queryKey: ["backup-targets", workspaceId],
@@ -377,7 +371,6 @@ export function SelfBackupCard({
     onSuccess: (c) => qc.setQueryData(["self-backup"], c),
   });
 
-  if (cfg.error instanceof ApiError && cfg.error.status === 404) return null;
   const dirty =
     !cfg.data ||
     cfg.data.enabled !== form.enabled ||

@@ -3,8 +3,8 @@
 //! Once this server runs a newer version than a node, the node is asked
 //! (`UpgradeRequest` on its stream) to install this version; the next one is
 //! asked only after it came back on the new version. Nodes that don't offer
-//! the `upgrade` capability (older releases) are left alone: an old node keeps
-//! working with a newer server, and the dashboard says to upgrade it by hand.
+//! the `upgrade` capability (installed without the modula-upgrade units) are
+//! left alone, and the dashboard says to upgrade them by hand.
 //! A failure stops the rollout until an admin retries it.
 
 use std::time::Duration;

@@ -272,8 +272,8 @@ pub struct UpdateInstance {
     pub config: ServiceConfig,
 }
 
-/// Settings changes are recorded as a change set. Until staged changes ship
-/// (C3) they are applied immediately; they take effect on the next deploy.
+/// Settings changes are applied immediately and recorded as a change set;
+/// they take effect on the next deploy.
 pub async fn update_instance(
     State(state): State<AppState>,
     actor: Actor,
@@ -345,7 +345,7 @@ pub struct Moved {
     pub deployment_id: Option<Id>,
 }
 
-/// Run the instance on another server (Railway's region picker): pinned to
+/// Run the instance on another server: pinned to
 /// it, and redeployed there when it was deployed before. The old deployment
 /// stops once the new one is live. A volume's data can't follow yet.
 pub async fn move_instance(

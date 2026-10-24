@@ -24,7 +24,7 @@ export function useInstanceDomain(enabled = true) {
     queryFn: api.instanceDomain,
     enabled,
     retry: (n, e) =>
-      !(e instanceof ApiError && [403, 404].includes(e.status)) && n < 2,
+      !(e instanceof ApiError && e.status === 403) && n < 2,
   });
 }
 
@@ -35,7 +35,6 @@ export function DomainSection() {
     if (q.data && window.location.hash === "#domain")
       document.getElementById("domain")?.scrollIntoView();
   }, [q.data]);
-  if (q.error instanceof ApiError && q.error.status === 404) return null;
   if (q.isPending) return <Skeleton className="h-40" />;
   if (q.error) return <Alert>{q.error.message}</Alert>;
   return <DomainForm data={q.data} />;

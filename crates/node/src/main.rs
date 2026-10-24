@@ -119,8 +119,6 @@ enum Command {
         #[arg(long, env = "MODULA_WG_PORT", default_value_t = modula_node::mesh::DEFAULT_PORT)]
         wg_port: u16,
     },
-    /// List what this build supports (the installer checks before using it).
-    Features,
     /// Show this server's identity.
     Status,
 }
@@ -268,11 +266,6 @@ async fn main() -> anyhow::Result<()> {
                 mesh,
             };
             session::run(cli.data_dir, runtime, caps, stop).await?;
-        }
-        Command::Features => {
-            for f in modula_node::FEATURES {
-                println!("{f}");
-            }
         }
         Command::Status => {
             let id = Identity::load(&cli.data_dir)?;

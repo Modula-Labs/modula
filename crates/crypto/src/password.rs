@@ -1,6 +1,6 @@
 //! Password hashing with argon2id: m=64 MiB, t=3, p=1 for new hashes (above
-//! OWASP's 19 MiB/t=2 floor). The parameters are recorded in each PHC string,
-//! so hashes made with older parameters still verify.
+//! OWASP's 19 MiB/t=2 floor). Verification takes the parameters from the PHC
+//! string, so a hash verifies whatever parameters it was made with.
 
 use std::sync::LazyLock;
 
@@ -75,7 +75,7 @@ mod tests {
         assert!(!verify("wrong horse battery", &h));
         assert!(!verify("anything", "not-a-phc-string"));
         assert!(!verify_dummy("anything"));
-        // Hashes made with the previous defaults (m=19 MiB, t=2) still verify.
+        // A hash with other parameters (argon2's defaults) verifies too.
         let old = Argon2::default()
             .hash_password(b"correct horse battery")
             .unwrap()

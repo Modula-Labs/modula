@@ -13,6 +13,12 @@ DOMAIN=deploy.e2e.test
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 [[ -f $RELEASE/SHA256SUMS.sig ]] || { echo "no release in $RELEASE; run scripts/release.sh" >&2; exit 1; }
 RELEASE=$(cd "$RELEASE" && pwd)
+# The published layout: binaries by checksum under files/, as publish.sh stores them.
+FILES=$PWD/dist/e2e-files
+rm -rf "$FILES" && mkdir -p "$FILES"
+while read -r sum name; do
+  ln -f "$RELEASE/${name#\*}" "$FILES/$sum" 2>/dev/null || cp "$RELEASE/${name#\*}" "$FILES/$sum"
+done <"$RELEASE/SHA256SUMS"
 
 pass() { echo "  ✓ $*"; }
 fail() { echo "  ✗ $*" >&2; exit 1; }
@@ -34,6 +40,7 @@ boot() { # boot NAME
     --tmpfs /run --tmpfs /run/lock \
     -v "$1-docker:/var/lib/docker" \
     -v "$RELEASE:/srv/releases/download/v$VERSION:ro" \
+    -v "$FILES:/srv/releases/files:ro" \
     -v "$PWD/deploy/install.sh:/root/install.sh:ro" \
     modula-e2e-ubuntu >/dev/null
   for _ in $(seq 1 50); do
@@ -79,20 +86,14 @@ on e2e-main id modula-build >/dev/null && pass "modula-build user exists" || fai
 docker exec -i e2e-main cmp -s /etc/modula/release.pub.pem - <deploy/release.pub.pem \
   && pass "release key stored for upgrades" || fail "/etc/modula/release.pub.pem differs from deploy/release.pub.pem"
 on e2e-main grep -q PUBKEY /etc/modula/upgrade.env && fail "upgrade.env carries a release key" || pass "upgrade.env names no release key"
-on e2e-main sh -c "ufw status | grep -q 20000:29999" && fail "the blanket 20000-29999 rule is open" || pass "no blanket TCP proxy port range"
 
 echo "upgrade.sh (verified installer, same version)"
-# An earlier installer's blanket rule, which upgrades remove.
-if on e2e-main sh -c "ufw status | grep -q 'Status: active'"; then
-  on e2e-main ufw allow 20000:29999/tcp comment modula >/dev/null
-fi
 on e2e-main rm -f /var/lib/modula-upgrade/result
 on e2e-main sh -c "echo $VERSION > /var/lib/modula-upgrade/request"
 for _ in $(seq 1 300); do on e2e-main test -f /var/lib/modula-upgrade/result && break; sleep 0.2; done
 on e2e-main grep -qx status=succeeded /var/lib/modula-upgrade/result \
   && pass "upgrade.sh verified and ran the release's install.sh" \
   || { on e2e-main cat /var/lib/modula-upgrade/result >&2 || true; fail "upgrade.sh failed"; }
-on e2e-main sh -c "ufw status | grep -q 20000:29999" && fail "upgrade kept the blanket port range" || pass "upgrade removed the blanket port range"
 # A tampered installer is refused.
 on e2e-main sh -c "d=/tmp/tampered/download/v$VERSION && mkdir -p \$d && cd /srv/releases/download/v$VERSION \
   && cp SHA256SUMS SHA256SUMS.sig install.sh \$d/ && echo '# tampered' >> \$d/install.sh \

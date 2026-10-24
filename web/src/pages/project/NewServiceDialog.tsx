@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { ArrowLeft, BrandDocker, BrandGithub, ChevronRight, Search } from "@/components/ui/icons";
@@ -7,6 +7,7 @@ import { Field, Input } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/misc";
 import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { ApiError, api, type ProjectDetail, type Template } from "@/lib/api";
+import { useTemplates } from "@/lib/useTemplates";
 import { projectReturnPath } from "@/lib/github";
 import { templateStack, uniqueName } from "@/lib/templates";
 import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
@@ -40,7 +41,7 @@ export const serviceNameFromRepo = (repo: string) => serviceNameFromImage(repo.s
 export type NewServiceStep = "root" | "image" | "repo" | "database";
 type Step = NewServiceStep;
 
-/** Command-style picker for adding a service (Docker image for now). */
+/** Command-style picker for adding a service (Docker image or GitHub repo). */
 export function NewServiceDialog({
   open,
   onOpenChange,
@@ -97,21 +98,7 @@ export function NewServiceDialog({
   // The name picking a repository filled in; replaced on the next pick unless edited.
   const autoName = useRef("");
 
-  // Older servers have no templates endpoint: the Database section just doesn't show.
-  const templates = useQuery({
-    queryKey: ["templates"],
-    queryFn: async (): Promise<Template[]> => {
-      try {
-        return await api.templates();
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 404) return [];
-        throw e;
-      }
-    },
-    staleTime: 5 * 60_000,
-    retry: false,
-    enabled: open,
-  });
+  const templates = useTemplates(open);
 
   const deployNew = async (svc: { instances: { id: string; environmentId: string }[] }) => {
     const instance = svc.instances.find((i) => i.environmentId === environmentId);

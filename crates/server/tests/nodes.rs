@@ -906,7 +906,7 @@ async fn database_templates_get_a_volume_a_proxy_and_stop_before_start(pool: PgP
     .await;
 }
 
-/// Railway-style deploy settings end to end: a pre-deploy command runs from
+/// Deploy settings end to end: a pre-deploy command runs from
 /// the new image with the deployment's variables before it starts, and its
 /// failure (like a failing health check) leaves the serving deployment alone;
 /// draining and restart limits reach the container.

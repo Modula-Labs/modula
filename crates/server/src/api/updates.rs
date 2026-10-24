@@ -74,7 +74,7 @@ pub struct ServerVersion {
     pub name: String,
     pub version: Option<String>,
     /// `current`, `behind` (waiting its turn), `upgrading`, `failed`,
-    /// `manual` (too old to upgrade on request) or `offline`.
+    /// `manual` (installed without the upgrade units, so it is upgraded by hand) or `offline`.
     pub status: &'static str,
     pub error: Option<String>,
 }

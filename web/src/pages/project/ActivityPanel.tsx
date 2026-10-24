@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/Button";
 import { ChevronDown, ChevronRight, X } from "@/components/ui/icons";
 import { Select } from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/misc";
-import { ApiError, api, type ActivityGroup, type ActivityKind, type ServiceSummary } from "@/lib/api";
+import { api, type ActivityGroup, type ActivityKind, type ServiceSummary } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
 import { describeChange, groupTitle, initials } from "./activity";
 
@@ -27,19 +27,12 @@ export function ActivityPanel({
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const activity = useQuery({
     queryKey: ["activity", projectId, environmentId, serviceId, kind],
-    queryFn: async () => {
-      try {
-        return await api.activity(projectId, {
-          environmentId,
-          serviceId: serviceId || undefined,
-          kind: kind || undefined,
-        });
-      } catch (e) {
-        // Older servers don't have the endpoint yet.
-        if (e instanceof ApiError && e.status === 404) return { items: [] as ActivityGroup[] };
-        throw e;
-      }
-    },
+    queryFn: () =>
+      api.activity(projectId, {
+        environmentId,
+        serviceId: serviceId || undefined,
+        kind: kind || undefined,
+      }),
     refetchInterval: 10_000,
     retry: false,
   });

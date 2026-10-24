@@ -658,7 +658,6 @@ export interface DbCredentials {
   publicUrl: string | null;
 }
 
-/** True when the server doesn't have the database endpoints yet. */
 export type MetricsRange = "1h" | "6h" | "24h" | "7d";
 export interface MetricsPoint {
   /** Unix ms. */
@@ -727,9 +726,6 @@ export interface InstanceDomain {
   appsDomain: string | null;
   appsDomainFromEnv: boolean;
 }
-
-export const isNotAvailable = (e: unknown) =>
-  e instanceof ApiError && (e.status === 404 || e.status === 501);
 
 const enc = encodeURIComponent;
 

@@ -111,6 +111,60 @@ pub async fn resolve(
     resolve_for_deployment(keys, db, tcp_proxy_host, env, instance, None).await
 }
 
+/// What a service's platform variables (`PORT`, `MODULA_*`) are made of.
+pub struct Platform<'a> {
+    pub port: u64,
+    pub project: Id,
+    pub environment: Id,
+    pub environment_name: &'a str,
+    pub service: Id,
+    pub service_name: &'a str,
+    pub deployment: Option<Id>,
+    pub public_domain: Option<&'a str>,
+    /// `MODULA_TCP_PROXY_HOST`, else the node's public IP.
+    pub tcp_proxy_host: Option<&'a str>,
+    /// The public port of the service's TCP proxy, if it has one.
+    pub tcp_proxy_port: Option<i32>,
+}
+
+impl Platform<'_> {
+    /// The platform variables; user variables override them (only `PORT`
+    /// can collide, `MODULA_*` names are reserved).
+    pub fn vars(&self) -> [(&'static str, String); 11] {
+        let tcp_host = match self.tcp_proxy_port {
+            Some(_) => self.tcp_proxy_host.unwrap_or_default().to_owned(),
+            None => String::new(),
+        };
+        [
+            ("PORT", self.port.to_string()),
+            ("MODULA_PROJECT_ID", self.project.to_string()),
+            ("MODULA_ENVIRONMENT_ID", self.environment.to_string()),
+            ("MODULA_ENVIRONMENT_NAME", self.environment_name.to_owned()),
+            ("MODULA_SERVICE_ID", self.service.to_string()),
+            ("MODULA_SERVICE_NAME", self.service_name.to_owned()),
+            (
+                "MODULA_DEPLOYMENT_ID",
+                self.deployment.map(|d| d.to_string()).unwrap_or_default(),
+            ),
+            (
+                "MODULA_PRIVATE_DOMAIN",
+                format!("{}.modula.internal", self.service_name),
+            ),
+            (
+                "MODULA_PUBLIC_DOMAIN",
+                self.public_domain.unwrap_or_default().to_owned(),
+            ),
+            ("MODULA_TCP_PROXY_DOMAIN", tcp_host),
+            (
+                "MODULA_TCP_PROXY_PORT",
+                self.tcp_proxy_port
+                    .map(|p| p.to_string())
+                    .unwrap_or_default(),
+            ),
+        ]
+    }
+}
+
 /// [`resolve`] for a new deployment `deployment` of `instance`: its own
 /// `MODULA_DEPLOYMENT_ID` is that id; other services' is the deployment
 /// serving them right now (empty when none is).
@@ -189,37 +243,19 @@ pub async fn resolve_for_deployment(
             Some(d) if inst == instance => Some(d),
             _ => serving,
         };
-        let tcp_host = match tcp_port {
-            Some(_) => tcp_proxy_host
-                .or(node_ip.as_deref())
-                .unwrap_or_default()
-                .to_owned(),
-            None => String::new(),
+        let platform = Platform {
+            port: config.get("port").and_then(|p| p.as_u64()).unwrap_or(8080),
+            project,
+            environment: env,
+            environment_name: &env_name,
+            service: service_id,
+            service_name: &service,
+            deployment: deployment_id,
+            public_domain: domain.as_deref(),
+            tcp_proxy_host: tcp_proxy_host.or(node_ip.as_deref()),
+            tcp_proxy_port: tcp_port,
         };
-        let port = config.get("port").and_then(|p| p.as_u64()).unwrap_or(8080);
-        let platform = [
-            ("PORT", port.to_string()),
-            (
-                "MODULA_PRIVATE_DOMAIN",
-                format!("{service}.modula.internal"),
-            ),
-            ("MODULA_PUBLIC_DOMAIN", domain.unwrap_or_default()),
-            ("MODULA_SERVICE_NAME", service.clone()),
-            ("MODULA_SERVICE_ID", service_id.to_string()),
-            (
-                "MODULA_DEPLOYMENT_ID",
-                deployment_id.map(|d| d.to_string()).unwrap_or_default(),
-            ),
-            ("MODULA_ENVIRONMENT_NAME", env_name),
-            ("MODULA_ENVIRONMENT_ID", env.to_string()),
-            ("MODULA_PROJECT_ID", project.to_string()),
-            ("MODULA_TCP_PROXY_DOMAIN", tcp_host),
-            (
-                "MODULA_TCP_PROXY_PORT",
-                tcp_port.map(|p| p.to_string()).unwrap_or_default(),
-            ),
-        ];
-        for (k, v) in platform {
+        for (k, v) in platform.vars() {
             // A user PORT overrides the platform one.
             raw.entry((Some(service.clone()), k.to_owned()))
                 .or_insert(v);

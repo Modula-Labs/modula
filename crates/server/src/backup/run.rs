@@ -154,16 +154,6 @@ async fn live_node(state: &AppState, instance: Id) -> anyhow::Result<(Id, Id)> {
         state.hub.is_connected(node),
         "the server running the database is offline"
     );
-    let capable: bool = sqlx::query_scalar(
-        "SELECT coalesce(info->'capabilities' ? 'backup', false) FROM nodes WHERE id = $1",
-    )
-    .bind(node)
-    .fetch_one(&state.db)
-    .await?;
-    anyhow::ensure!(
-        capable,
-        "the server running the database needs a newer modula-node for backups"
-    );
     Ok((deployment, node))
 }
 

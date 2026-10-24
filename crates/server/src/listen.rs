@@ -8,8 +8,8 @@
 //! finishes what it already accepted ([`serve_http`]).
 //!
 //! Each inherited socket is matched to its role by port, so the order of
-//! `ListenStream=` lines doesn't matter. Without socket activation (development,
-//! older units) the server binds the addresses itself.
+//! `ListenStream=` lines doesn't matter. Without socket activation (e.g. in
+//! development) the server binds the addresses itself.
 
 use std::future::IntoFuture;
 use std::net::SocketAddr;

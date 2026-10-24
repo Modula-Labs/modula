@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/Button";
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Plus, Refresh, Search, Table } from "@/components/ui/icons";
 import { Input } from "@/components/ui/Input";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
-import { api, isNotAvailable, type DbQueryResult, type DbRows, type Instance } from "@/lib/api";
+import { api, type DbQueryResult, type DbRows, type Instance } from "@/lib/api";
 import { formatCount, formatMs } from "@/lib/format";
 import { samplePlaceholder, tableRef } from "@/lib/sql";
 import { DataGrid } from "./DataGrid";
@@ -96,7 +96,7 @@ export function DataView({ instance, canEdit }: { instance: Instance; canEdit: b
         </div>
       </div>
 
-      {canEdit && !(tables.error && isNotAvailable(tables.error)) ? (
+      {canEdit ? (
         <SqlBox placeholder={samplePlaceholder(table ? [table] : refs)} running={run.isPending} onRun={(sql) => run.mutate(sql)} />
       ) : null}
       {run.error ? <Alert>{msg(run.error)}</Alert> : null}

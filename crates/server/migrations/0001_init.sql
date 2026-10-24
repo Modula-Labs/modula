@@ -189,7 +189,7 @@ CREATE TABLE nodes (
     location_pinned     boolean NOT NULL DEFAULT false,
     -- The public IPv4 the node reaches the internet from (TCP proxy host).
     public_ip           text,
-    -- Private networking (C9): the node's WireGuard public key and UDP port,
+    -- Private networking: the node's WireGuard public key and UDP port,
     -- its /24 of the mesh (10.80.<mesh_index>.0/24), its own interface
     -- addresses ("ip/prefix", for picking a private path to peers) and its
     -- last report on the tunnels to its peers.
@@ -341,9 +341,13 @@ CREATE TABLE domains (
     dns_target_ok       boolean,
     checked_at          timestamptz,
     verified_at         timestamptz,
-    -- Edge settings. Stored; not enforced until the edge's Caddy build ships
-    -- the rate-limit module.
+    -- Edge settings. The rate limit is stored and shown, but the edge does not
+    -- enforce it.
     rate_limit_per_minute integer CHECK (rate_limit_per_minute BETWEEN 1 AND 1000000),
+    -- Cloudflare ingress mode when the workspace's Cloudflare token manages
+    -- the zone: false = DNS only, true = proxied (orange cloud; the zone's SSL
+    -- mode must then be Full (strict)).
+    proxied             boolean NOT NULL DEFAULT false,
     created_at          timestamptz NOT NULL DEFAULT now(),
     CHECK (kind = 'generated' OR verification_token IS NOT NULL)
 );
@@ -353,8 +357,6 @@ CREATE INDEX domains_instance_idx ON domains (service_instance_id);
 -- Deployments
 ---------------------------------------------------------------------------
 
--- Immutable record of one rollout. config/env are snapshots taken at creation,
--- so a redeploy reproduces exactly what ran.
 -- Source archives uploaded with `modula up` (gzipped tarballs). The
 -- bytes live in a file under MODULA_UPLOADS_DIR named after the id; the row
 -- outlives the file (purged_at) so deployments keep their history. Only
@@ -375,6 +377,8 @@ CREATE INDEX source_uploads_kept_idx ON source_uploads (created_at) WHERE purged
 -- The per-workspace daily upload quota sums the last day's sizes.
 CREATE INDEX source_uploads_workspace_idx ON source_uploads (workspace_id, created_at);
 
+-- Immutable record of one rollout. config/env are snapshots taken at creation,
+-- so a redeploy reproduces exactly what ran.
 CREATE TABLE deployments (
     id                  id PRIMARY KEY,
     service_instance_id id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
@@ -739,11 +743,6 @@ CREATE TABLE integrations (
     updated_at      timestamptz NOT NULL DEFAULT now(),
     UNIQUE (workspace_id, kind)
 );
-
--- Cloudflare ingress mode of a custom domain whose zone the workspace's
--- Cloudflare token manages: false = DNS only, true = proxied (orange cloud;
--- the zone's SSL mode must then be Full (strict)).
-ALTER TABLE domains ADD COLUMN proxied boolean NOT NULL DEFAULT false;
 
 ---------------------------------------------------------------------------
 -- Provisioning: servers created at a cloud provider on a user's request

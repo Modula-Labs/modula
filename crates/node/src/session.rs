@@ -400,9 +400,10 @@ impl Ctx<'_> {
             node_version: self
                 .upgrade
                 .map_or_else(|| crate::VERSION.to_owned(), |u| u.version()),
-            capabilities: ["logs", "renew", "backup", "tunnel", "metrics", "logship"]
+            capabilities: self
+                .has_edge
+                .then_some("edge")
                 .into_iter()
-                .chain(self.has_edge.then_some("edge"))
                 .chain(self.build_logs.is_some().then_some("build"))
                 .chain(self.db.is_some().then_some("db"))
                 .chain(self.upgrade.is_some().then_some("upgrade"))

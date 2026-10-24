@@ -143,7 +143,7 @@ export function NetworkPanel() {
       {outside.length > 0 ? (
         <Alert tone="warn" title="Not in the private network">
           {outside.map((n) => n.name).join(", ")}: these servers run without
-          WireGuard (an older modula-node, or no WireGuard in the kernel).
+          WireGuard (no WireGuard in the kernel).
           Services on them can't reach services on other servers privately.
         </Alert>
       ) : null}

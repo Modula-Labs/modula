@@ -39,8 +39,6 @@ enum Command {
         #[arg(long)]
         decrypt_only: bool,
     },
-    /// List what this build supports (the installer checks before using it).
-    Features,
     /// Print a single-use command that joins a new server to this instance.
     JoinToken {
         /// Minutes until the token expires.
@@ -104,12 +102,6 @@ async fn main() -> anyhow::Result<()> {
                 "{}",
                 modula_server::nodes::join_command(&cfg, token.expose_secret(), &pki.fingerprint())
             );
-            Ok(())
-        }
-        Command::Features => {
-            for f in modula_server::FEATURES {
-                println!("{f}");
-            }
             Ok(())
         }
         Command::SetupToken => {

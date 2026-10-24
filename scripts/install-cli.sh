@@ -142,10 +142,9 @@ if [[ -z $expected ]]; then
 fi
 
 begin "Downloading $name"
-# Stored once by checksum (files/<sha256>); older releases by name.
-curl -fsSL --retry 3 -o "$tmp/$name" "$RELEASE_URL/files/$expected" 2>/dev/null \
-  || curl -fsSL --retry 3 -o "$tmp/$name" "$base/$name" \
-  || die "couldn't download $base/$name" "Check your connection, then try again."
+# Releases store binaries once, by checksum (files/<sha256>).
+curl -fsSL --retry 3 -o "$tmp/$name" "$RELEASE_URL/files/$expected" \
+  || die "couldn't download $name ($RELEASE_URL/files/$expected)" "Check your connection, then try again."
 actual=$(sha256 "$tmp/$name" | awk '{ print $1 }')
 [[ $actual == "$expected" ]] || die "checksum mismatch; refusing to install" \
   "The download doesn't match the signed SHA256SUMS. Nothing was installed."
@@ -164,10 +163,6 @@ case ":$PATH:" in
   *":$DIR:"*) ;;
   *) on_path=0 ;;
 esac
-# Releases before `server create` don't have it (or `guide`): only offer
-# what this binary can do.
-has_server=0
-"$DIR/modula" server options --help >/dev/null 2>&1 && has_server=1
 say ""
 say "  ${A}╭─${N} ${B}You're all set!${N} ${D}The modula CLI is ready.${N}"
 say "  ${A}│${N}"
@@ -176,17 +171,12 @@ if [[ $on_path == 0 ]]; then
   say "  ${A}│${N}    export PATH=\"$export_dir:\$PATH\""
   say "  ${A}│${N}"
 fi
-if [[ $has_server == 1 ]]; then
-  say "  ${A}│${N}  Next, either connect it to your Modula server:"
-  say "  ${A}│${N}    ${A}modula login --url https://your-instance${N}"
-  say "  ${A}│${N}  or create a new one on Hetzner Cloud from here:"
-  say "  ${A}│${N}    ${A}modula server create${N}"
-  say "  ${A}│${N}"
-  say "  ${A}│${N}  ${D}People and AI agents alike: ${N}${A}modula guide${N}"
-else
-  say "  ${A}│${N}  Next, connect it to your instance:"
-  say "  ${A}│${N}    ${A}modula login --url https://your-instance${N}"
-fi
+say "  ${A}│${N}  Next, either connect it to your Modula server:"
+say "  ${A}│${N}    ${A}modula login --url https://your-instance${N}"
+say "  ${A}│${N}  or create a new one on Hetzner Cloud from here:"
+say "  ${A}│${N}    ${A}modula server create${N}"
+say "  ${A}│${N}"
+say "  ${A}│${N}  ${D}People and AI agents alike: ${N}${A}modula guide${N}"
 say "  ${A}╰─${N} ${D}Happy shipping!${N}"
 say ""
 
@@ -195,7 +185,7 @@ say ""
 # answers come from the terminal itself. Without one (CI, agents), the card
 # above already said both commands.
 
-[[ $TTY == 1 && $has_server == 1 ]] || exit 0
+[[ $TTY == 1 ]] || exit 0
 { exec 5</dev/tty; } 2>/dev/null || exit 0
 modula=$DIR/modula
 say "  ${A}?${N} ${B}What next?${N}"

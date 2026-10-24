@@ -6,7 +6,6 @@ import { Field, Input, Select } from "@/components/ui/Input";
 import { Alert, Badge, Skeleton, type Tone } from "@/components/ui/misc";
 import {
   api,
-  ApiError,
   type UpdateMode,
   type UpdateRun,
   type UpdateServer,
@@ -88,7 +87,6 @@ export function UpdatesSection() {
   const q = useQuery({
     queryKey: ["instance-updates"],
     queryFn: api.updates,
-    retry: (n, e) => !(e instanceof ApiError && e.status === 404) && n < 2,
     refetchInterval: (query) => (isRunActive(query.state.data) ? 5000 : 60000),
   });
   const [mode, setMode] = useState<UpdateMode>("notify");
@@ -117,7 +115,6 @@ export function UpdatesSection() {
   const run = useMutation({ mutationFn: api.runUpdate, onSuccess: set });
   const check = useMutation({ mutationFn: api.checkUpdates, onSuccess: set });
 
-  if (q.error instanceof ApiError && q.error.status === 404) return null;
   if (q.isPending) return <Skeleton className="h-40" />;
   if (q.error) return <Alert>{q.error.message}</Alert>;
 

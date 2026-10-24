@@ -244,8 +244,9 @@ pub struct DbCredentials {
     pub username: String,
     #[serde(default)]
     pub password: String,
+    /// None for engines without one (Redis, MongoDB).
     #[serde(default)]
-    pub database: String,
+    pub database: Option<String>,
     pub private_url: Option<String>,
 }
 

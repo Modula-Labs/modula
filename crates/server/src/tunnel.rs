@@ -364,18 +364,6 @@ pub async fn open(
         Some(p) if p > 0 => p,
         _ => return Err(AppError::bad_request("port is required")),
     };
-    let capable: Option<bool> = sqlx::query_scalar(
-        "SELECT coalesce(info->'capabilities' ? 'tunnel', false) FROM nodes WHERE id = $1",
-    )
-    .bind(node)
-    .fetch_optional(&state.db)
-    .await?;
-    if capable != Some(true) {
-        return Err(AppError::Conflict(
-            "the server running this service doesn't support tunnels yet; update modula-node"
-                .into(),
-        ));
-    }
     if !state.hub.is_connected(node) {
         return Err(AppError::Conflict(
             "the server running this service is offline".into(),

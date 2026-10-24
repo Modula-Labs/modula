@@ -37,10 +37,8 @@ export function useGithub(workspaceId: string) {
     queryFn: () => github.installations(workspaceId),
     enabled: !!workspaceId && (apps.data?.apps.length ?? 0) > 0,
     staleTime: 60_000,
-    // Viewers can't list them, and older servers don't have the endpoint.
-    retry: (n, e) =>
-      !(e instanceof ApiError && (e.status === 404 || e.status === 403)) &&
-      n < 2,
+    // Viewers can't list them (403): don't retry.
+    retry: (n, e) => !(e instanceof ApiError && e.status === 403) && n < 2,
   });
   return {
     apps,

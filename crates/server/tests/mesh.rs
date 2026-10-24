@@ -71,7 +71,7 @@ async fn nodes_get_a_subnet_and_each_other_as_peers(pool: PgPool) {
         .await
         .unwrap();
     assert!(!again);
-    // Without the capability (an older modula-node), nothing at all.
+    // Without the capability (no mesh configured), nothing at all.
     let old = pb::Hello::default();
     assert!(
         !modula_server::mesh::record_hello(app.db(), a, &old)

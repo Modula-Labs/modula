@@ -8,7 +8,7 @@ import { Field, Input, Select } from "@/components/ui/Input";
 import { Menu, MenuItem } from "@/components/ui/Menu";
 import { Modal } from "@/components/ui/Modal";
 import { Alert, Badge, EmptyState, Skeleton, type Tone } from "@/components/ui/misc";
-import { ApiError, api, type Backup, type BackupSchedule, type Instance } from "@/lib/api";
+import { api, type Backup, type BackupSchedule, type Instance } from "@/lib/api";
 import { hourLabel } from "@/lib/backup";
 import { formatBytes, relativeTime } from "@/lib/format";
 
@@ -41,7 +41,6 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
   const info = useQuery({
     queryKey: key,
     queryFn: () => api.backups(instance.id),
-    retry: (n, e) => !(e instanceof ApiError && e.status === 404) && n < 2,
     refetchInterval: (q) => (q.state.data?.backups.some((b) => b.status === "running") ? 3000 : false),
   });
   const refresh = () => qc.invalidateQueries({ queryKey: key });
@@ -61,10 +60,7 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
   const [restoring, setRestoring] = useState<Backup | null>(null);
 
   if (info.isPending || targets.isPending) return <Skeleton className="h-48" />;
-  if (info.error) {
-    const missing = info.error instanceof ApiError && info.error.status === 404;
-    return <Alert tone={missing ? "warn" : "danger"}>{missing ? "This server doesn't support backups yet." : info.error.message}</Alert>;
-  }
+  if (info.error) return <Alert tone="danger">{info.error.message}</Alert>;
   if (!targets.data?.length) {
     return (
       <EmptyState

@@ -95,12 +95,7 @@ pub fn parse_custom(
         return Err("enter a full domain like app.example.com".into());
     }
     for l in &labels {
-        let ok = !l.is_empty()
-            && l.len() <= 63
-            && !l.starts_with('-')
-            && !l.ends_with('-')
-            && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-        if !ok {
+        if !crate::validate::dns_label(l) {
             return Err(format!(
                 "{l:?} is not a valid DNS label: use letters, digits and hyphens"
             ));
@@ -109,9 +104,6 @@ pub fn parse_custom(
     let tld = labels[labels.len() - 1];
     if tld.bytes().all(|b| b.is_ascii_digit()) {
         return Err("enter a domain name, not an IP address".into());
-    }
-    if wildcard && labels.len() < 2 {
-        return Err("a wildcard needs a parent domain, like *.example.com".into());
     }
     for reserved in ["localhost", "local", "internal", "invalid", "arpa"] {
         if tld == reserved {
@@ -151,8 +143,7 @@ pub struct DnsRecord {
 }
 
 /// Where a custom domain should point: the service's generated domain
-/// (CNAME) or, for apex names, services without one and generated domains
-/// under an IP-echo service (sslip.io), its servers' IPs.
+/// (CNAME) or, for apex names and services without one, its servers' IPs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Target {
     pub cname: Option<String>,
@@ -166,8 +157,7 @@ pub async fn target(db: &sqlx::PgPool, instance: Id) -> AppResult<Target> {
     )
     .bind(instance)
     .fetch_optional(db)
-    .await?
-    .filter(|h| !ip_echo(h));
+    .await?;
     let ips: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT n.public_ip FROM nodes n
          WHERE n.public_ip IS NOT NULL AND n.status <> 'revoked' AND (
@@ -180,16 +170,6 @@ pub async fn target(db: &sqlx::PgPool, instance: Id) -> AppResult<Target> {
     .fetch_all(db)
     .await?;
     Ok(Target { cname, ips })
-}
-
-/// Names a third party's DNS answers by echoing the IP inside them
-/// (`1-2-3-4.sslip.io`): fine as a no-domain fallback, but a custom domain
-/// CNAMEd there would put that third party in its resolution path, so
-/// custom domains get A records instead.
-fn ip_echo(hostname: &str) -> bool {
-    const SUFFIXES: [&str; 3] = [".sslip.io", ".nip.io", ".traefik.me"];
-    let h = hostname.trim_end_matches('.').to_ascii_lowercase();
-    SUFFIXES.iter().any(|s| h.ends_with(s))
 }
 
 /// Apex names (`example.com`) can't have a CNAME next to their SOA/NS records.
@@ -310,7 +290,7 @@ pub const RESYNC_JOB: &str = "domains.resync_routing";
 
 /// Job: rewrites the routing records of an instance's custom domains at the
 /// workspace's DNS provider after it moved to other servers, so A records
-/// follow it (the old server's IP goes once its deployment is gone).
+/// follow it (a server's IP is dropped once its deployment there is gone).
 pub async fn resync_job(state: AppState, job: crate::jobs::Job) -> anyhow::Result<()> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -677,14 +657,5 @@ mod tests {
         dns.set(RecordKind::A, "shop.com", &["104.16.0.1"]);
         let o = evaluate(&dns, "shop.com", "tok", &t, "pending").await;
         assert_eq!((o.status, o.target_ok), ("verified", Some(false)));
-    }
-
-    #[test]
-    fn ip_echo_names_are_never_cname_targets() {
-        assert!(ip_echo("api-1pvk.159-69-253-176.sslip.io"));
-        assert!(ip_echo("159-69-253-176.SSLIP.IO."));
-        assert!(ip_echo("app.10.0.0.1.nip.io"));
-        assert!(!ip_echo("api.apps.example.com"));
-        assert!(!ip_echo("sslip.io.example.com"));
     }
 }

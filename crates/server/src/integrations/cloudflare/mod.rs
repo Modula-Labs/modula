@@ -14,7 +14,7 @@
 //! workspace data key (AAD `integrations/secret/<id>`), and is never returned
 //! to clients: the API shows its last four characters only.
 //!
-//! TODO(C5): proxied mode does not lock the origin yet. Still to build:
+//! TODO: proxied mode does not lock the origin yet. Still to build:
 //! firewalling the edge to Cloudflare's IP ranges, Authenticated Origin Pulls
 //! (mTLS from Cloudflare to Caddy) and Cloudflare Tunnel ingress for apps. The
 //! dashboard itself can go through a tunnel: see `crate::private`.

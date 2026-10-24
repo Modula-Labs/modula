@@ -8,7 +8,7 @@ import { DotsVertical, Eye, EyeOff, FileText, Lock, Pencil, Plus, Trash, Variabl
 import { Input, Textarea } from "@/components/ui/Input";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { Alert, Badge, EmptyState, Skeleton } from "@/components/ui/misc";
-import { ApiError, api, type VariableInfo, type VariableNames, type VariablePatch } from "@/lib/api";
+import { api, type VariableInfo, type VariablePatch } from "@/lib/api";
 import { diffEnv, envTemplate, parseDotenv } from "@/lib/dotenv";
 import { relativeTime } from "@/lib/format";
 import { referenceOptions, type ReferenceOption } from "@/lib/references";
@@ -54,15 +54,7 @@ export function VariablesEditor({ scope, canEdit, noun }: { scope: VariablesScop
   const vars = useQuery({ queryKey: scope.key, queryFn: scope.load });
   const names = useQuery({
     queryKey: ["variable-names", scope.environmentId],
-    queryFn: async (): Promise<VariableNames> => {
-      try {
-        return await api.variableNames(scope.environmentId);
-      } catch (e) {
-        // Older servers have no autocomplete endpoint.
-        if (e instanceof ApiError && e.status === 404) return { shared: [], services: [] };
-        throw e;
-      }
-    },
+    queryFn: () => api.variableNames(scope.environmentId),
     staleTime: 30_000,
     retry: false,
   });

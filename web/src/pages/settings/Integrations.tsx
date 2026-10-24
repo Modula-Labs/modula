@@ -23,10 +23,8 @@ export function useCloudflare(workspaceId: string) {
     queryKey: statusKey(workspaceId),
     queryFn: () => cloudflare.status(workspaceId),
     staleTime: 60_000,
-    // Viewers can't read it, and older servers don't have it.
-    retry: (n, e) =>
-      !(e instanceof ApiError && (e.status === 404 || e.status === 403)) &&
-      n < 2,
+    // Viewers can't read it (403): don't retry.
+    retry: (n, e) => !(e instanceof ApiError && e.status === 403) && n < 2,
   });
 }
 
@@ -41,11 +39,6 @@ export function IntegrationsSection({
   const status = useCloudflare(workspaceId);
   const [connecting, setConnecting] = useState(false);
 
-  if (status.error instanceof ApiError && status.error.status === 404) {
-    return (
-      <Alert tone="warn">This server doesn't support integrations yet.</Alert>
-    );
-  }
   return (
     <>
       <div className="flex flex-col gap-3">

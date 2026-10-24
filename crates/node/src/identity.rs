@@ -187,7 +187,7 @@ mod tests {
     fn writes_atomically_with_its_own_temp_file() {
         let dir = std::env::temp_dir().join(format!("modula-id-{}", Id::new()));
         std::fs::create_dir_all(&dir).unwrap();
-        // A planted file at the old shared temp name is left alone.
+        // A file planted at a predictable temp name is left alone.
         std::fs::write(dir.join("node.tmp"), b"planted").unwrap();
         write_atomic(&dir.join(KEY), b"key", 0o600).unwrap();
         write_atomic(&dir.join(CERT), b"cert", 0o644).unwrap();

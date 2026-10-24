@@ -7,88 +7,39 @@ may break things).
 
 ## [Unreleased]
 
-### Security
+## [0.1.0] - 2026-10-24
 
-- Builds run in a sandboxed, rootless BuildKit per workspace (own cache, seccomp
-  profile, memory/CPU limits, own network); Railpack planning runs as an
-  unprivileged `modula-build` user; source archives can't plant symlinks that
-  escape the build directory.
-- Containers and builds can't reach the cloud metadata service.
-- Services without limits get 512 MB and 1 vCPU instead of unlimited.
-- Failed sign-ins are counted per email and IP; an attacker can no longer lock
-  the owner out.
-- A revoked server can't reconnect; servers a workspace creates on Hetzner only
-  run that workspace's services; per-server rate limits on the node stream.
-- GitHub installations are bound only after checking, with a one-time user
-  authorization, that you can access them; replayed push webhooks are ignored.
-- Database tab: reads run as a read-only `modula_reader` role; writes need Admin
-  and sudo.
-- One strict outbound address guard for webhooks and backups (private endpoints
-  opt-in); storage errors no longer echo response bodies.
-- Changing your password revokes API tokens; new password hashes use stronger
-  argon2id parameters; per-workspace upload quota.
-- Installer: secrets passed by environment, signed `VERSION` checked, downgrades
-  refused, hardened `modula-node` unit, TCP proxy ports opened one at a time;
-  dashboard upgrades verify the installer script before running it.
-- Releases: new signing key kept outside the repository, offline builds with
-  pinned images, installers and license files signed too.
-- CLI: ignores untrusted `.modula/token` files and refuses tokens over plain
-  http to non-local hosts.
-- CI builds now install `protoc`, pin every GitHub Action to a commit SHA, and run
-  `cargo-deny` and `cargo-audit` on every push and pull request.
+First public release: a self-hosted PaaS with Railway's project canvas,
+environments and staged deploys, licensed AGPL-3.0-only.
 
 ### Added
 
-- Open-source release under AGPL-3.0-only: `LICENSE`, `THIRD_PARTY_NOTICES.md`,
-  `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue and PR templates.
-- Dashboard: Settings → Domain, a domain step after setup and a reminder banner;
-  dashboard and apps domains can be set after install (API and CLI).
-- No domain needed at install: the dashboard is served on `https://<public IP>`
-  (sslip.io addresses removed).
-- Project shell with a left rail, a Project Settings page, and an environment Logs
-  page; stored logs and webhooks.
-- Move a service to another server; settings sliders, rail and server picker.
-- Change a service's source: connect a GitHub repo, switch repos, or disconnect.
-- Metrics: CPU, memory and network per service, with charts and `modula metrics`.
-- CLI: `modula deployments` lists deployments; rollback prompts without an empty commit.
-- Project cards show their services and how many are online; canvas cards snap to
-  the dot grid.
+- **Install:** one command on Ubuntu; the dashboard is served on
+  `https://<public IP>` with a Let's Encrypt IP certificate. Dashboard and apps
+  domains are set later in Settings → Domain (or with the CLI).
+- **Projects:** canvas with services, databases and volumes; environments;
+  staged changes deployed together; project settings, activity and logs.
+- **Sources:** GitHub repositories (one private GitHub App per account or
+  organization, push-to-deploy, commit statuses), Docker images, and local
+  files uploaded with `modula up`. Builds with Railpack or a Dockerfile in a
+  sandboxed, rootless BuildKit per workspace.
+- **Variables:** per service and shared per environment, `${{Service.VAR}}`
+  references, sealed at rest, raw `.env` editor.
+- **Networking:** generated and custom domains with automatic HTTPS, TCP
+  proxies, Cloudflare DNS integration, and a private network between servers
+  (WireGuard mesh, per-environment isolation, `<service>.modula.internal`).
+- **Scaling:** several servers, replicas spread one per server with load
+  balancing, CPU and memory limits, moving a service between servers, and
+  Hetzner Cloud server provisioning.
+- **Databases:** Postgres, MySQL, Redis and MongoDB templates; a Database tab;
+  scheduled backups to S3-compatible storage with restore.
+- **Observability:** stored deployment and runtime logs with search; CPU, memory
+  and network metrics; outgoing deployment webhooks.
+- **Security:** sign-in with TOTP and sudo for sensitive actions; roles per
+  workspace; signed releases and installers; a private dashboard behind
+  Cloudflare Tunnel and Access.
+- **CLI:** `modula` for projects, deployments, logs, variables, metrics,
+  `modula.toml` infrastructure as code, and `modula server create`.
 
-### Changed
-
-- Caddy 2.11.1 (fixes CVE-2026-27586; better IP certificates).
-- Custom domains get A records instead of CNAMEs to sslip.io.
-
-## [0.1.3] - 2026-10-24
-
-### Added
-
-- Local-files services: `modula up` creates the service.
-- `modula server create`: `--domain auto` for an instant `<ip>.sslip.io` address;
-  key-only SSH when a key is installed.
-- `modula.toml`: `partial = true` leaves the project's other services alone, and
-  unlisted variables are left untouched.
-- Railpack builds see the service's variables.
-- Failed starts and health checks include the container's last output.
-- `modula status` shows local sources.
-
-### Changed
-
-- Logs mask only credential-looking variable values.
-- Edge: plain HTTP redirects to HTTPS under socket activation.
-
-### Fixed
-
-- Builds on Ubuntu 23.10+: AppArmor profile for rootless BuildKit.
-- Hetzner: dropped the removed `GET /datacenters`; availability now comes from
-  `server_types` locations.
-
-## [0.1.1]
-
-Releases up to 0.1.1 predate this changelog (highlights: one-click GitHub connect,
-canvas polish, a private dashboard via Cloudflare Tunnel, zero-downtime upgrades and
-`modula server create`).
-
-[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.3...HEAD
-[0.1.3]: https://github.com/Modula-Labs/modula/compare/v0.1.1...v0.1.3
-[0.1.1]: https://github.com/Modula-Labs/modula/releases/tag/v0.1.1
+[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Modula-Labs/modula/releases/tag/v0.1.0

@@ -655,8 +655,8 @@ async fn servers_are_upgraded_one_at_a_time(pool: PgPool) {
     );
     let a = c.node("worker-a", Some(a_up.clone())).await;
     let b = c.node("worker-b", Some(b_up.clone())).await;
-    // An older release: no "upgrade" capability, so it's never asked.
-    let old = c.node("worker-old", None).await;
+    // No "upgrade" capability (no upgrade units), so it's never asked.
+    let manual = c.node("worker-manual", None).await;
 
     let v = updates::VERSION;
     wait_for(
@@ -695,7 +695,7 @@ async fn servers_are_upgraded_one_at_a_time(pool: PgPool) {
     assert_eq!(c.server_status(a).await, "current");
     // A server without the capability is never asked (and is never waited for).
     let asked: i64 = sqlx::query_scalar("SELECT count(*) FROM node_upgrades WHERE node_id = $1")
-        .bind(old)
+        .bind(manual)
         .fetch_one(c.app.db())
         .await
         .unwrap();

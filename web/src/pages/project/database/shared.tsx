@@ -2,23 +2,14 @@ import { clsx } from "clsx";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { Alert, Skeleton } from "@/components/ui/misc";
-import { isNotAvailable } from "@/lib/api";
 
-/** Query options shared by the database endpoints: don't hammer a server that lacks them. */
+/** Query options shared by the database endpoints. */
 export const dbQueryOpts = {
-  retry: (n: number, e: Error) => !isNotAvailable(e) && n < 1,
+  retry: 1,
   refetchOnWindowFocus: false,
 } as const;
 
-export function NotAvailable() {
-  return (
-    <div className="rounded-xl border border-dashed border-border px-6 py-10 text-center text-sm text-muted-foreground">
-      Not available on this server yet.
-    </div>
-  );
-}
-
-/** Renders loading / error / not-available for a query; `children` runs once data exists. */
+/** Renders loading / error for a query; `children` runs once data exists. */
 export function QueryBoundary<T>({
   q,
   skeleton = <Skeleton className="h-40" />,
@@ -28,7 +19,6 @@ export function QueryBoundary<T>({
   skeleton?: ReactNode;
   children: (data: T) => ReactNode;
 }) {
-  if (q.error && isNotAvailable(q.error)) return <NotAvailable />;
   if (q.data !== undefined) return <>{children(q.data)}</>;
   if (q.error)
     return (

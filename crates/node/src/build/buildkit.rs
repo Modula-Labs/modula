@@ -97,9 +97,6 @@ fn security_opts(profile_loaded: bool) -> Vec<String> {
 
 /// Pinned by digest (the multi-arch index) like [`BUILDKIT_IMAGE`].
 pub const RAILPACK_FRONTEND: &str = "ghcr.io/railwayapp/railpack-frontend:v0.43.0@sha256:355ef61fae6f2551103cd8b10c710cb07167dd353d561f15c69b8d7ac1c676cc";
-/// The single shared daemon of earlier versions; removed at startup (its
-/// state volume `modula-buildkit-state` is left alone).
-const LEGACY_CONTAINER: &str = "modula-buildkit";
 const CONTAINER_PREFIX: &str = "modula-buildkit-";
 const VOLUME_PREFIX: &str = "modula-buildkit-state-";
 /// Build daemons' network: a plain bridge with internet access, no
@@ -425,8 +422,8 @@ impl BuildkitBuilder {
             labels.insert(CONFIG_LABEL.into(), config.clone());
         }
         let existing = self.docker.inspect_container(&name, None).await.ok();
-        // A container made with other settings (an older version, before
-        // install.sh added the AppArmor profile, other limits) is recreated.
+        // A container made with other settings (image, limits, security
+        // profile) is recreated.
         let current = existing.as_ref().is_some_and(|c| {
             c.config
                 .as_ref()
@@ -783,16 +780,9 @@ impl Builder for BuildkitBuilder {
     }
 }
 
-/// Removes the legacy shared daemon, then every few minutes the daemons
-/// idle for [`IDLE_FOR`]. Daemons found at startup (Docker restarts them)
-/// count as just used.
+/// Every few minutes, removes the daemons idle for [`IDLE_FOR`]. Daemons
+/// found at startup (Docker restarts them) count as just used.
 async fn reap(docker: Docker, daemons: Daemons) {
-    let _ = docker
-        .remove_container(
-            LEGACY_CONTAINER,
-            Some(RemoveContainerOptionsBuilder::new().force(true).build()),
-        )
-        .await;
     let filters = HashMap::from([("label".to_owned(), vec![format!("{ROLE_LABEL}=buildkit")])]);
     let opts = ListContainersOptionsBuilder::new()
         .all(true)

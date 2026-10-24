@@ -48,8 +48,8 @@ pub struct SystemdUpgrader {
 }
 
 impl SystemdUpgrader {
-    /// `None` when the installer didn't set up the upgrade unit here (older
-    /// installs, development): the node then doesn't offer upgrades.
+    /// `None` when the installer didn't set up the upgrade unit here
+    /// (development): the node then doesn't offer upgrades.
     pub fn detect(dir: &Path) -> Option<Self> {
         dir.is_dir().then(|| Self {
             dir: dir.to_owned(),
@@ -107,7 +107,7 @@ impl SystemdUpgrader {
                 .unwrap_or_default();
             let result = UpgradeResult::parse(&text);
             if result.to != version {
-                continue; // an older run's result
+                continue; // another request's result
             }
             return match result.status.as_str() {
                 "succeeded" => Ok(()),

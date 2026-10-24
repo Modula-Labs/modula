@@ -477,20 +477,6 @@ firewall_rules() {
   return 0
 }
 
-# Earlier installers opened all of 20000–29999 for TCP proxies; modula-node
-# now opens each allocated port itself, so the blanket rule goes.
-LEGACY_RANGE=20000:29999/tcp
-firewall_legacy_range() {
-  ufw_active || return 0
-  [[ $(ufw status 2>/dev/null) == *"20000:29999/tcp"* ]] || return 0
-  ufw delete allow "$LEGACY_RANGE" >/dev/null 2>&1 || true
-  # (Matching can depend on the comment in some ufw versions.)
-  if [[ $(ufw status 2>/dev/null) == *"20000:29999/tcp"* ]]; then
-    ufw delete allow "$LEGACY_RANGE" comment modula >/dev/null 2>&1 || true
-  fi
-  return 0
-}
-
 # Deny incoming except SSH (first, so this session survives) and Modula's
 # ports. An active ufw keeps its rules and defaults; ours are only added.
 # Docker containers here publish no ports (Caddy and modula-node's TCP proxies
@@ -517,7 +503,6 @@ firewall() {
   done < <(firewall_rules)
   [[ $active == 1 ]] || ufw --force enable
   ufw_active
-  firewall_legacy_range
   SECURITY+=("firewall on (${ports[*]}; app TCP ports as allocated)")
 }
 
@@ -577,9 +562,8 @@ docker_log_config() {
 }
 
 # Containers keep running while Docker itself restarts (security updates of
-# docker.io): "live-restore": true. Only in a daemon.json this installer owns
-# (wrote itself, or the log settings an earlier installer wrote) or that is
-# absent, never on swarm nodes. live-restore takes effect on a reload (SIGHUP),
+# docker.io): "live-restore": true. Only in a daemon.json this installer wrote
+# itself or that is absent, never on swarm nodes. live-restore takes effect on a reload (SIGHUP),
 # which leaves containers alone. Returns 1 when it left things as they were.
 docker_live_restore() {
   command -v docker >/dev/null || return 1
@@ -590,11 +574,8 @@ docker_live_restore() {
     touch "$DOCKER_OWNED"
   else
     command -v jq >/dev/null || return 1
+    [[ -f $DOCKER_OWNED ]] || return 1
     jq -e 'has("live-restore") | not' "$DOCKER_DAEMON" >/dev/null 2>&1 || return 1
-    if [[ ! -f $DOCKER_OWNED ]]; then
-      jq -e --argjson ours "$DOCKER_LOGCFG" '. == $ours' "$DOCKER_DAEMON" >/dev/null 2>&1 || return 1
-      touch "$DOCKER_OWNED"
-    fi
     local tmp; tmp=$(mktemp "$DOCKER_DAEMON.XXXXXX")
     jq '. + {"live-restore": true}' "$DOCKER_DAEMON" >"$tmp" && chmod 0644 "$tmp" && mv "$tmp" "$DOCKER_DAEMON"
   fi
@@ -717,19 +698,23 @@ print_tips() {
 # ---------------------------------------------------------------- release files
 
 # artifact NAME DEST [SUMS] — the instance first (same version, close by), then
-# the public release: binaries are stored once by checksum (files/<sha256>, as
-# listed in the release's SHA256SUMS; verified against its signature after),
-# older releases by name.
+# the public release. With SUMS (a binary), from where the release stores it
+# once by checksum: files/<sha256> as listed in SHA256SUMS (verified against
+# its signature after). Without (the signed list and small files), by name.
 artifact() {
-  local name=$1 dest=$2 sums=${3:-} url sum=""
+  local name=$1 dest=$2 sums=${3:-} url sum
   if [[ -n $SERVER_RELEASES ]] && curl -fsSL --retry 2 -o "$dest" "$SERVER_RELEASES$name" 2>/dev/null; then
     return 0
   fi
-  [[ -n $sums ]] && sum=$(awk -v n="$name" '$2 == n { print $1; exit }' "$sums")
-  if [[ $sum =~ ^[0-9a-f]{64}$ ]] && curl -fsSL --retry 3 -o "$dest" "$RELEASE_URL/files/$sum" 2>/dev/null; then
-    return 0
+  if [[ -n $sums ]]; then
+    sum=$(awk -v n="$name" '$2 == n { print $1; exit }' "$sums")
+    [[ $sum =~ ^[0-9a-f]{64}$ ]] || { echo "$name is not in SHA256SUMS" >&2; return 1; }
+    url="$RELEASE_URL/files/$sum"
+  elif [[ $VERSION == latest ]]; then
+    url="$RELEASE_URL/latest/download/$name"
+  else
+    url="$RELEASE_URL/download/v$VERSION/$name"
   fi
-  if [[ $VERSION == latest ]]; then url="$RELEASE_URL/latest/download/$name"; else url="$RELEASE_URL/download/v$VERSION/$name"; fi
   curl -fsSL --retry 3 -o "$dest" "$url" || { echo "cannot download $url" >&2; return 1; }
 }
 
@@ -743,9 +728,8 @@ download() {
   artifact SHA256SUMS "$tmp/SHA256SUMS"
   artifact SHA256SUMS.sig "$tmp/SHA256SUMS.sig"
   artifact VERSION "$tmp/VERSION"
-  # The installer itself, so this server can hand it on (older releases
-  # don't list it; then it is left out).
-  artifact install.sh "$tmp/install.sh" 2>/dev/null || rm -f "$tmp/install.sh"
+  # The installer itself, so this server can hand it on.
+  artifact install.sh "$tmp/install.sh"
   local pids=()
   for n in "${names[@]}"; do artifact "$n" "$tmp/$n" "$tmp/SHA256SUMS" & pids+=($!); done
   for p in "${pids[@]}"; do wait "$p" || { rm -rf "$tmp"; return 1; }; done
@@ -758,8 +742,7 @@ download() {
   # sha256sum --ignore-missing skips files SHA256SUMS doesn't list, so every
   # file kept must be listed.
   listed() { grep -qE "^[0-9a-f]{64}  $1\$" "$tmp/SHA256SUMS"; }
-  [[ -f $tmp/install.sh ]] && ! listed install.sh && rm -f "$tmp/install.sh"
-  for n in VERSION "${names[@]}"; do
+  for n in VERSION install.sh "${names[@]}"; do
     listed "$n" || { rm -rf "$tmp"; echo "$n is not in SHA256SUMS" >&2; return 1; }
   done
   (cd "$tmp" && sha256sum --check --ignore-missing --quiet SHA256SUMS) \
@@ -930,11 +913,6 @@ no_unit() {
   CHANGED+="$1 "
 }
 
-# has_feature BINARY FEATURE — whether the active release's binary has it.
-# Units only rely on what the release being switched to supports, so going
-# back to an older release (rollback, --version) gets the units it expects.
-has_feature() { [[ -x $PREFIX/current/$1 ]] && "$PREFIX/current/$1" features 2>/dev/null | grep -qx "$2"; }
-
 # A server.env value, or its default.
 server_env() { local v; v=$(sed -n "s/^$1=//p" "$CONF/server.env" 2>/dev/null | tail -1); printf '%s' "${v:-$2}"; }
 
@@ -975,7 +953,7 @@ release_key() {
 # Containers never reach the cloud's metadata service (instance credentials,
 # user data with join tokens): a DROP at the top of Docker's DOCKER-USER chain,
 # put back whenever Docker (re)starts. Plain commands, no shell; the first
-# line of each pair removes an older copy so restarts don't stack rules.
+# line of each pair removes an existing copy so restarts don't stack rules.
 # modula-node also re-asserts it at startup.
 metadata_firewall_unit() {
   local ipt ip6t v6=""
@@ -1023,27 +1001,13 @@ metadata_firewall_start() {
 units() {
   CHANGED=" "
   buildkit_apparmor
-  # (Upgrades never run accounts; releases from here on expect these.)
-  build_account
-  [[ -f $CONF/server.env ]] && oom_dropins
   release_key
   metadata_firewall_unit
-  local caddy_sockets=0 server_sockets=0 upgrades=0
-  has_feature modula-node caddy-sockets && caddy_sockets=1
-  if [[ -f $CONF/server.env ]]; then
-    has_feature modula-server socket-activation && server_sockets=1
-    has_feature modula-server upgrade-requests && upgrades=1
-  else
-    has_feature modula-node upgrade && upgrades=1
-  fi
 
   # The edge. With socket activation, systemd holds 80/443 while Caddy
   # restarts (connections wait in the backlog instead of being refused); the
   # order of the sockets is fixed: fd 3 = TCP 80, fd 4 = TCP 443, fd 5 = UDP 443.
-  local caddy_deps=""
-  if [[ $caddy_sockets == 1 ]]; then
-    caddy_deps=$'\nRequires=modula-caddy.socket\nAfter=modula-caddy.socket'
-    unit modula-caddy.socket <<EOF
+  unit modula-caddy.socket <<EOF
 [Unit]
 Description=Modula Deploy edge ports (held open while Caddy restarts)
 
@@ -1057,15 +1021,14 @@ Backlog=4096
 [Install]
 WantedBy=sockets.target
 EOF
-  else
-    no_unit modula-caddy.socket
-  fi
   unit modula-caddy.service <<EOF
 [Unit]
 Description=Modula Deploy edge (Caddy, configured by modula-node)
 StartLimitIntervalSec=0
 After=network-online.target
-Wants=network-online.target$caddy_deps
+Wants=network-online.target
+Requires=modula-caddy.socket
+After=modula-caddy.socket
 
 [Service]
 User=modula-caddy
@@ -1097,11 +1060,10 @@ EOF
 EOF
   chmod 0644 "$CONF/caddy.json"
 
-  local args=""
+  local args=" --caddy-sockets"
   if [[ $MODE == main || -f $CONF/server.env ]]; then
     args+=" --route $(server_env MODULA_PUBLIC_URL "" | sed 's|.*https://||')=$(server_env MODULA_LISTEN 127.0.0.1:7100)"
   fi
-  [[ $caddy_sockets == 1 ]] && args+=" --caddy-sockets"
   unit modula-node.service <<EOF
 [Unit]
 Description=Modula Deploy node (runs this server's workloads)
@@ -1130,10 +1092,7 @@ WantedBy=multi-user.target
 EOF
 
   if [[ -f $CONF/server.env ]]; then
-    local server_deps="" rw=$STATE
-    if [[ $server_sockets == 1 ]]; then
-      server_deps=$'\nRequires=modula-server.socket\nAfter=modula-server.socket'
-      unit modula-server.socket <<EOF
+    unit modula-server.socket <<EOF
 [Unit]
 Description=Modula Deploy control plane ports (held open while it restarts)
 
@@ -1146,16 +1105,14 @@ Backlog=4096
 [Install]
 WantedBy=sockets.target
 EOF
-    else
-      no_unit modula-server.socket
-    fi
-    [[ $upgrades == 1 ]] && rw+=" $UPGRADE_DIR"
     unit modula-server.service <<EOF
 [Unit]
 Description=Modula Deploy control plane
 StartLimitIntervalSec=0
 After=network-online.target postgresql.service redis-server.service
-Wants=network-online.target postgresql.service redis-server.service$server_deps
+Wants=network-online.target postgresql.service redis-server.service
+Requires=modula-server.socket
+After=modula-server.socket
 
 [Service]
 User=modula
@@ -1179,21 +1136,16 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 CapabilityBoundingSet=
-ReadWritePaths=$rw
+ReadWritePaths=$STATE $UPGRADE_DIR
 
 [Install]
 WantedBy=multi-user.target
 EOF
   fi
 
-  if [[ $upgrades == 1 ]]; then
-    upgrade_unit
-  else
-    no_unit modula-upgrade.path
-    no_unit modula-upgrade.service
-  fi
+  upgrade_unit
   [[ $CHANGED != " " ]] && systemctl daemon-reload
-  if [[ $upgrades == 1 ]]; then systemctl enable --now modula-upgrade.path >/dev/null 2>&1; fi
+  systemctl enable --now modula-upgrade.path >/dev/null 2>&1
   metadata_firewall_start
   return 0
 }
@@ -1217,8 +1169,6 @@ upgrade_unit() {
   if [[ ! -f $CONF/server.env && -z $SERVER_RELEASES && -f $CONF/upgrade.env ]]; then
     url=$(sed -n 's/^INSTALL_URL=//p' "$CONF/upgrade.env" | tail -1)
     releases=$(sed -n 's/^MODULA_SERVER_RELEASES=//p' "$CONF/upgrade.env" | tail -1)
-    # (Written before MODULA_SERVER_RELEASES was: the instance's installer URL says where.)
-    if [[ -z $releases && $url == https://*/api/install.sh ]]; then releases="${url%/api/install.sh}/api/releases?file="; fi
   fi
   [[ -f $CONF/server.env ]] && releases=""
   # Never the release key: upgrade.sh only trusts $RELEASE_KEY_FILE.
@@ -1346,25 +1296,11 @@ wait_healthy() {
   return 1
 }
 
-# restart_with_socket NAME — restarts a service. When it just got a socket
-# unit, the old process still holds the ports, so the switch (once) stops it
-# first and can't be seamless; every restart after that is.
-restart_with_socket() {
-  local name=$1
-  if [[ -f /etc/systemd/system/$name.socket ]] && ! systemctl is-active --quiet "$name.socket"; then
-    systemctl stop "$name.service"
-    systemctl enable --now "$name.socket" >/dev/null 2>&1
-    systemctl start "$name.service"
-  else
-    systemctl restart "$name.service"
-  fi
-}
-
-# enable_units NAME… — enables and starts each service and its socket unit, if any.
+# enable_units NAME… — enables and starts each service and its socket unit.
 enable_units() {
   local n
   for n in "$@"; do
-    if [[ -f /etc/systemd/system/$n.socket ]]; then systemctl enable --now "$n.socket" >/dev/null 2>&1; fi
+    systemctl enable --now "$n.socket" >/dev/null 2>&1
     systemctl enable --now "$n.service" >/dev/null 2>&1
   done
   return 0
@@ -1631,17 +1567,6 @@ install_join() {
 # The checksum of a release's Caddy binary (empty when it has none).
 caddy_sum() { sha256sum "$1/caddy" 2>/dev/null | awk '{print $1}'; }
 
-# The first upgrade to a release with Caddy socket activation: systemd takes
-# the ports over and the node renders Caddy's config for them. Requests wait
-# in the socket's backlog meanwhile; only the moment between Caddy letting go
-# of the ports and the socket unit taking them can refuse a connection.
-edge_to_sockets() {
-  systemctl stop modula-caddy
-  systemctl enable --now modula-caddy.socket >/dev/null 2>&1
-  systemctl restart modula-node
-  systemctl start modula-caddy
-}
-
 upgrade() {
   [[ -L $PREFIX/current ]] || die "Modula Deploy is not installed here" "Install it first: curl -fsSL https://usemodula.org/install.sh | bash"
   if [[ -f $CONF/server.env ]]; then
@@ -1651,7 +1576,6 @@ upgrade() {
   local previous; previous=$(readlink -f "$PREFIX/current")
   header "Upgrading Modula on $(this_host) ${D}(currently $(basename "$previous"))${N}"
   step "Checking this server" preflight
-  firewall_legacy_range
   step "Downloading release ($VERSION)" download
   if [[ $(readlink -f "$RELEASE") == "$previous" ]]; then
     printf '\n  %s✓%s Already on %s%s%s; nothing to do. Enjoy!\n\n' "$A" "$N" "$B" "$(basename "$previous")" "$N"
@@ -1663,12 +1587,12 @@ upgrade() {
   if [[ $MODE == main ]]; then
     # Socket-activated, the API's port stays open: requests wait for the new
     # process while the old one finishes what it already accepted.
-    restart_with_socket modula-server
+    systemctl restart modula-server
     if ! wait_healthy; then
       printf '  %s✗ The new version did not start; rolling back to %s.%s\n' "$R" "$(basename "$previous")" "$N" >&2
       RELEASE=$previous activate
       units
-      restart_with_socket modula-server
+      systemctl restart modula-server
       systemctl start modula-caddy modula-node # (no-ops when running)
       wait_healthy || true
       printf '    %s\n' "Your apps keep running. The log lines above should say what went wrong." >&2
@@ -1678,24 +1602,13 @@ upgrade() {
   # Caddy only restarts when it changed: its config lives in the running
   # process (the node restores it after a restart), and app traffic never
   # notices a node restart.
-  local edge=0
+  step "Restarting the node" systemctl restart modula-node
   if [[ $(caddy_sum "$RELEASE") != "$caddy_before" ]] || changed modula-caddy.service || changed modula-caddy.socket; then
-    edge=1
-  fi
-  if [[ $edge == 1 && -f /etc/systemd/system/modula-caddy.socket ]] && ! systemctl is-active --quiet modula-caddy.socket; then
-    step "Restarting the node and edge" edge_to_sockets
+    step "Restarting the edge" systemctl restart modula-caddy
   else
-    step "Restarting the node" systemctl restart modula-node
-    if [[ $edge == 1 ]]; then
-      step "Restarting the edge" restart_with_socket modula-caddy
-    else
-      skipped "Restarting the edge" "Caddy is unchanged"
-    fi
+    skipped "Restarting the edge" "Caddy is unchanged"
   fi
   systemctl start modula-caddy # (a no-op when running)
-  if docker_live_restore >/dev/null 2>&1; then
-    note "Docker now keeps containers running when it restarts (live-restore)."
-  fi
   prune_releases
   printf '\n  %s✓%s Upgraded to %s%s%s in %s. Fresh and ready!\n\n' "$A" "$N" "$B" "$(basename "$RELEASE")" "$N" "$(fmt_ms "$(ms_since "$T0")")"
 }

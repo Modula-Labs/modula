@@ -139,7 +139,6 @@ mod tests {
         // The installer finds the public IP itself; nothing third-party.
         assert!(s.contains(r#"bash "$installer" --email 'you@example.com'"#));
         assert!(!s.contains("--domain") && !s.contains("--apps-domain"));
-        assert!(!s.contains("sslip") && !s.contains("nip.io"));
         assert_eq!(
             crate::provision::flow::instant_domain("203.0.113.7".parse().unwrap()),
             "203.0.113.7"

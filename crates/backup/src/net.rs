@@ -14,16 +14,12 @@ use std::sync::Arc;
 const METADATA_V4: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
 const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
 
-/// The opt-in for private (and loopback) backup endpoints; the second name
-/// is the older spelling, still honoured.
+/// The opt-in for private (and loopback) backup endpoints.
 pub const ALLOW_PRIVATE_ENV: &str = "MODULA_BACKUP_ALLOW_PRIVATE_ENDPOINTS";
-pub const ALLOW_PRIVATE_ENV_OLD: &str = "MODULA_BACKUP_ALLOW_LOCAL_ENDPOINTS";
 
 /// Whether the environment opts in to private backup endpoints.
 pub fn private_endpoints_from_env() -> bool {
-    [ALLOW_PRIVATE_ENV, ALLOW_PRIVATE_ENV_OLD]
-        .iter()
-        .any(|k| std::env::var(k).is_ok_and(|v| v == "1"))
+    std::env::var(ALLOW_PRIVATE_ENV).is_ok_and(|v| v == "1")
 }
 
 /// The IPv4 address an IPv6 one stands for, if it embeds one: IPv4-mapped

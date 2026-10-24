@@ -27,6 +27,15 @@ pub fn display_name(raw: &str, what: &str) -> AppResult<String> {
     Ok(n.to_owned())
 }
 
+/// One DNS label: 1–63 letters, digits and hyphens, not starting or ending
+/// with a hyphen.
+pub fn dns_label(l: &str) -> bool {
+    (1..=63).contains(&l.len())
+        && !l.starts_with('-')
+        && !l.ends_with('-')
+        && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 pub fn password(raw: &str) -> AppResult<()> {
     modula_crypto::password::validate_policy(raw).map_err(AppError::bad_request)
 }

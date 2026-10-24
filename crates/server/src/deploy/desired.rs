@@ -92,191 +92,12 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
     let mut networks: Vec<Id> = Vec::new();
     let mut workloads = Vec::with_capacity(rows.len());
     for r in rows {
-        let cfg: ServiceConfig = serde_json::from_value(r.config).map_err(anyhow::Error::from)?;
-        let vars = match &r.env_sealed {
-            Some(sealed) => {
-                env::open_snapshot(&state.keys, &state.db, r.environment_id, r.id, sealed).await?
-            }
-            None => env::EnvMap::new(),
-        };
-        let platform = [
-            ("PORT", cfg.port.to_string()),
-            ("MODULA_PROJECT_ID", r.project_id.to_string()),
-            ("MODULA_ENVIRONMENT_ID", r.environment_id.to_string()),
-            ("MODULA_ENVIRONMENT_NAME", r.environment_name.clone()),
-            ("MODULA_SERVICE_ID", r.service_id.to_string()),
-            ("MODULA_SERVICE_NAME", r.service_name.clone()),
-            ("MODULA_DEPLOYMENT_ID", r.id.to_string()),
-            (
-                "MODULA_PRIVATE_DOMAIN",
-                format!("{}.modula.internal", r.service_name),
-            ),
-            (
-                "MODULA_PUBLIC_DOMAIN",
-                r.public_domain.clone().unwrap_or_default(),
-            ),
-            (
-                "MODULA_TCP_PROXY_DOMAIN",
-                tcp_proxy_host(state, r.node_public_ip.as_deref(), r.tcp_public_port),
-            ),
-            (
-                "MODULA_TCP_PROXY_PORT",
-                r.tcp_public_port.map(|p| p.to_string()).unwrap_or_default(),
-            ),
-        ];
-        // User variables win over platform defaults (e.g. a custom PORT);
-        // MODULA_* names are reserved, so only PORT can actually collide.
-        let mut env_vars: Vec<pb::EnvVar> = platform
-            .into_iter()
-            .filter(|(k, _)| !vars.contains_key(*k))
-            .map(|(k, v)| pb::EnvVar {
-                name: k.into(),
-                value: v,
-            })
-            .collect();
-        env_vars.extend(vars.iter().map(|(k, v)| pb::EnvVar {
-            name: k.clone(),
-            value: v.expose_secret().to_owned(),
-        }));
-        // Built images run their baked start command (Railpack wraps it in a
-        // shell); everything else takes the configured argv.
-        let railpack = cfg.builds_from_source() && cfg.builder == Builder::Railpack;
-        let command = match (&cfg.start_command, railpack) {
-            (Some(argv), false) => argv.clone(),
-            _ => Vec::new(),
-        };
-        // Where the source comes from: GitHub at the commit, or this server
-        // for an upload (a signed download bound to this deployment). Every
-        // replica builds on its own server; one that hasn't come up still
-        // does after the first replica's build moved the deployment on.
-        let builds = r.status == "building"
-            || (r.status == "deploying"
-                && r.replica_starting
-                && r.image.starts_with(super::start::BUILD_PREFIX));
-        let source = match (builds, cfg.repo(), cfg.upload(), &r.commit_sha) {
-            (true, Some((repo, _, _)), _, Some(sha)) => Some((
-                state.github.tarball_url(repo, sha),
-                crate::github::app::source_auth(state, r.workspace_id, repo).await?,
-                String::new(),
-            )),
-            (true, None, Some(upload), _) => Some((
-                upload_url(state),
-                format!(
-                    "Bearer {}",
-                    super::upload::token(&state.keys, r.id, upload, r.created_at)
-                ),
-                // A purged upload has no hash: the download then fails cleanly.
-                r.upload_sha256.clone().unwrap_or_else(|| "0".repeat(64)),
-            )),
-            _ => None,
-        };
-        let build = match source {
-            Some((source_url, source_auth, source_sha256)) => Some(pb::Build {
-                source_url,
-                source_auth,
-                source_sha256,
-                root_dir: cfg
-                    .root_dir()
-                    .unwrap_or_default()
-                    .trim_matches('/')
-                    .to_owned(),
-                builder: match cfg.builder {
-                    Builder::Railpack => pb::Builder::Railpack,
-                    Builder::Dockerfile => pb::Builder::Dockerfile,
-                } as i32,
-                dockerfile_path: cfg.dockerfile_path.clone().unwrap_or_default(),
-                build_command: cfg.build_command.clone().unwrap_or_default(),
-                start_command: match (&cfg.start_command, railpack) {
-                    (Some(argv), true) => shell_join(argv),
-                    _ => String::new(),
-                },
-                cache_key: r.workspace_id.to_string(),
-                secrets_hash: secrets_hash(state, r.environment_id, &vars).await?,
-            }),
-            None => None,
-        };
         if !networks.contains(&r.environment_id) {
             networks.push(r.environment_id);
         }
-        workloads.push(pb::Workload {
-            deployment_id: r.id.to_string(),
-            service_id: r.service_id.to_string(),
-            environment_id: r.environment_id.to_string(),
-            service_name: r.service_name,
-            image: r.image,
-            command,
-            env: env_vars,
-            port: u32::from(cfg.port),
-            health: Some(pb::HealthCheck {
-                path: cfg.healthcheck_path.clone().unwrap_or_default(),
-                timeout_secs: cfg.healthcheck_timeout_secs,
-            }),
-            limits: Some(pb::Limits {
-                memory_bytes: u64::from(cfg.memory_mb.unwrap_or(DEFAULT_MEMORY_MB)) * 1024 * 1024,
-                nano_cpus: u64::from(cfg.cpu_millis.unwrap_or(DEFAULT_CPU_MILLIS)) * 1_000_000,
-                pids: DEFAULT_PIDS,
-            }),
-            restart: match cfg.restart_policy {
-                RestartPolicy::OnFailure => pb::RestartPolicy::OnFailure,
-                RestartPolicy::Always => pb::RestartPolicy::Always,
-                RestartPolicy::Never => pb::RestartPolicy::Never,
-            } as i32,
-            build,
-            restart_generation: u32::try_from(r.restart_generation).unwrap_or(0),
-            volume: r
-                .volume_id
-                .zip(r.mount_path)
-                .map(|(id, mount_path)| pb::Volume {
-                    name: volume_name(id),
-                    mount_path,
-                }),
-            pre_deploy_command: cfg.pre_deploy_command.clone().unwrap_or_default(),
-            draining_seconds: draining_seconds(&cfg, &vars),
-            restart_max_retries: match cfg.restart_policy {
-                RestartPolicy::OnFailure => cfg.restart_policy_max_retries.unwrap_or(0),
-                _ => 0,
-            },
-            mesh_ip: r.mesh_ip.unwrap_or_default(),
-        });
+        workloads.push(workload(state, r).await?);
     }
-    // Public hostnames route to the serving deployment only (never one still
-    // rolling out), so traffic moves in the same snapshot that retires the old one.
-    // Unverified custom domains are left out, which also keeps them off the
-    // node's `ask` allowlist (no certificate). Every node running a replica
-    // serves them, balancing over its own and the other healthy replicas.
-    let routes: Vec<RouteRow> = sqlx::query_as(
-        "SELECT m.hostname, d.id AS deployment_id, d.config, m.target_port,
-                ARRAY(SELECT o.mesh_ip FROM deployment_replicas o
-                      WHERE o.deployment_id = d.id AND o.node_id <> $1 AND o.mesh_ip IS NOT NULL
-                        AND o.status = 'active'
-                      ORDER BY o.ordinal) AS remote_ips
-         FROM domains m
-         JOIN deployments d ON d.service_instance_id = m.service_instance_id
-         JOIN deployment_replicas r ON r.deployment_id = d.id AND r.node_id = $1
-         WHERE d.status IN ('active', 'crashed') AND m.status = 'verified'
-         ORDER BY m.hostname",
-    )
-    .bind(node)
-    .fetch_all(&state.db)
-    .await?;
-    let mut pb_routes = Vec::with_capacity(routes.len());
-    for r in routes {
-        let cfg: ServiceConfig = serde_json::from_value(r.config).map_err(anyhow::Error::from)?;
-        let port = r
-            .target_port
-            .and_then(|p| u32::try_from(p).ok())
-            .unwrap_or(u32::from(cfg.port));
-        pb_routes.push(pb::Route {
-            hostname: r.hostname,
-            deployment_id: r.deployment_id.to_string(),
-            port,
-            remote_upstreams: r
-                .remote_ips
-                .iter()
-                .map(|ip| format!("{ip}:{port}"))
-                .collect(),
-        });
-    }
+    let pb_routes = routes(state, node).await?;
     // TCP proxies point at the serving deployment, like routes.
     let proxies: Vec<(i32, Id, i32)> = sqlx::query_as(
         "SELECT t.public_port, d.id, t.target_port
@@ -326,6 +147,187 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
         }),
         mesh: crate::mesh::build(&state.db, node).await?,
     })
+}
+
+/// One deployment replica on this node, as the node runs it.
+async fn workload(state: &AppState, r: Row) -> AppResult<pb::Workload> {
+    let cfg: ServiceConfig = serde_json::from_value(r.config).map_err(anyhow::Error::from)?;
+    let vars = match &r.env_sealed {
+        Some(sealed) => {
+            env::open_snapshot(&state.keys, &state.db, r.environment_id, r.id, sealed).await?
+        }
+        None => env::EnvMap::new(),
+    };
+    let platform = env::Platform {
+        port: u64::from(cfg.port),
+        project: r.project_id,
+        environment: r.environment_id,
+        environment_name: &r.environment_name,
+        service: r.service_id,
+        service_name: &r.service_name,
+        deployment: Some(r.id),
+        public_domain: r.public_domain.as_deref(),
+        tcp_proxy_host: state
+            .cfg
+            .tcp_proxy_host
+            .as_deref()
+            .or(r.node_public_ip.as_deref()),
+        tcp_proxy_port: r.tcp_public_port,
+    };
+    // User variables win over platform defaults (e.g. a custom PORT).
+    let mut env_vars: Vec<pb::EnvVar> = platform
+        .vars()
+        .into_iter()
+        .filter(|(k, _)| !vars.contains_key(*k))
+        .map(|(k, v)| pb::EnvVar {
+            name: k.into(),
+            value: v,
+        })
+        .collect();
+    env_vars.extend(vars.iter().map(|(k, v)| pb::EnvVar {
+        name: k.clone(),
+        value: v.expose_secret().to_owned(),
+    }));
+    // Built images run their baked start command (Railpack wraps it in a
+    // shell); everything else takes the configured argv.
+    let railpack = cfg.builds_from_source() && cfg.builder == Builder::Railpack;
+    let command = match (&cfg.start_command, railpack) {
+        (Some(argv), false) => argv.clone(),
+        _ => Vec::new(),
+    };
+    // Where the source comes from: GitHub at the commit, or this server
+    // for an upload (a signed download bound to this deployment). Every
+    // replica builds on its own server; one that hasn't come up still
+    // does after the first replica's build moved the deployment on.
+    let builds = r.status == "building"
+        || (r.status == "deploying"
+            && r.replica_starting
+            && r.image.starts_with(super::start::BUILD_PREFIX));
+    let source = match (builds, cfg.repo(), cfg.upload(), &r.commit_sha) {
+        (true, Some((repo, _, _)), _, Some(sha)) => Some((
+            state.github.tarball_url(repo, sha),
+            crate::github::app::source_auth(state, r.workspace_id, repo).await?,
+            String::new(),
+        )),
+        (true, None, Some(upload), _) => Some((
+            upload_url(state),
+            format!(
+                "Bearer {}",
+                super::upload::token(&state.keys, r.id, upload, r.created_at)
+            ),
+            // A purged upload has no hash: the download then fails cleanly.
+            r.upload_sha256.clone().unwrap_or_else(|| "0".repeat(64)),
+        )),
+        _ => None,
+    };
+    let build = match source {
+        Some((source_url, source_auth, source_sha256)) => Some(pb::Build {
+            source_url,
+            source_auth,
+            source_sha256,
+            root_dir: cfg
+                .root_dir()
+                .unwrap_or_default()
+                .trim_matches('/')
+                .to_owned(),
+            builder: match cfg.builder {
+                Builder::Railpack => pb::Builder::Railpack,
+                Builder::Dockerfile => pb::Builder::Dockerfile,
+            } as i32,
+            dockerfile_path: cfg.dockerfile_path.clone().unwrap_or_default(),
+            build_command: cfg.build_command.clone().unwrap_or_default(),
+            start_command: match (&cfg.start_command, railpack) {
+                (Some(argv), true) => shell_join(argv),
+                _ => String::new(),
+            },
+            cache_key: r.workspace_id.to_string(),
+            secrets_hash: secrets_hash(state, r.environment_id, &vars).await?,
+        }),
+        None => None,
+    };
+    Ok(pb::Workload {
+        deployment_id: r.id.to_string(),
+        service_id: r.service_id.to_string(),
+        environment_id: r.environment_id.to_string(),
+        service_name: r.service_name,
+        image: r.image,
+        command,
+        env: env_vars,
+        port: u32::from(cfg.port),
+        health: Some(pb::HealthCheck {
+            path: cfg.healthcheck_path.clone().unwrap_or_default(),
+            timeout_secs: cfg.healthcheck_timeout_secs,
+        }),
+        limits: Some(pb::Limits {
+            memory_bytes: u64::from(cfg.memory_mb.unwrap_or(DEFAULT_MEMORY_MB)) * 1024 * 1024,
+            nano_cpus: u64::from(cfg.cpu_millis.unwrap_or(DEFAULT_CPU_MILLIS)) * 1_000_000,
+            pids: DEFAULT_PIDS,
+        }),
+        restart: match cfg.restart_policy {
+            RestartPolicy::OnFailure => pb::RestartPolicy::OnFailure,
+            RestartPolicy::Always => pb::RestartPolicy::Always,
+            RestartPolicy::Never => pb::RestartPolicy::Never,
+        } as i32,
+        build,
+        restart_generation: u32::try_from(r.restart_generation).unwrap_or(0),
+        volume: r
+            .volume_id
+            .zip(r.mount_path)
+            .map(|(id, mount_path)| pb::Volume {
+                name: volume_name(id),
+                mount_path,
+            }),
+        pre_deploy_command: cfg.pre_deploy_command.clone().unwrap_or_default(),
+        draining_seconds: draining_seconds(&cfg, &vars),
+        restart_max_retries: match cfg.restart_policy {
+            RestartPolicy::OnFailure => cfg.restart_policy_max_retries.unwrap_or(0),
+            _ => 0,
+        },
+        mesh_ip: r.mesh_ip.unwrap_or_default(),
+    })
+}
+
+/// The public hostnames this node routes, to the serving deployment only.
+async fn routes(state: &AppState, node: Id) -> AppResult<Vec<pb::Route>> {
+    // Public hostnames route to the serving deployment only (never one still
+    // rolling out), so traffic moves in the same snapshot that retires the old one.
+    // Unverified custom domains are left out, which also keeps them off the
+    // node's `ask` allowlist (no certificate). Every node running a replica
+    // serves them, balancing over its own and the other healthy replicas.
+    let routes: Vec<RouteRow> = sqlx::query_as(
+        "SELECT m.hostname, d.id AS deployment_id, d.config, m.target_port,
+                ARRAY(SELECT o.mesh_ip FROM deployment_replicas o
+                      WHERE o.deployment_id = d.id AND o.node_id <> $1 AND o.mesh_ip IS NOT NULL
+                        AND o.status = 'active'
+                      ORDER BY o.ordinal) AS remote_ips
+         FROM domains m
+         JOIN deployments d ON d.service_instance_id = m.service_instance_id
+         JOIN deployment_replicas r ON r.deployment_id = d.id AND r.node_id = $1
+         WHERE d.status IN ('active', 'crashed') AND m.status = 'verified'
+         ORDER BY m.hostname",
+    )
+    .bind(node)
+    .fetch_all(&state.db)
+    .await?;
+    let mut pb_routes = Vec::with_capacity(routes.len());
+    for r in routes {
+        let cfg: ServiceConfig = serde_json::from_value(r.config).map_err(anyhow::Error::from)?;
+        let port = r
+            .target_port
+            .and_then(|p| u32::try_from(p).ok())
+            .unwrap_or(u32::from(cfg.port));
+        pb_routes.push(pb::Route {
+            hostname: r.hostname,
+            deployment_id: r.deployment_id.to_string(),
+            port,
+            remote_upstreams: r
+                .remote_ips
+                .iter()
+                .map(|ip| format!("{ip}:{port}"))
+                .collect(),
+        });
+    }
+    Ok(pb_routes)
 }
 
 /// The configured draining time, or Railway's variable for it when the
@@ -383,19 +385,6 @@ pub fn shell_join(argv: &[String]) -> String {
 /// The Docker volume backing a `volumes` row.
 pub fn volume_name(id: Id) -> String {
     format!("modula-vol-{id}")
-}
-
-/// Where clients reach a TCP proxy: the configured host, else the node's IP.
-pub fn tcp_proxy_host(state: &AppState, node_public_ip: Option<&str>, port: Option<i32>) -> String {
-    match port {
-        None => String::new(),
-        Some(_) => state
-            .cfg
-            .tcp_proxy_host
-            .clone()
-            .or_else(|| node_public_ip.map(str::to_owned))
-            .unwrap_or_default(),
-    }
 }
 
 #[cfg(test)]

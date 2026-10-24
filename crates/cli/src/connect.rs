@@ -88,8 +88,10 @@ pub fn local_url(engine: Option<Engine>, creds: &DbCredentials, local_port: u16)
     if !creds.password.is_empty() {
         u.set_password(Some(&creds.password)).ok()?;
     }
-    if !creds.database.is_empty() && engine != Engine::Redis {
-        u.set_path(&creds.database);
+    if let Some(db) = creds.database.as_deref().filter(|d| !d.is_empty())
+        && engine != Engine::Redis
+    {
+        u.set_path(db);
     }
     Some(u)
 }
@@ -169,96 +171,6 @@ pub fn client_command(
     (engine.client().to_owned(), args, env)
 }
 
-/// Variables holding (user, password, database) per engine; a `None` user
-/// or database is a fixed value from the template.
-fn template_variables(
-    engine: Engine,
-) -> (
-    Result<&'static str, &'static str>,
-    &'static str,
-    Option<&'static str>,
-) {
-    match engine {
-        Engine::Postgres => (
-            Ok("POSTGRES_USER"),
-            "POSTGRES_PASSWORD",
-            Some("POSTGRES_DB"),
-        ),
-        Engine::Mysql => (Err("root"), "MYSQL_ROOT_PASSWORD", Some("MYSQL_DATABASE")),
-        Engine::Redis => (Err("default"), "REDIS_PASSWORD", None),
-        Engine::Mongo => (
-            Ok("MONGO_INITDB_ROOT_USERNAME"),
-            "MONGO_INITDB_ROOT_PASSWORD",
-            None,
-        ),
-    }
-}
-
-/// Credentials from the database template's variables (revealed one by one).
-/// Revealing needs a recently re-authenticated session, which API tokens never
-/// have: then this fails with a message saying so.
-async fn template_credentials(
-    api: &Api,
-    instance: &str,
-    engine: Engine,
-) -> anyhow::Result<Option<DbCredentials>> {
-    #[derive(serde::Deserialize)]
-    struct Var {
-        id: String,
-        name: String,
-        #[serde(default)]
-        sealed: bool,
-    }
-    #[derive(serde::Deserialize)]
-    struct Revealed {
-        value: String,
-    }
-    let vars: Vec<Var> = api
-        .get(&format!("/api/service-instances/{instance}/variables"))
-        .await?;
-    let reveal = |name: &'static str| {
-        let var = vars.iter().find(|v| v.name == name && !v.sealed);
-        async move {
-            let Some(var) = var else {
-                return Ok::<_, anyhow::Error>(None);
-            };
-            let r: Revealed = match api
-                .post_empty(&format!("/api/variables/{}/reveal", var.id))
-                .await
-            {
-                Ok(r) => r,
-                Err(e) if api_error(&e).is_some_and(|a| a.code == "sudo_required") => {
-                    anyhow::bail!(
-                        "revealing variables needs a recently re-authenticated browser session, \
-                         which API tokens never have"
-                    )
-                }
-                Err(e) => return Err(e),
-            };
-            // An unresolved reference is no use as a credential.
-            Ok(Some(r.value).filter(|v| !v.contains("${{")))
-        }
-    };
-    let (user, password, database) = template_variables(engine);
-    let Some(password) = reveal(password).await? else {
-        return Ok(None);
-    };
-    let username = match user {
-        Ok(var) => reveal(var).await?.unwrap_or_default(),
-        Err(fixed) => fixed.to_owned(),
-    };
-    let database = match database {
-        Some(var) => reveal(var).await?.unwrap_or_default(),
-        None => String::new(),
-    };
-    Ok(Some(DbCredentials {
-        username,
-        password,
-        database,
-        private_url: None,
-    }))
-}
-
 pub async fn run(api: &Api, link: Option<&Link>, args: ConnectArgs) -> anyhow::Result<i32> {
     let wanted_project = args.project.as_deref().or(link.map(|l| l.project.as_str()));
     let project = resolve::project(api, wanted_project).await?;
@@ -294,19 +206,11 @@ pub async fn run(api: &Api, link: Option<&Link>, args: ConnectArgs) -> anyhow::R
         .await
     {
         Ok(c) => Some(c),
-        // Not served for this engine (409: Postgres only), not allowed, or an
-        // older server: read the template's variables instead.
+        // Not a database (409), or not allowed to read its credentials: the
+        // tunnel alone is still useful.
         Err(e) if api_error(&e).is_some_and(|a| matches!(a.status, 403 | 404 | 409)) => {
-            match engine {
-                Some(engine) => match template_credentials(api, &instance, engine).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("Couldn't read {}'s credentials: {e:#}", service.name);
-                        None
-                    }
-                },
-                None => None,
-            }
+            eprintln!("Couldn't read {}'s credentials: {e:#}", service.name);
+            None
         }
         Err(e) => return Err(e),
     };
@@ -376,7 +280,7 @@ mod tests {
         DbCredentials {
             username: "postgres".into(),
             password: "s3cr/t".into(),
-            database: "app".into(),
+            database: Some("app".into()),
             private_url: url.map(Into::into),
         }
     }
@@ -443,6 +347,17 @@ mod tests {
         assert_eq!(prog, "redis-cli");
         assert_eq!(args, ["-h", "127.0.0.1", "-p", "6380"]);
         assert_eq!(env, [("REDISCLI_AUTH".to_owned(), "pw".to_owned())]);
+    }
+
+    #[test]
+    fn credentials_without_a_database_parse() {
+        let c: DbCredentials = serde_json::from_str(
+            r#"{"template":"redis","username":"default","password":"pw","database":null,"privateUrl":"redis://default:pw@cache.modula.internal:6379"}"#,
+        )
+        .unwrap();
+        assert_eq!(c.database, None);
+        let u = local_url(Some(Engine::Redis), &c, 6380).unwrap();
+        assert_eq!(u.as_str(), "redis://default:pw@127.0.0.1:6380");
     }
 
     #[test]

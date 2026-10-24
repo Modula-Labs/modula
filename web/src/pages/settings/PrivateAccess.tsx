@@ -7,7 +7,6 @@ import { Check, Circle, X } from "@/components/ui/icons";
 import { Alert, Badge, Skeleton, type Tone } from "@/components/ui/misc";
 import {
   api,
-  ApiError,
   type PrivateAccessPhase,
   type PrivateAccessStatus,
   type PrivateAccessStep,
@@ -110,7 +109,6 @@ export function PrivateAccessSection({ workspaceId }: { workspaceId: string }) {
     onSuccess: set,
   });
 
-  if (q.error instanceof ApiError && q.error.status === 404) return null;
   if (q.isPending) return <Skeleton className="h-40" />;
   if (q.error) return <Alert>{q.error.message}</Alert>;
 

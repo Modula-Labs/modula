@@ -78,7 +78,7 @@ impl DnsProvider for CloudflareDns {
         })
     }
 
-    /// TODO(C5): DNS-01 needs the token on every edge node (Caddy's
+    /// TODO: DNS-01 needs the token on every edge node (Caddy's
     /// `caddy-dns/cloudflare` issuer); nothing delivers it there yet, so
     /// wildcard domains stay unavailable.
     fn supports_dns01(&self) -> bool {

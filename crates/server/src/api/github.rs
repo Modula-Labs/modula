@@ -243,12 +243,6 @@ async fn workspace_admin(state: &AppState, workspace: Id, user: Id) -> AppResult
 
 /// The App's installation page, with a fresh `install` state for `flow`.
 async fn install_url(state: &AppState, html_url: &str, user: Id, flow: &Flow) -> AppResult<String> {
-    // Checked when stored; again here for rows stored before that check.
-    if !app::is_github_web_url(state, html_url) {
-        return Err(AppError::Conflict(
-            "the stored GitHub App URL is not on GitHub; remove the App and create it again".into(),
-        ));
-    }
     // select_target: GitHub's account picker (personal account or any org).
     let mut url: Url = format!(
         "{}/installations/select_target",

@@ -87,7 +87,7 @@ async fn live(state: &AppState, instance: Id) -> AppResult<Live> {
     };
     if !capable {
         return Err(AppError::Conflict(
-            "the server running this database needs a newer modula-node".into(),
+            "the server running this database doesn't offer database access".into(),
         ));
     }
     Ok(Live { deployment, node })

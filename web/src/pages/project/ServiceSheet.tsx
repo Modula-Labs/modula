@@ -6,7 +6,8 @@ import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { Sheet } from "@/components/ui/Sheet";
 import { TabPanel, Tabs } from "@/components/ui/Tabs";
 import { Alert, Skeleton } from "@/components/ui/misc";
-import { ApiError, api, type Role, type Template } from "@/lib/api";
+import { api, type Role } from "@/lib/api";
+import { useTemplates } from "@/lib/useTemplates";
 import { templateStack } from "@/lib/templates";
 import { atLeast } from "@/lib/roles";
 import { BackupsTab } from "./BackupsTab";
@@ -52,20 +53,7 @@ export function ServiceSheet({
   });
   const i = instance.data;
   const [connecting, setConnecting] = useState(false);
-  const templates = useQuery({
-    queryKey: ["templates"],
-    queryFn: async (): Promise<Template[]> => {
-      try {
-        return await api.templates();
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 404) return [];
-        throw e;
-      }
-    },
-    staleTime: 5 * 60_000,
-    retry: false,
-    enabled: !!i?.template,
-  });
+  const templates = useTemplates(!!i?.template);
   const template = templates.data?.find((t) => t.id === i?.template);
   const canDeploy = atLeast(role, "deployer");
 

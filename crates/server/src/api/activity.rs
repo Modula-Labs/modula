@@ -383,8 +383,9 @@ struct Snapshot {
     deployed: bool,
     deployed_config: Option<Value>,
     config: Value,
-    /// None: the deployment predates variable snapshots (compare by log only).
-    deployed_vars: Option<env::RawVars>,
+    /// The deployed variables as written (empty when never deployed, or when
+    /// no logged change needs them).
+    deployed_vars: env::RawVars,
     vars: env::RawVars,
 }
 
@@ -409,15 +410,15 @@ impl Snapshot {
                         .fetch_one(&state.db)
                         .await?;
                 let vars = match sealed {
-                    Some(s) if needs_vars => Some(
-                        env::open_vars_snapshot(&state.keys, &state.db, environment, d, &s).await?,
-                    ),
-                    _ => None,
+                    Some(s) if needs_vars => {
+                        env::open_vars_snapshot(&state.keys, &state.db, environment, d, &s).await?
+                    }
+                    _ => env::RawVars::new(),
                 };
                 (Some(cfg), vars)
             }
             // Never deployed: everything is new.
-            None => (None, Some(env::RawVars::new())),
+            None => (None, env::RawVars::new()),
         };
         let vars = if needs_vars {
             env::raw_variables(&state.keys, &state.db, environment, head.instance_id).await?
@@ -455,16 +456,7 @@ impl Snapshot {
             // `service.NAME`: another service's variable this one references
             // (e.g. a regenerated database password); names never contain dots.
             "variable" if !r.shared && !key.contains('.') => {
-                let Some(deployed) = &self.deployed_vars else {
-                    // Deployed before variable snapshots: only the new value is known.
-                    let mut d = logged(false);
-                    if let Some(v) = self.vars.get(key) {
-                        d.out.new_value = Some(v.value.clone());
-                        d.out.sealed = v.sealed;
-                    }
-                    return Some(d);
-                };
-                let (before, after) = (deployed.get(key), self.vars.get(key));
+                let (before, after) = (self.deployed_vars.get(key), self.vars.get(key));
                 let op = net_op(before.map(|v| &v.value), after.map(|v| &v.value))?;
                 Some(Diff {
                     out: PendingChange {

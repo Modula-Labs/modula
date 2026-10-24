@@ -86,8 +86,8 @@ pub fn release_page(base: &Url, version: &str) -> String {
     )
 }
 
-/// The newest published release. `Ok(None)` when it publishes no `VERSION`
-/// file yet (releases before update checks existed).
+/// The newest published release. `Ok(None)` when there is none (no `VERSION`
+/// file at the latest-release URL).
 pub async fn fetch_latest(
     http: &reqwest::Client,
     base: &Url,

@@ -46,14 +46,6 @@ use crate::keyring::Keyring;
 use crate::ratelimit::RateLimiter;
 use crate::state::AppState;
 
-/// What `modula-server features` prints. install.sh writes units that rely
-/// on a feature only when the release it installs has it, so upgrading to (or
-/// rolling back to) an older release keeps working.
-///
-/// * `socket-activation`: takes its listeners from systemd (modula-server.socket).
-/// * `upgrade-requests`: hands upgrades to modula-upgrade.path (`MODULA_UPGRADE_DIR`).
-pub const FEATURES: &[&str] = &["socket-activation", "upgrade-requests"];
-
 pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let kek = cfg.load_master_key()?;
     tracing::info!(kek_id = %kek.id(), "master key loaded");

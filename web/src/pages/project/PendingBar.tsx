@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/Input";
 import { Menu, MenuItem } from "@/components/ui/Menu";
 import { Modal } from "@/components/ui/Modal";
 import { Alert, Skeleton } from "@/components/ui/misc";
-import { ApiError, api, type PendingChange, type PendingChanges, type PendingService } from "@/lib/api";
+import { api, type PendingChange, type PendingChanges, type PendingService } from "@/lib/api";
 import { useMe } from "@/lib/workspace";
 import { initials, words } from "./activity";
 
@@ -19,15 +19,7 @@ export function usePending(environmentId: string | undefined) {
   return useQuery({
     queryKey: ["pending", environmentId],
     enabled: !!environmentId,
-    queryFn: async () => {
-      try {
-        return await api.pending(environmentId!);
-      } catch (e) {
-        // Older servers don't track pending changes.
-        if (e instanceof ApiError && e.status === 404) return none;
-        throw e;
-      }
-    },
+    queryFn: () => api.pending(environmentId!),
     refetchInterval: 10_000,
     retry: false,
   });

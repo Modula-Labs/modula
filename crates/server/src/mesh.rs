@@ -1,4 +1,4 @@
-//! Private networking between servers (C9).
+//! Private networking between servers.
 //!
 //! Every node that reports a WireGuard key joins one mesh: the server gives
 //! it a /24 of `10.80.0.0/16` (`10.80.<mesh_index>.0/24`, host address `.1`)

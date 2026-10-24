@@ -835,7 +835,7 @@ async fn public_domain_variable_skips_unverified_custom_domains(pool: PgPool) {
             .to_owned()
     };
 
-    // An older custom domain that hasn't been verified yet is not served.
+    // A custom domain that hasn't been verified is not served.
     sqlx::query(
         "INSERT INTO domains (id, service_instance_id, hostname, kind, status, verification_token, created_at)
          VALUES ($1, $2, 'shop.example.com', 'custom', 'pending', 'token', now() - interval '1 hour')",

@@ -27,7 +27,7 @@ pub struct Config {
     pub edge_tls: EdgeTls,
     /// Contact address for ACME accounts (optional).
     pub acme_email: Option<String>,
-    /// The host clients use for TCP proxies (`MODULA_TCP_PROXY_DOMAIN`).
+    /// The host clients use for TCP proxies (`MODULA_TCP_PROXY_HOST`).
     /// None = each node's detected public IP.
     pub tcp_proxy_host: Option<String>,
     /// The installed release (binaries + signed checksums). Served to servers
@@ -289,15 +289,7 @@ impl Config {
 /// Lowercase, no scheme, no trailing dot, valid DNS labels.
 pub fn normalize_apps_domain(raw: &str) -> anyhow::Result<String> {
     let d = raw.trim().trim_end_matches('.').to_ascii_lowercase();
-    let ok = !d.is_empty()
-        && d.len() <= 200
-        && d.split('.').all(|l| {
-            !l.is_empty()
-                && l.len() <= 63
-                && !l.starts_with('-')
-                && !l.ends_with('-')
-                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        });
+    let ok = !d.is_empty() && d.len() <= 200 && d.split('.').all(crate::validate::dns_label);
     if !ok {
         bail!("MODULA_APPS_DOMAIN must be a domain like apps.example.com");
     }

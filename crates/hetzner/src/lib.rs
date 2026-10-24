@@ -82,8 +82,8 @@ pub struct ServerType {
     #[serde(default)]
     pub prices: Vec<Price>,
     /// Per-location availability: `available: false` is sold out there, a
-    /// deprecation means retired there. (Replaces `GET /datacenters`, gone
-    /// since 2026-10-01.)
+    /// deprecation means retired there. (Hetzner's API has no
+    /// `GET /datacenters` since 2026-10-01; this is where availability lives.)
     #[serde(default)]
     pub locations: Vec<TypeLocation>,
 }

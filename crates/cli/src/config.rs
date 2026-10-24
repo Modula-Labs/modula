@@ -76,7 +76,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         opts.mode(0o600);
-        // An older file keeps its mode on open; tighten it either way.
+        // An existing file keeps its mode on open; tighten it either way.
         if path.exists() {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }

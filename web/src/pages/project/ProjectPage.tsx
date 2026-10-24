@@ -1,10 +1,11 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Activity, BrandDocker, BrandGithub, Copy, Database, Disk, LayoutGrid, Plus, Power, Refresh, Rocket, Trash } from "@/components/ui/icons";
 import { ContextMenu, MenuItem, MenuLabel, MenuSeparator } from "@/components/ui/Menu";
 import { useLingering } from "@/components/ui/Sheet";
-import { ApiError, api, type DeploymentStatus, type Template } from "@/lib/api";
+import { api, type DeploymentStatus } from "@/lib/api";
+import { useTemplates } from "@/lib/useTemplates";
 import { projectReturn } from "@/lib/github";
 import { atLeast } from "@/lib/roles";
 import { load, save } from "@/lib/storage";
@@ -90,20 +91,7 @@ export function ProjectPage({
   // While the "Apply N changes" bar is up it owns the screen's primary button.
   const hasPending = canDeploy && (pending?.count ?? 0) > 0;
   // Same query as the add dialog; the canvas menu offers Database only when there are templates.
-  const templates = useQuery({
-    queryKey: ["templates"],
-    queryFn: async (): Promise<Template[]> => {
-      try {
-        return await api.templates();
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 404) return [];
-        throw e;
-      }
-    },
-    staleTime: 5 * 60_000,
-    retry: false,
-    enabled: canEdit,
-  });
+  const templates = useTemplates(canEdit);
   useEffect(() => {
     if (!notice) return;
     const t = window.setTimeout(() => setNotice(null), 4000);

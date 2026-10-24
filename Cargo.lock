@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "modula-backup"
-version = "0.1.5"
+version = "0.1.0"
 dependencies = [
  "age",
  "anyhow",
@@ -2610,7 +2610,7 @@ dependencies = [
 
 [[package]]
 name = "modula-cli"
-version = "0.1.5"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2645,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "modula-crypto"
-version = "0.1.5"
+version = "0.1.0"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -2665,7 +2665,7 @@ dependencies = [
 
 [[package]]
 name = "modula-hetzner"
-version = "0.1.5"
+version = "0.1.0"
 dependencies = [
  "reqwest",
  "rustls",
@@ -2679,7 +2679,7 @@ dependencies = [
 
 [[package]]
 name = "modula-id"
-version = "0.1.5"
+version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
  "serde",
@@ -2689,7 +2689,7 @@ dependencies = [
 
 [[package]]
 name = "modula-node"
-version = "0.1.5"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2731,7 +2731,7 @@ dependencies = [
 
 [[package]]
 name = "modula-proto"
-version = "0.1.5"
+version = "0.1.0"
 dependencies = [
  "prost",
  "tonic",
@@ -2741,7 +2741,7 @@ dependencies = [
 
 [[package]]
 name = "modula-server"
-version = "0.1.5"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
