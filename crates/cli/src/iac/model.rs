@@ -38,6 +38,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "cronSchedule",
     "cronTimeoutSecs",
     "edgeRules",
+    "serverless",
 ];
 
 /// Keys of a service table that aren't settings.
@@ -136,6 +137,9 @@ pub struct ServiceSpec {
     pub cron_schedule: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron_timeout_secs: Option<u32>,
+    /// Scale to zero after this many idle minutes (`{}` = the default, 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serverless: Option<ServerlessSpec>,
 
     /// Custom domains (generated ones are never deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,6 +158,13 @@ pub struct ServiceSpec {
     /// Remote-only variables `apply` must not delete.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preserve: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServerlessSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_minutes: Option<u32>,
 }
 
 /// Where the code comes from: exactly one of `repo`, `image` or `local`.

@@ -28,7 +28,7 @@ pub async fn choose(tx: &mut PgConnection, instance: Id) -> AppResult<Id> {
     // Prefer online nodes, then the fewest live deployments.
     let picked: Option<Id> = sqlx::query_scalar(
         "SELECT n.id FROM nodes n
-         LEFT JOIN deployments d ON d.node_id = n.id AND d.status IN ('building', 'deploying', 'active', 'crashed')
+         LEFT JOIN deployments d ON d.node_id = n.id AND d.status IN ('building', 'deploying', 'active', 'sleeping', 'crashed')
          WHERE n.status <> 'revoked'
            AND (n.workspace_id IS NULL OR n.workspace_id = (
                  SELECT p.workspace_id FROM service_instances i
@@ -105,11 +105,11 @@ pub async fn choose_replicas(
                 EXISTS (SELECT 1 FROM deployment_replicas pr
                         JOIN deployments pd ON pd.id = pr.deployment_id
                         WHERE pr.node_id = n.id AND pd.service_instance_id = $1
-                          AND pd.status IN ('active', 'crashed')) AS previous
+                          AND pd.status IN ('active', 'sleeping', 'crashed')) AS previous
          FROM nodes n
          LEFT JOIN deployment_replicas r ON r.node_id = n.id
          LEFT JOIN deployments d ON d.id = r.deployment_id
-              AND d.status IN ('building', 'deploying', 'active', 'crashed')
+              AND d.status IN ('building', 'deploying', 'active', 'sleeping', 'crashed')
          WHERE n.status <> 'revoked' AND n.id <> $2
            AND n.mesh_index IS NOT NULL AND n.wg_public_key IS NOT NULL
            AND (n.workspace_id IS NULL OR n.workspace_id = (

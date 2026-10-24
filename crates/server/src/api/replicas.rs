@@ -248,7 +248,7 @@ pub async fn create(
     let candidates: Vec<Candidate> = sqlx::query_as(
         "SELECT n.id, n.name, n.status = 'online' AS online,
                 (SELECT count(*) FROM deployment_replicas r JOIN deployments d ON d.id = r.deployment_id
-                 WHERE r.node_id = n.id AND d.status IN ('building', 'deploying', 'active', 'crashed')) AS load,
+                 WHERE r.node_id = n.id AND d.status IN ('building', 'deploying', 'active', 'sleeping', 'crashed')) AS load,
                 false AS previous
          FROM nodes n
          WHERE n.status <> 'revoked' AND n.mesh_index IS NOT NULL AND n.wg_public_key IS NOT NULL

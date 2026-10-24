@@ -489,6 +489,7 @@ fn status_label(status: Option<&str>) -> &'static str {
         Some("building") => "Building",
         Some("deploying") => "Deploying",
         Some("active") => "Ready",
+        Some("sleeping") => "Ready (sleeping)",
         Some("failed") => "Failed",
         Some("crashed") => "Crashed",
         Some("cancelled") => "Cancelled",

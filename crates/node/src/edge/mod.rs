@@ -12,8 +12,9 @@ pub mod caddy;
 mod http;
 pub mod rules;
 pub mod tcp;
+pub mod wake;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
@@ -33,6 +34,9 @@ pub struct Site {
     /// Proxied by Cloudflare (client IP and country from its headers).
     pub proxied: bool,
     pub rules: Vec<EdgeRule>,
+    /// Sleeping (serverless): the route's upstream is the wake proxy, and
+    /// requests carry this [`wake::HEADER`] value.
+    pub wake: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,12 +61,18 @@ pub trait EdgeSink: Send + Sync + 'static {
     fn unsupported(&self) -> Vec<String> {
         Vec::new()
     }
+    /// Requests in flight per upstream address (open websockets and long
+    /// polls included); empty when the edge can't tell.
+    async fn in_flight(&self) -> HashMap<SocketAddr, u64> {
+        HashMap::new()
+    }
 }
 
 /// Records the last config instead of serving it (tests).
 #[derive(Default)]
 pub struct RecordingEdge {
     pub last: std::sync::Mutex<Option<EdgeConfig>>,
+    pub in_flight: std::sync::Mutex<HashMap<SocketAddr, u64>>,
 }
 
 #[async_trait]
@@ -70,6 +80,10 @@ impl EdgeSink for RecordingEdge {
     async fn apply(&self, config: &EdgeConfig) -> anyhow::Result<()> {
         *self.last.lock().expect("edge lock") = Some(config.clone());
         Ok(())
+    }
+
+    async fn in_flight(&self) -> HashMap<SocketAddr, u64> {
+        self.in_flight.lock().expect("edge lock").clone()
     }
 }
 

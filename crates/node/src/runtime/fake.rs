@@ -25,6 +25,10 @@ struct State {
     /// container id → the workload it was created from.
     workloads: BTreeMap<String, Workload>,
     next: u64,
+    /// How many times a container was stopped (kept, not removed).
+    stops: u64,
+    /// How many times a container was started.
+    starts: u64,
 }
 
 #[derive(Default)]
@@ -163,6 +167,12 @@ impl FakeRuntime {
             .collect()
     }
 
+    /// (starts, stops) of containers so far.
+    pub fn start_stops(&self) -> (u64, u64) {
+        let s = self.state.lock().expect("fake lock");
+        (s.starts, s.stops)
+    }
+
     pub fn network_ids(&self) -> BTreeSet<String> {
         self.state.lock().expect("fake lock").networks.clone()
     }
@@ -258,6 +268,7 @@ impl Runtime for FakeRuntime {
             .get_mut(container_id)
             .ok_or_else(|| anyhow::anyhow!("no such container"))?;
         c.running = true;
+        s.starts += 1;
         Ok(())
     }
 
@@ -332,6 +343,18 @@ impl Runtime for FakeRuntime {
             .ok_or_else(|| anyhow::anyhow!("no such container"))?;
         c.running = true;
         c.restart_count += 1;
+        Ok(())
+    }
+
+    async fn stop(&self, container_id: &str) -> anyhow::Result<()> {
+        let mut s = self.state.lock().expect("fake lock");
+        let c = s
+            .containers
+            .get_mut(container_id)
+            .ok_or_else(|| anyhow::anyhow!("no such container"))?;
+        c.running = false;
+        c.exit_code = 0;
+        s.stops += 1;
         Ok(())
     }
 

@@ -8,6 +8,15 @@
 //! runs come one at a time ([`crate::cron`]). A periodic pass repairs drift and reports crashes and recoveries. Containers whose
 //! deployment is no longer desired are stopped and removed; nothing without
 //! our labels is ever touched.
+//!
+//! Serverless deployments (`Workload.serverless`) scale to zero: once one
+//! had no request for its idle time (access log, requests in flight at the
+//! edge, connections through the wake proxy), its route moves to the wake
+//! proxy ([`crate::edge::wake`]) and its container is stopped, not removed
+//! (SLEEPING). The next request starts it again; it is ACTIVE once the wake
+//! finished, with the cold start's duration. A stopped container of a
+//! sleeping deployment is expected, never a crash. Without an edge and a wake
+//! proxy serverless deployments just keep running.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::build::{BuildLog, BuildSupport, Built, LOCAL_PREFIX};
 use crate::edge::tcp::TcpProxies;
+use crate::edge::wake::{ContainerTarget, State as WakeState, Waker};
 use crate::edge::{EdgeConfig, EdgeSink, ResolvedRoute, Site};
 use crate::runtime::{Container, Runtime};
 
@@ -42,6 +52,21 @@ struct Tracked {
     rollout: Option<JoinHandle<()>>,
     /// The `restart_generation` last applied; `None` until first observed.
     restarted: Option<u32>,
+    /// When it last became ACTIVE: a serverless deployment is idle from then
+    /// at the earliest.
+    active_since: tokio::time::Instant,
+}
+
+impl Tracked {
+    fn new() -> Self {
+        Self {
+            phase: Phase::PhaseUnspecified,
+            message: String::new(),
+            rollout: None,
+            restarted: None,
+            active_since: tokio::time::Instant::now(),
+        }
+    }
 }
 
 /// Optional parts of a node: an edge (Caddy), a builder and database access.
@@ -57,6 +82,8 @@ pub struct Capabilities {
     pub mesh: Option<Arc<crate::mesh::Mesh>>,
     /// The edge's HTTP access log collector ([`crate::edge::access`]).
     pub access_log: Option<Arc<crate::edge::access::AccessLog>>,
+    /// The wake proxy of sleeping serverless deployments.
+    pub wake: Option<Arc<Waker>>,
 }
 
 pub struct Reconciler {
@@ -64,6 +91,9 @@ pub struct Reconciler {
     edge: Option<Arc<dyn EdgeSink>>,
     build: Option<BuildSupport>,
     mesh: Option<Arc<crate::mesh::Mesh>>,
+    access_log: Option<Arc<crate::edge::access::AccessLog>>,
+    /// Set only with an edge: nothing could wake a deployment otherwise.
+    wake: Option<Arc<Waker>>,
     out: mpsc::Sender<pb::NodeMessage>,
     tracked: Mutex<HashMap<String, Tracked>>,
     applied: AtomicU64,
@@ -102,16 +132,24 @@ impl Reconciler {
         caps: Capabilities,
         out: mpsc::Sender<pb::NodeMessage>,
     ) -> Arc<Self> {
+        let wake = caps.wake.filter(|_| caps.edge.is_some());
         Arc::new(Self {
             runtime,
             edge: caps.edge,
             build: caps.build,
             mesh: caps.mesh,
+            access_log: caps.access_log,
+            wake,
             out,
             tracked: Mutex::new(HashMap::new()),
             applied: AtomicU64::new(0),
             tcp: TcpProxies::default(),
         })
+    }
+
+    /// Whether serverless deployments can sleep here (an edge and a wake proxy).
+    pub fn serverless(&self) -> bool {
+        self.wake.is_some()
     }
 
     pub fn applied_generation(&self) -> u64 {
@@ -127,7 +165,7 @@ impl Reconciler {
             .filter(|(_, t)| {
                 matches!(
                     t.phase,
-                    Phase::Active | Phase::Failed | Phase::Crashed | Phase::Built
+                    Phase::Active | Phase::Failed | Phase::Crashed | Phase::Built | Phase::Sleeping
                 )
             })
             .map(|(id, t)| event(id, t.phase, &t.message, self.applied_generation()))
@@ -142,10 +180,18 @@ impl Reconciler {
         let mut tick = tokio::time::interval(REPAIR_EVERY);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            let woke = async {
+                match &self.wake {
+                    Some(w) => w.changed().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 _ = stop.cancelled() => break,
                 changed = desired.changed() => if changed.is_err() { break },
                 _ = tick.tick() => {}
+                // A wake finished: the route goes back to the container now.
+                _ = woke => {}
             }
             let current = desired.borrow_and_update().clone();
             if let Some(ds) = current
@@ -171,7 +217,7 @@ impl Reconciler {
     }
 
     fn set_phase(&self, deployment: &str, phase: Phase, message: impl Into<String>) {
-        self.set_phase_with(deployment, phase, message, None);
+        self.set_phase_with(deployment, phase, message, None, 0);
     }
 
     fn set_phase_with(
@@ -180,18 +226,19 @@ impl Reconciler {
         phase: Phase,
         message: impl Into<String>,
         build: Option<pb::BuildOutput>,
+        cold_start_ms: u32,
     ) {
         let message = message.into();
         {
             let mut tracked = self.tracked.lock().expect("tracked lock");
-            let t = tracked.entry(deployment.to_owned()).or_insert(Tracked {
-                phase: Phase::PhaseUnspecified,
-                message: String::new(),
-                rollout: None,
-                restarted: None,
-            });
+            let t = tracked
+                .entry(deployment.to_owned())
+                .or_insert(Tracked::new());
             t.phase = phase;
             t.message = message.clone();
+            if phase == Phase::Active {
+                t.active_since = tokio::time::Instant::now();
+            }
             if !matches!(
                 phase,
                 Phase::Building
@@ -208,6 +255,7 @@ impl Reconciler {
         let mut ev = event(deployment, phase, &message, self.applied_generation());
         if let Some(Msg::Event(e)) = &mut ev.msg {
             e.build = build;
+            e.cold_start_ms = cold_start_ms;
         }
         self.emit(ev);
     }
@@ -236,10 +284,23 @@ impl Reconciler {
         let in_mesh = self.apply_mesh(ds).await;
 
         // 1. Point the edge at what serves now, *before* retiring anything, so
-        //    traffic moves to a new deployment before the old one stops.
+        //    traffic moves to a new deployment before the old one stops (and
+        //    to the wake proxy before an idle serverless one stops).
         let containers = self.runtime.containers().await?;
+        if let Some(w) = &self.wake {
+            w.retain(|d| wanted.contains(d));
+        }
+        let sleepy = self.serverless_pass(ds, &workloads, &containers).await;
         self.apply_edge(ds, &containers).await;
         self.apply_tcp(ds, &containers).await;
+        for (deployment, container) in sleepy {
+            if let Err(e) = self.runtime.stop(&container).await {
+                tracing::warn!(%deployment, error = format!("{e:#}"), "cannot stop an idle container");
+            }
+            if let Some(w) = &self.wake {
+                w.asleep(&deployment);
+            }
+        }
 
         // 2. Stop what is no longer wanted.
         for c in containers
@@ -398,15 +459,153 @@ impl Reconciler {
         }
     }
 
+    /// Serverless bookkeeping before the edge is updated: a woken deployment
+    /// is ACTIVE again (its route goes back to the container), and an idle
+    /// one is SLEEPING (its route moves to the wake proxy). Returns the
+    /// (deployment, container) pairs to stop once the edge has moved. Only
+    /// deployments this node routes sleep: nothing else could wake them.
+    async fn serverless_pass(
+        &self,
+        ds: &pb::DesiredState,
+        workloads: &[&pb::Workload],
+        containers: &[Container],
+    ) -> Vec<(String, String)> {
+        let (Some(wake), Some(edge)) = (&self.wake, &self.edge) else {
+            return Vec::new();
+        };
+        let now = tokio::time::Instant::now();
+        let mut idle = Vec::new();
+        for w in workloads
+            .iter()
+            .filter(|w| w.serverless.is_some() && !w.cron)
+        {
+            let id = w.deployment_id.as_str();
+            if self.rollout_running(id) {
+                continue;
+            }
+            let running = containers
+                .iter()
+                .find(|c| c.deployment_id == id && c.running);
+            match self.phase_of(id) {
+                Some(Phase::Sleeping)
+                    if running.is_some() && matches!(wake.state(id), Some(WakeState::Awake(_))) =>
+                {
+                    let ms = wake
+                        .take_cold_start(id)
+                        .map_or(0, |d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX));
+                    self.set_phase_with(
+                        id,
+                        Phase::Active,
+                        format!("Woke up on a request (cold start {ms} ms)"),
+                        None,
+                        ms.max(1),
+                    );
+                }
+                Some(Phase::Active) if ds.routes.iter().any(|r| r.deployment_id == id) => {
+                    let Some(c) = running else { continue };
+                    let secs = w.serverless.as_ref().map_or(0, |s| s.idle_secs).max(1);
+                    let last = [
+                        self.active_since(id),
+                        self.access_log.as_ref().and_then(|l| l.last_request(id)),
+                        wake.last_active(id),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .max()
+                    .unwrap_or(now);
+                    if now.duration_since(last) >= Duration::from_secs(u64::from(secs)) {
+                        idle.push((*w, c, secs));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if idle.is_empty() {
+            return Vec::new();
+        }
+        // Requests still in flight (a websocket, a long poll) keep it awake.
+        let in_flight = edge.in_flight().await;
+        let mut out = Vec::new();
+        for (w, c, secs) in idle {
+            let id = w.deployment_id.as_str();
+            if let Ok(Some(ip)) = self.runtime.address(&c.id, &c.environment_id).await
+                && in_flight.iter().any(|(a, n)| a.ip() == ip && *n > 0)
+            {
+                if let Some(t) = self.tracked.lock().expect("tracked lock").get_mut(id) {
+                    t.active_since = now;
+                }
+                continue;
+            }
+            wake.draining(id, Arc::new(self.wake_target(w, &c.id)));
+            self.set_phase(
+                id,
+                Phase::Sleeping,
+                format!("Asleep after {} without requests", idle_text(secs)),
+            );
+            out.push((id.to_owned(), c.id.clone()));
+        }
+        out
+    }
+
+    /// How the wake proxy starts `container` of `w` again.
+    fn wake_target(&self, w: &pb::Workload, container: &str) -> ContainerTarget {
+        let health = w.health.clone().unwrap_or_default();
+        let limit = if health.path.is_empty() {
+            crate::edge::wake::MAX_WAKE
+        } else {
+            Duration::from_secs(u64::from(health.timeout_secs.max(1)))
+                .min(crate::edge::wake::MAX_WAKE)
+        };
+        ContainerTarget {
+            runtime: self.runtime.clone(),
+            container_id: container.to_owned(),
+            environment_id: w.environment_id.clone(),
+            port: u16::try_from(w.port).unwrap_or(0),
+            health_path: health.path,
+            timeout: limit,
+        }
+    }
+
+    fn active_since(&self, deployment: &str) -> Option<tokio::time::Instant> {
+        self.tracked
+            .lock()
+            .expect("tracked lock")
+            .get(deployment)
+            .map(|t| t.active_since)
+    }
+
     /// Resolve routes to running containers and hand them to the edge. Edge
     /// failures are logged, never fatal: workloads keep reconciling.
     async fn apply_edge(&self, ds: &pb::DesiredState, containers: &[Container]) {
         let Some(edge) = &self.edge else { return };
+        // Sleeping deployments are served by the wake proxy.
+        let sleeping: HashSet<String> = match &self.wake {
+            Some(_) => self
+                .tracked
+                .lock()
+                .expect("tracked lock")
+                .iter()
+                .filter(|(_, t)| t.phase == Phase::Sleeping)
+                .map(|(d, _)| d.clone())
+                .collect(),
+            None => HashSet::new(),
+        };
         let mut routes = Vec::new();
         for r in &ds.routes {
             let Ok(port) = u16::try_from(r.port) else {
                 continue;
             };
+            if let Some(w) = self
+                .wake
+                .as_ref()
+                .filter(|_| sleeping.contains(&r.deployment_id))
+            {
+                routes.push(ResolvedRoute {
+                    hostname: r.hostname.clone(),
+                    upstream: w.addr(),
+                });
+                continue;
+            }
             for c in containers
                 .iter()
                 .filter(|c| c.deployment_id == r.deployment_id && c.running)
@@ -450,6 +649,11 @@ impl Reconciler {
                         deployment_id: r.deployment_id.clone(),
                         proxied: r.proxied,
                         rules: r.rules.clone(),
+                        wake: self
+                            .wake
+                            .as_ref()
+                            .filter(|_| sleeping.contains(&r.deployment_id))
+                            .map(|w| w.header(&r.deployment_id, r.port as u16)),
                     },
                 ))
             })
@@ -550,6 +754,28 @@ impl Reconciler {
         if w.cron && phase == Some(Phase::Active) {
             return Ok(());
         }
+        let serverless = w.serverless.is_some() && !w.cron && self.wake.is_some();
+        if serverless && phase == Some(Phase::Sleeping) {
+            // Its next start is the restart.
+            self.restart_due(id, w.restart_generation);
+            let waking = self
+                .wake
+                .as_ref()
+                .and_then(|wk| wk.state(id))
+                .is_some_and(|s| matches!(s, WakeState::Waking | WakeState::Draining));
+            match containers.first() {
+                None => {
+                    if let Some(wk) = &self.wake {
+                        wk.retain(|d| d != id);
+                    }
+                    self.start_rollout(w.clone());
+                }
+                // Started by something else (Docker, after its own restart).
+                Some(c) if c.running && !waking => self.set_phase(id, Phase::Active, "running"),
+                Some(_) => {}
+            }
+            return Ok(());
+        }
         // Extra containers for one deployment can only come from a crash
         // mid-rollout; keep the first.
         for extra in containers.iter().skip(1) {
@@ -566,6 +792,14 @@ impl Reconciler {
             (None, _) => self.start_rollout(w.clone()),
             // Adopt a container that survived a node restart.
             (Some(c), None) if c.running => self.set_phase(id, Phase::Active, "running"),
+            // A serverless one stopped: it was asleep.
+            (Some(c), None) if serverless => {
+                if let Some(wk) = &self.wake {
+                    wk.draining(id, Arc::new(self.wake_target(w, &c.id)));
+                    wk.asleep(id);
+                }
+                self.set_phase(id, Phase::Sleeping, "Asleep");
+            }
             (Some(c), None) => self.set_phase(
                 id,
                 Phase::Crashed,
@@ -600,12 +834,7 @@ impl Reconciler {
             }
         });
         let mut tracked = self.tracked.lock().expect("tracked lock");
-        let t = tracked.entry(id).or_insert(Tracked {
-            phase: Phase::PhaseUnspecified,
-            message: String::new(),
-            rollout: None,
-            restarted: None,
-        });
+        let t = tracked.entry(id).or_insert(Tracked::new());
         t.rollout = Some(handle);
     }
 
@@ -625,6 +854,7 @@ impl Reconciler {
                         stack: built.stack,
                         ..Default::default()
                     }),
+                    0,
                 );
                 return Ok(());
             }
@@ -639,6 +869,7 @@ impl Reconciler {
                         stack: built.stack.clone(),
                         ..built.overrides.to_output()
                     }),
+                    0,
                 );
                 // The repository's config file overrides the dashboard.
                 effective = w.clone();
@@ -958,6 +1189,15 @@ fn redact(text: &str, env: &[pb::EnvVar]) -> String {
     out
 }
 
+/// `secs` for humans: `45 s`, `10 min`, `2 h`.
+fn idle_text(secs: u32) -> String {
+    match secs {
+        s if s % 3600 == 0 => format!("{} h", s / 3600),
+        s if s % 60 == 0 => format!("{} min", s / 60),
+        s => format!("{s} s"),
+    }
+}
+
 /// A static-site build whose output is hosted elsewhere.
 fn exports_output(w: &pb::Workload) -> bool {
     w.build.as_ref().is_some_and(|b| !b.output_dir.is_empty())
@@ -980,6 +1220,7 @@ fn event(deployment: &str, phase: Phase, message: &str, generation: u64) -> pb::
             at_unix_ms: now_ms(),
             generation,
             build: None,
+            cold_start_ms: 0,
         })),
     }
 }
@@ -1235,6 +1476,265 @@ mod tests {
                 .routes
                 .is_empty()
         );
+    }
+
+    /// A loopback "app" answering every request with 200 and its path.
+    async fn http_app() -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut c, _)) = l.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let Ok(n) = c.read(&mut buf).await else {
+                        return;
+                    };
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = head.split_whitespace().nth(1).unwrap_or("").to_owned();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{path}",
+                        path.len()
+                    );
+                    let _ = c.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
+    /// A request as Caddy sends it to the wake proxy for a sleeping site.
+    async fn through_proxy(waker: &Waker, header: &str, path: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut c = tokio::net::TcpStream::connect(waker.addr()).await.unwrap();
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: api.apps.test\r\n{}: {header}\r\nConnection: close\r\n\r\n",
+            crate::edge::wake::HEADER
+        );
+        c.write_all(req.as_bytes()).await.unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).await.unwrap();
+        out
+    }
+
+    /// Every event so far for `dep`, as (phase, cold start ms).
+    fn events_of(rx: &mut mpsc::Receiver<pb::NodeMessage>, dep: Id) -> Vec<(Phase, u32)> {
+        let mut out = vec![];
+        while let Ok(m) = rx.try_recv() {
+            if let Some(Msg::Event(e)) = m.msg
+                && e.deployment_id == dep.to_string()
+            {
+                out.push((Phase::try_from(e.phase).unwrap(), e.cold_start_ms));
+            }
+        }
+        out
+    }
+
+    struct Serverless {
+        rt: Arc<FakeRuntime>,
+        edge: Arc<crate::edge::RecordingEdge>,
+        waker: Arc<Waker>,
+        r: Arc<Reconciler>,
+        rx: mpsc::Receiver<pb::NodeMessage>,
+        ds: pb::DesiredState,
+        dep: Id,
+        port: u16,
+        _stop: CancellationToken,
+    }
+
+    /// A serverless deployment (1 s idle) with a route, rolled out and ACTIVE.
+    async fn serverless(health: &str) -> Serverless {
+        let rt = Arc::new(FakeRuntime::new());
+        *rt.address_override.lock().unwrap() = Some(std::net::IpAddr::from([127, 0, 0, 1]));
+        let edge = Arc::new(crate::edge::RecordingEdge::default());
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let waker = Waker::new(l.local_addr().unwrap());
+        let stop = CancellationToken::new();
+        tokio::spawn(waker.clone().serve(l, stop.clone()));
+        let (tx, rx) = mpsc::channel(256);
+        let r = Reconciler::new(
+            rt.clone(),
+            Capabilities {
+                edge: Some(edge.clone()),
+                wake: Some(waker.clone()),
+                ..Default::default()
+            },
+            tx,
+        );
+        let port = http_app().await;
+        let (env, dep) = (Id::new(), Id::new());
+        let mut w = workload(dep, env, health);
+        w.port = u32::from(port);
+        w.serverless = Some(pb::Serverless { idle_secs: 1 });
+        let mut ds = state(1, env, vec![w]);
+        ds.routes = vec![pb::Route {
+            hostname: "api.apps.test".into(),
+            deployment_id: dep.to_string(),
+            port: u32::from(port),
+            ..Default::default()
+        }];
+        r.apply(&ds).await.unwrap();
+        for _ in 0..100 {
+            if !r.rollout_running(&dep.to_string()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let mut s = Serverless {
+            rt,
+            edge,
+            waker,
+            r,
+            rx,
+            ds,
+            dep,
+            port,
+            _stop: stop,
+        };
+        assert_eq!(events_of(&mut s.rx, dep).last(), Some(&(Phase::Active, 0)));
+        s
+    }
+
+    impl Serverless {
+        fn edge_cfg(&self) -> EdgeConfig {
+            self.edge.last.lock().unwrap().clone().unwrap()
+        }
+
+        /// Idle long enough, then one reconcile: asleep, routed to the proxy.
+        async fn sleep(&mut self) {
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            self.r.apply(&self.ds).await.unwrap();
+            assert_eq!(events_of(&mut self.rx, self.dep), [(Phase::Sleeping, 0)]);
+            assert!(self.rt.running_deployments().is_empty(), "stopped");
+            assert_eq!(
+                self.waker.state(&self.dep.to_string()),
+                Some(WakeState::Sleeping)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_serverless_deployment_sleeps_and_a_request_wakes_it() {
+        let mut s = serverless("").await;
+        let dep = s.dep.to_string();
+        // Requests in flight at the edge keep it awake.
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", s.port).parse().unwrap();
+        s.edge.in_flight.lock().unwrap().insert(addr, 1);
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        s.r.apply(&s.ds).await.unwrap();
+        assert!(events_of(&mut s.rx, s.dep).is_empty());
+        assert_eq!(s.rt.running_deployments(), [dep.clone()].into());
+        s.edge.in_flight.lock().unwrap().clear();
+
+        s.sleep().await;
+        let (starts, stops) = s.rt.start_stops();
+        assert_eq!(stops, 1);
+        // The route now dials the wake proxy, naming the deployment.
+        let cfg = s.edge_cfg();
+        assert_eq!(cfg.routes[0].upstream, s.waker.addr());
+        let header = cfg.sites["api.apps.test"].wake.clone().unwrap();
+        assert!(header.starts_with(&format!("{dep} {} ", s.port)));
+        // A stopped container while asleep is expected: no crash.
+        s.r.apply(&s.ds).await.unwrap();
+        assert!(events_of(&mut s.rx, s.dep).is_empty());
+        assert!(
+            s.r.replay().iter().any(
+                |m| matches!(&m.msg, Some(Msg::Event(e)) if e.phase == Phase::Sleeping as i32)
+            )
+        );
+
+        // The held request is served by the woken container.
+        let out = through_proxy(&s.waker, &header, "/hello").await;
+        assert!(
+            out.starts_with("HTTP/1.1 200") && out.ends_with("/hello"),
+            "{out}"
+        );
+        assert_eq!(s.rt.start_stops().0, starts + 1);
+        // ACTIVE again with the cold start, then routed to the container.
+        s.r.apply(&s.ds).await.unwrap();
+        let evs = events_of(&mut s.rx, s.dep);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].0, Phase::Active);
+        assert!(evs[0].1 > 0, "cold start recorded");
+        s.r.apply(&s.ds).await.unwrap();
+        let cfg = s.edge_cfg();
+        assert_eq!(cfg.routes[0].upstream.port(), s.port);
+        assert_eq!(cfg.sites["api.apps.test"].wake, None);
+        // And it sleeps again when idle.
+        s.sleep().await;
+    }
+
+    #[tokio::test]
+    async fn a_wake_whose_health_check_never_passes_answers_504() {
+        let mut s = serverless("/health").await;
+        s.sleep().await;
+        // Health checks fail from now on; the wake gives up after the
+        // check's timeout (2 s) and the container sleeps again.
+        s.rt.unhealthy.lock().unwrap().insert(s.dep.to_string());
+        let header = s.edge_cfg().sites["api.apps.test"].wake.clone().unwrap();
+        let out = through_proxy(&s.waker, &header, "/").await;
+        assert!(out.starts_with("HTTP/1.1 504"), "{out}");
+        assert!(s.rt.running_deployments().is_empty());
+        s.r.apply(&s.ds).await.unwrap();
+        assert!(events_of(&mut s.rx, s.dep).is_empty(), "still asleep");
+        // Healthy again: the next request wakes it.
+        s.rt.unhealthy.lock().unwrap().clear();
+        assert!(
+            through_proxy(&s.waker, &header, "/ok")
+                .await
+                .ends_with("/ok")
+        );
+    }
+
+    /// After a node restart, a serverless deployment's stopped container is
+    /// asleep (routed to the proxy), not crashed.
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_serverless_container_is_adopted_asleep() {
+        let rt = Arc::new(FakeRuntime::new());
+        let (env, dep, plain) = (Id::new(), Id::new(), Id::new());
+        let mut w = workload(dep, env, "");
+        w.serverless = Some(pb::Serverless { idle_secs: 600 });
+        let ds = state(1, env, vec![w, workload(plain, env, "")]);
+        {
+            let (tx, _rx) = mpsc::channel(256);
+            let first = Reconciler::new(rt.clone(), Capabilities::default(), tx);
+            first.apply(&ds).await.unwrap();
+            settle(&first, dep).await;
+            settle(&first, plain).await;
+        }
+        for c in rt.containers().await.unwrap() {
+            rt.stop(&c.id).await.unwrap();
+        }
+        let edge = Arc::new(crate::edge::RecordingEdge::default());
+        let waker = Waker::new("127.0.0.1:7104".parse().unwrap());
+        let (tx, mut rx) = mpsc::channel(256);
+        let r = Reconciler::new(
+            rt.clone(),
+            Capabilities {
+                edge: Some(edge),
+                wake: Some(waker.clone()),
+                ..Default::default()
+            },
+            tx,
+        );
+        r.apply(&ds).await.unwrap();
+        let events = drain(&mut rx);
+        assert_eq!(of(&events, dep), [Phase::Sleeping]);
+        assert_eq!(of(&events, plain), [Phase::Crashed]);
+        assert_eq!(waker.state(&dep.to_string()), Some(WakeState::Sleeping));
+        // Gone from the desired state: forgotten.
+        r.apply(&state(2, env, vec![])).await.unwrap();
+        assert_eq!(waker.state(&dep.to_string()), None);
+    }
+
+    #[test]
+    fn idle_times_read_well() {
+        assert_eq!(idle_text(600), "10 min");
+        assert_eq!(idle_text(7200), "2 h");
+        assert_eq!(idle_text(45), "45 s");
     }
 
     #[tokio::test(start_paused = true)]

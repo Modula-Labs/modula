@@ -108,6 +108,11 @@ pub trait Runtime: Send + Sync + 'static {
     ) -> anyhow::Result<i64>;
     /// Stop gracefully and start again (same container, same config).
     async fn restart(&self, container_id: &str) -> anyhow::Result<()>;
+    /// Stop gracefully (SIGTERM, then SIGKILL after the container's grace
+    /// period) and keep the container, to [`start`](Self::start) again later
+    /// (a sleeping serverless deployment). The restart policy doesn't bring
+    /// it back.
+    async fn stop(&self, container_id: &str) -> anyhow::Result<()>;
     /// Stop gracefully (SIGTERM, then SIGKILL after a grace period) and delete.
     async fn remove(&self, container_id: &str) -> anyhow::Result<()>;
     /// Delete a managed volume and its data. Missing is fine; one still in use
@@ -130,6 +135,19 @@ pub trait Runtime: Send + Sync + 'static {
         port: u16,
         path: &str,
     ) -> anyhow::Result<bool>;
+
+    /// Whether the container accepts TCP connections on `port` inside its
+    /// environment network (readiness without an HTTP health check).
+    async fn accepts(&self, container_id: &str, environment_id: &str, port: u16) -> bool {
+        let Ok(Some(ip)) = self.address(container_id, environment_id).await else {
+            return false;
+        };
+        let connect = tokio::net::TcpStream::connect(std::net::SocketAddr::new(ip, port));
+        matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), connect).await,
+            Ok(Ok(_))
+        )
+    }
 
     async fn logs(
         &self,

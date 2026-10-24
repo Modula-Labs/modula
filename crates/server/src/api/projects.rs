@@ -181,7 +181,7 @@ pub async fn list(
         "SELECT s.project_id, s.id, s.name, i.stack,
                 i.config->'source'->>'image' AS image, i.config->'source'->>'repo' AS repo,
                 EXISTS (SELECT 1 FROM deployments d
-                        WHERE d.service_instance_id = i.id AND d.status = 'active') AS online
+                        WHERE d.service_instance_id = i.id AND d.status IN ('active', 'sleeping')) AS online
          FROM services s
          JOIN projects p ON p.id = s.project_id
          JOIN LATERAL (

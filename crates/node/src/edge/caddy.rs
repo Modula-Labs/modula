@@ -242,6 +242,14 @@ pub fn render(
                 });
             }
             let site = cfg.sites.get(host);
+            // Sleeping: the upstream is the wake proxy, told which
+            // deployment to wake. One connection per request: a woken one
+            // is spliced to the container, never reused for another site.
+            if let Some(wake) = site.and_then(|s| s.wake.as_deref()) {
+                proxy["headers"] = json!({ "request": { "set": { super::wake::HEADER: [wake] } } });
+                proxy["transport"] =
+                    json!({ "protocol": "http", "keep_alive": { "enabled": false } });
+            }
             let mut handle = Vec::new();
             if let (Some(site), Some(_)) = (site, &opts.access_log) {
                 handle.push(log_append("deployment_id", &site.deployment_id));
@@ -459,6 +467,22 @@ impl EdgeSink for CaddyEdge {
             }
         }
         anyhow::bail!("the edge config could not be loaded")
+    }
+
+    async fn in_flight(&self) -> std::collections::HashMap<std::net::SocketAddr, u64> {
+        #[derive(serde::Deserialize)]
+        struct Upstream {
+            address: String,
+            num_requests: u64,
+        }
+        let Ok(r) = http::get(&self.admin, "/reverse_proxy/upstreams").await else {
+            return Default::default();
+        };
+        serde_json::from_str::<Vec<Upstream>>(&r.body)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|u| Some((u.address.parse().ok()?, u.num_requests)))
+            .collect()
     }
 
     fn unsupported(&self) -> Vec<String> {
@@ -729,6 +753,7 @@ mod tests {
                 deployment_id: "dep1".into(),
                 proxied: true,
                 rules: rules::tests::every_rule(),
+                wake: None,
             },
         );
         c.sites.insert(
@@ -737,6 +762,7 @@ mod tests {
                 deployment_id: "dep2".into(),
                 proxied: false,
                 rules: vec![],
+                wake: None,
             },
         );
         c
@@ -795,6 +821,36 @@ mod tests {
         assert_eq!(routes[2]["handle"][0]["status_code"], 404);
     }
 
+    /// A sleeping site dials the wake proxy and names its deployment; its
+    /// requests are still logged (they count as activity).
+    #[test]
+    fn a_sleeping_site_goes_through_the_wake_proxy() {
+        let mut c = with_sites(TlsMode::TlsAcme);
+        c.routes.retain(|r| r.hostname != "10.0.0.1");
+        c.routes.push(ResolvedRoute {
+            hostname: "10.0.0.1".into(),
+            upstream: "127.0.0.1:7104".parse().unwrap(),
+        });
+        c.sites.get_mut("10.0.0.1").unwrap().wake = Some("dep2 80 key".into());
+        let out = render(&c, Listeners::Ports, "x", "x", &logged());
+        let routes = out["apps"]["http"]["servers"]["modula"]["routes"]
+            .as_array()
+            .unwrap();
+        let ip = &routes[0]["handle"];
+        assert_eq!(ip[0]["value"], "dep2");
+        let proxy = &ip[3];
+        assert_eq!(proxy["upstreams"], json!([{ "dial": "127.0.0.1:7104" }]));
+        assert_eq!(
+            proxy["headers"]["request"]["set"]["X-Modula-Wake"],
+            json!(["dep2 80 key"])
+        );
+        assert_eq!(proxy["transport"]["keep_alive"]["enabled"], false);
+        // The awake site is untouched.
+        let api = &routes[1]["handle"][3];
+        assert!(api.to_string().contains("10.88.0.2:8080"));
+        assert!(!api.to_string().contains("X-Modula-Wake"));
+    }
+
     #[test]
     fn no_sites_no_access_log() {
         // Only local routes (the dashboard): nothing to log, nothing trusted.
@@ -836,9 +892,19 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         for tls in [TlsMode::TlsAcme, TlsMode::TlsInternal, TlsMode::TlsOff] {
             for listeners in [Listeners::Ports, Listeners::SystemdSockets] {
-                for opts in [Options::default(), logged()] {
+                for (opts, sleeping) in [
+                    (Options::default(), false),
+                    (logged(), false),
+                    (logged(), true),
+                ] {
+                    let mut sites = with_sites(tls);
+                    if sleeping {
+                        for s in sites.sites.values_mut() {
+                            s.wake = Some(format!("{} 80 k", s.deployment_id));
+                        }
+                    }
                     let c = render(
-                        &with_sites(tls),
+                        &sites,
                         listeners,
                         "localhost:2999",
                         "http://127.0.0.1:7102/ask",

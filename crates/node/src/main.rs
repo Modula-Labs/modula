@@ -82,6 +82,9 @@ enum Command {
             default_value = "127.0.0.1:7103"
         )]
         access_log_listen: std::net::SocketAddr,
+        /// Loopback address of the wake proxy (sleeping serverless services).
+        #[arg(long, env = "MODULA_WAKE_LISTEN", default_value = "127.0.0.1:7104")]
+        wake_listen: std::net::SocketAddr,
         /// Run workloads without managing Caddy (no public routes).
         #[arg(long)]
         no_edge: bool,
@@ -185,6 +188,7 @@ async fn main() -> anyhow::Result<()> {
             caddy_admin,
             ask_listen,
             access_log_listen,
+            wake_listen,
             no_edge,
             routes,
             no_build,
@@ -210,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
             let serves_dashboard = !routes.is_empty();
             let stop = CancellationToken::new();
             let mut access_log = None;
+            let mut wake = None;
             let edge: Option<Arc<dyn EdgeSink>> = if no_edge {
                 None
             } else {
@@ -236,6 +241,22 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => tracing::warn!(
                         error = %e,
                         "cannot bind {access_log_listen}: HTTP access logs are off"
+                    ),
+                }
+                anyhow::ensure!(
+                    wake_listen.ip().is_loopback(),
+                    "--wake-listen must be a loopback address"
+                );
+                // Without the wake proxy serverless services never sleep.
+                match tokio::net::TcpListener::bind(wake_listen).await {
+                    Ok(listener) => {
+                        let waker = modula_node::edge::wake::Waker::new(listener.local_addr()?);
+                        tokio::spawn(waker.clone().serve(listener, stop.clone()));
+                        wake = Some(waker);
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "cannot bind {wake_listen}: serverless services keep running"
                     ),
                 }
                 let caddy = Arc::new(CaddyEdge::new(
@@ -302,6 +323,7 @@ async fn main() -> anyhow::Result<()> {
                 upgrade,
                 mesh,
                 access_log,
+                wake,
             };
             session::run(cli.data_dir, runtime, caps, stop).await?;
         }

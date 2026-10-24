@@ -32,7 +32,13 @@ pub struct AccessLog {
 struct Shared {
     requests: Vec<pb::HttpRequestLog>,
     dropped: u32,
+    /// When each deployment last had a request (idle tracking of serverless
+    /// deployments), dropped lines included.
+    last: std::collections::HashMap<String, tokio::time::Instant>,
 }
+
+/// Deployments remembered in [`Shared::last`] before it starts over.
+const MAX_TRACKED: usize = 10_000;
 
 #[derive(Deserialize)]
 struct Line {
@@ -134,8 +140,23 @@ pub fn parse(line: &[u8]) -> Option<pb::HttpRequestLog> {
 }
 
 impl AccessLog {
+    /// When `deployment` last had a request through the edge.
+    pub fn last_request(&self, deployment: &str) -> Option<tokio::time::Instant> {
+        self.shared
+            .lock()
+            .expect("access lock")
+            .last
+            .get(deployment)
+            .copied()
+    }
+
     fn push(&self, r: pb::HttpRequestLog) {
         let mut s = self.shared.lock().expect("access lock");
+        if s.last.len() >= MAX_TRACKED && !s.last.contains_key(&r.deployment_id) {
+            s.last.clear();
+        }
+        s.last
+            .insert(r.deployment_id.clone(), tokio::time::Instant::now());
         if s.requests.len() >= BUFFER {
             s.dropped = s.dropped.saturating_add(1);
         } else {
@@ -307,6 +328,8 @@ mod tests {
         log.read(input.as_bytes()).await;
         // The last line has no newline yet: not a complete line.
         assert_eq!(log.shared.lock().unwrap().requests.len(), 2);
+        assert!(log.last_request("dep1").is_some());
+        assert!(log.last_request("dep2").is_none());
     }
 
     #[test]

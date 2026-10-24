@@ -348,6 +348,11 @@ pub async fn open(
             .bind(deployment)
             .fetch_one(&state.db)
             .await?;
+    if status == "sleeping" {
+        return Err(AppError::Conflict(
+            "this deployment is asleep: a request to one of its domains wakes it".into(),
+        ));
+    }
     if status != "active" {
         return Err(AppError::Conflict("this deployment is not running".into()));
     }

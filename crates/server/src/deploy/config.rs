@@ -139,6 +139,26 @@ pub struct ServiceConfig {
     /// order (see [`super::edge`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge_rules: Vec<super::edge::EdgeRule>,
+
+    /// Scale to zero: the container stops after this long without requests
+    /// and starts again on the next one (a cold start). One replica, no
+    /// volume; only requests to its domains wake it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serverless: Option<Serverless>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Serverless {
+    #[serde(default = "default_idle_minutes")]
+    pub idle_minutes: u32,
+}
+
+pub const DEFAULT_IDLE_MINUTES: u32 = 10;
+pub const MAX_IDLE_MINUTES: u32 = 24 * 60;
+
+fn default_idle_minutes() -> u32 {
+    DEFAULT_IDLE_MINUTES
 }
 
 pub const DEFAULT_CRON_TIMEOUT_SECS: u32 = 3600;
@@ -379,6 +399,28 @@ impl ServiceConfig {
             if !(1..=MAX_CRON_TIMEOUT_SECS).contains(&t) {
                 return Err(AppError::bad_request(
                     "cron timeout must be 1–86400 seconds",
+                ));
+            }
+        }
+        if let Some(s) = &self.serverless {
+            if !(1..=MAX_IDLE_MINUTES).contains(&s.idle_minutes) {
+                return Err(AppError::bad_request(
+                    "serverless idle time must be 1–1440 minutes",
+                ));
+            }
+            if self.replicas != 1 {
+                return Err(AppError::bad_request(
+                    "a serverless service runs one replica: set replicas to 1",
+                ));
+            }
+            if self.cron_schedule.is_some() {
+                return Err(AppError::bad_request(
+                    "a cron service already runs only when due: it can't also be serverless",
+                ));
+            }
+            if self.hosting.is_some() {
+                return Err(AppError::bad_request(
+                    "a site hosted on Cloudflare doesn't run on the servers: it can't be serverless",
                 ));
             }
         }
@@ -680,6 +722,41 @@ mod tests {
     }
 
     #[test]
+    fn serverless_settings() {
+        let c: ServiceConfig = serde_json::from_value(serde_json::json!({
+            "source": { "type": "image", "image": "api:1" },
+            "serverless": {},
+        }))
+        .unwrap();
+        c.validate().unwrap();
+        assert_eq!(c.serverless.unwrap().idle_minutes, DEFAULT_IDLE_MINUTES);
+        let with = |f: &dyn Fn(&mut ServiceConfig)| {
+            let mut c = c.clone();
+            f(&mut c);
+            c.validate()
+        };
+        assert!(with(&|c| c.serverless = Some(Serverless { idle_minutes: 1440 })).is_ok());
+        assert!(with(&|c| c.serverless = Some(Serverless { idle_minutes: 0 })).is_err());
+        assert!(with(&|c| c.serverless = Some(Serverless { idle_minutes: 1441 })).is_err());
+        assert!(with(&|c| c.replicas = 2).is_err(), "single replica");
+        assert!(with(&|c| c.cron_schedule = Some("@daily".into())).is_err());
+        let site = serde_json::json!({
+            "source": { "type": "repo", "repo": "acme/web", "branch": "main" },
+            "hosting": { "type": "cloudflare", "outputDir": "dist" },
+            "serverless": { "idleMinutes": 5 },
+        });
+        let site: ServiceConfig = serde_json::from_value(site).unwrap();
+        assert!(site.validate().is_err(), "Cloudflare hosting");
+        assert!(
+            serde_json::from_value::<ServiceConfig>(serde_json::json!({
+                "source": { "type": "image", "image": "api:1" },
+                "serverless": { "idleSeconds": 5 },
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn config_roundtrip_and_validation() {
         let c: ServiceConfig = serde_json::from_value(serde_json::json!({
             "source": { "type": "image", "image": "nginx:alpine" },
@@ -725,6 +802,7 @@ mod tests {
         assert!(bad.validate().is_err());
         // Defaults stay out of the stored JSON.
         let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("serverless").is_none());
         assert!(v.get("drainingSeconds").is_none() && v.get("preDeployCommand").is_none());
         assert!(
             serde_json::from_value::<ServiceConfig>(serde_json::json!({
