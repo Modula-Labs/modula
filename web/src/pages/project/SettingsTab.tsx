@@ -14,7 +14,9 @@ import {
   type ServiceConfig,
 } from "@/lib/api";
 import { projectReturnPath } from "@/lib/github";
+import { hostingError } from "@/lib/hosting";
 import { DomainsSection } from "./DomainsSection";
+import { HostingFields } from "./HostingSection";
 import { parseRepo } from "./NewServiceDialog";
 import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
 import { ResourceSliders, SectionRail, ServerPicker, useNodes } from "./SettingsParts";
@@ -86,6 +88,10 @@ export interface Form {
   memoryMb: string;
   cpuMillis: string;
   replicas: string;
+  cloudflare: boolean;
+  outputDir: string;
+  spa: boolean;
+  scriptName: string;
 }
 
 // R2 buckets (source `r2`) have no settings form: the sheet never shows it.
@@ -113,6 +119,10 @@ export const toForm = (c: ServiceConfig): Form => ({
   memoryMb: c.memoryMb ? String(c.memoryMb) : "",
   cpuMillis: c.cpuMillis ? String(c.cpuMillis) : "",
   replicas: String(c.replicas ?? 1),
+  cloudflare: c.hosting?.type === "cloudflare",
+  outputDir: c.hosting?.outputDir ?? "",
+  spa: c.hosting?.spa ?? false,
+  scriptName: c.hosting?.scriptName ?? "",
 });
 
 /** Switches the service's source kind, keeping every other field. Fields that
@@ -170,6 +180,14 @@ export const toConfig = (f: Form): ServiceConfig => {
         ? f.dockerfilePath.trim() || undefined
         : undefined,
     buildCommand: f.buildCommand.trim() || undefined,
+    hosting: f.cloudflare
+      ? {
+          type: "cloudflare" as const,
+          outputDir: f.outputDir.trim(),
+          spa: f.spa,
+          scriptName: f.scriptName.trim() || undefined,
+        }
+      : undefined,
   };
   if (f.kind === "local")
     return {
@@ -255,7 +273,9 @@ export function SettingsTab({
   const invalidSource =
     form.kind === "repo" && !parseRepo(form.repo)
       ? "Pick a repository (owner/name) first."
-      : null;
+      : form.kind !== "image"
+        ? hostingError(form)
+        : null;
   const set =
     <K extends keyof Form>(k: K) =>
     (e: { target: { value: string } }) =>
@@ -513,11 +533,24 @@ export function SettingsTab({
         ) : null}
       </Section>
 
+      {form.kind !== "image" ? (
+        <Section title="Hosting" description="Where this site is served from.">
+          <HostingFields
+            form={form}
+            setForm={setForm}
+            canEdit={canEdit}
+            workspaceId={workspaceId}
+            serviceName={instance.serviceName}
+            environmentName={instance.environmentName}
+          />
+        </Section>
+      ) : null}
+
       <Section
         title="Networking"
         description="Generated and custom domains. HTTPS is set up automatically."
       >
-        <DomainsSection instanceId={instance.id} canEdit={canEdit} />
+        <DomainsSection instanceId={instance.id} canEdit={canEdit} cloudflare={instance.config.hosting?.type === "cloudflare"} />
         <TcpProxySection instance={instance} canEdit={canEdit} />
         <Field
           label="Port"

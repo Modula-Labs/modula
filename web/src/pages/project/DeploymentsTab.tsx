@@ -270,11 +270,17 @@ function DeploymentRow({
           <span className={clsx("block truncate text-sm", imageOnly && "font-mono")}>{title}</span>
           <span className="block truncate text-[13px] text-muted-foreground">
             {relativeTime(d.createdAt)} {viaLabel(d)}
+            {d.hosting === "cloudflare" ? " · Cloudflare" : ""}
           </span>
           {d.error ? <span className="block truncate text-[13px] text-error">{d.error}</span> : null}
         </span>
       </button>
       <div className="flex shrink-0 items-center gap-1 px-2">
+        {d.hosting === "cloudflare" && d.url ? (
+          <a href={d.url} target="_blank" rel="noreferrer" className="max-w-48 truncate text-xs text-muted-foreground hover:text-foreground hover:underline max-sm:hidden">
+            {d.url.replace(/^https?:\/\//, "")}
+          </a>
+        ) : null}
         <span
           className={clsx(
             "transition-opacity duration-150",
@@ -305,7 +311,7 @@ function DeploymentRow({
               Rollback
             </MenuItem>
           ) : null}
-          {actions.canDeploy && serving ? (
+          {actions.canDeploy && serving && d.hosting !== "cloudflare" ? (
             <MenuItem icon={<Refresh />} onSelect={() => actions.run("restart", d.id)}>
               Restart
             </MenuItem>
