@@ -13,6 +13,7 @@ import { atLeast } from "@/lib/roles";
 import { BackupsTab } from "./BackupsTab";
 import { BucketTab } from "./BucketTab";
 import { ConnectDialog } from "./ConnectDialog";
+import { CronTab } from "./CronTab";
 import { DatabaseTab } from "./database/DatabaseTab";
 import { DeploymentsTab } from "./DeploymentsTab";
 import { MetricsTab } from "./MetricsTab";
@@ -20,7 +21,7 @@ import { SettingsTab } from "./SettingsTab";
 import { ShellTab } from "./ShellTab";
 import { VariablesTab } from "./VariablesTab";
 
-export type ServiceTab = "deployments" | "metrics" | "database" | "bucket" | "variables" | "shell" | "backups" | "settings";
+export type ServiceTab = "deployments" | "cron" | "metrics" | "database" | "bucket" | "variables" | "shell" | "backups" | "settings";
 
 export function ServiceSheet({
   instanceId,
@@ -112,6 +113,7 @@ export function ServiceSheet({
               ]
             : [
                 { value: "deployments", label: "Deployments" },
+                ...(i?.config.cronSchedule ? [{ value: "cron" as const, label: "Cron" }] : []),
                 { value: "metrics", label: "Metrics" },
                 ...(i?.template === "postgres" ? [{ value: "database" as const, label: "Database" }] : []),
                 ...(bucket ? [{ value: "bucket" as const, label: "Bucket" }] : []),
@@ -124,6 +126,9 @@ export function ServiceSheet({
       >
         <TabPanel value="deployments">
           <DeploymentsTab instanceId={instanceId} selected={deploymentId} canDeploy={canDeploy} onOpen={onOpenDeployment} />
+        </TabPanel>
+        <TabPanel value="cron">
+          {i ? <CronTab instance={i} canRun={canDeploy} /> : <Skeleton className="h-32" />}
         </TabPanel>
         <TabPanel value="metrics">
           <MetricsTab instanceId={instanceId} />

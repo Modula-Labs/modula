@@ -276,6 +276,14 @@ impl Ctx<'_> {
                     self.results.clone(),
                 ));
             }
+            In::CronRun(req) => {
+                tokio::spawn(crate::cron::run(
+                    self.runtime.clone(),
+                    self.mesh.cloned(),
+                    req,
+                    self.results.clone(),
+                ));
+            }
             // Answered on this session: the caller waits on this connection.
             In::Db(req) => match self.db {
                 Some(executor) => {

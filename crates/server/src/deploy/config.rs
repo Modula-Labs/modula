@@ -120,7 +120,20 @@ pub struct ServiceConfig {
     /// servers (the built image runs behind the edge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosting: Option<Hosting>,
+
+    /// A 5-field cron expression in UTC (`0 3 * * *`; `@daily` and the other
+    /// nicknames too). Set: nothing runs continuously; at each due time the
+    /// service runs once to completion (see `crate::cron`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_schedule: Option<String>,
+    /// How long one run may take before it is stopped (default
+    /// [`DEFAULT_CRON_TIMEOUT_SECS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_timeout_secs: Option<u32>,
 }
+
+pub const DEFAULT_CRON_TIMEOUT_SECS: u32 = 3600;
+pub const MAX_CRON_TIMEOUT_SECS: u32 = 24 * 3600;
 
 /// Hosting a static site's build output somewhere other than the servers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,6 +272,11 @@ impl ServiceConfig {
         }
     }
 
+    /// The run timeout of a cron service.
+    pub fn cron_timeout(&self) -> u32 {
+        self.cron_timeout_secs.unwrap_or(DEFAULT_CRON_TIMEOUT_SECS)
+    }
+
     /// The Cloudflare hosting settings, when the build output is hosted there.
     pub fn cloudflare(&self) -> Option<CloudflareHosting<'_>> {
         self.hosting.as_ref().map(|h| match h {
@@ -327,6 +345,31 @@ impl ServiceConfig {
             if self.replicas != 1 {
                 return Err(AppError::bad_request(
                     "a site hosted on Cloudflare is built once: set replicas to 1",
+                ));
+            }
+        }
+        if let Some(expr) = &self.cron_schedule {
+            crate::cron::parse(expr).map_err(AppError::bad_request)?;
+            if self.hosting.is_some() {
+                return Err(AppError::bad_request(
+                    "a site hosted on Cloudflare can't run on a cron schedule",
+                ));
+            }
+            if self.replicas != 1 {
+                return Err(AppError::bad_request(
+                    "a cron service runs once per due time: set replicas to 1",
+                ));
+            }
+        }
+        if let Some(t) = self.cron_timeout_secs {
+            if self.cron_schedule.is_none() {
+                return Err(AppError::bad_request(
+                    "a cron timeout needs a cron schedule",
+                ));
+            }
+            if !(1..=MAX_CRON_TIMEOUT_SECS).contains(&t) {
+                return Err(AppError::bad_request(
+                    "cron timeout must be 1–86400 seconds",
                 ));
             }
         }

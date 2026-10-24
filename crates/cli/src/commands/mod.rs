@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod cron;
 pub mod db;
 pub mod deploy;
 pub mod domain;
@@ -88,6 +89,7 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
         Command::Members { workspace, command } => {
             members::run(ctx, workspace.as_deref(), command).await?
         }
+        Command::Cron { command } => return cron::run(ctx, command).await,
     }
     Ok(0)
 }

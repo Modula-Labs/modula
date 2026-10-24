@@ -928,3 +928,40 @@ CREATE TABLE private_access (
     updated_at              timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO private_access (id) VALUES (true);
+
+-- Cron schedules: a service whose serving deployment sets `cronSchedule`
+-- (UTC) runs once per due time instead of continuously. One row per such
+-- instance, kept in step with that deployment's schedule by the tick
+-- (crate::cron); claiming a run moves `next_run_at` on.
+CREATE TABLE cron_schedules (
+    service_instance_id id PRIMARY KEY REFERENCES service_instances (id) ON DELETE CASCADE,
+    schedule            text NOT NULL,
+    next_run_at         timestamptz NOT NULL
+);
+
+-- One run of a cron service: a one-shot container from its serving
+-- deployment's image on that deployment's server. Its output is stored with
+-- the deployment's logs.
+CREATE TABLE cron_runs (
+    id                  id PRIMARY KEY,
+    service_instance_id id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    deployment_id       id REFERENCES deployments (id) ON DELETE SET NULL,
+    node_id             id REFERENCES nodes (id) ON DELETE SET NULL,
+    trigger             text NOT NULL CHECK (trigger IN ('schedule', 'manual')),
+    status              text NOT NULL
+                        CHECK (status IN ('queued', 'running', 'succeeded', 'failed',
+                                          'timed_out', 'skipped')),
+    -- The due time a scheduled run was started for.
+    scheduled_for       timestamptz,
+    timeout_secs        integer NOT NULL,
+    created_by          id REFERENCES users (id) ON DELETE SET NULL,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    started_at          timestamptz,
+    finished_at         timestamptz,
+    exit_code           bigint,
+    error               text
+);
+CREATE INDEX cron_runs_instance_idx ON cron_runs (service_instance_id, created_at DESC);
+-- One run at a time per instance: a due time while one runs is skipped.
+CREATE UNIQUE INDEX cron_runs_one_active ON cron_runs (service_instance_id)
+    WHERE status IN ('queued', 'running');

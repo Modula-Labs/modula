@@ -154,10 +154,10 @@ fn paint(status: &str, color: bool) -> String {
         return status.to_owned();
     }
     let code = match status {
-        "active" | "online" | "verified" | "SUCCESS" => "32",
-        "failed" | "crashed" | "error" => "31",
-        "queued" | "building" | "deploying" | "pending" => "33",
-        "removed" | "cancelled" | "offline" => "2",
+        "active" | "online" | "verified" | "SUCCESS" | "succeeded" => "32",
+        "failed" | "crashed" | "error" | "timed_out" => "31",
+        "queued" | "building" | "deploying" | "pending" | "running" => "33",
+        "removed" | "cancelled" | "offline" | "skipped" => "2",
         _ => return status.to_owned(),
     };
     format!("\x1b[{code}m{status}\x1b[0m")

@@ -442,7 +442,8 @@ impl Runtime for DockerRuntime {
             .await;
         let body = ContainerCreateBody {
             image: Some(w.image.clone()),
-            cmd: Some(command.to_vec()),
+            // Empty = the image's own command (a cron run of a built image).
+            cmd: (!command.is_empty()).then(|| command.to_vec()),
             env: Some(
                 w.env
                     .iter()

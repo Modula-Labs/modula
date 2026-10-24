@@ -8,6 +8,7 @@ pub mod auth;
 pub mod authz;
 pub mod backup;
 pub mod config;
+pub mod cron;
 pub mod db;
 pub mod deploy;
 pub mod domains;
@@ -116,6 +117,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     ));
     let cleanup = tokio::spawn(schedule_cleanup(state.clone(), stop.clone()));
     let backups = tokio::spawn(backup::schedule_loop(state.clone(), stop.clone()));
+    let crons = tokio::spawn(cron::schedule_loop(state.clone(), stop.clone()));
     let domain_checks = tokio::spawn(domains::verify_loop(state.clone(), stop.clone()));
     let updates = tokio::spawn(updates::run(state.clone(), stop.clone()));
     tokio::spawn(private::startup(state.clone()));
@@ -160,6 +162,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         let _ = worker.await;
         let _ = cleanup.await;
         let _ = backups.await;
+        let _ = crons.await;
         let _ = domain_checks.await;
         let _ = updates.await;
         let _ = rollout.await;

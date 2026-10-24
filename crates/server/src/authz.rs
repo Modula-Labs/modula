@@ -213,6 +213,10 @@ pub enum Action {
     /// A service instance's resolved variables, with values, for running a
     /// command locally (`modula run`).
     RunEnvRead,
+    /// A cron service's schedule (next due times) and its runs.
+    CronRunsRead,
+    /// Run a cron service now.
+    CronRunCreate,
 }
 
 impl Action {
@@ -290,6 +294,7 @@ impl Action {
             Self::MemberUpdate | Self::MemberRemove => K::Member,
             Self::DeploymentExec => K::Deployment,
             Self::RunEnvRead => K::ServiceInstance,
+            Self::CronRunsRead | Self::CronRunCreate => K::ServiceInstance,
         })
     }
 
@@ -387,6 +392,9 @@ impl Action {
             }
             // A shell sees every secret the container has.
             Self::DeploymentExec | Self::RunEnvRead => Role::Member,
+            // Like deployments: Viewers see runs, Deployers start them.
+            Self::CronRunsRead => Role::Viewer,
+            Self::CronRunCreate => Role::Deployer,
         }
     }
 
@@ -482,6 +490,8 @@ impl Action {
             Self::MemberList | Self::MemberInvite | Self::InviteRevoke | Self::MemberLeave => false,
             // Sudo for dashboard sessions only: see `session_sudo`.
             Self::DeploymentExec | Self::RunEnvRead => false,
+            // `modula cron run` works with API tokens (never sudo).
+            Self::CronRunsRead | Self::CronRunCreate => false,
         }
     }
 

@@ -525,6 +525,7 @@ pub async fn restart(
     let node: Option<Option<Id>> = sqlx::query_scalar(
         "UPDATE deployments SET restart_generation = restart_generation + 1, updated_at = now()
          WHERE id = $1 AND status IN ('active', 'crashed') AND config->'hosting' IS NULL
+           AND config->'cronSchedule' IS NULL
          RETURNING node_id",
     )
     .bind(id)

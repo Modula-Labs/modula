@@ -67,6 +67,7 @@ message NodeMessage {
     UpgradeStatus upgrade_status = 60;
     AccessStatus access_status = 70;
     MeshReport mesh_report = 80;
+    CronResult cron_result = 90;
   }
 }
 
@@ -223,6 +224,7 @@ message ServerMessage {
     ExecClose exec_close = 43;
     UpgradeRequest upgrade = 60;
     AccessConfig access = 70;
+    CronRun cron_run = 90;
   }
 }
 
@@ -375,6 +377,10 @@ message Workload {
   uint32 restart_max_retries = 47;
   // The container's address on the node's mesh network (empty = none).
   string mesh_ip = 80;
+  // A cron service: the rollout ends ACTIVE once the image is built or
+  // pulled (and the pre-deploy command ran), with no container started.
+  // Runs come as CronRun.
+  bool cron = 90;
 }
 
 message Volume {
@@ -732,4 +738,28 @@ message AccessStatus {
   string request_id = 1;
   bool ok = 2;
   string error = 3;
+}
+
+// ---------------------------------------------------------------- cron (90–99)
+//
+// A cron service runs nothing continuously. At each due time the server sends
+// CronRun to the server that built its serving deployment; the node runs the
+// workload once (like a pre-deploy command: its image, env and network, the
+// workload's start command or the image's default), ships its output as
+// LogBatch lines of that deployment, and reports CronResult through the
+// outbox (so it survives reconnects).
+
+message CronRun {
+  string run_id = 1;
+  Workload workload = 2;
+  // Stop it after this long (reported as timed_out).
+  uint32 timeout_secs = 3;
+}
+
+message CronResult {
+  string run_id = 1;
+  int64 exit_code = 2;
+  bool timed_out = 3;
+  // Set when it could not run (or the runtime failed); exit_code is then 0.
+  string error = 4;
 }

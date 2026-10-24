@@ -22,6 +22,7 @@ import { Disk, Maximize, Minus, Plus } from "@/components/ui/icons";
 import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { StatusDot } from "@/components/ui/misc";
 import type { DeploymentStatus } from "@/lib/api";
+import { cronCardLine } from "@/lib/cron";
 import { serviceState } from "@/lib/status";
 import { load, save } from "@/lib/storage";
 import { freeSpot, GRID, snapPoint } from "./snap";
@@ -47,6 +48,8 @@ export interface CanvasService {
   pendingChanges?: number;
   /** A Cloudflare R2 bucket service: its bucket here (null = none yet). Nothing deploys. */
   r2?: { bucket: string | null };
+  /** A cron job: its deployed schedule's next run (RFC3339), null while undeployed. */
+  cron?: { nextAt: string | null };
 }
 
 /** Where a right-click happened: viewport pixels and canvas coordinates. */
@@ -84,7 +87,7 @@ function ServiceCard({ data }: NodeProps<ServiceNode>) {
           <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs font-normal text-muted-foreground">Edited</span>
         ) : null}
       </div>
-      <div className="mt-1 truncate text-[13px] text-muted-foreground">{service.r2?.bucket ?? service.domain ?? service.repo ?? " "}</div>
+      <div className="mt-1 truncate text-[13px] text-muted-foreground">{service.cron ? cronCardLine(service.cron.nextAt) : (service.r2?.bucket ?? service.domain ?? service.repo ?? " ")}</div>
       <div className="mt-auto flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-2 text-[13px] whitespace-nowrap">
           <span className="shrink-0">

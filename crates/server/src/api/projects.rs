@@ -83,6 +83,11 @@ pub struct InstanceSummary {
     pub volume: Option<serde_json::Value>,
     /// An R2 bucket service's bucket in this environment.
     pub bucket: Option<String>,
+    /// A cron service's configured schedule, and the next due time of the
+    /// deployed one (the card shows "cron · next in 2h").
+    pub cron_schedule: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub cron_next_at: Option<time::OffsetDateTime>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -292,7 +297,10 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
                 s.template,
                 (SELECT json_build_object('id', v.id, 'mountPath', v.mount_path)
                  FROM volumes v WHERE v.service_instance_id = i.id) AS volume,
-                (SELECT r.bucket FROM r2_buckets r WHERE r.service_instance_id = i.id) AS bucket
+                (SELECT r.bucket FROM r2_buckets r WHERE r.service_instance_id = i.id) AS bucket,
+                i.config->>'cronSchedule' AS cron_schedule,
+                (SELECT c.next_run_at FROM cron_schedules c WHERE c.service_instance_id = i.id)
+                    AS cron_next_at
          FROM service_instances i
          JOIN services s ON s.id = i.service_id
          LEFT JOIN LATERAL (
