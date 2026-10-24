@@ -78,6 +78,7 @@ export interface Form {
   buildCommand: string;
   autoDeploy: boolean;
   watchPaths: string;
+  waitForCi: boolean;
   startCommand: string;
   preDeployCommand: string;
   port: string;
@@ -109,6 +110,7 @@ export const toForm = (c: ServiceConfig): Form => ({
   buildCommand: c.buildCommand ?? "",
   autoDeploy: c.autoDeploy ?? true,
   watchPaths: (c.watchPaths ?? []).join("\n"),
+  waitForCi: c.waitForCi ?? false,
   startCommand: joinArgs(c.startCommand),
   preDeployCommand: joinArgs(c.preDeployCommand),
   port: String(c.port),
@@ -217,6 +219,7 @@ export const toConfig = (f: Form): ServiceConfig => {
     ...build,
     autoDeploy: f.autoDeploy,
     watchPaths: watchPaths.length ? watchPaths : undefined,
+    waitForCi: f.waitForCi || undefined,
     ...common,
   };
 };
@@ -476,6 +479,22 @@ export function SettingsTab({
                 <span className="leading-none font-normal">Auto-deploy</span>
                 <span className="text-sm text-muted-foreground">
                   Deploy automatically when the branch gets new commits.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <Checkbox
+                disabled={!canEdit}
+                checked={form.waitForCi}
+                onCheckedChange={(waitForCi) =>
+                  setForm((f) => ({ ...f, waitForCi }))
+                }
+                className="mt-0.5"
+              />
+              <span className="flex flex-col gap-1">
+                <span className="leading-none font-normal">Wait for CI</span>
+                <span className="text-sm text-muted-foreground">
+                  Build a pushed commit only once its other GitHub checks pass.
                 </span>
               </span>
             </label>

@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { Environment, InstanceSummary, ProjectDetail } from "@/lib/api";
 import { branchOverrides, pickEnvironment, repoServices } from "./environments";
 
-const env = (id: string, isDefault = false): Environment => ({ id, name: id, createdAt: "", isDefault });
+const env = (id: string, isDefault = false): Environment => ({
+  id,
+  name: id,
+  createdAt: "",
+  isDefault,
+  ephemeral: false,
+  prNumber: null,
+  prRepo: null,
+});
 
 describe("pickEnvironment", () => {
   const envs = [env("prod", true), env("staging")];

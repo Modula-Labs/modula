@@ -5,6 +5,7 @@ import { useProject } from "./ProjectContext";
 import { DangerSection } from "./settings/DangerSection";
 import { EnvironmentsSection } from "./settings/EnvironmentsSection";
 import { GeneralSection } from "./settings/GeneralSection";
+import { PrPreviewsSection } from "./settings/PrPreviewsSection";
 import { SETTINGS_SECTIONS, parseSection } from "./settings/sections";
 import { SharedVariablesSection } from "./settings/SharedVariablesSection";
 import { UsageSection } from "./settings/UsageSection";
@@ -54,7 +55,10 @@ export function ProjectSettingsPage({ projectId, section }: { projectId: string;
           ) : active === "usage" ? (
             <UsageSection />
           ) : active === "environments" ? (
-            <EnvironmentsSection project={p} current={env} canEdit={canEdit} canDelete={canAdmin} />
+            <div className="flex flex-col gap-10">
+              <EnvironmentsSection project={p} current={env} canEdit={canEdit} canDelete={canAdmin} />
+              <PrPreviewsSection project={p} canEdit={canEdit} />
+            </div>
           ) : active === "shared-variables" ? (
             <SharedVariablesSection project={p} currentEnvId={env?.id} canEdit={canDeploy} />
           ) : active === "webhooks" ? (

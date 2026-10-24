@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChartBar, Check, ChevronDown, FileText, LayoutGrid, Plus, Refresh, Server, Settings, IconStack2 as Stack, Variable } from "@/components/ui/icons";
 import { LogoMark } from "@/components/ui/Logo";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
-import { Skeleton } from "@/components/ui/misc";
+import { Badge, Skeleton } from "@/components/ui/misc";
 import { ApiError, api } from "@/lib/api";
 import { atLeast } from "@/lib/roles";
 import { isLive } from "@/lib/status";
@@ -84,13 +84,17 @@ export function ProjectShell({ projectId, envId }: { projectId: string; envId: s
               trigger={
                 <button className="flex h-8 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-sm hover:bg-nav-hover">
                   {env.name}
+                  {env.prNumber ? <Badge>PR #{env.prNumber}</Badge> : null}
                   <ChevronDown className="size-3.5 text-muted-foreground" />
                 </button>
               }
             >
               {p.environments.map((e) => (
                 <MenuItem key={e.id} icon={e.id === env.id ? <Check /> : <span className="size-4" />} onSelect={() => setEnv(e.id)}>
-                  {e.name}
+                  <span className="flex items-center gap-1.5">
+                    {e.name}
+                    {e.prNumber ? <Badge>PR #{e.prNumber}</Badge> : null}
+                  </span>
                 </MenuItem>
               ))}
               <MenuSeparator />
