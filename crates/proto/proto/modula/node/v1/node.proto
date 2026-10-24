@@ -68,6 +68,7 @@ message NodeMessage {
     AccessStatus access_status = 70;
     MeshReport mesh_report = 80;
     CronResult cron_result = 90;
+    HttpLogBatch http_log_batch = 100;
   }
 }
 
@@ -174,6 +175,10 @@ message BuildOutput {
 message StateReport {
   uint64 generation = 1;
   repeated WorkloadStatus workloads = 2;
+  // Edge rule actions this node's Caddy can't run (its module is missing),
+  // as EdgeRule action names ("rate_limit", "cache"). Rules with them are
+  // left out of its config; everything else is served.
+  repeated string edge_unsupported = 90;
 }
 
 message WorkloadStatus {
@@ -315,6 +320,101 @@ message Route {
   // Healthy replicas of the deployment on other nodes, as "mesh-ip:port";
   // load-balanced together with the local one.
   repeated string remote_upstreams = 4;
+  // Edge (90–99).
+  // The service's edge rules, in order (enabled ones only).
+  repeated EdgeRule rules = 90;
+  // The domain is proxied by Cloudflare: client IP and country come from
+  // CF-Connecting-IP / CF-IPCountry when the connection is from Cloudflare.
+  bool proxied = 91;
+}
+
+// One edge rule: when `any` of the groups matches (all of a group's
+// conditions; no groups = every request), the action runs. Block, redirect
+// and allow end the evaluation; the others don't.
+message EdgeRule {
+  repeated EdgeMatchGroup any = 1;
+  oneof action {
+    EdgeRateLimit rate_limit = 10;
+    EdgeBlock block = 11;
+    EdgeAllow allow = 12;
+    EdgeRedirect redirect = 13;
+    EdgeHeaders headers = 14;
+    EdgeCache cache = 15;
+  }
+}
+
+message EdgeMatchGroup {
+  repeated EdgeCondition all = 1;
+}
+
+message EdgeCondition {
+  bool negate = 1;
+  oneof kind {
+    EdgePath path = 2;
+    EdgeList method = 3;
+    EdgeHeader header = 4;
+    // Client IP in any of these CIDRs (or addresses).
+    EdgeList ip = 5;
+    // ISO country codes; matches only through Cloudflare (proxied domains).
+    EdgeList country = 6;
+  }
+}
+
+enum EdgePathOp {
+  PATH_MATCHES = 0;
+  PATH_PREFIX = 1;
+  PATH_EQUALS = 2;
+}
+
+message EdgePath {
+  EdgePathOp op = 1;
+  string value = 2;
+}
+
+message EdgeList {
+  repeated string values = 1;
+}
+
+enum EdgeHeaderOp {
+  HEADER_EXISTS = 0;
+  HEADER_EQUALS = 1;
+  HEADER_CONTAINS = 2;
+}
+
+message EdgeHeader {
+  string name = 1;
+  EdgeHeaderOp op = 2;
+  string value = 3;
+}
+
+message EdgeRateLimit {
+  uint32 requests = 1;
+  uint32 window_secs = 2;
+  // Count per request header value instead of per client IP.
+  string header = 3;
+}
+
+message EdgeBlock {
+  uint32 status = 1;
+  string body = 2;
+}
+
+message EdgeAllow {}
+
+message EdgeRedirect {
+  uint32 status = 1;
+  // May contain {host}, {path} and {query}.
+  string target = 2;
+}
+
+message EdgeHeaders {
+  // Response headers.
+  map<string, string> set = 1;
+  repeated string remove = 2;
+}
+
+message EdgeCache {
+  uint32 ttl_secs = 1;
 }
 
 enum TlsMode {
@@ -489,6 +589,31 @@ message ShippedLine {
   int64 at_unix_ms = 2;
   bool stderr = 3;
   string text = 4;
+}
+
+// HTTP requests served by the node's edge (its access log), shipped like
+// LogBatch. Only requests to deployments' routes; the client IP is the
+// connecting address, or Cloudflare's CF-Connecting-IP on proxied domains.
+message HttpLogBatch {
+  repeated HttpRequestLog requests = 1;
+  // Requests dropped on the node since the last batch (buffer full).
+  uint32 dropped = 2;
+}
+
+message HttpRequestLog {
+  string deployment_id = 1;
+  int64 at_unix_ms = 2;
+  string host = 3;
+  string method = 4;
+  // Without the query string.
+  string path = 5;
+  uint32 status = 6;
+  uint32 duration_us = 7;
+  uint64 bytes = 8;
+  string client_ip = 9;
+  // The upstream that served it ("ip:port"), empty if none did.
+  string upstream = 10;
+  string user_agent = 11;
 }
 
 message LogCancel {
