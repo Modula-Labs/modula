@@ -120,6 +120,31 @@ async fn fixture(
             .unwrap();
             id
         }
+        ResourceKind::NotificationChannel => {
+            let id = Id::new();
+            sqlx::query(
+                "INSERT INTO notification_channels (id, workspace_id, kind, name, host, url_sealed)
+                 VALUES ($1, $2, 'slack', 'ops', 'hooks.slack.com', '\\x00')",
+            )
+            .bind(id)
+            .bind(workspace)
+            .execute(app.db())
+            .await
+            .unwrap();
+            id
+        }
+        ResourceKind::AlertRule => {
+            let id = Id::new();
+            sqlx::query(
+                "INSERT INTO alert_rules (id, workspace_id, name, kind) VALUES ($1, $2, 'r', 'deployment_failed')",
+            )
+            .bind(id)
+            .bind(workspace)
+            .execute(app.db())
+            .await
+            .unwrap();
+            id
+        }
         ResourceKind::ApiToken => {
             let id = Id::new();
             let t =

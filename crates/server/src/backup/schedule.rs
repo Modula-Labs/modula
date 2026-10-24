@@ -57,15 +57,24 @@ async fn start_due(state: &AppState) -> anyhow::Result<()> {
 /// Give up on backups and restores that have not reported back within 14
 /// hours (the node's own limit is 12): the node died or the result was lost.
 async fn sweep_stale(state: &AppState) -> anyhow::Result<()> {
-    let stale: Vec<(Id, Id, String, Option<String>)> = sqlx::query_as(
+    let mut tx = state.db.begin().await?;
+    // id, target, object key, upload, service instance.
+    type Stale = (Id, Id, String, Option<String>, Option<Id>);
+    let stale: Vec<Stale> = sqlx::query_as(
         "UPDATE backups SET status = 'failed', finished_at = now(),
                 error = 'no result from the server running the dump'
          WHERE status = 'running' AND started_at < now() - interval '14 hours'
-         RETURNING id, target_id, object_key, upload_id",
+         RETURNING id, target_id, object_key, upload_id, service_instance_id",
     )
-    .fetch_all(&state.db)
+    .fetch_all(&mut *tx)
     .await?;
-    for (id, target, key, upload) in stale {
+    for (id, _, _, _, instance) in &stale {
+        if let Some(instance) = instance {
+            super::run::alert_failed(&mut tx, *id, *instance).await?;
+        }
+    }
+    tx.commit().await?;
+    for (id, target, key, upload, _) in stale {
         tracing::warn!(backup = %id, "backup timed out");
         if let Some(upload) = upload {
             abort(state, target, &key, &upload).await;

@@ -232,20 +232,43 @@ pub(crate) fn app(e: AppError) -> anyhow::Error {
 
 /// Mark a running backup failed and abort its upload (best effort).
 pub async fn fail(state: &AppState, backup: Id, error: &str) -> anyhow::Result<()> {
-    let row: Option<(Id, String, Option<String>)> = sqlx::query_as(
+    let mut tx = state.db.begin().await?;
+    let row: Option<(Id, String, Option<String>, Option<Id>)> = sqlx::query_as(
         "UPDATE backups SET status = 'failed', error = $2, finished_at = now()
          WHERE id = $1 AND status = 'running'
-         RETURNING target_id, object_key, upload_id",
+         RETURNING target_id, object_key, upload_id, service_instance_id",
     )
     .bind(backup)
     .bind(error.chars().take(500).collect::<String>())
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
+    if let Some((_, _, _, Some(instance))) = &row {
+        alert_failed(&mut tx, backup, *instance).await?;
+    }
+    tx.commit().await?;
     tracing::warn!(%backup, error, "backup failed");
-    if let Some((target, key, Some(upload_id))) = row {
+    if let Some((target, key, Some(upload_id), _)) = row {
         abort(state, target, &key, &upload_id).await;
     }
     Ok(())
+}
+
+/// Queues the "backup failed" alerts of a service's backup (control plane
+/// backups have no service and no alert rules).
+pub async fn alert_failed(
+    conn: &mut sqlx::PgConnection,
+    backup: Id,
+    instance: Id,
+) -> anyhow::Result<()> {
+    let event = crate::alerts::Event {
+        kind: crate::alerts::Kind::BackupFailed,
+        service_instance_id: instance,
+        deployment_id: None,
+        backup_id: Some(backup),
+    };
+    crate::alerts::enqueue_event(&mut *conn, event)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))
 }
 
 /// Abort an upload the control plane started (nodes abort their own).
