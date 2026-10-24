@@ -871,12 +871,15 @@ export interface MeshNetwork {
     connected: boolean;
     /** Unix seconds of its last tunnel report. */
     reportedAt: number | null;
+    /** Behind NAT: reached through the main server. */
+    relayed?: boolean;
   }[];
   /** One per ordered pair: how `from` reaches `to` and what it measured. */
   links: {
     from: string;
     to: string;
-    path: "private" | "public" | "none";
+    /** `relay`: no tunnel of its own, through the main server (one side is behind NAT). */
+    path: "private" | "public" | "relay" | "none";
     endpoint: string | null;
     latencyMs: number | null;
     lastHandshake: number | null;

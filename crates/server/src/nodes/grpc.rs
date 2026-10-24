@@ -569,9 +569,12 @@ async fn handle(
         In::DbResult(r) => state.hub.deliver_db(node, r),
         In::UpgradeStatus(s) => crate::updates::rollout::on_status(state, node, s).await?,
         In::AccessStatus(s) => state.private.deliver(node, s),
-        In::MeshReport(r) => crate::mesh::record_report(&state.db, node, &r)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        In::MeshReport(r) => {
+            let kick = crate::mesh::record_report(&state.db, node, &r)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            state.hub.kick_all(&kick);
+        }
         // Never waits: see crate::tunnel on flow control.
         m @ (In::TunnelOpened(_) | In::TunnelData(_) | In::TunnelClose(_)) => {
             if let Some(reply) = state.tunnels.from_node(node, m) {

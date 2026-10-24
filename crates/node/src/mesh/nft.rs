@@ -2,13 +2,14 @@
 //!
 //! Only decisions to *drop* live here: Docker's own (iptables) FORWARD
 //! chain still has to accept mesh traffic, which `linux.rs` arranges with
-//! two `DOCKER-USER` rules. Both chains see every packet; a drop in either wins.
+//! `DOCKER-USER` rules. Both chains see every packet; a drop in either wins.
 //!
 //! What it enforces, on every node:
 //!   * only the mesh bridge sends into the tunnel, and only from this node's
 //!     own container addresses (no container can borrow the host's identity
 //!     through an environment bridge's masquerade, or spoof another's);
-//!   * what arrives through the tunnel only goes to the mesh bridge;
+//!   * what arrives through the tunnel only goes to the mesh bridge (on the
+//!     relay hub also back into the tunnel, between mesh addresses);
 //!   * a new connection is allowed when source and destination are in the
 //!     same environment's set, or the source is a node (Caddy balancing over
 //!     replicas on other servers);
@@ -30,6 +31,9 @@ pub struct Spec {
     pub peers: Vec<Ipv4Addr>,
     /// (environment id, every mesh address of it on any node).
     pub environments: Vec<(String, Vec<Ipv4Addr>)>,
+    /// This node relays between peers: tunnel-to-tunnel traffic inside the
+    /// mesh passes (the receiving node's firewall still decides).
+    pub relay_hub: bool,
 }
 
 /// Environment ids become set names (`env_<id>`): ids are 16 lowercase
@@ -76,7 +80,17 @@ pub fn render(spec: &Spec) -> String {
         out,
         "\tchain forward {{
 \t\ttype filter hook forward priority filter - 1; policy accept;
-\t\tiifname \"{INTERFACE}\" oifname != \"{BRIDGE}\" drop
+"
+    );
+    if spec.relay_hub {
+        let _ = writeln!(
+            out,
+            "\t\tiifname \"{INTERFACE}\" oifname \"{INTERFACE}\" ip saddr 10.80.0.0/16 ip daddr 10.80.0.0/16 accept"
+        );
+    }
+    let _ = write!(
+        out,
+        "\t\tiifname \"{INTERFACE}\" oifname != \"{BRIDGE}\" drop
 \t\toifname \"{INTERFACE}\" iifname != \"{BRIDGE}\" drop
 \t\tiifname \"{BRIDGE}\" meta nfproto ipv6 drop
 \t\tiifname \"{BRIDGE}\" ip saddr != {own} drop
@@ -165,6 +179,7 @@ mod tests {
                 ("Robert'); drop".into(), vec![ip("10.80.1.9")]),
                 ("cccccccccccccccc".into(), vec![]),
             ],
+            relay_hub: false,
         };
         let expected = "table inet modula
 delete table inet modula
@@ -206,6 +221,21 @@ table inet modula {
 }
 ";
         assert_eq!(render(&spec), expected);
+
+        // The relay hub forwards tunnel to tunnel inside the mesh, before
+        // the rule that sends tunnel traffic only to the bridge.
+        let hub = render(&Spec {
+            relay_hub: true,
+            ..spec
+        });
+        assert_eq!(
+            hub,
+            expected.replace(
+                "\t\tiifname \"modula0\" oifname != \"modula-mesh\" drop\n",
+                "\t\tiifname \"modula0\" oifname \"modula0\" ip saddr 10.80.0.0/16 ip daddr 10.80.0.0/16 accept\n\
+                 \t\tiifname \"modula0\" oifname != \"modula-mesh\" drop\n"
+            )
+        );
     }
 
     #[test]
@@ -214,6 +244,7 @@ table inet modula {
             subnet: Subnet { index: 4 },
             peers: vec![],
             environments: vec![],
+            relay_hub: false,
         });
         assert!(
             r.contains("\tset nodes {\n\t\ttype ipv4_addr\n\t}\n"),

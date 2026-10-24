@@ -498,3 +498,110 @@ async fn the_network_tab_shows_paths_and_latency(pool: PgPool) {
     let ba = links.iter().find(|l| l["from"] == b.to_string()).unwrap();
     assert!(ba["latencyMs"].is_null());
 }
+
+fn handshakes(peers: &[(Id, i64)]) -> pb::MeshReport {
+    pb::MeshReport {
+        peers: peers
+            .iter()
+            .map(|(id, at)| pb::PeerStatus {
+                node_id: id.to_string(),
+                last_handshake_unix: *at,
+                ..Default::default()
+            })
+            .collect(),
+    }
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn a_server_behind_nat_is_relayed_through_the_main_server(pool: PgPool) {
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let (hub, a, nat) = (
+        node(&app, "main").await,
+        node(&app, "a").await,
+        node(&app, "nat").await,
+    );
+    sqlx::query(
+        "UPDATE nodes SET info = '{\"capabilities\": [\"dashboard\", \"mesh\"]}' WHERE id = $1",
+    )
+    .bind(hub)
+    .execute(app.db())
+    .await
+    .unwrap();
+    join_mesh(&app, hub, KEYS[0], "203.0.113.200/32").await;
+    join_mesh(&app, a, KEYS[1], "203.0.113.201/32").await;
+    join_mesh(&app, nat, KEYS[2], "192.168.1.5/24").await;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    // `a` reaches the hub (and nobody reached `nat`); `nat` reaches the hub only.
+    modula_server::mesh::record_report(app.db(), a, &handshakes(&[(hub, now - 10), (nat, 0)]))
+        .await
+        .unwrap();
+    let report = handshakes(&[(hub, now - 10), (a, 0)]);
+    let kick = modula_server::mesh::record_report(app.db(), nat, &report)
+        .await
+        .unwrap();
+    assert!(kick.is_empty(), "not before it has looked that way a while");
+    sqlx::query(
+        "UPDATE nodes SET mesh_unreachable_since = now() - interval '3 minutes' WHERE id = $1",
+    )
+    .bind(nat)
+    .execute(app.db())
+    .await
+    .unwrap();
+    let kick = modula_server::mesh::record_report(app.db(), nat, &report)
+        .await
+        .unwrap();
+    assert!(kick.contains(&nat) && kick.contains(&a) && kick.contains(&hub));
+
+    // `a` and `nat` reach each other through the hub, which forwards.
+    let relayed = |m: &pb::Mesh| -> Vec<(String, bool, bool)> {
+        m.peers
+            .iter()
+            .map(|p| (p.name.clone(), p.relayed, p.hub))
+            .collect()
+    };
+    let m = modula_server::mesh::build(app.db(), a)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        relayed(&m),
+        [("main".into(), false, true), ("nat".into(), true, false)]
+    );
+    let m = modula_server::mesh::build(app.db(), hub)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(m.relay_hub);
+    let r = app
+        .call(
+            axum::http::Method::GET,
+            "/api/nodes/network",
+            Some(&admin),
+            None,
+        )
+        .await;
+    let links = r.json["links"].as_array().unwrap();
+    let path = |from: Id, to: Id| {
+        links
+            .iter()
+            .find(|l| l["from"] == from.to_string() && l["to"] == to.to_string())
+            .unwrap()["path"]
+            .clone()
+    };
+    assert_eq!(path(a, nat), "relay");
+    assert_eq!(path(nat, a), "relay");
+    assert_eq!(path(nat, hub), "public");
+
+    // New networking (it moved): direct paths are tried again.
+    let changed =
+        modula_server::mesh::record_hello(app.db(), nat, &hello(KEYS[2], "198.51.100.4/32"))
+            .await
+            .unwrap();
+    assert!(changed);
+    let m = modula_server::mesh::build(app.db(), a)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(m.peers.iter().all(|p| !p.relayed));
+}

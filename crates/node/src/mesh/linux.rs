@@ -96,7 +96,12 @@ impl MeshSystem for LinuxMesh {
                     let mut peer = Peer::new(Key::try_from(p.public_key.as_str()).ok()?);
                     peer.endpoint = p.endpoint;
                     peer.persistent_keepalive_interval = Some(KEEPALIVE_SECS);
-                    peer.allowed_ips = vec![IpAddrMask::new(IpAddr::V4(p.subnet.host(0)), 24)];
+                    // Its /24 and, on the hub's peer, the relayed nodes'
+                    // (replaced on every configure).
+                    peer.allowed_ips = std::iter::once(p.subnet)
+                        .chain(p.via.iter().copied())
+                        .map(|s| IpAddrMask::new(IpAddr::V4(s.host(0)), 24))
+                        .collect();
                     Some(peer)
                 })
                 .collect();
@@ -121,11 +126,16 @@ impl MeshSystem for LinuxMesh {
             Ok(())
         })
         .await??;
-        // Interface up, then one route per peer's /24 (the source is our
-        // address on it). Not the crate's peer routing: it also pins
-        // endpoints to the default gateway, which breaks private paths.
+        // Interface up, then one route per peer's /24, relayed ones too (the
+        // source is our address on it; WireGuard picks the tunnel). Not the
+        // crate's peer routing: it also pins endpoints to the default
+        // gateway, which breaks private paths.
         run("ip", &["link", "set", INTERFACE, "up"]).await?;
-        let wanted: Vec<Subnet> = t.peers.iter().map(|p| p.subnet).collect();
+        let wanted: Vec<Subnet> = t
+            .peers
+            .iter()
+            .flat_map(|p| std::iter::once(p.subnet).chain(p.via.iter().copied()))
+            .collect();
         let src = t.address.to_string();
         for s in &wanted {
             run(
@@ -217,9 +227,14 @@ impl MeshSystem for LinuxMesh {
     }
 }
 
-/// Docker's FORWARD chain drops traffic into its networks; these let the
-/// mesh through (`table inet modula` decides what may pass).
-const DOCKER_USER: [(&str, &str); 2] = [(INTERFACE, BRIDGE), (BRIDGE, INTERFACE)];
+/// Docker's FORWARD chain drops traffic into its networks and, with its
+/// policy, anything it forwards; these let the mesh through, tunnel to
+/// tunnel for the relay hub (`table inet modula` decides what may pass).
+const DOCKER_USER: [(&str, &str); 3] = [
+    (INTERFACE, BRIDGE),
+    (BRIDGE, INTERFACE),
+    (INTERFACE, INTERFACE),
+];
 
 async fn docker_user_has(i: &str, o: &str) -> bool {
     run(

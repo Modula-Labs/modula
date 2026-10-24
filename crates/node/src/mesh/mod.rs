@@ -105,6 +105,35 @@ pub struct TunnelPeer {
     pub public_key: String,
     pub endpoint: Option<SocketAddr>,
     pub subnet: Subnet,
+    /// Other nodes' /24s reached through this peer (it is the relay hub).
+    pub via: Vec<Subnet>,
+}
+
+/// One tunnel per peer, except relayed ones: their /24s go to the hub's
+/// tunnel instead (WireGuard routes by allowed IPs, which must not overlap).
+/// Without a hub in the list relayed peers keep their own tunnel.
+fn relay_through_hub(peers: Vec<(&pb::MeshPeer, TunnelPeer)>) -> Vec<TunnelPeer> {
+    let Some(hub) = peers.iter().position(|(p, _)| p.hub) else {
+        return peers.into_iter().map(|(_, t)| t).collect();
+    };
+    let relayed = |i: usize, p: &pb::MeshPeer| p.relayed && i != hub;
+    let via: Vec<Subnet> = peers
+        .iter()
+        .enumerate()
+        .filter(|(i, (p, _))| relayed(*i, p))
+        .map(|(_, (_, t))| t.subnet)
+        .collect();
+    peers
+        .into_iter()
+        .enumerate()
+        .filter(|(i, (p, _))| !relayed(*i, p))
+        .map(|(i, (_, mut t))| {
+            if i == hub {
+                t.via = via.clone();
+            }
+            t
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -176,6 +205,8 @@ struct Current {
     /// Environments' members (the firewall's sets), from the server.
     environments: Vec<(String, Vec<Ipv4Addr>)>,
     peers: Vec<Peer>,
+    /// Forward between peers (this node is the relay hub).
+    relay_hub: bool,
     dns_started: bool,
 }
 
@@ -275,12 +306,17 @@ impl Mesh {
                 public_key: p.public_key.clone(),
                 subnet: peer_subnet,
             });
-            tunnel_peers.push(TunnelPeer {
-                public_key: p.public_key.clone(),
-                endpoint: p.endpoint.parse().ok(),
-                subnet: peer_subnet,
-            });
+            tunnel_peers.push((
+                p,
+                TunnelPeer {
+                    public_key: p.public_key.clone(),
+                    endpoint: p.endpoint.parse().ok(),
+                    subnet: peer_subnet,
+                    via: Vec::new(),
+                },
+            ));
         }
+        let tunnel_peers = relay_through_hub(tunnel_peers);
         let tunnels = Tunnels {
             address: subnet.gateway(),
             port: u16::try_from(spec.listen_port)
@@ -321,6 +357,7 @@ impl Mesh {
             c.tunnels = tunnels;
             c.environments = environments;
             c.peers = peers.clone();
+            c.relay_hub = spec.relay_hub;
             !std::mem::replace(&mut c.dns_started, true)
         };
         self.book.update(dns::BookData::from_spec(
@@ -391,6 +428,7 @@ impl Mesh {
                 subnet,
                 peers: c.peers.iter().map(|p| p.subnet.gateway()).collect(),
                 environments: envs,
+                relay_hub: c.relay_hub,
             };
             let ruleset = nft::render(&spec);
             if c.ruleset.as_deref() == Some(ruleset.as_str()) {
@@ -544,6 +582,7 @@ mod tests {
                     ..Default::default()
                 }],
             }],
+            ..Default::default()
         }
     }
 
@@ -582,6 +621,7 @@ mod tests {
                 public_key: KEY.into(),
                 endpoint: Some("172.30.0.3:51820".parse().unwrap()),
                 subnet: Subnet { index: 2 },
+                via: vec![],
             }]
         );
         let rules = sys.rulesets.lock().unwrap().clone();
@@ -628,6 +668,50 @@ mod tests {
         async fn peer_stats(&self) -> anyhow::Result<Vec<PeerStat>> {
             Ok(Vec::new())
         }
+    }
+
+    #[tokio::test]
+    async fn relayed_peers_are_reached_through_the_hubs_tunnel() {
+        const KEY2: &str = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
+        const KEY3: &str = "TrMvSoP4jYQlY6RIzBgbssQqY3vxI2Pi+y71lOWWXX0=";
+        let peer = |key: &str, index: u8, relayed, hub| pb::MeshPeer {
+            node_id: format!("n{index}"),
+            public_key: key.into(),
+            endpoint: format!("203.0.113.{index}:51820"),
+            subnet: format!("10.80.{index}.0/24"),
+            relayed,
+            hub,
+            ..Default::default()
+        };
+        let mut s = spec();
+        s.peers = vec![
+            peer(KEY, 2, false, true),
+            peer(KEY2, 3, true, false),
+            peer(KEY3, 4, false, false),
+        ];
+        s.relay_hub = false;
+        let sys = Arc::new(RecordingSystem::default());
+        let mesh = Mesh::new(sys.clone(), KEY.into(), 51820);
+        mesh.apply(&s).await.unwrap();
+        let t = sys.tunnels.lock().unwrap().clone().unwrap();
+        let tunnels: Vec<(u8, Vec<u8>)> = t
+            .peers
+            .iter()
+            .map(|p| (p.subnet.index, p.via.iter().map(|v| v.index).collect()))
+            .collect();
+        assert_eq!(tunnels, [(2, vec![3]), (4, vec![])]);
+        // A relayed peer is still a node to the firewall.
+        let rules = sys.rulesets.lock().unwrap().last().unwrap().clone();
+        assert!(
+            rules.contains("elements = { 10.80.2.1, 10.80.3.1, 10.80.4.1 }"),
+            "{rules}"
+        );
+        assert!(!rules.contains("oifname \"modula0\" ip saddr 10.80.0.0/16"));
+        // The hub forwards.
+        s.relay_hub = true;
+        mesh.apply(&s).await.unwrap();
+        let rules = sys.rulesets.lock().unwrap().last().unwrap().clone();
+        assert!(rules.contains("iifname \"modula0\" oifname \"modula0\" ip saddr 10.80.0.0/16"));
     }
 
     #[tokio::test]

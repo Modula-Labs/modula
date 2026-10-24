@@ -217,6 +217,11 @@ CREATE TABLE nodes (
     mesh_index          smallint UNIQUE CHECK (mesh_index BETWEEN 1 AND 254),
     addresses           jsonb NOT NULL DEFAULT '[]'::jsonb,
     mesh_status         jsonb NOT NULL DEFAULT '{}'::jsonb,
+    -- Behind NAT: peers can't reach it directly (no handshakes although it
+    -- reaches the main server), so its traffic goes through the main
+    -- server's tunnel; since when it looked that way, before being marked.
+    mesh_relay          boolean NOT NULL DEFAULT false,
+    mesh_unreachable_since timestamptz,
     -- Desired-state generation the server wants vs. the one the node applied.
     desired_generation  bigint NOT NULL DEFAULT 1,
     applied_generation  bigint NOT NULL DEFAULT 0,
