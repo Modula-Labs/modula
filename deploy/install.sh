@@ -722,7 +722,7 @@ artifact() {
 download() {
   local tmp; tmp=$(mktemp -d "$PREFIX/.download.XXXXXX")
   chmod 0755 "$tmp" # mktemp makes it 0700; modula-server must read and run it
-  local names=("modula-node-linux-$ARCH" "caddy-linux-$ARCH" "buildctl-linux-$ARCH" "railpack-linux-$ARCH" "wal-g-linux-$ARCH")
+  local names=("modula-node-linux-$ARCH" "caddy-linux-$ARCH" "buildctl-linux-$ARCH" "railpack-linux-$ARCH" "wal-g-linux-$ARCH" "workerd-linux-$ARCH")
   [[ $MODE == main ]] && names+=("modula-server-linux-$ARCH")
   # Small files first; the binaries download in parallel.
   artifact SHA256SUMS "$tmp/SHA256SUMS"
@@ -821,6 +821,9 @@ accounts() {
 build_account() {
   id modula-build >/dev/null 2>&1 \
     || useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin modula-build
+  # And workerd, which runs the server's JavaScript functions, as its own.
+  id modula-fn >/dev/null 2>&1 \
+    || useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin modula-fn
 }
 
 # Under memory pressure the kernel kills app containers before the control
@@ -1075,7 +1078,8 @@ Wants=network-online.target docker.service modula-caddy.service
 # Manages Docker, Caddy, ufw and iptables, which is root-equivalent anyway;
 # the sandboxing below only takes away what it never needs.
 EnvironmentFile=-$CONF/node.env
-ExecStart=$PREFIX/current/modula-node --data-dir $NODE_STATE run --caddy-admin unix:$CADDY_SOCKET --buildctl $PREFIX/current/buildctl --railpack $PREFIX/current/railpack --wal-g $PREFIX/current/wal-g$args
+ExecStart=$PREFIX/current/modula-node --data-dir $NODE_STATE run --caddy-admin unix:$CADDY_SOCKET --buildctl $PREFIX/current/buildctl --railpack $PREFIX/current/railpack --wal-g $PREFIX/current/wal-g --workerd $PREFIX/current/workerd$args
+
 Restart=always
 RestartSec=2
 KillMode=mixed

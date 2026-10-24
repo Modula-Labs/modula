@@ -31,6 +31,8 @@ const FILES: &[&str] = &[
     "railpack-linux-arm64",
     "wal-g-linux-amd64",
     "wal-g-linux-arm64",
+    "workerd-linux-amd64",
+    "workerd-linux-arm64",
 ];
 
 /// `install.sh` with this instance's version and release URL filled in.
