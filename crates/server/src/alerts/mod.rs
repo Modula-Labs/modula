@@ -32,6 +32,8 @@ pub enum Kind {
     DeploymentFailed,
     BuildFailed,
     DeploymentCrashed,
+    /// A replica of an active deployment crashed while the others serve.
+    DeploymentDegraded,
     BackupFailed,
     /// CPU above `threshold` percent of the limit (or of the server's CPUs)
     /// for `window_minutes`.
@@ -52,6 +54,7 @@ impl Kind {
             Self::DeploymentFailed => "deployment_failed",
             Self::BuildFailed => "build_failed",
             Self::DeploymentCrashed => "deployment_crashed",
+            Self::DeploymentDegraded => "deployment_degraded",
             Self::BackupFailed => "backup_failed",
             Self::Cpu => "cpu",
             Self::Memory => "memory",
@@ -71,6 +74,7 @@ impl Kind {
             Self::DeploymentFailed
                 | Self::BuildFailed
                 | Self::DeploymentCrashed
+                | Self::DeploymentDegraded
                 | Self::BackupFailed
         )
     }
@@ -207,6 +211,7 @@ mod tests {
             Kind::DeploymentFailed,
             Kind::BuildFailed,
             Kind::DeploymentCrashed,
+            Kind::DeploymentDegraded,
             Kind::BackupFailed,
             Kind::Cpu,
             Kind::Memory,

@@ -170,9 +170,10 @@ async fn degraded(app: &TestApp, dep: Id) -> bool {
     .unwrap()
 }
 
-async fn degraded_webhooks(app: &TestApp) -> i64 {
+async fn degraded_events(app: &TestApp) -> i64 {
     sqlx::query_scalar(
-        "SELECT count(*) FROM jobs WHERE kind = 'webhooks.dispatch' AND payload->>'event' = 'deployment.degraded'",
+        "SELECT count(*) FROM jobs WHERE (kind = 'webhooks.dispatch' AND payload->>'event' = 'deployment.degraded')
+            OR (kind = 'alerts.event' AND payload->>'kind' = 'deployment_degraded')",
     )
     .fetch_one(app.db())
     .await
@@ -383,7 +384,7 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .unwrap();
     assert_eq!(status(&app, started.id).await, "active");
     assert!(degraded(&app, started.id).await);
-    assert_eq!(degraded_webhooks(&app).await, 1);
+    assert_eq!(degraded_events(&app).await, 2, "a webhook and an alert");
     let ds = deploy::desired::build(&app.state, a).await.unwrap();
     let route = ds
         .routes
@@ -413,7 +414,7 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .unwrap();
     assert!(!degraded(&app, started.id).await);
     // Only a crash while others serve is a degraded event.
-    assert_eq!(degraded_webhooks(&app).await, 1);
+    assert_eq!(degraded_events(&app).await, 2, "no more events");
 
     // A new deployment gets fresh addresses next to the serving one's, and
     // stays on the same two servers.

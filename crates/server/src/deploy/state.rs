@@ -21,7 +21,8 @@
 //! replica is running any more. An active deployment with a replica that
 //! isn't running (its node reported it crashed) reads as degraded
 //! ([`degraded_sql!`](crate::degraded_sql)): still `active` in the table,
-//! serving from the others; the crash fires `deployment.degraded` webhooks.
+//! serving from the others; the crash fires `deployment.degraded` webhooks
+//! and `deployment_degraded` alert rules.
 //! Replica changes re-push the environment's
 //! address book to every node running something of it.
 //!
@@ -168,6 +169,13 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
         (DeploymentPhase::Crashed, "active") if running > 0 && replica_status == "active" => {
             crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentDegraded)
                 .await?;
+            let event = crate::alerts::Event {
+                kind: crate::alerts::Kind::DeploymentDegraded,
+                service_instance_id: instance,
+                deployment_id: Some(*dep),
+                backup_id: None,
+            };
+            crate::alerts::enqueue_event(&mut *tx, event).await?;
         }
         (DeploymentPhase::Crashed, "active") if running > 0 => {}
         (DeploymentPhase::Building, "building") => {
