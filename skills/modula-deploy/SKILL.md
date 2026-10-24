@@ -109,7 +109,8 @@ environment). The CLI resolves it from `-p/-e/-s` or `.modula/project.toml`
 **Create a service** (Member): `modula add --database postgres`
 (`mysql`, `redis`, `mongo`), `add --image ghcr.io/acme/api:1.2 --port 3000`, or
 `add --repo owner/name --branch main --port 3000` (needs the workspace's
-GitHub App). Names: lowercase letters, digits, `-`. The service exists in
+GitHub App). A whole app with its databases, deployed at once:
+`add --template n8n` (`--template list` for the gallery). Names: lowercase letters, digits, `-`. The service exists in
 every environment; nothing is deployed yet.
 
 **Config as code** (Member): if the repo has `modula.toml` (or the user wants

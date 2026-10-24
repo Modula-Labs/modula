@@ -483,3 +483,39 @@ async fn up_uploads_local_files_and_deploys_them(pool: PgPool) {
             .unwrap();
     assert_eq!(n, 1);
 }
+
+/// `add --template`: an app and its database, created and deployed together.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn add_template_creates_and_deploys_an_app(pool: PgPool) {
+    let s = setup(pool).await;
+    s.app.create_workspace(&s.admin, "team").await;
+    s.json(&["init", "web", "--workspace", "team"]).await;
+
+    let (r, _) = s.run(&["add", "--template", "wordpress"]).await;
+    let e = format!("{:#}", r.unwrap_err());
+    assert!(e.contains("one of: ghost, metabase, n8n"), "{e}");
+    let listed = s.json(&["add", "--template", "list"]).await;
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == "umami")
+    );
+
+    let created = s
+        .json(&["add", "--template", "umami", "--name", "stats"])
+        .await;
+    let names: Vec<&str> = created["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["stats-postgres", "stats-umami"]);
+    assert!(created["domain"].as_str().unwrap().ends_with(".apps.test"));
+    // Each service either deployed or says why not.
+    let tried = created["deployments"].as_array().unwrap().len()
+        + created["warnings"].as_array().unwrap().len();
+    assert_eq!(tried, 2, "{created}");
+}

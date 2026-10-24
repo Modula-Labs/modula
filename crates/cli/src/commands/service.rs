@@ -1,4 +1,5 @@
-//! `add`: create a service from a database template, an image or a repository.
+//! `add`: create a service from a database template, an image or a
+//! repository, or an app template's services.
 
 use serde_json::{Value, json};
 
@@ -87,6 +88,9 @@ pub fn new_service(args: &AddArgs) -> anyhow::Result<NewService> {
 }
 
 pub async fn add(ctx: &mut Ctx, args: AddArgs) -> anyhow::Result<()> {
+    if let Some(template) = &args.template {
+        return add_app(ctx, template, args.name.as_deref()).await;
+    }
     let vars = parse_pairs(&args.variables)?;
     let req = new_service(&args)?;
     let api = ctx.api()?;
@@ -129,6 +133,75 @@ pub async fn add(ctx: &mut Ctx, args: AddArgs) -> anyhow::Result<()> {
             ));
         }
         o.note("Deploy it with `modula deploy -s <name>` (or `up`).");
+    })
+}
+
+/// `add --template`: create an app's services and deploy them in the
+/// selected environment, databases first (like the dashboard).
+async fn add_app(ctx: &mut Ctx, template: &str, prefix: Option<&str>) -> anyhow::Result<()> {
+    let api = ctx.api()?;
+    let gallery = api.app_templates().await?;
+    let Some(app) = gallery.iter().find(|a| a["id"] == template) else {
+        let mut ids: Vec<&str> = gallery.iter().filter_map(|a| a["id"].as_str()).collect();
+        ids.sort_unstable();
+        if template == "list" {
+            return ctx.out.either(&gallery, |o| {
+                for a in &gallery {
+                    o.line(format!(
+                        "{:<12} {} ({} services)",
+                        a["id"].as_str().unwrap_or_default(),
+                        a["description"].as_str().unwrap_or_default(),
+                        a["services"].as_array().map_or(0, Vec::len),
+                    ));
+                }
+            });
+        }
+        return Err(usage(format!(
+            "unknown template {template}; one of: {}",
+            ids.join(", ")
+        )));
+    };
+    let p = ctx.project().await?;
+    let env = ctx.environment(&p)?.clone();
+    let mut created = api
+        .create_app(
+            &p.id,
+            template,
+            &env.id,
+            prefix.map(service_name).as_deref(),
+        )
+        .await?;
+    let mut warnings: Vec<String> = created["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|w| w.as_str().map(str::to_owned))
+        .collect();
+    let services = created["services"].as_array().cloned().unwrap_or_default();
+    let mut deployments = Vec::new();
+    for s in &services {
+        let instance = s["instanceId"].as_str().unwrap_or_default();
+        match api.deploy_instance(instance).await {
+            Ok(d) => deployments.push(json!({ "service": s["name"], "deployment": d.id })),
+            // Without a server the services wait; deploy them later.
+            Err(e) => warnings.push(format!("{}: {e:#}", s["name"].as_str().unwrap_or_default())),
+        }
+    }
+    created["deployments"] = Value::from(deployments);
+    created["warnings"] = json!(warnings);
+    let name = app["name"].as_str().unwrap_or(template);
+    ctx.out.either(&created, |o| {
+        o.line(format!("Created {name} in {} ({}):", p.name, env.name));
+        for s in &services {
+            o.line(format!("  {}", s["name"].as_str().unwrap_or_default()));
+        }
+        if let Some(d) = created["domain"].as_str() {
+            o.line(format!("Open https://{d} once it is online."));
+        }
+        for w in &warnings {
+            o.note(format!("warning: {w}"));
+        }
+        o.note("Follow the deployments with `modula status`.");
     })
 }
 

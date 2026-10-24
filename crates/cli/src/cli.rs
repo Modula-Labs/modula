@@ -118,7 +118,8 @@ pub enum Command {
         /// Service name or id; omitted: list the project's services.
         name: Option<String>,
     },
-    /// Create a service from a database template, an image or a repository.
+    /// Create a service from a database template, an image or a repository,
+    /// or an app and its databases from a template.
     Add(AddArgs),
     /// Upload the current directory, build it and deploy it to the service.
     Up(UpArgs),
@@ -343,12 +344,17 @@ impl Database {
 #[command(group(
     clap::ArgGroup::new("source")
         .required(true)
-        .args(["database", "image", "repo"])
+        .args(["database", "image", "repo", "template"])
 ))]
 pub struct AddArgs {
     /// A database from its template.
     #[arg(short, long, value_enum)]
     pub database: Option<Database>,
+    /// A one-click app with the databases it needs (n8n, plausible, umami,
+    /// metabase, uptime-kuma, ghost; `--template list` lists them), deployed
+    /// right away. `--name` prefixes its service names.
+    #[arg(short, long, conflicts_with_all = ["port", "variables"])]
+    pub template: Option<String>,
     /// A prebuilt image, e.g. ghcr.io/acme/api:1.2.
     #[arg(short, long)]
     pub image: Option<String>,
@@ -871,6 +877,13 @@ mod tests {
         assert!(parse(&["add", "--image", "nginx", "--repo", "a/b"]).is_err());
         assert!(parse(&["add", "--database", "oracle"]).is_err());
         assert!(parse(&["add", "--database", "redis", "--port", "1"]).is_err());
+        let cli = parse(&["add", "--template", "ghost", "--name", "blog"]).unwrap();
+        let Command::Add(a) = cli.command else {
+            panic!()
+        };
+        assert_eq!(a.template.as_deref(), Some("ghost"));
+        assert!(parse(&["add", "--template", "ghost", "--image", "nginx"]).is_err());
+        assert!(parse(&["add", "--template", "n8n", "-v", "A=1"]).is_err());
     }
 
     #[test]

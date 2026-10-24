@@ -229,7 +229,7 @@ so they fail with "the server running this deployment is offline" when it is.
 ### `add`
 
 ```
-modula add (--database <ENGINE> | --image <REF> | --repo <OWNER/NAME> [--branch <BRANCH>])
+modula add (--database <ENGINE> | --image <REF> | --repo <OWNER/NAME> [--branch <BRANCH>] | --template <APP>)
                   [--name <NAME>] [--port <PORT>] [-v, --variables KEY=VALUE]…
 ```
 
@@ -239,11 +239,13 @@ modula add (--database <ENGINE> | --image <REF> | --repo <OWNER/NAME> [--branch 
 | `-i, --image` | A prebuilt image, e.g. `ghcr.io/acme/api:1.2`. |
 | `-r, --repo` | A GitHub repository, built on every deploy (needs the GitHub App installed for the workspace). |
 | `-b, --branch` | With `--repo`; default `main`. |
+| `-t, --template` | A one-click app with the databases it needs: `n8n`, `plausible`, `umami`, `metabase`, `uptime-kuma` or `ghost` (`--template list` lists them). Creates every service, volume, generated secret and reference, generates a domain for the app and deploys it all in the selected environment. `--name` becomes a prefix (`blog` → `blog-ghost`, `blog-mysql`); taken names get `-2`. |
 | `-n, --name` | Service name; default from the engine, image or repository name (lowercase letters, digits, `-`). |
 | `--port` | The port the app listens on (image and repo); default 8080. |
 | `-v, --variables` | Variables to set in the selected environment, repeatable. |
 
-The service exists in every environment. Nothing is deployed yet. When the
+The service exists in every environment. Nothing is deployed yet (except
+with `--template`). When the
 directory is linked to the project, a new image or repo service becomes its
 default service.
 
