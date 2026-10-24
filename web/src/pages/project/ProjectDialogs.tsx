@@ -1,51 +1,70 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { Checkbox } from "@/components/ui/Controls";
 import { Field, Input, Select } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
 import { Alert } from "@/components/ui/misc";
-import { api, type Environment } from "@/lib/api";
+import { api, type Environment, type ProjectDetail } from "@/lib/api";
+import { branchOverrides, repoServices } from "./environments";
 
+const EMPTY = "";
+
+/** New environment: a duplicate of one (services, settings, all variables) or
+ *  an empty one, with the branch each repo service deploys from there. */
 export function NewEnvironmentDialog({
   open,
   onOpenChange,
-  projectId,
-  environments,
+  project,
   current,
   onCreated,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
-  projectId: string;
-  environments: Environment[];
-  /** Offered first when duplicating. */
+  project: ProjectDetail;
+  /** Offered (and picked) first. */
   current?: Environment;
   onCreated: (id: string) => void;
 }) {
   const qc = useQueryClient();
+  const envs = project.environments;
   const [name, setName] = useState("");
-  // "" = empty: the server's default of the first environment's config, no variables.
-  const [from, setFrom] = useState("");
-  const [copyVariables, setCopyVariables] = useState(false);
+  // An environment id to duplicate, or EMPTY; unset = the current one.
+  const [from, setFrom] = useState<string>();
+  const [branches, setBranches] = useState<Record<string, string>>({});
+  const choice = from ?? current?.id ?? envs[0]?.id ?? EMPTY;
+  // Services take their settings (and branch) from the duplicated environment, or from the default one.
+  const source = choice === EMPTY ? envs.find((e) => e.isDefault) ?? envs[0] : envs.find((e) => e.id === choice);
+  const repos = source ? repoServices(project, source.id) : [];
+  const reset = () => {
+    setName("");
+    setFrom(undefined);
+    setBranches({});
+  };
   const create = useMutation({
     mutationFn: () =>
-      api.createEnvironment(projectId, {
+      api.createEnvironment(project.id, {
         name: name.trim(),
-        ...(from ? { cloneFrom: from, copyVariables } : {}),
+        ...(choice === EMPTY ? {} : { duplicateFrom: choice }),
+        branches: branchOverrides(repos, branches),
       }),
     onSuccess: async (e) => {
-      await qc.invalidateQueries({ queryKey: ["project", projectId] });
+      await qc.invalidateQueries({ queryKey: ["project", project.id] });
       onCreated(e.id);
-      setName("");
-      setFrom("");
-      setCopyVariables(false);
+      reset();
       onOpenChange(false);
     },
   });
-  const ordered = current ? [current, ...environments.filter((e) => e.id !== current.id)] : environments;
+  const ordered = current ? [current, ...envs.filter((e) => e.id !== current.id)] : envs;
   return (
-    <Modal open={open} onOpenChange={onOpenChange} title="New environment" description="Each environment gets its own copy of every service, with its own variables and domains.">
+    <Modal
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) create.reset();
+        onOpenChange(o);
+      }}
+      title="New environment"
+      description="Every service gets its own copy in the new environment, with its own variables, volumes and domains."
+    >
       <form
         className="flex flex-col gap-4"
         onSubmit={(e) => {
@@ -57,20 +76,47 @@ export function NewEnvironmentDialog({
         <Field label="Name">
           {(p) => <Input {...p} autoFocus required maxLength={32} placeholder="staging" value={name} onChange={(e) => setName(e.target.value)} />}
         </Field>
-        <Field label="Start from" hint={from ? undefined : "Services get the first environment's configuration, without variables."}>
+        <Field
+          label="Start from"
+          hint={
+            choice === EMPTY
+              ? "Services get the default environment's settings, without variables."
+              : "Copies every service's settings and variables; sealed ones stay sealed. Databases start empty, with new credentials."
+          }
+        >
           {(p) => (
-            <Select {...p} value={from} onChange={(e) => setFrom(e.target.value)}>
-              <option value="">Empty</option>
+            <Select {...p} value={choice} onChange={(e) => setFrom(e.target.value)}>
               {ordered.map((e) => (
                 <option key={e.id} value={e.id}>
                   Duplicate {e.name}
                 </option>
               ))}
+              <option value={EMPTY}>Empty</option>
             </Select>
           )}
         </Field>
-        {from ? (
-          <Checkbox checked={copyVariables} onCheckedChange={setCopyVariables} label="Copy variables (sealed ones are not copied)" />
+        {repos.length > 0 ? (
+          <fieldset className="flex flex-col gap-3">
+            <legend className="mb-2 text-sm">Branches</legend>
+            {repos.map((s) => (
+              <div key={s.serviceId} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-center gap-3">
+                <label htmlFor={`branch-${s.serviceId}`} className="min-w-0">
+                  <span className="block truncate text-sm">{s.name}</span>
+                  <span className="block truncate font-mono text-xs text-muted-foreground">{s.repo}</span>
+                </label>
+                <Input
+                  id={`branch-${s.serviceId}`}
+                  mono
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={s.branch}
+                  value={branches[s.serviceId] ?? s.branch}
+                  onChange={(e) => setBranches((b) => ({ ...b, [s.serviceId]: e.target.value }))}
+                />
+              </div>
+            ))}
+            <p className="text-sm text-muted-foreground">Pushes to a service's branch deploy it in this environment.</p>
+          </fieldset>
         ) : null}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
@@ -81,57 +127,6 @@ export function NewEnvironmentDialog({
           </Button>
         </div>
       </form>
-    </Modal>
-  );
-}
-
-/** Deleting needs sudo; the API client opens the re-auth dialog and retries. */
-export function DeleteEnvironmentDialog({
-  environment,
-  onClose,
-  projectId,
-  onDeleted,
-}: {
-  environment?: Environment;
-  onClose: () => void;
-  projectId: string;
-  onDeleted: () => void;
-}) {
-  const qc = useQueryClient();
-  // Keep the name on screen while the dialog fades out.
-  const [last, setLast] = useState(environment);
-  if (environment && environment !== last) setLast(environment);
-  const remove = useMutation({
-    mutationFn: (id: string) => api.deleteEnvironment(id),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["project", projectId] });
-      onDeleted();
-      onClose();
-    },
-  });
-  return (
-    <Modal
-      open={!!environment}
-      onOpenChange={(o) => {
-        if (!o) {
-          remove.reset();
-          onClose();
-        }
-      }}
-      title={`Delete ${last?.name ?? "environment"}?`}
-      description="Removes its services, variables and deployments, and stops their containers. This can't be undone."
-    >
-      <div className="flex flex-col gap-4">
-        {remove.error ? <Alert>{remove.error.message}</Alert> : null}
-        <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button variant="danger" loading={remove.isPending} onClick={() => last && remove.mutate(last.id)}>
-            Delete environment
-          </Button>
-        </div>
-      </div>
     </Modal>
   );
 }

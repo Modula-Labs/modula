@@ -1,25 +1,28 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
-import { useMemo, useState, type ReactNode } from "react";
-import { ChartBar, Check, ChevronDown, FileText, LayoutGrid, Plus, Server, Settings, IconStack2 as Stack, Trash, Variable } from "@/components/ui/icons";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { ChartBar, Check, ChevronDown, FileText, LayoutGrid, Plus, Refresh, Server, Settings, IconStack2 as Stack, Variable } from "@/components/ui/icons";
 import { LogoMark } from "@/components/ui/Logo";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { Skeleton } from "@/components/ui/misc";
-import { ApiError, api, type Environment } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import { atLeast } from "@/lib/roles";
 import { isLive } from "@/lib/status";
 import { useMe } from "@/lib/workspace";
 import { ProjectContext, type ProjectCtx } from "./ProjectContext";
-import { DeleteEnvironmentDialog, NewEnvironmentDialog } from "./ProjectDialogs";
+import { pickEnvironment, rememberEnvironment, rememberedEnvironment } from "./environments";
+import { NewEnvironmentDialog } from "./ProjectDialogs";
+import { SyncDialog } from "./SyncDialog";
 
 /** The project frame shared by the canvas, metrics, logs and settings pages: top bar with the
  *  environment selector, the left icon rail, and the page itself. The selected environment lives
- *  in `?env=` so it survives switching between pages. */
+ *  in `?env=` so it survives switching between pages, and is remembered per project for visits
+ *  without it. */
 export function ProjectShell({ projectId, envId }: { projectId: string; envId: string | undefined }) {
   const { data: me } = useMe();
   const navigate = useNavigate();
   const [newEnv, setNewEnv] = useState(false);
-  const [deletingEnv, setDeletingEnv] = useState<Environment>();
+  const [syncing, setSyncing] = useState(false);
   const project = useQuery({
     queryKey: ["project", projectId],
     queryFn: () => api.project(projectId),
@@ -28,12 +31,24 @@ export function ProjectShell({ projectId, envId }: { projectId: string; envId: s
   });
   const p = project.data;
   const role = me?.workspaces.find((w) => w.id === p?.workspaceId)?.role;
-  const env = p?.environments.find((e) => e.id === envId) ?? p?.environments[0];
+  // Read once per project: the stored value changes with every switch.
+  const remembered = useMemo(() => rememberedEnvironment(projectId), [projectId]);
+  const env = p ? pickEnvironment(p.environments, envId, remembered) : undefined;
   const ctx: ProjectCtx = useMemo(() => ({ projectId, project: p, env, role }), [projectId, p, env, role]);
   const canEdit = atLeast(role, "member");
 
   // Stay on the current page; a canvas selection doesn't carry over to another environment.
   const setEnv = (id: string | undefined) => void navigate({ to: ".", search: id ? { env: id } : {} } as never);
+
+  const shownId = env?.id;
+  useEffect(() => {
+    if (!shownId) return;
+    rememberEnvironment(projectId, shownId);
+    // Opened without `?env=` on a remembered environment: put it in the URL.
+    if (!envId && shownId === remembered) {
+      void navigate({ to: ".", search: (s: Record<string, unknown>) => ({ ...s, env: shownId }), replace: true } as never);
+    }
+  }, [projectId, shownId, envId, remembered, navigate]);
 
   if (project.error) {
     const missing = project.error instanceof ApiError && project.error.status === 404;
@@ -79,6 +94,16 @@ export function ProjectShell({ projectId, envId }: { projectId: string; envId: s
                 </MenuItem>
               ))}
               <MenuSeparator />
+              {canEdit ? (
+                <MenuItem icon={<Plus />} onSelect={() => setNewEnv(true)}>
+                  New environment
+                </MenuItem>
+              ) : null}
+              {canEdit && p.environments.length > 1 ? (
+                <MenuItem icon={<Refresh />} onSelect={() => setSyncing(true)}>
+                  Sync {env.name} from…
+                </MenuItem>
+              ) : null}
               <MenuItem
                 icon={<Variable />}
                 onSelect={() =>
@@ -91,16 +116,18 @@ export function ProjectShell({ projectId, envId }: { projectId: string; envId: s
               >
                 Shared variables
               </MenuItem>
-              {canEdit ? (
-                <MenuItem icon={<Plus />} onSelect={() => setNewEnv(true)}>
-                  New environment
-                </MenuItem>
-              ) : null}
-              {atLeast(role, "admin") && env.id !== p.environments[0]?.id ? (
-                <MenuItem danger icon={<Trash />} onSelect={() => setDeletingEnv(env)}>
-                  Delete {env.name}
-                </MenuItem>
-              ) : null}
+              <MenuItem
+                icon={<Settings />}
+                onSelect={() =>
+                  void navigate({
+                    to: "/projects/$projectId/settings/$section",
+                    params: { projectId, section: "environments" },
+                    search: { env: env.id },
+                  } as never)
+                }
+              >
+                Manage environments
+              </MenuItem>
             </Menu>
           ) : null}
         </header>
@@ -121,17 +148,8 @@ export function ProjectShell({ projectId, envId }: { projectId: string; envId: s
         </main>
       </div>
 
-      {p ? (
-        <NewEnvironmentDialog
-          open={newEnv}
-          onOpenChange={setNewEnv}
-          projectId={projectId}
-          environments={p.environments}
-          current={env}
-          onCreated={(id) => setEnv(id)}
-        />
-      ) : null}
-      <DeleteEnvironmentDialog environment={deletingEnv} onClose={() => setDeletingEnv(undefined)} projectId={projectId} onDeleted={() => setEnv(undefined)} />
+      {p ? <NewEnvironmentDialog open={newEnv} onOpenChange={setNewEnv} project={p} current={env} onCreated={(id) => setEnv(id)} /> : null}
+      {p && env ? <SyncDialog open={syncing} onOpenChange={setSyncing} projectId={projectId} target={env} environments={p.environments} /> : null}
     </ProjectContext.Provider>
   );
 }

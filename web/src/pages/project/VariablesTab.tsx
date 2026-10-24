@@ -1,6 +1,6 @@
 import { clsx } from "clsx";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Checkbox } from "@/components/ui/Controls";
 import { CopyButton } from "@/components/ui/CopyButton";
@@ -12,6 +12,7 @@ import { api, type VariableInfo, type VariablePatch } from "@/lib/api";
 import { diffEnv, envTemplate, parseDotenv } from "@/lib/dotenv";
 import { relativeTime } from "@/lib/format";
 import { referenceOptions, type ReferenceOption } from "@/lib/references";
+import { ProjectContext } from "./ProjectContext";
 import { ReferenceInput } from "./ReferenceInput";
 
 /** Where a variables list lives: one service instance, or the environment's shared set. */
@@ -52,6 +53,8 @@ export function VariablesTab({
 export function VariablesEditor({ scope, canEdit, noun }: { scope: VariablesScope; canEdit: boolean; noun: "service" | "shared" }) {
   const qc = useQueryClient();
   const vars = useQuery({ queryKey: scope.key, queryFn: scope.load });
+  // Variables are per environment: say which one is being edited.
+  const envName = useContext(ProjectContext)?.project?.environments.find((e) => e.id === scope.environmentId)?.name;
   const names = useQuery({
     queryKey: ["variable-names", scope.environmentId],
     queryFn: () => api.variableNames(scope.environmentId),
@@ -77,8 +80,9 @@ export function VariablesEditor({ scope, canEdit, noun }: { scope: VariablesScop
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
-        <div className="text-sm text-muted-foreground">
+        <div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
           {vars.data ? `${vars.data.length} ${noun} variable${vars.data.length === 1 ? "" : "s"}` : " "}
+          {envName ? <Badge>{envName}</Badge> : null}
         </div>
         {canEdit ? (
           <div className="flex gap-2">
