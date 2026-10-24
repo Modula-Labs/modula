@@ -44,6 +44,8 @@ struct Row {
     node_public_ip: Option<String>,
     tcp_public_port: Option<i32>,
     mesh_ip: Option<String>,
+    /// A read replica's primary service (its name in the environment).
+    primary_name: Option<String>,
     /// This replica hasn't come up yet (it still builds, if it must).
     replica_starting: bool,
 }
@@ -69,7 +71,8 @@ macro_rules! workload_rows {
                  ORDER BY created_at LIMIT 1) AS public_domain,
                 d.restart_generation, v.id AS volume_id, v.mount_path,
                 n.public_ip AS node_public_ip, t.public_port AS tcp_public_port,
-                r.mesh_ip, r.status = 'starting' AS replica_starting
+                r.mesh_ip, r.status = 'starting' AS replica_starting,
+                (SELECT ps.name FROM services ps WHERE ps.id = s.replica_of) AS primary_name
          FROM deployment_replicas r
          JOIN deployments d ON d.id = r.deployment_id
          JOIN service_instances i ON i.id = d.service_instance_id
@@ -249,6 +252,13 @@ async fn workload(state: &AppState, node: Id, r: Row) -> AppResult<pb::Workload>
             None
         }
     };
+    // A read replica fills an empty data directory from its primary.
+    if let Some(primary) = &r.primary_name {
+        env_vars.push(pb::EnvVar {
+            name: "MODULA_REPLICA_OF".into(),
+            value: format!("{primary}.modula.internal"),
+        });
+    }
     let pitr = pitr.map(|(vars, mount)| {
         env_vars.retain(|e| !vars.iter().any(|(k, _)| *k == e.name));
         env_vars.extend(

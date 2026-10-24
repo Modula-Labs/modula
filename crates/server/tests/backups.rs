@@ -1038,6 +1038,176 @@ async fn point_in_time_recovery_end_to_end(pool: PgPool) {
     );
 }
 
+/// A read replica with a fake node: the primary gets the replication role,
+/// the replica deploys as its standby with the primary's credentials, lag is
+/// reported, and promotion makes it standalone.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn read_replicas_follow_and_promote(pool: PgPool) {
+    let c = cluster(TestApp::new(pool)).await;
+    let db = Arc::new(modula_node::db::fake::FakeDb::default());
+    let rt = c.start_node_with(Some(db.clone())).await;
+    let ws = c.app.create_workspace(&c.admin, "team").await;
+    let p = c
+        .ok(
+            Method::POST,
+            &format!("/api/workspaces/{ws}/projects"),
+            Some(json!({"name": "shop"})),
+        )
+        .await;
+    let s = c
+        .ok(
+            Method::POST,
+            &format!("/api/projects/{}/services", p["id"].as_str().unwrap()),
+            Some(json!({ "name": "postgres", "template": "postgres" })),
+        )
+        .await;
+    let primary: Id = s["instances"][0]["id"].as_str().unwrap().parse().unwrap();
+    c.ok(
+        Method::POST,
+        &format!("/api/service-instances/{primary}/deployments"),
+        None,
+    )
+    .await;
+    let primary_dep = c.active_deployment(primary, None).await;
+    let primary_env = rt.env_of(&primary_dep);
+    assert!(!primary_env.contains_key("MODULA_REPLICA_OF"));
+
+    let r = c
+        .ok(
+            Method::POST,
+            &format!("/api/service-instances/{primary}/replicas"),
+            None,
+        )
+        .await;
+    assert_eq!(r["serviceName"], "postgres-replica");
+    let replica: Id = r["instanceId"].as_str().unwrap().parse().unwrap();
+    // The role, with the primary's REPLICATION_PASSWORD (as a verifier on the node).
+    let calls = db.calls();
+    let (_, op) = calls
+        .iter()
+        .find(|(_, op)| op.name() == "replicationRole")
+        .expect("role created");
+    assert!(
+        format!("{op:?}").contains("PasswordArgs { .. }"),
+        "never printed"
+    );
+    let dep = c.active_deployment(replica, None).await;
+    let env = rt.env_of(&dep);
+    assert_eq!(env["MODULA_REPLICA_OF"], "postgres.modula.internal");
+    for k in ["POSTGRES_PASSWORD", "REPLICATION_PASSWORD", "POSTGRES_USER"] {
+        assert_eq!(env[k], primary_env[k], "{k}");
+    }
+    assert_eq!(
+        env["DATABASE_URL"],
+        format!(
+            "postgresql://postgres:{}@postgres-replica.modula.internal:5432/app",
+            primary_env["POSTGRES_PASSWORD"]
+        )
+    );
+    // The primary's DATABASE_REPLICA_URL (applies on its next deploy).
+    let vars = c
+        .ok(
+            Method::GET,
+            &format!("/api/service-instances/{primary}/variables"),
+            None,
+        )
+        .await;
+    assert!(vars.to_string().contains("DATABASE_REPLICA_URL"), "{vars}");
+
+    db.answer(
+        "replication",
+        Ok(
+            json!({ "role": "primary", "standbys": [{ "name": "walreceiver", "state": "streaming",
+                   "replayLagSeconds": 0.2, "lagBytes": 128.0, "address": "10.88.0.2" }] }),
+        ),
+    );
+    let r = c
+        .ok(
+            Method::GET,
+            &format!("/api/service-instances/{primary}/replication"),
+            None,
+        )
+        .await;
+    assert_eq!(r["role"], "primary");
+    assert_eq!(r["replicas"][0]["serviceName"], "postgres-replica");
+    assert_eq!(r["status"]["standbys"][0]["lagBytes"], 128.0);
+    let r = c
+        .ok(
+            Method::GET,
+            &format!("/api/service-instances/{replica}/replication"),
+            None,
+        )
+        .await;
+    assert_eq!(r["role"], "replica");
+    assert_eq!(r["primary"]["serviceName"], "postgres");
+    // No replicas of replicas.
+    let r = c
+        .call(
+            Method::POST,
+            &format!("/api/service-instances/{replica}/replicas"),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
+
+    // Promote: typed confirmation; then standalone with its own credentials.
+    let promote = format!("/api/service-instances/{replica}/promote");
+    let r = c
+        .call(
+            Method::POST,
+            &promote,
+            Some(json!({ "confirm": "postgres" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    db.answer(
+        "replication",
+        Ok(json!({ "role": "primary", "standbys": [] })),
+    );
+    let r = c
+        .ok(
+            Method::POST,
+            &promote,
+            Some(json!({ "confirm": "postgres-replica" })),
+        )
+        .await;
+    assert_eq!(r["role"], "standalone");
+    assert!(db.calls().iter().any(|(_, op)| op.name() == "promote"));
+    let refs: Vec<Vec<String>> = sqlx::query_scalar(
+        "SELECT refs FROM variables WHERE service_instance_id = $1 AND name = 'POSTGRES_PASSWORD'",
+    )
+    .bind(replica)
+    .fetch_all(c.app.db())
+    .await
+    .unwrap();
+    assert_eq!(refs, [Vec::<String>::new()], "its own value now");
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM variables WHERE service_instance_id = $1 AND name = 'DATABASE_REPLICA_URL'",
+    )
+    .bind(primary)
+    .fetch_one(c.app.db())
+    .await
+    .unwrap();
+    assert_eq!(left, 0);
+    // Redeployed, it no longer streams from the primary.
+    c.ok(
+        Method::POST,
+        &format!("/api/service-instances/{replica}/deployments"),
+        None,
+    )
+    .await;
+    let again = c.active_deployment(replica, Some(&dep)).await;
+    let env = rt.env_of(&again);
+    assert!(!env.contains_key("MODULA_REPLICA_OF"));
+    assert_eq!(env["POSTGRES_PASSWORD"], primary_env["POSTGRES_PASSWORD"]);
+    let actions: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM audit_log WHERE action LIKE 'replica%' ORDER BY id")
+            .fetch_all(c.app.db())
+            .await
+            .unwrap();
+    assert_eq!(actions, ["replica.create", "replica.promote"]);
+}
+
 /// Needs `pg_dump` on PATH (skipped otherwise).
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
 async fn the_control_plane_backs_itself_up(pool: PgPool) {

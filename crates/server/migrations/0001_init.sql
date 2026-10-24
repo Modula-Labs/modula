@@ -275,6 +275,9 @@ CREATE TABLE services (
     -- The gallery app it was deployed with (see app_templates.rs), on every
     -- service of the app; its databases also have their `template`.
     app_template text,
+    -- A Postgres read replica: each environment's instance streams from this
+    -- service's instance there (until promoted).
+    replica_of  id REFERENCES services (id) ON DELETE SET NULL,
     created_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (project_id, name)
 );

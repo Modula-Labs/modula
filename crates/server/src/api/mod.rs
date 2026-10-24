@@ -18,6 +18,7 @@ pub mod metrics;
 pub mod nodes;
 pub mod pitr;
 pub mod projects;
+pub mod replicas;
 pub mod services;
 pub mod storage;
 pub mod tokens;
@@ -180,6 +181,10 @@ pub fn routes(state: AppState) -> ApiRouter {
         .put("/api/service-instances/{instance_id}/pitr", Resource(Action::BackupScheduleUpdate), pitr::put)
         .post("/api/service-instances/{instance_id}/pitr/base-backups", Resource(Action::BackupCreate), pitr::base_backup)
         .post("/api/service-instances/{instance_id}/pitr/restore", Resource(Action::PitrRestore), pitr::restore)
+        // Read replicas (Postgres; see api/replicas.rs)
+        .get("/api/service-instances/{instance_id}/replication", Resource(Action::DatabaseRead), replicas::get)
+        .post("/api/service-instances/{instance_id}/replicas", Resource(Action::ReplicaCreate), replicas::create)
+        .post("/api/service-instances/{instance_id}/promote", Resource(Action::ReplicaPromote), replicas::promote)
         .post("/api/backups/{backup_id}/restore", Resource(Action::BackupRestore), backups::restore)
         .delete("/api/backups/{backup_id}", Resource(Action::BackupDelete), backups::delete)
         .get("/api/instance/self-backup", Instance(Action::SelfBackupRead), backups::get_self_backup)
