@@ -4,6 +4,7 @@ import { Segmented } from "@/components/ui/Tabs";
 import { Alert, Skeleton } from "@/components/ui/misc";
 import { api, type MetricsRange } from "@/lib/api";
 import { METRICS_RANGES } from "@/lib/metrics";
+import { HttpMetricsPanels } from "./HttpMetricsPanels";
 import { MetricsPanels } from "./MetricsPanels";
 
 /** CPU, memory and network of every service in one environment, summed. */
@@ -34,6 +35,7 @@ export function ProjectMetrics({ projectId, environmentId }: { projectId: string
       ) : m ? (
         <MetricsPanels m={m} range={range} />
       ) : null}
+      <HttpMetricsPanels queryKey={["project", projectId, environmentId]} fetcher={() => api.projectHttpMetrics(projectId, environmentId, range)} range={range} />
     </div>
   );
 }

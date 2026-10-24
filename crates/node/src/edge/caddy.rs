@@ -1,7 +1,7 @@
 //! Caddy as the node's edge. We always load a *complete* config (never patch),
 //! so what runs is exactly what we rendered.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use super::ask::Allowlist;
 use super::http::{self, AdminAddr, post_json};
+use super::rules;
 use super::{EdgeConfig, EdgeSink, ResolvedRoute, normalize_host};
 
 /// Re-load even an unchanged config this often: it restores our routes after
@@ -26,6 +27,18 @@ const WATCH_EVERY: Duration = Duration::from_millis(100);
 /// How long Caddy lets in-flight requests finish when it stops or reloads.
 const GRACE_PERIOD: &str = "10s";
 const NOT_FOUND: &str = "No service is deployed at this address.";
+/// The access logger of app routes (`http.log.access.<name>`).
+const ACCESS_LOGGER: &str = "modula";
+
+/// What a render may use besides the routes.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    /// Where access log lines go (`host:port` of the node's collector);
+    /// None = no access log.
+    pub access_log: Option<String>,
+    /// Rule actions whose Caddy module is missing (left out).
+    pub unsupported: BTreeSet<String>,
+}
 
 /// Where Caddy's HTTP servers listen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -48,6 +61,8 @@ pub struct CaddyEdge {
     local_routes: Vec<ResolvedRoute>,
     /// Local routes not to serve (private mode hides the dashboard).
     hidden: Mutex<Vec<String>>,
+    access_log: Option<String>,
+    unsupported: Mutex<BTreeSet<String>>,
     last: Mutex<Option<(Value, Instant)>>,
 }
 
@@ -58,6 +73,7 @@ impl CaddyEdge {
         allowlist: Allowlist,
         local_routes: Vec<ResolvedRoute>,
         listeners: Listeners,
+        access_log: Option<String>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             admin: AdminAddr::parse(admin)?,
@@ -66,6 +82,8 @@ impl CaddyEdge {
             allowlist,
             local_routes,
             hidden: Mutex::new(Vec::new()),
+            access_log,
+            unsupported: Mutex::new(BTreeSet::new()),
             last: Mutex::new(None),
         })
     }
@@ -178,7 +196,19 @@ fn https_redirects(hosts: &[&String]) -> Value {
     Value::Array(routes)
 }
 
-pub fn render(cfg: &EdgeConfig, listeners: Listeners, admin_listen: &str, ask_url: &str) -> Value {
+/// A handler adding `key` to the request's access log line once the rest
+/// of the chain has run (so upstream placeholders are set).
+fn log_append(key: &str, value: &str) -> Value {
+    json!({ "handler": "log_append", "key": key, "value": value })
+}
+
+pub fn render(
+    cfg: &EdgeConfig,
+    listeners: Listeners,
+    admin_listen: &str,
+    ask_url: &str,
+    opts: &Options,
+) -> Value {
     // One route per hostname; several upstreams if several replicas serve it.
     let mut by_host: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for r in &cfg.routes {
@@ -211,9 +241,29 @@ pub fn render(cfg: &EdgeConfig, listeners: Listeners, admin_listen: &str, ask_ur
                     "passive": { "fail_duration": "10s", "max_fails": 1 }
                 });
             }
+            let site = cfg.sites.get(host);
+            let mut handle = Vec::new();
+            if let (Some(site), Some(_)) = (site, &opts.access_log) {
+                handle.push(log_append("deployment_id", &site.deployment_id));
+                handle.push(log_append("proxied", if site.proxied { "1" } else { "0" }));
+                handle.push(log_append(
+                    "upstream",
+                    "{http.reverse_proxy.upstream.hostport}",
+                ));
+            }
+            match site {
+                Some(s) if !s.rules.is_empty() => handle.push(rules::subroute(
+                    &s.deployment_id,
+                    &s.rules,
+                    s.proxied,
+                    &proxy,
+                    &opts.unsupported,
+                )),
+                _ => handle.push(proxy),
+            }
             json!({
                 "match": [{ "host": [host] }],
-                "handle": [proxy],
+                "handle": handle,
                 "terminal": true
             })
         })
@@ -232,6 +282,20 @@ pub fn render(cfg: &EdgeConfig, listeners: Listeners, admin_listen: &str, ask_ur
         .filter(|h| super::ipv4_host(h).is_some())
         .collect();
     let mut server = json!({ "routes": routes });
+    let sites: Vec<_> = cfg
+        .sites
+        .iter()
+        .filter(|(h, _)| by_host.contains_key(*h))
+        .map(|(_, s)| s)
+        .collect();
+    if sites.iter().any(|s| s.proxied) {
+        // The client of a request from Cloudflare is its CF-Connecting-IP
+        // (`{http.vars.client_ip}`, the `client_ip` matcher); from anywhere
+        // else the header is ignored.
+        server["trusted_proxies"] =
+            json!({ "source": "static", "ranges": rules::CLOUDFLARE_RANGES });
+        server["client_ip_headers"] = json!(["CF-Connecting-IP"]);
+    }
     let mut servers = serde_json::Map::new();
     let mut apps = serde_json::Map::new();
     match (cfg.tls, listeners) {
@@ -302,16 +366,35 @@ pub fn render(cfg: &EdgeConfig, listeners: Listeners, admin_listen: &str, ask_ur
             apps.insert("tls".into(), Value::Object(tls));
         }
     }
+    let access = opts.access_log.as_deref().filter(|_| !sites.is_empty());
+    if access.is_some() {
+        server["logs"] = json!({ "default_logger_name": ACCESS_LOGGER });
+    }
     servers.insert("modula".into(), server);
     apps.insert(
         "http".into(),
         json!({ "grace_period": GRACE_PERIOD, "servers": servers }),
     );
-    json!({
+    let mut config = json!({
         // Re-declared on every load so Caddy never falls back to localhost:2019.
         "admin": { "listen": admin_listen, "config": { "persist": false } },
         "apps": apps
-    })
+    });
+    if let Some(addr) = access {
+        // Access lines go to the node only (not Caddy's own log). With
+        // soft_start a node that isn't listening never fails the load;
+        // Caddy then writes the lines to stderr until it can reconnect.
+        let logger = format!("http.log.access.{ACCESS_LOGGER}");
+        config["logging"] = json!({ "logs": {
+            "default": { "exclude": [logger] },
+            "modula_access": {
+                "writer": { "output": "net", "address": addr, "soft_start": true },
+                "encoder": { "format": "json" },
+                "include": [logger]
+            }
+        } });
+    }
+    config
 }
 
 #[async_trait]
@@ -331,23 +414,60 @@ impl EdgeSink for CaddyEdge {
             .collect();
         *self.allowlist.write().expect("allowlist lock") = hosts;
 
-        let rendered = render(
-            cfg,
-            self.listeners,
-            &self.admin.caddy_listen(),
-            &self.ask_url,
-        );
-        let fresh = {
-            let last = self.last.lock().expect("edge lock");
-            match &*last {
-                Some((prev, at)) => *prev != rendered || at.elapsed() > REFRESH_EVERY,
-                None => true,
+        // A Caddy without a rule's plugin rejects the whole config: drop
+        // that rule type (reported to the server) and load the rest.
+        for _ in 0..3 {
+            let opts = Options {
+                access_log: self.access_log.clone(),
+                unsupported: self.unsupported.lock().expect("edge lock").clone(),
+            };
+            let rendered = render(
+                cfg,
+                self.listeners,
+                &self.admin.caddy_listen(),
+                &self.ask_url,
+                &opts,
+            );
+            let fresh = {
+                let last = self.last.lock().expect("edge lock");
+                match &*last {
+                    Some((prev, at)) => *prev != rendered || at.elapsed() > REFRESH_EVERY,
+                    None => true,
+                }
+            };
+            if !fresh {
+                return Ok(());
             }
-        };
-        if !fresh {
-            return Ok(());
+            match self.load(&rendered).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    let missing = rules::missing_action(&format!("{e:#}"));
+                    let new = missing.is_some_and(|a| {
+                        self.unsupported
+                            .lock()
+                            .expect("edge lock")
+                            .insert(a.to_owned())
+                    });
+                    if !new {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        action = missing.unwrap_or_default(),
+                        "the edge has no module for this rule type; its rules are not applied"
+                    );
+                }
+            }
         }
-        self.load(&rendered).await
+        anyhow::bail!("the edge config could not be loaded")
+    }
+
+    fn unsupported(&self) -> Vec<String> {
+        self.unsupported
+            .lock()
+            .expect("edge lock")
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -372,6 +492,7 @@ mod tests {
                     upstream: "10.88.0.4:80".parse().unwrap(),
                 },
             ],
+            sites: BTreeMap::new(),
             tls,
             acme_email: "ops@example.com".into(),
             dashboard_hosts: vec![],
@@ -385,6 +506,7 @@ mod tests {
             Listeners::Ports,
             "unix//run/caddy/admin.sock",
             "http://127.0.0.1:7102/ask",
+            &Options::default(),
         );
         assert_eq!(c["admin"]["listen"], "unix//run/caddy/admin.sock");
         assert_eq!(c["admin"]["config"]["persist"], false);
@@ -472,6 +594,7 @@ mod tests {
             Listeners::Ports,
             "localhost:2019",
             "x",
+            &Options::default(),
         );
         assert_eq!(
             off["apps"]["http"]["servers"]["modula"]["listen"],
@@ -483,6 +606,7 @@ mod tests {
             Listeners::Ports,
             "localhost:2019",
             "x",
+            &Options::default(),
         );
         assert_eq!(
             internal["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]["module"],
@@ -514,7 +638,13 @@ mod tests {
         }
         for tls in [TlsMode::TlsAcme, TlsMode::TlsInternal, TlsMode::TlsOff] {
             for listeners in [Listeners::Ports, Listeners::SystemdSockets] {
-                let c = render(&cfg(tls), listeners, "localhost:2019", "x");
+                let c = render(
+                    &cfg(tls),
+                    listeners,
+                    "localhost:2019",
+                    "x",
+                    &Options::default(),
+                );
                 let mut proxies = 0;
                 walk(&c["apps"]["http"], &mut proxies);
                 assert!(proxies > 0);
@@ -533,6 +663,7 @@ mod tests {
             Listeners::SystemdSockets,
             "unix//run/caddy/admin.sock",
             "http://127.0.0.1:7102/ask",
+            &Options::default(),
         );
         let servers = &c["apps"]["http"]["servers"];
         assert_eq!(servers["modula"]["listen"], json!(["fd/4", "fdgram/5"]));
@@ -564,15 +695,171 @@ mod tests {
         );
         assert_eq!(c["apps"]["http"]["grace_period"], GRACE_PERIOD);
 
-        let off = render(&cfg(TlsMode::TlsOff), Listeners::SystemdSockets, "x", "x");
+        let off = render(
+            &cfg(TlsMode::TlsOff),
+            Listeners::SystemdSockets,
+            "x",
+            "x",
+            &Options::default(),
+        );
         let servers = off["apps"]["http"]["servers"].as_object().unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers["modula"]["listen"], json!(["fd/3"]));
 
         // Without sockets nothing changes: one server on :80 and :443.
-        let ports = render(&cfg(TlsMode::TlsAcme), Listeners::Ports, "x", "x");
+        let ports = render(
+            &cfg(TlsMode::TlsAcme),
+            Listeners::Ports,
+            "x",
+            "x",
+            &Options::default(),
+        );
         let servers = ports["apps"]["http"]["servers"].as_object().unwrap();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers["modula"]["listen"], json!([":80", ":443"]));
+    }
+
+    /// The test config with sites for its app hosts: the first proxied by
+    /// Cloudflare with every rule type, the IP host plain.
+    fn with_sites(tls: TlsMode) -> EdgeConfig {
+        let mut c = cfg(tls);
+        c.sites.insert(
+            "api.apps.example.com".into(),
+            super::super::Site {
+                deployment_id: "dep1".into(),
+                proxied: true,
+                rules: rules::tests::every_rule(),
+            },
+        );
+        c.sites.insert(
+            "10.0.0.1".into(),
+            super::super::Site {
+                deployment_id: "dep2".into(),
+                proxied: false,
+                rules: vec![],
+            },
+        );
+        c
+    }
+
+    fn logged() -> Options {
+        Options {
+            access_log: Some("127.0.0.1:7103".into()),
+            unsupported: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn access_log_goes_to_the_node() {
+        let c = render(
+            &with_sites(TlsMode::TlsAcme),
+            Listeners::Ports,
+            "x",
+            "x",
+            &logged(),
+        );
+        assert_eq!(
+            c["logging"],
+            json!({ "logs": {
+                "default": { "exclude": ["http.log.access.modula"] },
+                "modula_access": {
+                    "writer": { "output": "net", "address": "127.0.0.1:7103", "soft_start": true },
+                    "encoder": { "format": "json" },
+                    "include": ["http.log.access.modula"]
+                }
+            } })
+        );
+        let server = &c["apps"]["http"]["servers"]["modula"];
+        assert_eq!(server["logs"]["default_logger_name"], "modula");
+        // Each site's lines say which deployment served them, and how.
+        let routes = server["routes"].as_array().unwrap();
+        let ip = &routes[0]["handle"];
+        assert_eq!(
+            ip[0],
+            json!({ "handler": "log_append", "key": "deployment_id", "value": "dep2" })
+        );
+        assert_eq!(ip[1]["value"], "0");
+        assert_eq!(ip[2]["value"], "{http.reverse_proxy.upstream.hostport}");
+        assert_eq!(ip[3]["handler"], "reverse_proxy");
+        let api = &routes[1]["handle"];
+        assert_eq!(api[1]["value"], "1");
+        assert_eq!(api[3]["handler"], "subroute");
+        // Proxied sites: CF-Connecting-IP is believed from Cloudflare only.
+        assert_eq!(server["trusted_proxies"]["source"], "static");
+        assert_eq!(
+            server["trusted_proxies"]["ranges"],
+            json!(rules::CLOUDFLARE_RANGES)
+        );
+        assert_eq!(server["client_ip_headers"], json!(["CF-Connecting-IP"]));
+        // The 404 fallback carries nothing.
+        assert_eq!(routes[2]["handle"][0]["status_code"], 404);
+    }
+
+    #[test]
+    fn no_sites_no_access_log() {
+        // Only local routes (the dashboard): nothing to log, nothing trusted.
+        let c = render(
+            &cfg(TlsMode::TlsAcme),
+            Listeners::Ports,
+            "x",
+            "x",
+            &logged(),
+        );
+        assert!(c.get("logging").is_none());
+        let server = &c["apps"]["http"]["servers"]["modula"];
+        assert!(server.get("logs").is_none());
+        assert!(server.get("trusted_proxies").is_none());
+        assert_eq!(server["routes"][1]["handle"][0]["handler"], "reverse_proxy");
+        // A site with logging off still gets its rules.
+        let c = render(
+            &with_sites(TlsMode::TlsAcme),
+            Listeners::Ports,
+            "x",
+            "x",
+            &Options::default(),
+        );
+        assert!(c.get("logging").is_none());
+        assert_eq!(
+            c["apps"]["http"]["servers"]["modula"]["routes"][1]["handle"][0]["handler"],
+            "subroute"
+        );
+    }
+
+    /// Every variant through `caddy validate` (which provisions every module)
+    /// when MODULA_CADDY_BIN points at a Caddy built like the release's.
+    #[test]
+    fn rendered_configs_pass_caddy_validate() {
+        let Ok(bin) = std::env::var("MODULA_CADDY_BIN") else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("modula-caddy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for tls in [TlsMode::TlsAcme, TlsMode::TlsInternal, TlsMode::TlsOff] {
+            for listeners in [Listeners::Ports, Listeners::SystemdSockets] {
+                for opts in [Options::default(), logged()] {
+                    let c = render(
+                        &with_sites(tls),
+                        listeners,
+                        "localhost:2999",
+                        "http://127.0.0.1:7102/ask",
+                        &opts,
+                    );
+                    let file = dir.join("caddy.json");
+                    std::fs::write(&file, serde_json::to_vec(&c).unwrap()).unwrap();
+                    let out = std::process::Command::new(&bin)
+                        .arg("validate")
+                        .arg("--config")
+                        .arg(&file)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        out.status.success(),
+                        "{tls:?} {listeners:?}: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

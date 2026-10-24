@@ -312,6 +312,29 @@ export interface ServiceConfig {
   replicas?: number;
   /** Static sites only (repo or local source): absent = served from your servers. */
   hosting?: CloudflareHosting;
+  /** Edge rules, applied in order to every request to the service's domains (omitted when empty). */
+  edgeRules?: EdgeRule[];
+}
+export type EdgeCondition =
+  | { field: "path"; op: "matches" | "prefix" | "equals"; value: string; negate?: boolean }
+  | { field: "method"; values: string[]; negate?: boolean }
+  | { field: "header"; name: string; op: "exists" | "equals" | "contains"; value?: string; negate?: boolean }
+  | { field: "ip"; cidrs: string[]; negate?: boolean }
+  | { field: "country"; values: string[]; negate?: boolean };
+export type EdgeAction =
+  | { type: "rateLimit"; requests: number; windowSecs: number; key: "ip" | "header"; header?: string }
+  | { type: "block"; status: number; body?: string }
+  | { type: "allow" }
+  | { type: "redirect"; status: 301 | 302 | 307 | 308; target: string }
+  | { type: "headers"; set?: Record<string, string>; remove?: string[] }
+  | { type: "cache"; ttlSecs: number };
+export interface EdgeRule {
+  /** At most 60 characters; may be empty. */
+  name: string;
+  enabled: boolean;
+  /** An OR of AND groups; empty = every request. */
+  when: EdgeCondition[][];
+  then: EdgeAction;
 }
 export interface CloudflareHosting {
   type: "cloudflare";
@@ -383,6 +406,8 @@ export interface Instance {
   tcpProxy?: TcpProxy | null;
   /** An R2 bucket service's bucket in this environment (null = none yet). */
   r2?: R2Link | null;
+  /** Edge action types a server running this service can't apply (its Caddy lacks the module). */
+  edgeUnsupported?: string[];
   updatedAt: string;
 }
 export interface R2Link {
@@ -995,6 +1020,63 @@ export interface EnvironmentLogs {
   bucketMs: number;
   truncated: boolean;
 }
+export interface HttpRequest {
+  /** Unix ms. */
+  t: number;
+  serviceId: string;
+  serviceName: string;
+  deploymentId: string;
+  host: string;
+  method: string;
+  /** Without the query string. */
+  path: string;
+  status: number;
+  durationMs: number;
+  bytes: number;
+  clientIp: string;
+  upstream: string;
+  userAgent: string;
+}
+export interface HttpBucket {
+  /** Bucket start, unix ms. */
+  t: number;
+  count: number;
+  status4xx: number;
+  status5xx: number;
+}
+export interface EnvironmentHttpLogs {
+  /** Oldest first; when truncated, the newest `limit` requests. */
+  requests: HttpRequest[];
+  histogram: HttpBucket[];
+  bucketMs: number;
+  truncated: boolean;
+}
+export type HttpStatusClass = "2xx" | "3xx" | "4xx" | "5xx";
+export interface EnvironmentHttpLogsQuery {
+  since: number;
+  until?: number;
+  service?: string;
+  status?: HttpStatusClass;
+  method?: string;
+  path?: string;
+  limit?: number;
+}
+export interface HttpMetricsPoint {
+  /** Bucket start, unix ms. */
+  t: number;
+  requests: number;
+  status4xx: number;
+  status5xx: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  p99Ms: number | null;
+}
+export interface HttpMetrics {
+  range: MetricsRange;
+  stepSecs: number;
+  points: HttpMetricsPoint[];
+}
+
 export interface EnvironmentLogsQuery {
   since: number;
   until?: number;
@@ -1234,6 +1316,26 @@ export const api = {
       `/api/environments/${enc(environment)}/logs?${params}`,
     );
   },
+  environmentHttpLogs: (environment: string, q: EnvironmentHttpLogsQuery) => {
+    const params = new URLSearchParams({ since: String(q.since) });
+    if (q.until !== undefined) params.set("until", String(q.until));
+    if (q.service) params.set("service", q.service);
+    if (q.status) params.set("status", q.status);
+    if (q.method) params.set("method", q.method);
+    if (q.path) params.set("path", q.path);
+    if (q.limit !== undefined) params.set("limit", String(q.limit));
+    return get<EnvironmentHttpLogs>(
+      `/api/environments/${enc(environment)}/http-logs?${params}`,
+    );
+  },
+  instanceHttpMetrics: (instance: string, range: MetricsRange) =>
+    get<HttpMetrics>(
+      `/api/service-instances/${enc(instance)}/http-metrics?range=${range}`,
+    ),
+  projectHttpMetrics: (project: string, environment: string, range: MetricsRange) =>
+    get<HttpMetrics>(
+      `/api/projects/${enc(project)}/http-metrics?environment=${enc(environment)}&range=${range}`,
+    ),
   webhooks: (project: string) =>
     get<Webhook[]>(`/api/projects/${enc(project)}/webhooks`),
   /** The signing secret is returned only here. */

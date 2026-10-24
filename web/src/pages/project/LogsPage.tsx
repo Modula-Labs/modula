@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Download, Search } from "@/components/ui/icons";
 import { Select } from "@/components/ui/Input";
 import { Alert, Skeleton } from "@/components/ui/misc";
+import { Segmented } from "@/components/ui/Tabs";
 import { api, type LogLine } from "@/lib/api";
 import {
   LOG_RANGES,
@@ -19,13 +20,35 @@ import {
   type LogRangeId,
 } from "@/lib/logs";
 import { useProject } from "./ProjectContext";
+import { HttpLogsView } from "./HttpLogsView";
 import { LogsHistogram } from "./LogsHistogram";
 
 const POLL_MS = 3000;
 
+/** The project's Logs page: application logs, or the HTTP requests seen by the edge. */
+export function LogsPage() {
+  const [tab, setTab] = useState<"logs" | "http">("logs");
+  return (
+    <div className="flex h-full flex-col">
+      <div className="px-6 pt-6">
+        <Segmented
+          label="Log type"
+          value={tab}
+          onChange={setTab}
+          options={[
+            { value: "logs", label: "Logs" },
+            { value: "http", label: "HTTP" },
+          ]}
+        />
+      </div>
+      <div className="min-h-0 flex-1">{tab === "logs" ? <LogsView /> : <HttpLogsView />}</div>
+    </div>
+  );
+}
+
 /** Project logs for the selected environment: search, service and time filters, a volume histogram,
  *  and a live tail that polls for new lines. */
-export function LogsPage() {
+function LogsView() {
   const { project: p, env } = useProject();
   const envId = env?.id;
   const [input, setInput] = useState("");
@@ -141,7 +164,7 @@ export function LogsPage() {
 
   const first = logs.isLoading || !env;
   return (
-    <div className="flex h-full flex-col gap-4 p-6">
+    <div className="flex h-full flex-col gap-4 p-6 pt-4">
       <div className="flex flex-wrap items-center gap-2">
         <label className="flex h-8 min-w-56 flex-1 items-center gap-2 rounded-lg border border-input px-2.5 text-muted-foreground focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30">
           <Search className="size-4" />

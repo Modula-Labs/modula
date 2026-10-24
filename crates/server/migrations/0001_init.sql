@@ -220,6 +220,9 @@ CREATE TABLE nodes (
     -- Desired-state generation the server wants vs. the one the node applied.
     desired_generation  bigint NOT NULL DEFAULT 1,
     applied_generation  bigint NOT NULL DEFAULT 0,
+    -- Edge rule actions the node's Caddy can't run (module missing), as it
+    -- last reported them, as the dashboard names them ("rateLimit", "cache").
+    edge_unsupported    text[] NOT NULL DEFAULT '{}',
     last_seen_at        timestamptz,
     created_at          timestamptz NOT NULL DEFAULT now(),
     revoked_at          timestamptz
@@ -1056,3 +1059,38 @@ CREATE INDEX cron_runs_instance_idx ON cron_runs (service_instance_id, created_a
 -- One run at a time per instance: a due time while one runs is skipped.
 CREATE UNIQUE INDEX cron_runs_one_active ON cron_runs (service_instance_id)
     WHERE status IN ('queued', 'running');
+
+-- HTTP requests served by the nodes' edges (access logs), kept like
+-- log_lines for 7 days; the path never has its query string.
+CREATE TABLE http_logs (
+    environment_id       id NOT NULL REFERENCES environments (id) ON DELETE CASCADE,
+    service_instance_id  id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    deployment_id        id NOT NULL REFERENCES deployments (id) ON DELETE CASCADE,
+    at                   timestamptz NOT NULL,
+    host                 text NOT NULL,
+    method               text NOT NULL,
+    path                 text NOT NULL,
+    status               smallint NOT NULL,
+    duration_us          integer NOT NULL,
+    bytes                bigint NOT NULL,
+    client_ip            text NOT NULL,
+    upstream             text NOT NULL,
+    user_agent           text NOT NULL
+);
+CREATE INDEX http_logs_environment_at_idx ON http_logs (environment_id, at);
+CREATE INDEX http_logs_at_idx ON http_logs (at);
+
+-- Per deployment and minute: request counts and a latency histogram (counts
+-- per bucket of crate::http_logs::LATENCY_BOUNDS_MS), added to as requests
+-- arrive. Histograms add up, so any bucket width gets true percentiles.
+CREATE TABLE http_rollups (
+    deployment_id        id NOT NULL REFERENCES deployments (id) ON DELETE CASCADE,
+    service_instance_id  id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    minute               timestamptz NOT NULL,
+    requests             integer NOT NULL,
+    status_4xx           integer NOT NULL,
+    status_5xx           integer NOT NULL,
+    latency_hist         integer[] NOT NULL,
+    PRIMARY KEY (deployment_id, minute)
+);
+CREATE INDEX http_rollups_instance_minute_idx ON http_rollups (service_instance_id, minute);

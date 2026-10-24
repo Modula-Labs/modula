@@ -70,3 +70,5 @@ export const SortDesc = kobra(T.IconArrowDown);
 export const Table = kobra(T.IconTable);
 export const Dots = kobra(T.IconDots);
 export const Pencil = kobra(T.IconPencil);
+export const GripVertical = kobra(T.IconGripVertical);
+export const ChevronUp = kobra(T.IconChevronUp);

@@ -60,6 +60,9 @@ pub async fn run(
     let reconnect = Arc::new(tokio::sync::Notify::new());
     // Backup results also go through the outbox, to survive reconnects.
     let results = out_tx.clone();
+    if let Some(log) = caps.access_log.clone() {
+        tokio::spawn(log.ship(out_tx.clone(), stop.clone()));
+    }
     let logship = tokio::spawn(crate::logship::run(
         runtime.clone(),
         out_tx.clone(),

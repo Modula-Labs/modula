@@ -123,7 +123,7 @@ pub struct Found {
 }
 
 /// `ILIKE` pattern matching `text` literally.
-fn like_pattern(text: &str) -> String {
+pub(crate) fn like_pattern(text: &str) -> String {
     let mut p = String::with_capacity(text.len() + 2);
     p.push('%');
     for c in text.chars() {

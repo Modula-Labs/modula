@@ -431,6 +431,19 @@ impl Limits {
                 .iter()
                 .map(|l| l.text.len() + l.deployment_id.len())
                 .sum::<usize>() as f64,
+            In::HttpLogBatch(b) => b
+                .requests
+                .iter()
+                .map(|r| {
+                    r.deployment_id.len()
+                        + r.host.len()
+                        + r.path.len()
+                        + r.user_agent.len()
+                        + r.client_ip.len()
+                        + r.upstream.len()
+                        + 40
+                })
+                .sum::<usize>() as f64,
             In::Metrics(_) | In::Event(_) => 0.0,
             _ => return true,
         };
@@ -483,13 +496,21 @@ async fn handle(
         }
         In::Metrics(r) => crate::metrics::record(&state.db, node, &r).await?,
         In::LogBatch(b) => crate::logs::record(&state.db, node, &b).await?,
+        In::HttpLogBatch(b) => crate::http_logs::record(&state.db, node, &b).await?,
         In::Report(r) => {
+            let unsupported: Vec<&str> = r
+                .edge_unsupported
+                .iter()
+                .filter_map(|a| crate::deploy::edge::action_label(a))
+                .collect();
             let r = sqlx::query(
-                "UPDATE nodes SET applied_generation = GREATEST(applied_generation, $2), last_seen_at = now()
+                "UPDATE nodes SET applied_generation = GREATEST(applied_generation, $2), last_seen_at = now(),
+                                  edge_unsupported = $3
                  WHERE id = $1 AND status <> 'revoked'",
             )
             .bind(node)
             .bind(r.generation as i64)
+            .bind(&unsupported)
             .execute(&state.db)
             .await?;
             if r.rows_affected() == 0 {

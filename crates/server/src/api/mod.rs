@@ -10,6 +10,7 @@ pub mod deployments;
 pub mod domains;
 pub mod env_config;
 pub mod github;
+pub mod http_logs;
 pub mod install;
 pub mod instance;
 pub mod logs;
@@ -121,6 +122,10 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/service-instances/{instance_id}/metrics", Resource(Action::InstanceRead), metrics::get)
         .get("/api/projects/{project_id}/metrics", Resource(Action::ProjectRead), metrics::project)
         .get("/api/environments/{environment_id}/logs", Resource(Action::EnvironmentLogsRead), logs::search)
+        // HTTP requests served by the edge (access logs) and request charts
+        .get("/api/environments/{environment_id}/http-logs", Resource(Action::EnvironmentLogsRead), http_logs::search)
+        .get("/api/service-instances/{instance_id}/http-metrics", Resource(Action::InstanceRead), http_logs::instance_metrics)
+        .get("/api/projects/{project_id}/http-metrics", Resource(Action::ProjectRead), http_logs::project_metrics)
         .get("/api/projects/{project_id}/webhooks", Resource(Action::WebhookList), webhooks::list)
         .post("/api/projects/{project_id}/webhooks", Resource(Action::WebhookCreate), webhooks::create)
         .delete("/api/webhooks/{webhook_id}", Resource(Action::WebhookDelete), webhooks::delete)

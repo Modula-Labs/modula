@@ -16,6 +16,7 @@ pub mod error;
 pub mod exec;
 pub mod github;
 pub mod http;
+pub mod http_logs;
 pub mod instance_domain;
 pub mod integrations;
 pub mod jobs;
@@ -101,6 +102,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 tracing::info!(samples, "old metric samples removed");
                 let lines = logs::purge(&s.db).await?;
                 tracing::info!(lines, "old log lines removed");
+                let requests = http_logs::purge(&s.db).await?;
+                tracing::info!(requests, "old HTTP requests removed");
                 Ok(())
             })
             .on(github::app::STATUS_JOB, github::app::status_job)

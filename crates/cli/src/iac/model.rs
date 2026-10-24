@@ -37,6 +37,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "hosting",
     "cronSchedule",
     "cronTimeoutSecs",
+    "edgeRules",
 ];
 
 /// Keys of a service table that aren't settings.

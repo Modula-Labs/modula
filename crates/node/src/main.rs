@@ -75,6 +75,13 @@ enum Command {
         /// Loopback address for Caddy's on-demand TLS `ask` endpoint.
         #[arg(long, env = "MODULA_ASK_LISTEN", default_value = "127.0.0.1:7102")]
         ask_listen: std::net::SocketAddr,
+        /// Loopback address Caddy sends the HTTP access log to.
+        #[arg(
+            long,
+            env = "MODULA_ACCESS_LOG_LISTEN",
+            default_value = "127.0.0.1:7103"
+        )]
+        access_log_listen: std::net::SocketAddr,
         /// Run workloads without managing Caddy (no public routes).
         #[arg(long)]
         no_edge: bool,
@@ -177,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Run {
             caddy_admin,
             ask_listen,
+            access_log_listen,
             no_edge,
             routes,
             no_build,
@@ -201,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
             // Only the main server serves routes of its own (the dashboard).
             let serves_dashboard = !routes.is_empty();
             let stop = CancellationToken::new();
+            let mut access_log = None;
             let edge: Option<Arc<dyn EdgeSink>> = if no_edge {
                 None
             } else {
@@ -213,6 +222,22 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     .with_context(|| format!("cannot bind {ask_listen}"))?;
                 tokio::spawn(ask::serve(listener, allowlist.clone(), stop.clone()));
+                anyhow::ensure!(
+                    access_log_listen.ip().is_loopback(),
+                    "--access-log-listen must be a loopback address"
+                );
+                // Without the collector the edge still serves, unlogged.
+                match tokio::net::TcpListener::bind(access_log_listen).await {
+                    Ok(listener) => {
+                        let log = Arc::new(modula_node::edge::access::AccessLog::default());
+                        tokio::spawn(log.clone().serve(listener, stop.clone()));
+                        access_log = Some(log);
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "cannot bind {access_log_listen}: HTTP access logs are off"
+                    ),
+                }
                 let caddy = Arc::new(CaddyEdge::new(
                     &caddy_admin,
                     format!("http://{ask_listen}/ask"),
@@ -223,6 +248,7 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         Listeners::Ports
                     },
+                    access_log.as_ref().map(|_| access_log_listen.to_string()),
                 )?);
                 tokio::spawn(caddy.clone().watch(stop.clone()));
                 Some(caddy)
@@ -275,6 +301,7 @@ async fn main() -> anyhow::Result<()> {
                 db: Some(db),
                 upgrade,
                 mesh,
+                access_log,
             };
             session::run(cli.data_dir, runtime, caps, stop).await?;
         }

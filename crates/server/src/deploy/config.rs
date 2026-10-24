@@ -134,6 +134,11 @@ pub struct ServiceConfig {
     /// [`DEFAULT_CRON_TIMEOUT_SECS`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron_timeout_secs: Option<u32>,
+
+    /// Rules the edge applies to requests for the service's domains, in
+    /// order (see [`super::edge`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge_rules: Vec<super::edge::EdgeRule>,
 }
 
 pub const DEFAULT_CRON_TIMEOUT_SECS: u32 = 3600;
@@ -424,6 +429,7 @@ impl ServiceConfig {
                 return Err(AppError::bad_request("max retries must be 1–1000"));
             }
         }
+        super::edge::validate(&self.edge_rules)?;
         if self.port == 0 {
             return Err(AppError::bad_request("port must be 1–65535"));
         }
