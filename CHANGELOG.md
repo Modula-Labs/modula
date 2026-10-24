@@ -23,6 +23,37 @@ may break things).
   branch per repo service) or empty; rename; the default environment can't be
   deleted. CLI: `modula environment new --duplicate --branch`, `rename`,
   `delete`.
+- **Team members:** invite people to a workspace with a single-use link and a
+  role; change roles, remove members, or leave. An admin invite needs sudo.
+- **Cron schedules:** run a service on a 5-field UTC schedule instead of
+  continuously, with run history and "Run now" (`modula cron run`).
+- **PR previews:** an environment per pull request, built from a base
+  environment, with a generated domain and a PR comment linking it; removed
+  when the PR closes. Fork PRs get no secrets.
+- **Wait for CI:** a push deploys once its GitHub checks pass.
+- **Shell:** a terminal into a running deployment in the dashboard
+  (`modula ssh`), and `modula run <cmd>` to run a command locally with a
+  service's variables.
+- **Alerts:** Slack, Discord and webhook channels, with rules for failed,
+  crashed or degraded deployments, CPU, memory and disk use, and offline
+  servers.
+- **Edge:** HTTP access logs and request, error-rate and latency charts per
+  service; edge rules to block, allow, redirect, rate-limit, cache or set
+  headers.
+- **Templates:** one-click apps (n8n, Plausible, Umami, Metabase, Uptime Kuma,
+  Ghost), with images pinned by digest (`modula deploy --template`).
+- **Postgres:** back up to an S3 target, an R2 or self-hosted bucket, or a
+  server's disk; point-in-time recovery with WAL-G; read replicas with
+  replication lag and promote.
+- **Serverless services:** scale a service to zero after an idle time; the
+  next request starts it again (cold starts are shown on the deployment).
+- **Functions:** JavaScript functions written in the dashboard or bundled from
+  a repository, run by workerd on your servers or deployed to Cloudflare
+  Workers.
+- **Private network:** DNS records for every server running a replica, a
+  virtual IP per service balanced across them, relay through the main server
+  for servers behind NAT, and a Hetzner firewall rule for WireGuard. A
+  deployment whose replica crashed shows as degraded.
 
 ### Fixed
 

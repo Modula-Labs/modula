@@ -1079,7 +1079,6 @@ Wants=network-online.target docker.service modula-caddy.service
 # the sandboxing below only takes away what it never needs.
 EnvironmentFile=-$CONF/node.env
 ExecStart=$PREFIX/current/modula-node --data-dir $NODE_STATE run --caddy-admin unix:$CADDY_SOCKET --buildctl $PREFIX/current/buildctl --railpack $PREFIX/current/railpack --wal-g $PREFIX/current/wal-g --workerd $PREFIX/current/workerd$args
-
 Restart=always
 RestartSec=2
 KillMode=mixed
