@@ -567,6 +567,11 @@ impl ServiceConfig {
                     "a site hosted on Cloudflare doesn't run on the servers: it can't be serverless",
                 ));
             }
+            if self.function().is_some() {
+                return Err(AppError::bad_request(
+                    "a function is always warm and costs next to nothing idle: it can't be serverless",
+                ));
+            }
         }
         if !(1..=MAX_REPLICAS).contains(&self.replicas) {
             return Err(AppError::bad_request(format!(
@@ -1150,6 +1155,10 @@ mod tests {
             (
                 serde_json::json!({ "hosting": { "type": "cloudflare" }, "replicas": 2 }),
                 "replicas on Cloudflare",
+            ),
+            (
+                serde_json::json!({ "serverless": { "idleMinutes": 5 } }),
+                "serverless",
             ),
         ] {
             let mut v = extra.clone();
