@@ -90,8 +90,12 @@ export function RepoField({
   onRepoInput,
   repo,
   onPick,
+  autoFocus = true,
+  disabled,
 }: {
   s: RepoSuggestions;
+  autoFocus?: boolean;
+  disabled?: boolean;
   repoInput: string;
   onRepoInput: (v: string) => void;
   /** `repoInput` parsed as `owner/name`, or null. */
@@ -129,7 +133,8 @@ export function RepoField({
           <Combobox
             inputProps={p}
             mono
-            autoFocus
+            autoFocus={autoFocus}
+            disabled={disabled}
             placeholder="Search or paste owner/name"
             value={repoInput}
             onChange={onRepoInput}
@@ -154,7 +159,8 @@ export function RepoField({
           <Input
             {...p}
             mono
-            autoFocus
+            autoFocus={autoFocus}
+            disabled={disabled}
             required
             placeholder="owner/name or https://github.com/owner/name"
             value={repoInput}
@@ -166,7 +172,7 @@ export function RepoField({
   );
 }
 
-export function BranchField({ s, branch, onBranch }: { s: RepoSuggestions; branch: string; onBranch: (v: string) => void }) {
+export function BranchField({ s, branch, onBranch, disabled }: { s: RepoSuggestions; branch: string; onBranch: (v: string) => void; disabled?: boolean }) {
   const options = s.branchOptions;
   return (
     <Field label="Branch">
@@ -175,6 +181,7 @@ export function BranchField({ s, branch, onBranch }: { s: RepoSuggestions; branc
           <Combobox
             inputProps={p}
             mono
+            disabled={disabled}
             value={branch}
             onChange={onBranch}
             options={options}
@@ -189,7 +196,7 @@ export function BranchField({ s, branch, onBranch }: { s: RepoSuggestions; branc
             onPick={(b) => onBranch(b.name)}
           />
         ) : (
-          <Input {...p} mono value={branch} onChange={(e) => onBranch(e.target.value)} />
+          <Input {...p} mono disabled={disabled} value={branch} onChange={(e) => onBranch(e.target.value)} />
         )
       }
     </Field>

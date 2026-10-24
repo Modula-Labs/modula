@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseRepo, serviceNameFromImage } from "./NewServiceDialog";
-import { joinArgs, splitArgs, toConfig, toForm } from "./SettingsTab";
+import { joinArgs, splitArgs, switchSource, toConfig, toForm } from "./SettingsTab";
 import type { ServiceConfig } from "@/lib/api";
 
 describe("serviceNameFromImage", () => {
@@ -78,5 +78,41 @@ describe("service config payload", () => {
   it("omits dockerfilePath for the railpack builder", () => {
     const f = { ...toForm({ ...base, source: { type: "repo", repo: "a/b", branch: "main" } }), dockerfilePath: "X" };
     expect(toConfig(f).dockerfilePath).toBeUndefined();
+  });
+
+  describe("switching the source kind", () => {
+    const sw = (c: ServiceConfig, kind: "image" | "repo" | "local", patch = {}) =>
+      JSON.parse(JSON.stringify(toConfig({ ...switchSource(toForm(c), kind), ...patch })));
+
+    it("local → repo adds repo/branch and the repo-only fields, keeps the rest", () => {
+      const c: ServiceConfig = { ...base, port: 3000, source: { type: "local", rootDir: "api" }, builder: "dockerfile", dockerfilePath: "D" };
+      const out = sw(c, "repo", { repo: "https://github.com/acme/app.git", branch: "dev" });
+      expect(out.source).toEqual({ type: "repo", repo: "acme/app", branch: "dev", rootDir: "api" });
+      expect(out).toMatchObject({ port: 3000, builder: "dockerfile", dockerfilePath: "D", autoDeploy: true });
+    });
+
+    it("repo → local drops repo, branch, autoDeploy and watchPaths", () => {
+      const c: ServiceConfig = {
+        ...base,
+        source: { type: "repo", repo: "acme/app", branch: "main", rootDir: "web" },
+        autoDeploy: false,
+        watchPaths: ["web/**"],
+        buildCommand: "npm run build",
+      };
+      const out = sw(c, "local");
+      expect(out.source).toEqual({ type: "local", rootDir: "web" });
+      expect(out.autoDeploy).toBeUndefined();
+      expect(out.watchPaths).toBeUndefined();
+      expect(out.buildCommand).toBe("npm run build");
+    });
+
+    it("image → repo gets a build config; switching back restores the image", () => {
+      const c: ServiceConfig = { ...base, source: { type: "image", image: "nginx:1" } };
+      const out = sw(c, "repo", { repo: "acme/app" });
+      expect(out.source).toEqual({ type: "repo", repo: "acme/app", branch: "main" });
+      expect(out.builder).toBe("railpack");
+      expect(sw(c, "repo")).not.toEqual(c);
+      expect(toConfig(switchSource(switchSource(toForm(c), "repo"), "image"))).toEqual(toConfig(toForm(c)));
+    });
   });
 });

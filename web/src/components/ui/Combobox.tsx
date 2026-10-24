@@ -21,6 +21,7 @@ export function Combobox<T>({
   empty,
   placeholder,
   autoFocus,
+  disabled,
   mono,
 }: {
   /** From `Field` (id, aria-invalid, aria-describedby). */
@@ -36,6 +37,7 @@ export function Combobox<T>({
   empty?: ReactNode;
   placeholder?: string;
   autoFocus?: boolean;
+  disabled?: boolean;
   mono?: boolean;
 }) {
   const listId = useId();
@@ -56,6 +58,7 @@ export function Combobox<T>({
         {...inputProps}
         mono={mono}
         autoFocus={autoFocus}
+        disabled={disabled}
         autoComplete="off"
         spellCheck={false}
         placeholder={placeholder}

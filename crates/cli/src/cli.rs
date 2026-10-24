@@ -153,6 +153,9 @@ pub enum Command {
     },
     /// Show a deployment's logs.
     Logs(LogsArgs),
+    /// Show or change where the service's code comes from: connect a GitHub
+    /// repository (or another one), an image, or local files (`--local`).
+    Source(SourceArgs),
     /// Show the service's CPU, memory and network usage.
     Metrics {
         /// How far back: 1h, 6h, 24h or 7d.
@@ -325,6 +328,28 @@ pub struct AddArgs {
     /// Variables to set in the selected environment (KEY=VALUE, repeatable).
     #[arg(short, long = "variables", value_name = "KEY=VALUE")]
     pub variables: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+#[command(group(
+    clap::ArgGroup::new("kind").args(["repo", "image", "local"])
+))]
+pub struct SourceArgs {
+    /// Connect this GitHub repository (owner/name), or switch to it.
+    #[arg(long)]
+    pub repo: Option<String>,
+    /// The branch to deploy (default: the current one, else main).
+    #[arg(long)]
+    pub branch: Option<String>,
+    /// Build from this directory of the repository or upload.
+    #[arg(long)]
+    pub root_dir: Option<String>,
+    /// Run this prebuilt image instead.
+    #[arg(long)]
+    pub image: Option<String>,
+    /// Disconnect the repository: deploy local files with `modula up`.
+    #[arg(long)]
+    pub local: bool,
 }
 
 #[derive(Debug, Subcommand)]

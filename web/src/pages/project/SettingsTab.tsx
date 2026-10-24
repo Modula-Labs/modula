@@ -7,11 +7,15 @@ import { Segmented } from "@/components/ui/Tabs";
 import {
   api,
   type Builder,
+  type ProjectDetail,
   type Instance,
   type RestartPolicy,
   type ServiceConfig,
 } from "@/lib/api";
+import { projectReturnPath } from "@/lib/github";
 import { DomainsSection } from "./DomainsSection";
+import { parseRepo } from "./NewServiceDialog";
+import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
 import { TcpProxySection, VolumeSection } from "./StorageSections";
 
 function Section({
@@ -56,7 +60,7 @@ export function joinArgs(a: string[] | undefined): string {
     .join(" ");
 }
 
-interface Form {
+export interface Form {
   kind: "image" | "repo" | "local";
   image: string;
   repo: string;
@@ -106,6 +110,13 @@ export const toForm = (c: ServiceConfig): Form => ({
   replicas: String(c.replicas ?? 1),
 });
 
+/** Switches the service's source kind, keeping every other field. Fields that
+ *  belong to the kind being left stay in the form, so switching back restores them. */
+export const switchSource = (f: Form, kind: Form["kind"]): Form => ({
+  ...f,
+  kind,
+});
+
 const optNum = (s: string) => (s.trim() ? Number(s) : undefined);
 
 /** The exact config shape the server accepts; build fields exist only for repo sources. */
@@ -153,7 +164,7 @@ export const toConfig = (f: Form): ServiceConfig => {
   return {
     source: {
       type: "repo",
-      repo: f.repo.trim(),
+      repo: parseRepo(f.repo) ?? f.repo.trim(),
       branch: f.branch.trim() || "main",
       rootDir: f.rootDir.trim() || undefined,
     },
@@ -177,10 +188,42 @@ export function SettingsTab({
 }) {
   const qc = useQueryClient();
   const [form, setForm] = useState(() => toForm(instance.config));
-  useEffect(() => setForm(toForm(instance.config)), [instance.config]);
+  useEffect(() => {
+    setForm(toForm(instance.config));
+    setConfirmDisconnect(false);
+  }, [instance.config]);
   const dirty =
     JSON.stringify(toConfig(form)) !==
     JSON.stringify(toConfig(toForm(instance.config)));
+  const origKind = instance.config.source.type;
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const workspaceId = qc.getQueryData<ProjectDetail>([
+    "project",
+    instance.projectId,
+  ])?.workspaceId;
+  const suggestions = useRepoSuggestions(
+    form.kind === "repo" && canEdit ? workspaceId : undefined,
+    form.repo,
+    parseRepo(form.repo),
+    form.branch,
+    projectReturnPath(instance.projectId, instance.environmentId),
+  );
+  const switchKind = (kind: Form["kind"]) => setForm((f) => switchSource(f, kind));
+  const sourceDescription =
+    form.kind === "repo"
+      ? "The repository every deploy builds from."
+      : form.kind === "image"
+        ? "The image every deploy pulls."
+        : (
+          <>
+            Deployed from local files with <code className="font-mono text-foreground">modula up</code>. Deploying again
+            reuses the latest upload.
+          </>
+        );
+  const invalidSource =
+    form.kind === "repo" && !parseRepo(form.repo)
+      ? "Pick a repository (owner/name) first."
+      : null;
   const set =
     <K extends keyof Form>(k: K) =>
     (e: { target: { value: string } }) =>
@@ -215,161 +258,228 @@ export function SettingsTab({
 
   return (
     <div className="flex flex-col pb-20">
-      {form.kind !== "image" ? (
-        <Section
-          title="Source"
-          description={
-            form.kind === "repo"
-              ? "The repository every deploy builds from."
-              : "Local files, uploaded with `modula up` from your machine. Deploying again reuses the latest upload."
-          }
-        >
-          {form.kind === "repo" ? (
-          <Field label="Repository">
-            {(p) => (
-              <Input
-                {...p}
-                mono
-                disabled={!canEdit}
-                value={form.repo}
-                onChange={set("repo")}
-              />
-            )}
-          </Field>
-          ) : null}
-          <div className="grid grid-cols-2 gap-3">
-            {form.kind === "repo" ? (
-            <Field label="Branch">
-              {(p) => (
-                <Input
-                  {...p}
-                  mono
-                  disabled={!canEdit}
-                  value={form.branch}
-                  onChange={set("branch")}
-                />
-              )}
-            </Field>
-            ) : null}
-            <Field label="Root directory" hint="For monorepos.">
-              {(p) => (
-                <Input
-                  {...p}
-                  mono
-                  disabled={!canEdit}
-                  placeholder="/"
-                  value={form.rootDir}
-                  onChange={set("rootDir")}
-                />
-              )}
-            </Field>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <div className="text-sm font-medium">Builder</div>
-            <div
-              className={canEdit ? undefined : "pointer-events-none opacity-50"}
-            >
-              <Segmented
-                label="Builder"
-                value={form.builder}
-                onChange={(builder) => setForm((f) => ({ ...f, builder }))}
-                options={[
-                  { value: "railpack", label: "Railpack" },
-                  { value: "dockerfile", label: "Dockerfile" },
-                ]}
-              />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {form.builder === "railpack"
-                ? "Detects your language and builds without a Dockerfile."
-                : form.kind === "repo"
-                  ? "Builds with a Dockerfile from the repository."
-                  : "Builds with the Dockerfile in the uploaded files."}
-            </p>
-          </div>
-          {form.builder === "dockerfile" ? (
-            <Field
-              label="Dockerfile path"
-              hint="Relative to the root directory. Defaults to Dockerfile."
-            >
-              {(p) => (
-                <Input
-                  {...p}
-                  mono
-                  disabled={!canEdit}
-                  placeholder="Dockerfile"
-                  value={form.dockerfilePath}
-                  onChange={set("dockerfilePath")}
-                />
-              )}
-            </Field>
-          ) : null}
-          <Field
-            label="Build command"
-            hint="Leave empty to use the detected default."
-          >
-            {(p) => (
-              <Input
-                {...p}
-                mono
-                disabled={!canEdit}
-                placeholder="npm run build"
-                value={form.buildCommand}
-                onChange={set("buildCommand")}
-              />
-            )}
-          </Field>
-          {form.kind === "repo" ? (
+      <Section title="Source" description={sourceDescription}>
+        {form.kind === "image" ? (
           <>
-          <label className="flex items-start gap-2.5 text-sm">
-            <input
-              type="checkbox"
-              disabled={!canEdit}
-              checked={form.autoDeploy}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, autoDeploy: e.target.checked }))
-              }
-              className="mt-0.5 size-4 accent-foreground"
-            />
-            <span>
-              <span className="font-medium">Auto-deploy</span>
-              <span className="block text-xs text-muted-foreground">
-                Deploy automatically when the branch gets new commits.
-              </span>
-            </span>
-          </label>
-          <Field
-            label="Watch paths"
-            hint="One glob per line. Only matching changes trigger a deploy. Empty means any change."
-          >
-            {(p) => (
-              <Textarea
-                {...p}
-                disabled={!canEdit}
-                placeholder={"src/**\n!docs/**"}
-                value={form.watchPaths}
-                onChange={set("watchPaths")}
-              />
-            )}
-          </Field>
+            <Field label="Image">
+              {(p) => (
+                <Input
+                  {...p}
+                  mono
+                  disabled={!canEdit}
+                  value={form.image}
+                  onChange={set("image")}
+                />
+              )}
+            </Field>
+            {canEdit ? (
+              <div>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => switchKind("repo")}
+                >
+                  Use a GitHub repository instead
+                </Button>
+              </div>
+            ) : null}
           </>
-          ) : null}
-        </Section>
-      ) : (
-        <Section title="Source" description="The image every deploy pulls.">
-          <Field label="Image">
-            {(p) => (
-              <Input
-                {...p}
-                mono
+        ) : null}
+        {form.kind === "local" && canEdit ? (
+          <div>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => switchKind("repo")}
+            >
+              Connect a GitHub repository
+            </Button>
+          </div>
+        ) : null}
+        {form.kind === "repo" ? (
+          <>
+            <RepoField
+              s={suggestions}
+              repoInput={form.repo}
+              onRepoInput={(repo) => setForm((f) => ({ ...f, repo }))}
+              repo={parseRepo(form.repo)}
+              autoFocus={origKind !== "repo"}
+              disabled={!canEdit}
+              onPick={(r) =>
+                setForm((f) => ({
+                  ...f,
+                  repo: r.fullName,
+                  branch: r.defaultBranch,
+                }))
+              }
+            />
+          </>
+        ) : null}
+        {form.kind !== "image" ? (
+          <>
+            <div className="grid grid-cols-2 items-start gap-3">
+              {form.kind === "repo" ? (
+                <BranchField
+                  s={suggestions}
+                  branch={form.branch}
+                  disabled={!canEdit}
+                  onBranch={(branch) => setForm((f) => ({ ...f, branch }))}
+                />
+              ) : null}
+              <Field label="Root directory" hint="For monorepos.">
+                {(p) => (
+                  <Input
+                    {...p}
+                    mono
+                    disabled={!canEdit}
+                    placeholder="/"
+                    value={form.rootDir}
+                    onChange={set("rootDir")}
+                  />
+                )}
+              </Field>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <div className="text-sm font-medium">Builder</div>
+              <div
+                className={
+                  canEdit ? undefined : "pointer-events-none opacity-50"
+                }
+              >
+                <Segmented
+                  label="Builder"
+                  value={form.builder}
+                  onChange={(builder) => setForm((f) => ({ ...f, builder }))}
+                  options={[
+                    { value: "railpack", label: "Railpack" },
+                    { value: "dockerfile", label: "Dockerfile" },
+                  ]}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {form.builder === "railpack"
+                  ? "Detects your language and builds without a Dockerfile."
+                  : form.kind === "repo"
+                    ? "Builds with a Dockerfile from the repository."
+                    : "Builds with the Dockerfile in the uploaded files."}
+              </p>
+            </div>
+            {form.builder === "dockerfile" ? (
+              <Field
+                label="Dockerfile path"
+                hint="Relative to the root directory. Defaults to Dockerfile."
+              >
+                {(p) => (
+                  <Input
+                    {...p}
+                    mono
+                    disabled={!canEdit}
+                    placeholder="Dockerfile"
+                    value={form.dockerfilePath}
+                    onChange={set("dockerfilePath")}
+                  />
+                )}
+              </Field>
+            ) : null}
+            <Field
+              label="Build command"
+              hint="Leave empty to use the detected default."
+            >
+              {(p) => (
+                <Input
+                  {...p}
+                  mono
+                  disabled={!canEdit}
+                  placeholder="npm run build"
+                  value={form.buildCommand}
+                  onChange={set("buildCommand")}
+                />
+              )}
+            </Field>
+          </>
+        ) : null}
+        {form.kind === "repo" ? (
+          <>
+            <label className="flex items-start gap-2.5 text-sm">
+              <input
+                type="checkbox"
                 disabled={!canEdit}
-                value={form.image}
-                onChange={set("image")}
+                checked={form.autoDeploy}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, autoDeploy: e.target.checked }))
+                }
+                className="mt-0.5 size-4 accent-foreground"
               />
-            )}
-          </Field>
-        </Section>
-      )}
+              <span>
+                <span className="font-medium">Auto-deploy</span>
+                <span className="block text-xs text-muted-foreground">
+                  Deploy automatically when the branch gets new commits.
+                </span>
+              </span>
+            </label>
+            <Field
+              label="Watch paths"
+              hint="One glob per line. Only matching changes trigger a deploy. Empty means any change."
+            >
+              {(p) => (
+                <Textarea
+                  {...p}
+                  disabled={!canEdit}
+                  placeholder={"src/**\n!docs/**"}
+                  value={form.watchPaths}
+                  onChange={set("watchPaths")}
+                />
+              )}
+            </Field>
+          </>
+        ) : null}
+        {form.kind === "repo" && canEdit ? (
+          confirmDisconnect ? (
+            <div className="flex flex-col gap-3 rounded-lg border border-border p-4 text-sm">
+              <p className="text-muted-foreground">
+                Future deploys will come from local files with{" "}
+                <code className="font-mono text-foreground">modula up</code>,
+                and push-to-deploy stops.
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => {
+                    switchKind("local");
+                    setConfirmDisconnect(false);
+                  }}
+                >
+                  Switch to local files
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setConfirmDisconnect(false)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  origKind === "repo"
+                    ? setConfirmDisconnect(true)
+                    : switchKind(origKind)
+                }
+              >
+                {origKind === "repo"
+                  ? "Disconnect repository"
+                  : "Cancel connecting a repository"}
+              </Button>
+            </div>
+          )
+        ) : null}
+      </Section>
 
       <Section
         title="Networking"
@@ -599,7 +709,7 @@ export function SettingsTab({
             ) : deploy.error ? (
               <span className="text-error">{deploy.error.message}</span>
             ) : dirty ? (
-              "Unsaved changes"
+              (invalidSource ?? "Unsaved changes")
             ) : (
               "Saved. Deploy to apply the new settings."
             )}
@@ -618,7 +728,7 @@ export function SettingsTab({
                   size="sm"
                   variant="secondary"
                   loading={save.isPending}
-                  disabled={Number(form.replicas) > 1}
+                  disabled={Number(form.replicas) > 1 || !!invalidSource}
                   onClick={() => save.mutate()}
                 >
                   Save
