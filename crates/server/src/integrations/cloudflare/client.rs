@@ -379,6 +379,60 @@ impl Client {
         }
     }
 
+    /// Makes the routing records (A/AAAA/CNAME) at `name` exactly `want`
+    /// (`(kind, value)` pairs): Modula's own records that aren't wanted go,
+    /// the wanted ones are ensured. A CNAME can't sit next to other records,
+    /// so a conflicting kind is removed before the new records are written;
+    /// stale values of the same kind go afterwards (no gap while switching
+    /// servers). The user's own records are never touched.
+    pub async fn set_routing(
+        &self,
+        zone_id: &str,
+        name: &str,
+        want: &[(&str, &str)],
+        proxied: bool,
+    ) -> Result<()> {
+        let mut managed = Vec::new();
+        for kind in ["A", "AAAA", "CNAME"] {
+            managed.extend(
+                self.dns_records(zone_id, name, kind)
+                    .await?
+                    .into_iter()
+                    .filter(|r| r.comment.as_deref() == Some(MANAGED_COMMENT)),
+            );
+        }
+        let wanted = |r: &DnsRecord| {
+            want.iter().any(|(k, v)| {
+                k.eq_ignore_ascii_case(&r.kind) && same_content(&r.kind, &r.content, v)
+            })
+        };
+        let wants_cname = want.iter().any(|(k, _)| k.eq_ignore_ascii_case("CNAME"));
+        let (conflicting, stale): (Vec<&DnsRecord>, Vec<&DnsRecord>) = managed
+            .iter()
+            .filter(|r| !wanted(r))
+            .partition(|r| wants_cname || r.kind == "CNAME");
+        for r in conflicting {
+            self.delete_record_id(zone_id, &r.id).await?;
+        }
+        for (kind, value) in want {
+            self.ensure_record(zone_id, name, kind, value, proxied)
+                .await?;
+        }
+        for r in stale {
+            self.delete_record_id(zone_id, &r.id).await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_record_id(&self, zone_id: &str, id: &str) -> Result<()> {
+        let path = format!("zones/{zone_id}/dns_records/{id}");
+        match self.call::<Value>(Method::DELETE, &path, &[], None).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.status() == Some(404) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Removes the `kind` records named `name` that Modula wrote (see
     /// [`MANAGED_COMMENT`]); the user's own records are left alone. Returns
     /// how many went.

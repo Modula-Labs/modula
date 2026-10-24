@@ -84,6 +84,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .delete("/api/services/{service_id}", Resource(Action::ServiceDelete), services::delete)
         .get("/api/service-instances/{instance_id}", Resource(Action::InstanceRead), services::get_instance)
         .patch("/api/service-instances/{instance_id}", Resource(Action::InstanceUpdate), services::update_instance)
+        .patch("/api/service-instances/{instance_id}/server", Resource(Action::InstanceUpdate), services::move_instance)
         .get("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesRead), variables::instance_variables)
         .patch("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesWrite), variables::update_instance_variables)
         .get("/api/environments/{environment_id}/variables", Resource(Action::SharedVariablesRead), variables::shared_variables)

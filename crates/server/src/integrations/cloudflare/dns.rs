@@ -51,6 +51,21 @@ impl DnsProvider for CloudflareDns {
         })
     }
 
+    fn set_routing<'a>(
+        &'a self,
+        zone: &'a Zone,
+        name: &'a str,
+        want: &'a [(&'a str, &'a str)],
+        proxied: bool,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            self.client
+                .set_routing(&zone.id, name, want, proxied)
+                .await?;
+            Ok(())
+        })
+    }
+
     fn delete_record<'a>(
         &'a self,
         zone: &'a Zone,

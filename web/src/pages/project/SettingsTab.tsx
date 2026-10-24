@@ -16,7 +16,10 @@ import { projectReturnPath } from "@/lib/github";
 import { DomainsSection } from "./DomainsSection";
 import { parseRepo } from "./NewServiceDialog";
 import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
+import { ResourceSliders, SectionRail, ServerPicker, useNodes } from "./SettingsParts";
 import { TcpProxySection, VolumeSection } from "./StorageSections";
+
+const sectionId = (title: string) => `settings-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
 
 function Section({
   title,
@@ -28,7 +31,7 @@ function Section({
   children: ReactNode;
 }) {
   return (
-    <section className="grid gap-4 @container border-b border-border py-6 first:pt-0 last:border-b-0">
+    <section id={sectionId(title)} className="grid scroll-mt-2 gap-4 @container border-b border-border py-6 first:pt-0 last:border-b-0">
       <div className="grid gap-4 @2xl:grid-cols-[200px_1fr] @2xl:gap-8">
         <div>
           <h3 className="text-base font-semibold">{title}</h3>
@@ -208,6 +211,18 @@ export function SettingsTab({
     form.branch,
     projectReturnPath(instance.projectId, instance.environmentId),
   );
+  const nodes = useNodes();
+  const node = nodes.data?.find((n) => n.id === instance.nodeId);
+  const railItems = [
+    "Source",
+    "Networking",
+    "Deploy",
+    "Teardown",
+    "Resources",
+    "Regions & Replicas",
+    "Volume",
+    ...(canDelete ? ["Danger zone"] : []),
+  ].map((label) => ({ id: sectionId(label), label }));
   const switchKind = (kind: Form["kind"]) => setForm((f) => switchSource(f, kind));
   const sourceDescription =
     form.kind === "repo"
@@ -257,7 +272,8 @@ export function SettingsTab({
   });
 
   return (
-    <div className="flex flex-col pb-20">
+    <div className="@container flex items-start gap-8">
+    <div className="flex min-w-0 flex-1 flex-col pb-20">
       <Section title="Source" description={sourceDescription}>
         {form.kind === "image" ? (
           <>
@@ -621,34 +637,28 @@ export function SettingsTab({
 
       <Section
         title="Resources"
-        description="Hard limits for the container. Empty means no limit."
+        description="Hard limits for the container. All the way right means no limit."
       >
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Memory (MB)">
-            {(p) => (
-              <Input
-                {...p}
-                inputMode="numeric"
-                disabled={!canEdit}
-                placeholder="No limit"
-                value={form.memoryMb}
-                onChange={set("memoryMb")}
-              />
-            )}
-          </Field>
-          <Field label="CPU (millicores)" hint="1000 = one vCPU.">
-            {(p) => (
-              <Input
-                {...p}
-                inputMode="numeric"
-                disabled={!canEdit}
-                placeholder="No limit"
-                value={form.cpuMillis}
-                onChange={set("cpuMillis")}
-              />
-            )}
-          </Field>
-        </div>
+        <ResourceSliders
+          node={node}
+          canEdit={canEdit}
+          cpuMillis={form.cpuMillis}
+          memoryMb={form.memoryMb}
+          onCpu={(cpuMillis) => setForm((f) => ({ ...f, cpuMillis }))}
+          onMemory={(memoryMb) => setForm((f) => ({ ...f, memoryMb }))}
+        />
+      </Section>
+
+      <Section
+        title="Regions & Replicas"
+        description="The server this service runs on, and how many copies of it."
+      >
+        <ServerPicker
+          instance={instance}
+          nodes={nodes.data}
+          workspaceId={workspaceId}
+          canEdit={canEdit}
+        />
         <Field
           label="Replicas"
           hint="Each replica runs on a different server. On one server, raise CPU and memory instead."
@@ -661,6 +671,7 @@ export function SettingsTab({
           {(p) => (
             <Input
               {...p}
+              className="w-32"
               type="number"
               min={1}
               max={1}
@@ -749,6 +760,8 @@ export function SettingsTab({
           </div>
         </div>
       ) : null}
+    </div>
+    <SectionRail items={railItems} />
     </div>
   );
 }

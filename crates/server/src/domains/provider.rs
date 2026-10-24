@@ -33,6 +33,16 @@ pub trait DnsProvider: Send + Sync {
         value: &'a str,
         proxied: bool,
     ) -> BoxFuture<'a, anyhow::Result<()>>;
+    /// Makes the routing records (A/AAAA/CNAME) at `name` exactly `want`
+    /// (`(kind, value)` pairs), replacing the ones it wrote earlier: a
+    /// CNAME that became A records, or the IP of a server the service left.
+    fn set_routing<'a>(
+        &'a self,
+        zone: &'a Zone,
+        name: &'a str,
+        want: &'a [(&'a str, &'a str)],
+        proxied: bool,
+    ) -> BoxFuture<'a, anyhow::Result<()>>;
     /// Removes the record `name` of type `kind`; absent records are not an error.
     fn delete_record<'a>(
         &'a self,

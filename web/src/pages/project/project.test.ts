@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { parseRepo, serviceNameFromImage } from "./NewServiceDialog";
 import { joinArgs, splitArgs, switchSource, toConfig, toForm } from "./SettingsTab";
-import type { ServiceConfig } from "@/lib/api";
+import type { NodeInfo, ServiceConfig } from "@/lib/api";
+import { CPU_STEP, MEM_STEP, capacity, formatCpu, formatMemory, fromSlider, serverLabel, toSlider } from "./resources";
 
 describe("serviceNameFromImage", () => {
   it.each([
@@ -114,5 +115,46 @@ describe("service config payload", () => {
       expect(sw(c, "repo")).not.toEqual(c);
       expect(toConfig(switchSource(switchSource(toForm(c), "repo"), "image"))).toEqual(toConfig(toForm(c)));
     });
+  });
+});
+
+describe("resource sliders", () => {
+  const cpuMax = 4000;
+  it("maps limits to slider positions and back", () => {
+    expect(toSlider("500", cpuMax, CPU_STEP)).toBe(2);
+    expect(fromSlider(2, cpuMax, CPU_STEP)).toBe("500");
+    expect(fromSlider(1, cpuMax, CPU_STEP)).toBe("250");
+    expect(toSlider("2048", 8192, MEM_STEP)).toBe(8);
+    expect(fromSlider(8, 8192, MEM_STEP)).toBe("2048");
+  });
+  const cfg: ServiceConfig = { source: { type: "image", image: "x" }, port: 80, healthcheckTimeoutSecs: 300, restartPolicy: "on_failure", cpuMillis: 500 };
+  it("treats the far right as no limit", () => {
+    expect(toSlider("", cpuMax, CPU_STEP)).toBe(16);
+    expect(fromSlider(16, cpuMax, CPU_STEP)).toBe("");
+    expect(fromSlider(32, 8192, MEM_STEP)).toBe("");
+    expect(toConfig({ ...toForm(cfg), cpuMillis: fromSlider(16, cpuMax, CPU_STEP) }).cpuMillis).toBeUndefined();
+  });
+  it("clamps a stored limit above the server's capacity below no-limit", () => {
+    expect(toSlider("9000", cpuMax, CPU_STEP)).toBe(15);
+  });
+  it("formats values", () => {
+    expect(formatCpu("250")).toBe("0.25 vCPU");
+    expect(formatCpu("2000")).toBe("2 vCPU");
+    expect(formatCpu("")).toBe("No limit");
+    expect(formatMemory("256")).toBe("256 MB");
+    expect(formatMemory("2048")).toBe("2 GB");
+    expect(formatMemory("1280")).toBe("1.25 GB");
+  });
+  it("falls back to 8 vCPU / 16 GB when the server is unknown", () => {
+    expect(capacity(undefined)).toEqual({ cpuMillis: 8000, memoryMb: 16384 });
+  });
+  it("labels servers", () => {
+    const node = {
+      name: "modula-main",
+      location: { id: "hetzner:fsn1", label: "Falkenstein", provider: "hetzner", countryCode: "DE" },
+      info: { cpus: 4, memoryBytes: 8 * 1024 ** 3 },
+    } as NodeInfo;
+    expect(serverLabel(node)).toBe("🇩🇪 Falkenstein · modula-main (4 vCPU · 8 GB)");
+    expect(serverLabel({ ...node, location: null })).toBe("modula-main (4 vCPU · 8 GB)");
   });
 });

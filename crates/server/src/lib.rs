@@ -98,6 +98,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 Ok(())
             })
             .on(github::app::STATUS_JOB, github::app::status_job)
+            .on(domains::RESYNC_JOB, domains::resync_job)
             .on(provision::track::TRACK_JOB, provision::track::track_job),
         format!("server-{}", modula_id::Id::new()),
         stop.clone(),

@@ -570,12 +570,15 @@ pub async fn set_ingress(
         d.verification_token.as_deref().unwrap_or_default(),
         &target,
     );
-    for r in records.iter().filter(|r| r.kind != "TXT") {
-        conn.client
-            .ensure_record(&zone.id, &r.name, r.kind, &r.value, req.proxied)
-            .await
-            .map_err(super::upstream)?;
-    }
+    let routing: Vec<(&str, &str)> = records
+        .iter()
+        .filter(|r| r.kind != "TXT")
+        .map(|r| (r.kind, r.value.as_str()))
+        .collect();
+    conn.client
+        .set_routing(&zone.id, &d.hostname, &routing, req.proxied)
+        .await
+        .map_err(super::upstream)?;
     let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE domains SET proxied = $2 WHERE id = $1")
         .bind(id)

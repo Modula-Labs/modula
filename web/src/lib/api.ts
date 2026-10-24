@@ -647,6 +647,8 @@ export const api = {
     post<{ id: string; name: string; instances: Instance[] }>(`/api/projects/${enc(project)}/services`, b),
   deleteService: (id: string) => del<{ ok: true }>(`/api/services/${enc(id)}`),
   serviceInstance: (id: string) => get<Instance>(`/api/service-instances/${enc(id)}`),
+  moveInstance: (id: string, nodeId: string) =>
+    patch<{ nodeId: string; deploymentId: string | null }>(`/api/service-instances/${enc(id)}/server`, { nodeId }),
   updateInstance: (id: string, config: ServiceConfig) => patch<Instance>(`/api/service-instances/${enc(id)}`, { config }),
 
   variables: (instance: string) => get<VariableInfo[]>(`/api/service-instances/${enc(instance)}/variables`),

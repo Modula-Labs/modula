@@ -309,8 +309,15 @@ pub async fn create_custom(
     // Unverified: nothing routes yet, so no node needs a new snapshot.
     let mut domain = fetch_one(&state, id).await?;
     if provider.is_some() {
-        domain.provider_note =
-            domains::sync_records(&state, workspace, &host.name, &domain.dns_records, false).await;
+        domain.provider_note = domains::sync_records(
+            &state,
+            workspace,
+            &host.name,
+            &domain.dns_records,
+            false,
+            false,
+        )
+        .await;
     }
     Ok(Json(domain))
 }
@@ -417,7 +424,15 @@ pub async fn delete(
     tx.commit().await?;
     state.hub.kick_all(&nodes);
     let note = if before.kind == "custom" {
-        domains::sync_records(&state, workspace, &hostname, &before.dns_records, true).await
+        domains::sync_records(
+            &state,
+            workspace,
+            &hostname,
+            &before.dns_records,
+            true,
+            false,
+        )
+        .await
     } else {
         None
     };

@@ -145,6 +145,15 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             .bind(dep)
             .execute(&mut *tx)
             .await?;
+            // Moved to other servers: custom domains' A records follow.
+            if old.iter().flatten().any(|n| *n != node) {
+                let job = NewJob {
+                    kind: crate::domains::RESYNC_JOB,
+                    payload: serde_json::json!({ "serviceInstanceId": instance }),
+                    ..Default::default()
+                };
+                jobs::enqueue(&mut *tx, job).await?;
+            }
             kick.extend(old.into_iter().flatten());
             commit_status = Some("success");
             // This node's routes now point at the new deployment.

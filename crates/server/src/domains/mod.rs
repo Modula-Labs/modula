@@ -136,7 +136,8 @@ pub struct DnsRecord {
 }
 
 /// Where a custom domain should point: the service's generated domain
-/// (CNAME) or, for apex names and services without one, its servers' IPs.
+/// (CNAME) or, for apex names, services without one and generated domains
+/// under an IP-echo service (sslip.io), its servers' IPs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Target {
     pub cname: Option<String>,
@@ -144,13 +145,14 @@ pub struct Target {
 }
 
 pub async fn target(db: &sqlx::PgPool, instance: Id) -> AppResult<Target> {
-    let cname: Option<String> = sqlx::query_scalar(
+    let cname = sqlx::query_scalar::<_, String>(
         "SELECT hostname FROM domains WHERE service_instance_id = $1 AND kind = 'generated'
          ORDER BY created_at LIMIT 1",
     )
     .bind(instance)
     .fetch_optional(db)
-    .await?;
+    .await?
+    .filter(|h| !ip_echo(h));
     let ips: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT n.public_ip FROM nodes n
          WHERE n.public_ip IS NOT NULL AND n.status <> 'revoked' AND (
@@ -163,6 +165,16 @@ pub async fn target(db: &sqlx::PgPool, instance: Id) -> AppResult<Target> {
     .fetch_all(db)
     .await?;
     Ok(Target { cname, ips })
+}
+
+/// Names a third party's DNS answers by echoing the IP inside them
+/// (`1-2-3-4.sslip.io`): fine as a no-domain fallback, but a custom domain
+/// CNAMEd there would put that third party in its resolution path, so
+/// custom domains get A records instead.
+fn ip_echo(hostname: &str) -> bool {
+    const SUFFIXES: [&str; 3] = [".sslip.io", ".nip.io", ".traefik.me"];
+    let h = hostname.trim_end_matches('.').to_ascii_lowercase();
+    SUFFIXES.iter().any(|s| h.ends_with(s))
 }
 
 /// Apex names (`example.com`) can't have a CNAME next to their SOA/NS records.
@@ -231,6 +243,7 @@ pub async fn sync_records(
     hostname: &str,
     records: &[DnsRecord],
     remove: bool,
+    proxied: bool,
 ) -> Option<String> {
     let p = provider_for(state, workspace).await?;
     let zone = match p.find_zone(hostname).await {
@@ -238,7 +251,23 @@ pub async fn sync_records(
         Ok(None) => return None,
         Err(e) => return Some(format!("{}: {e:#}", p.name())),
     };
-    for r in records {
+    let routing: Vec<(&str, &str)> = records
+        .iter()
+        .filter(|r| r.kind != "TXT")
+        .map(|r| (r.kind, r.value.as_str()))
+        .collect();
+    if !remove
+        && !routing.is_empty()
+        && let Err(e) = p.set_routing(&zone, hostname, &routing, proxied).await
+    {
+        tracing::warn!(
+            hostname,
+            error = format!("{e:#}"),
+            "DNS provider sync failed"
+        );
+        return Some(format!("{} could not update {hostname}: {e:#}", p.name()));
+    }
+    for r in records.iter().filter(|r| remove || r.kind == "TXT") {
         let res = if remove {
             p.delete_record(&zone, &r.name, r.kind).await
         } else {
@@ -260,6 +289,44 @@ pub async fn sync_records(
         }
     }
     None
+}
+
+pub const RESYNC_JOB: &str = "domains.resync_routing";
+
+/// Job: rewrites the routing records of an instance's custom domains at the
+/// workspace's DNS provider after it moved to other servers, so A records
+/// follow it (the old server's IP goes once its deployment is gone).
+pub async fn resync_job(state: AppState, job: crate::jobs::Job) -> anyhow::Result<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Payload {
+        service_instance_id: Id,
+    }
+    let p: Payload = serde_json::from_value(job.payload)?;
+    let rows: Vec<(String, String, bool, Id)> = sqlx::query_as(
+        "SELECT m.hostname, COALESCE(m.verification_token, ''), m.proxied, p.workspace_id
+         FROM domains m
+         JOIN service_instances i ON i.id = m.service_instance_id
+         JOIN services s ON s.id = i.service_id
+         JOIN projects p ON p.id = s.project_id
+         WHERE m.service_instance_id = $1 AND m.kind = 'custom'",
+    )
+    .bind(p.service_instance_id)
+    .fetch_all(&state.db)
+    .await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let t = target(&state.db, p.service_instance_id).await?;
+    for (hostname, token, proxied, workspace) in rows {
+        let records = required_records(&hostname, &token, &t);
+        if let Some(note) =
+            sync_records(&state, workspace, &hostname, &records, false, proxied).await
+        {
+            anyhow::bail!(note);
+        }
+    }
+    Ok(())
 }
 
 /// The resolver verification uses (swappable for tests).
@@ -585,5 +652,14 @@ mod tests {
         dns.set(RecordKind::A, "shop.com", &["104.16.0.1"]);
         let o = evaluate(&dns, "shop.com", "tok", &t, "pending").await;
         assert_eq!((o.status, o.target_ok), ("verified", Some(false)));
+    }
+
+    #[test]
+    fn ip_echo_names_are_never_cname_targets() {
+        assert!(ip_echo("api-1pvk.159-69-253-176.sslip.io"));
+        assert!(ip_echo("159-69-253-176.SSLIP.IO."));
+        assert!(ip_echo("app.10.0.0.1.nip.io"));
+        assert!(!ip_echo("api.apps.example.com"));
+        assert!(!ip_echo("sslip.io.example.com"));
     }
 }

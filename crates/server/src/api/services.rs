@@ -329,3 +329,97 @@ pub(crate) async fn set_config(
     tx.commit().await?;
     Ok(())
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MoveInstance {
+    pub node_id: Id,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Moved {
+    pub node_id: Id,
+    /// The deployment that runs it on the new server (None: never deployed,
+    /// it starts there on its first deploy).
+    pub deployment_id: Option<Id>,
+}
+
+/// Run the instance on another server (Railway's region picker): pinned to
+/// it, and redeployed there when it was deployed before. The old deployment
+/// stops once the new one is live. A volume's data can't follow yet.
+pub async fn move_instance(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+    Json(req): Json<MoveInstance>,
+) -> AppResult<Json<Moved>> {
+    let id = grant.id();
+    let workspace = grant.workspace_id()?;
+    let node: Option<(String, Option<Id>)> = sqlx::query_as(
+        "SELECT name, workspace_id FROM nodes WHERE id = $1 AND status <> 'revoked'",
+    )
+    .bind(req.node_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((node_name, _)) = node.filter(|(_, ws)| ws.is_none_or(|w| w == workspace)) else {
+        return Err(AppError::bad_request("no such server"));
+    };
+    let (current, has_volume, deployed): (Option<Id>, bool, bool) = sqlx::query_as(
+        "SELECT i.node_id,
+                EXISTS (SELECT 1 FROM volumes v WHERE v.service_instance_id = i.id),
+                EXISTS (SELECT 1 FROM deployments d WHERE d.service_instance_id = i.id
+                        AND d.status IN ('building', 'deploying', 'active', 'crashed'))
+         FROM service_instances i WHERE i.id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    if current == Some(req.node_id) {
+        return Ok(Json(Moved {
+            node_id: req.node_id,
+            deployment_id: None,
+        }));
+    }
+    if has_volume {
+        return Err(AppError::Conflict(
+            "this service has a volume, and moving its data to another server isn't supported yet"
+                .into(),
+        ));
+    }
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE service_instances SET node_id = $2, updated_at = now() WHERE id = $1")
+        .bind(id)
+        .bind(req.node_id)
+        .execute(&mut *tx)
+        .await?;
+    Entry::new("service_instance.move", &meta)
+        .actor(&actor)
+        .workspace(workspace)
+        .target("service_instance", id)
+        .metadata(json!({ "from": current, "to": req.node_id }))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let deployment_id = if deployed {
+        let message = format!("Moved to {node_name}");
+        Some(
+            crate::api::deployments::deploy_instance(
+                &state,
+                &actor,
+                workspace,
+                &meta,
+                id,
+                Some(&message),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    Ok(Json(Moved {
+        node_id: req.node_id,
+        deployment_id,
+    }))
+}
