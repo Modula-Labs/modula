@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { Checkbox } from "@/components/ui/Controls";
 import { Field, Input, Select, Textarea } from "@/components/ui/Input";
@@ -10,13 +10,16 @@ import {
   type Builder,
   type ProjectDetail,
   type Instance,
+  type EdgeRule,
   type RestartPolicy,
   type ServiceConfig,
 } from "@/lib/api";
+import { withEdgeRules } from "@/lib/edge";
 import { projectReturnPath } from "@/lib/github";
 import { hostingError } from "@/lib/hosting";
 import { CronFields } from "./CronFields";
 import { DomainsSection } from "./DomainsSection";
+import { EdgeSection } from "./EdgeSection";
 import { HostingFields } from "./HostingSection";
 import { parseRepo } from "./NewServiceDialog";
 import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
@@ -96,6 +99,8 @@ export interface Form {
   outputDir: string;
   spa: boolean;
   scriptName: string;
+  /** Edited in its own dialog and saved on its own; carried here so saving the form keeps them. */
+  edgeRules: EdgeRule[];
 }
 
 // R2 buckets (source `r2`) have no settings form: the sheet never shows it.
@@ -130,6 +135,7 @@ export const toForm = (c: ServiceConfig): Form => ({
   outputDir: c.hosting?.outputDir ?? "",
   spa: c.hosting?.spa ?? false,
   scriptName: c.hosting?.scriptName ?? "",
+  edgeRules: c.edgeRules ?? [],
 });
 
 /** Switches the service's source kind, keeping every other field. Fields that
@@ -180,6 +186,7 @@ export const toConfig = (f: Form): ServiceConfig => {
     memoryMb: optNum(f.memoryMb),
     cpuMillis: optNum(f.cpuMillis),
     replicas: Math.max(1, Math.floor(Number(f.replicas)) || 1),
+    edgeRules: f.edgeRules.length ? f.edgeRules : undefined,
   };
   if (f.kind === "image")
     return { source: { type: "image", image: f.image.trim() }, ...common };
@@ -237,8 +244,11 @@ export function SettingsTab({
 }) {
   const qc = useQueryClient();
   const [form, setForm] = useState(() => toForm(instance.config));
+  // After the edge dialog saves, the other unsaved edits stay in the form.
+  const keepForm = useRef<Form | null>(null);
   useEffect(() => {
-    setForm(toForm(instance.config));
+    setForm(keepForm.current ?? toForm(instance.config));
+    keepForm.current = null;
     setConfirmDisconnect(false);
   }, [instance.config]);
   const dirty =
@@ -259,10 +269,13 @@ export function SettingsTab({
   );
   const nodes = useNodes();
   const node = nodes.data?.find((n) => n.id === instance.nodeId);
+  // Edge rules sit in front of a running container: not static sites hosted on Cloudflare, not buckets.
+  const showEdge = instance.config.source.type !== "r2" && !instance.config.hosting && !form.cloudflare;
   const railItems = [
     "Source",
     ...(form.kind !== "image" ? ["Hosting"] : []),
     "Networking",
+    ...(showEdge ? ["Edge"] : []),
     "Deploy",
     "Cron schedule",
     "Teardown",
@@ -302,6 +315,21 @@ export function SettingsTab({
       void qc.invalidateQueries({
         queryKey: ["pending", instance.environmentId],
       });
+    },
+  });
+  const saveEdge = useMutation({
+    mutationFn: (rules: EdgeRule[]) => {
+      keepForm.current = { ...form, edgeRules: rules };
+      return api.updateInstance(instance.id, withEdgeRules(instance.config, rules));
+    },
+    onSuccess: (i) => {
+      qc.setQueryData(["instance", instance.id], i);
+      void qc.invalidateQueries({
+        queryKey: ["pending", instance.environmentId],
+      });
+    },
+    onError: () => {
+      keepForm.current = null;
     },
   });
   const deploy = useMutation({
@@ -601,6 +629,20 @@ export function SettingsTab({
           )}
         </Field>
       </Section>
+
+      {showEdge ? (
+        <Section
+          title="Edge"
+          description="Block, redirect, rate-limit or cache matching requests before they reach your service. Rules run in order."
+        >
+          <EdgeSection
+            rules={instance.config.edgeRules ?? []}
+            unsupported={instance.edgeUnsupported ?? []}
+            canEdit={canEdit}
+            onSave={(rules) => saveEdge.mutateAsync(rules).then(() => undefined)}
+          />
+        </Section>
+      ) : null}
 
       <Section title="Deploy">
         <Field

@@ -4,6 +4,7 @@ import { Segmented } from "@/components/ui/Tabs";
 import { Alert, Skeleton } from "@/components/ui/misc";
 import { api, type MetricsRange } from "@/lib/api";
 import { METRICS_RANGES } from "@/lib/metrics";
+import { HttpMetricsPanels } from "./HttpMetricsPanels";
 import { MetricsPanels } from "./MetricsPanels";
 
 export function MetricsTab({ instanceId }: { instanceId: string }) {
@@ -39,6 +40,7 @@ export function MetricsTab({ instanceId }: { instanceId: string }) {
       ) : m ? (
         <MetricsPanels m={m} range={range} />
       ) : null}
+      <HttpMetricsPanels queryKey={["instance", instanceId]} fetcher={() => api.instanceHttpMetrics(instanceId, range)} range={range} />
     </div>
   );
 }
