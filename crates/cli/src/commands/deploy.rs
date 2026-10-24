@@ -219,10 +219,10 @@ pub async fn rollback(ctx: &Ctx, deployment: &str, wait_for: bool) -> anyhow::Re
     let commit = from
         .commit_sha
         .as_deref()
-        .map(|s| s.chars().take(7).collect::<String>())
-        .unwrap_or_else(|| "-".into());
+        .map(|s| format!(", commit {}", s.chars().take(7).collect::<String>()))
+        .unwrap_or_default();
     ctx.confirm(&format!(
-        "Roll back to deployment {} ({}, commit {commit})? It is rebuilt and replaces what's live.",
+        "Roll back to deployment {} ({}{commit})? It is rebuilt and replaces what's live.",
         from.id, from.source
     ))?;
     let d = api.rollout(deployment, "rollback").await?;
@@ -239,8 +239,11 @@ pub async fn rollback(ctx: &Ctx, deployment: &str, wait_for: bool) -> anyhow::Re
     Ok(code)
 }
 
-pub async fn deployment(ctx: &Ctx, command: DeploymentCommand) -> anyhow::Result<i32> {
-    let DeploymentCommand::List { limit } = command;
+pub async fn deployment(ctx: &Ctx, command: Option<DeploymentCommand>) -> anyhow::Result<i32> {
+    let limit = match command {
+        Some(DeploymentCommand::List { limit }) => limit,
+        None => 20,
+    };
     let t = ctx.target().await?;
     let mut deployments = ctx.api()?.deployments(&t.instance).await?;
     deployments.truncate(limit);

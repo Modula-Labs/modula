@@ -145,11 +145,11 @@ pub enum Command {
         #[arg(short, long)]
         wait: bool,
     },
-    /// The service's deployments.
+    /// The service's deployments (alone: list them).
     #[command(visible_alias = "deployments")]
     Deployment {
         #[command(subcommand)]
-        command: DeploymentCommand,
+        command: Option<DeploymentCommand>,
     },
     /// Show a deployment's logs.
     Logs(LogsArgs),
