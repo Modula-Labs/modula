@@ -55,6 +55,11 @@ pub async fn run(
     let reconnect = Arc::new(tokio::sync::Notify::new());
     // Backup results also go through the outbox, to survive reconnects.
     let results = out_tx.clone();
+    let logship = tokio::spawn(crate::logship::run(
+        runtime.clone(),
+        out_tx.clone(),
+        stop.clone(),
+    ));
     let reconciler = Reconciler::new(runtime.clone(), caps, out_tx);
     let (desired_tx, desired_rx) = watch::channel(None);
     let reconcile_task = tokio::spawn(reconciler.clone().run(desired_rx, stop.clone()));
@@ -99,6 +104,7 @@ pub async fn run(
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
     let _ = reconcile_task.await;
+    let _ = logship.await;
     Ok(())
 }
 
@@ -387,7 +393,7 @@ impl Ctx<'_> {
             node_version: self
                 .upgrade
                 .map_or_else(|| crate::VERSION.to_owned(), |u| u.version()),
-            capabilities: ["logs", "renew", "backup", "tunnel", "metrics"]
+            capabilities: ["logs", "renew", "backup", "tunnel", "metrics", "logship"]
                 .into_iter()
                 .chain(self.has_edge.then_some("edge"))
                 .chain(self.build_logs.is_some().then_some("build"))

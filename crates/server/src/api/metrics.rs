@@ -3,6 +3,7 @@
 
 use axum::Json;
 use axum::extract::{Query, State};
+use modula_id::Id;
 use serde::{Deserialize, Serialize};
 
 use crate::authz::Grant;
@@ -57,6 +58,62 @@ pub async fn get(
         cpus: cpus.unwrap_or(0),
         memory_total_bytes: memory_total_bytes.unwrap_or(0),
         memory_limit_bytes: memory_mb.filter(|m| *m > 0).map(|m| m * 1024 * 1024),
+        points,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ProjectParams {
+    environment: Id,
+    #[serde(default)]
+    range: Range,
+}
+
+/// `GET /api/projects/{id}/metrics?environment=&range=`: every service of
+/// the project in one environment, summed; the totals are those of the
+/// servers the services run on.
+pub async fn project(
+    State(state): State<AppState>,
+    grant: Grant,
+    Query(p): Query<ProjectParams>,
+) -> AppResult<Json<Metrics>> {
+    let instances: Vec<Id> = sqlx::query_scalar(
+        "SELECT i.id FROM service_instances i
+         JOIN services s ON s.id = i.service_id
+         JOIN environments e ON e.id = i.environment_id
+         WHERE s.project_id = $1 AND e.project_id = $1 AND i.environment_id = $2",
+    )
+    .bind(grant.id())
+    .bind(p.environment)
+    .fetch_all(&state.db)
+    .await?;
+    let points = metrics::series_of(&state.db, &instances, p.range).await?;
+    let (cpus, memory_total_bytes, memory_limit): (Option<i64>, Option<i64>, Option<i64>) =
+        sqlx::query_as(
+            "WITH placed AS (
+                 SELECT DISTINCT COALESCE(d.node_id, i.node_id) AS node_id
+                 FROM service_instances i
+                 LEFT JOIN LATERAL (
+                     SELECT node_id FROM deployments WHERE service_instance_id = i.id
+                     ORDER BY created_at DESC LIMIT 1
+                 ) d ON true
+                 WHERE i.id = ANY($1)
+             )
+             SELECT sum((n.info->>'cpus')::bigint)::bigint, sum((n.info->>'memoryBytes')::bigint)::bigint,
+                    (SELECT CASE WHEN bool_and((config->>'memoryMb')::bigint > 0)
+                                 THEN sum((config->>'memoryMb')::bigint) END::bigint
+                     FROM service_instances WHERE id = ANY($1))
+             FROM placed JOIN nodes n ON n.id = placed.node_id",
+        )
+        .bind(&instances)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(Json(Metrics {
+        range: p.range,
+        step_secs: p.range.span_and_step().1,
+        cpus: cpus.unwrap_or(0),
+        memory_total_bytes: memory_total_bytes.unwrap_or(0),
+        memory_limit_bytes: memory_limit.filter(|m| *m > 0).map(|m| m * 1024 * 1024),
         points,
     }))
 }

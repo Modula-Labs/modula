@@ -79,6 +79,19 @@ async fn fixture(
             .unwrap();
             id
         }
+        ResourceKind::Webhook => {
+            let id = Id::new();
+            sqlx::query(
+                "INSERT INTO webhooks (id, project_id, url, events, secret_sealed)
+                 VALUES ($1, $2, 'https://example.com/hook', '{deployment.failed}', '\\x00')",
+            )
+            .bind(id)
+            .bind(chain.project)
+            .execute(app.db())
+            .await
+            .unwrap();
+            id
+        }
         ResourceKind::ApiToken => {
             let id = Id::new();
             let t =

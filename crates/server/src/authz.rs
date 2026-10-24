@@ -174,6 +174,13 @@ pub enum Action {
     ServerSuggest,
     /// Delete a provisioned server at the provider and remove its node.
     ServerDelete,
+    /// Search an environment's stored logs (every service in it).
+    EnvironmentLogsRead,
+    /// A project's outgoing webhooks (list, add, send a test, remove).
+    WebhookList,
+    WebhookCreate,
+    WebhookTest,
+    WebhookDelete,
 }
 
 impl Action {
@@ -234,6 +241,9 @@ impl Action {
             | Self::ServerProvision
             | Self::ServerSuggest => K::Workspace,
             Self::ServerRead | Self::ServerDelete => K::ProvisionedServer,
+            Self::EnvironmentLogsRead => K::Environment,
+            Self::WebhookList | Self::WebhookCreate => K::Project,
+            Self::WebhookTest | Self::WebhookDelete => K::Webhook,
         })
     }
 
@@ -312,6 +322,11 @@ impl Action {
             | Self::HetznerCatalog
             | Self::ServerProvision
             | Self::ServerDelete => Role::Admin,
+            // Same audience as a deployment's logs.
+            Self::EnvironmentLogsRead => Role::Viewer,
+            Self::WebhookList | Self::WebhookCreate | Self::WebhookTest | Self::WebhookDelete => {
+                Role::Member
+            }
         }
     }
 
@@ -389,6 +404,11 @@ impl Action {
             | Self::HetznerDisconnect
             | Self::ServerProvision
             | Self::ServerDelete => true,
+            Self::EnvironmentLogsRead
+            | Self::WebhookList
+            | Self::WebhookCreate
+            | Self::WebhookTest
+            | Self::WebhookDelete => false,
         }
     }
 }
@@ -413,6 +433,7 @@ pub enum ResourceKind {
     Backup,
     ApiToken,
     ProvisionedServer,
+    Webhook,
 }
 
 impl ResourceKind {
@@ -433,6 +454,7 @@ impl ResourceKind {
         ResourceKind::Backup,
         ResourceKind::ApiToken,
         ResourceKind::ProvisionedServer,
+        ResourceKind::Webhook,
     ];
 
     pub fn param(self) -> &'static str {
@@ -453,6 +475,7 @@ impl ResourceKind {
             Self::Backup => "backup_id",
             Self::ApiToken => "token_id",
             Self::ProvisionedServer => "server_id",
+            Self::Webhook => "webhook_id",
         }
     }
 
@@ -472,7 +495,8 @@ impl ResourceKind {
             | Self::TcpProxy
             | Self::BackupTarget
             | Self::Backup
-            | Self::ProvisionedServer => OwnerKind::Workspace,
+            | Self::ProvisionedServer
+            | Self::Webhook => OwnerKind::Workspace,
         }
     }
 
@@ -540,6 +564,10 @@ impl ResourceKind {
             }
             Self::ApiToken => "SELECT user_id FROM api_tokens WHERE id = $1",
             Self::ProvisionedServer => "SELECT workspace_id FROM provisioned_servers WHERE id = $1",
+            Self::Webhook => {
+                "SELECT p.workspace_id FROM webhooks w
+                 JOIN projects p ON p.id = w.project_id WHERE w.id = $1"
+            }
         };
         Ok(sqlx::query_scalar(sql).bind(id).fetch_optional(db).await?)
     }

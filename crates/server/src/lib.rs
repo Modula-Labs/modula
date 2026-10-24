@@ -18,6 +18,7 @@ pub mod jobs;
 pub mod keyring;
 pub mod listen;
 pub mod locations;
+pub mod logs;
 pub mod metrics;
 pub mod nodes;
 pub mod pki;
@@ -29,6 +30,7 @@ pub mod templates;
 pub mod tunnel;
 pub mod updates;
 pub mod validate;
+pub mod webhooks;
 
 use std::time::Duration;
 
@@ -95,10 +97,13 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 tracing::info!(purged, "expired source uploads removed");
                 let samples = metrics::purge(&s.db).await?;
                 tracing::info!(samples, "old metric samples removed");
+                let lines = logs::purge(&s.db).await?;
+                tracing::info!(lines, "old log lines removed");
                 Ok(())
             })
             .on(github::app::STATUS_JOB, github::app::status_job)
             .on(domains::RESYNC_JOB, domains::resync_job)
+            .on(webhooks::DISPATCH_JOB, webhooks::dispatch_job)
             .on(provision::track::TRACK_JOB, provision::track::track_job),
         format!("server-{}", modula_id::Id::new()),
         stop.clone(),

@@ -589,6 +589,47 @@ export interface InstanceMetrics {
   points: MetricsPoint[];
 }
 
+export interface LogLine {
+  /** Unix ms. */
+  t: number;
+  serviceId: string;
+  serviceName: string;
+  deploymentId: string;
+  stream: "stdout" | "stderr";
+  line: string;
+}
+export interface LogBucket {
+  /** Bucket start, unix ms. */
+  t: number;
+  count: number;
+  errors: number;
+}
+export interface EnvironmentLogs {
+  /** Oldest first; when truncated, the newest `limit` lines. */
+  lines: LogLine[];
+  histogram: LogBucket[];
+  bucketMs: number;
+  truncated: boolean;
+}
+export interface EnvironmentLogsQuery {
+  since: number;
+  until?: number;
+  q?: string;
+  service?: string;
+  limit?: number;
+}
+
+export type WebhookEvent = "deployment.succeeded" | "deployment.failed" | "deployment.crashed";
+export interface Webhook {
+  id: string;
+  url: string;
+  events: WebhookEvent[];
+  createdAt: string;
+  lastStatus: number | null;
+  lastError: string | null;
+  lastAt: string | null;
+}
+
 export const isNotAvailable = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 501);
 
 const enc = encodeURIComponent;
@@ -673,6 +714,22 @@ export const api = {
   deployments: (instance: string) => get<Deployment[]>(`/api/service-instances/${enc(instance)}/deployments`),
   instanceMetrics: (instance: string, range: MetricsRange) =>
     get<InstanceMetrics>(`/api/service-instances/${enc(instance)}/metrics?range=${range}`),
+  projectMetrics: (project: string, environment: string, range: MetricsRange) =>
+    get<InstanceMetrics>(`/api/projects/${enc(project)}/metrics?environment=${enc(environment)}&range=${range}`),
+  environmentLogs: (environment: string, q: EnvironmentLogsQuery) => {
+    const params = new URLSearchParams({ since: String(q.since) });
+    if (q.until !== undefined) params.set("until", String(q.until));
+    if (q.q) params.set("q", q.q);
+    if (q.service) params.set("service", q.service);
+    if (q.limit !== undefined) params.set("limit", String(q.limit));
+    return get<EnvironmentLogs>(`/api/environments/${enc(environment)}/logs?${params}`);
+  },
+  webhooks: (project: string) => get<Webhook[]>(`/api/projects/${enc(project)}/webhooks`),
+  /** The signing secret is returned only here. */
+  createWebhook: (project: string, b: { url: string; events: WebhookEvent[] }) =>
+    post<Webhook & { secret: string }>(`/api/projects/${enc(project)}/webhooks`, b),
+  deleteWebhook: (id: string) => del<void>(`/api/webhooks/${enc(id)}`),
+  testWebhook: (id: string) => post<{ status: number | null; error: string | null }>(`/api/webhooks/${enc(id)}/test`),
   deploy: (instance: string) => post<DeploymentDetail>(`/api/service-instances/${enc(instance)}/deployments`),
   deployment: (id: string) => get<DeploymentDetail>(`/api/deployments/${enc(id)}`),
   redeployDeployment: (id: string) => post<DeploymentDetail>(`/api/deployments/${enc(id)}/redeploy`),

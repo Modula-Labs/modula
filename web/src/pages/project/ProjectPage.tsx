@@ -1,47 +1,21 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
-import { clsx } from "clsx";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import {
-  Activity,
-  BrandDocker,
-  BrandGithub,
-  Check,
-  ChevronDown,
-  Copy,
-  Database,
-  Disk,
-  LayoutGrid,
-  Plus,
-  Power,
-  Refresh,
-  Rocket,
-  Server,
-  Settings,
-  Trash,
-  Variable,
-} from "@/components/ui/icons";
-import { Field, Input, Select } from "@/components/ui/Input";
-import { LogoMark } from "@/components/ui/Logo";
-import { ContextMenu, Menu, MenuItem, MenuLabel, MenuSeparator } from "@/components/ui/Menu";
-import { Modal } from "@/components/ui/Modal";
+import { Activity, BrandDocker, BrandGithub, Copy, Database, Disk, LayoutGrid, Plus, Power, Refresh, Rocket, Trash } from "@/components/ui/icons";
+import { ContextMenu, MenuItem, MenuLabel, MenuSeparator } from "@/components/ui/Menu";
 import { useLingering } from "@/components/ui/Sheet";
-import { Alert, Skeleton } from "@/components/ui/misc";
-import { ApiError, api, type DeploymentStatus, type Environment, type Template } from "@/lib/api";
+import { ApiError, api, type DeploymentStatus, type Template } from "@/lib/api";
 import { projectReturn } from "@/lib/github";
 import { atLeast } from "@/lib/roles";
-import { isLive } from "@/lib/status";
 import { load, save } from "@/lib/storage";
 import { templateStack } from "@/lib/templates";
-import { useMe } from "@/lib/workspace";
 import { ActivityPanel } from "./ActivityPanel";
 import { Canvas, type CanvasPoint, type CanvasService } from "./Canvas";
 import { DeploymentSheet } from "./DeploymentSheet";
 import { NewServiceDialog, type NewServiceStep } from "./NewServiceDialog";
 import { PendingBar, usePending } from "./PendingBar";
-import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
-import { SharedVariablesSheet } from "./SharedVariablesSheet";
+import { DeleteServiceDialog } from "./ProjectDialogs";
+import { useProject } from "./ProjectContext";
 import { SyncDialog } from "./SyncDialog";
 import { ServiceSheet, type ServiceTab } from "./ServiceSheet";
 
@@ -67,7 +41,6 @@ export function ProjectPage({
   search: ProjectSearch;
   setSearch: (s: ProjectSearch) => void;
 }) {
-  const { data: me } = useMe();
   const qc = useQueryClient();
   const [adding, setAdding] = useState(false);
   const [addStep, setAddStep] = useState<NewServiceStep>("root");
@@ -78,8 +51,6 @@ export function ProjectPage({
   const [menu, setMenu] = useState<{ at: CanvasPoint; serviceId?: string } | null>(null);
   const [deletingService, setDeletingService] = useState<{ id: string; name: string }>();
   const [notice, setNotice] = useState<string | null>(null);
-  const [newEnv, setNewEnv] = useState(false);
-  const [settings, setSettings] = useState(false);
   const [syncing, setSyncing] = useState(false);
   // Open by default; the choice is remembered in this browser.
   const [activityOpen, setActivityOpenState] = useState(() => load("mc.activity.open") !== "0");
@@ -89,17 +60,7 @@ export function ProjectPage({
       save("mc.activity.open", next ? "1" : "0");
       return next;
     });
-  const [sharedOpen, setSharedOpen] = useState(false);
-  const [deletingEnv, setDeletingEnv] = useState<Environment>();
-  const project = useQuery({
-    queryKey: ["project", projectId],
-    queryFn: () => api.project(projectId),
-    refetchInterval: (q) =>
-      q.state.data?.instances.some((i) => i.latestDeploymentStatus && isLive(i.latestDeploymentStatus)) ? 2000 : 10_000,
-  });
-  const p = project.data;
-  const role = me?.workspaces.find((w) => w.id === p?.workspaceId)?.role;
-  const env = p?.environments.find((e) => e.id === search.env) ?? p?.environments[0];
+  const { project: p, env, role } = useProject();
 
   const pending = usePending(env?.id).data;
   const services: CanvasService[] = useMemo(() => {
@@ -126,7 +87,6 @@ export function ProjectPage({
   const { value: deploymentId, leaving: deploymentLeaving } = useLingering(currentInstanceId ? search.deployment : undefined);
   const canEdit = atLeast(role, "member");
   const canDeploy = atLeast(role, "deployer");
-  const { value: sharedMounted, leaving: sharedLeaving } = useLingering(sharedOpen ? true : undefined);
   // While the "Apply N changes" bar is up it owns the screen's primary button.
   const hasPending = canDeploy && (pending?.count ?? 0) > 0;
   // Same query as the add dialog; the canvas menu offers Database only when there are templates.
@@ -178,95 +138,14 @@ export function ProjectPage({
       .catch((e: Error) => setNotice(e.message));
   };
 
-  if (project.error) {
-    const missing = project.error instanceof ApiError && project.error.status === 404;
-    return (
-      <div className="flex h-full items-center justify-center p-8">
-        <div className="flex max-w-sm flex-col items-center gap-3 text-center">
-          <div className="text-lg font-semibold">{missing ? "Project not found" : "Couldn't load the project"}</div>
-          <p className="text-sm text-muted-foreground">{missing ? "It may have been deleted, or you don't have access." : project.error.message}</p>
-          <Link to="/projects" className="text-sm underline">
-            Back to projects
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="grid h-full grid-cols-[56px_1fr] grid-rows-[52px_1fr]">
-      <Link to="/projects" aria-label="All projects" className="flex items-center justify-center text-foreground">
-        <LogoMark />
-      </Link>
-      <header className="flex min-w-0 items-center gap-2 pr-3">
-        <Link to="/projects" className="truncate text-sm text-muted-foreground hover:text-foreground">
-          Projects
-        </Link>
-        <span className="text-muted-foreground">/</span>
-        {p ? <span className="truncate text-sm font-semibold">{p.name}</span> : <Skeleton className="h-5 w-32" />}
-        <span className="text-muted-foreground">/</span>
-        {p && env ? (
-          <Menu
-            align="start"
-            trigger={
-              <button className="flex h-8 items-center gap-1.5 rounded-md px-2 text-sm hover:bg-accent">
-                {env.name}
-                <ChevronDown className="size-3.5 text-muted-foreground" />
-              </button>
-            }
-          >
-            {p.environments.map((e) => (
-              <MenuItem key={e.id} icon={e.id === env.id ? <Check /> : <span className="size-4" />} onSelect={() => setSearch({ env: e.id })}>
-                {e.name}
-              </MenuItem>
-            ))}
-            <MenuSeparator />
-            <MenuItem
-              icon={<Variable />}
-              onSelect={() => {
-                setSearch({ env: search.env });
-                setSharedOpen(true);
-              }}
-            >
-              Shared variables
-            </MenuItem>
-            {canEdit ? (
-              <MenuItem icon={<Plus />} onSelect={() => setNewEnv(true)}>
-                New environment
-              </MenuItem>
-            ) : null}
-            {atLeast(role, "admin") && env.id !== p.environments[0]?.id ? (
-              <MenuItem danger icon={<Trash />} onSelect={() => setDeletingEnv(env)}>
-                Delete {env.name}
-              </MenuItem>
-            ) : null}
-          </Menu>
-        ) : null}
-        {p ? (
-          <button
-            aria-label="Project settings"
-            title="Project settings"
-            onClick={() => setSettings(true)}
-            className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground [&>svg]:size-4"
-          >
-            <Settings />
-          </button>
-        ) : null}
-      </header>
-
-      <nav aria-label="Project" className="flex flex-col items-center gap-1 pt-2">
-        <RailLink to="/projects" label="Projects" icon={<LayoutGrid />} />
-        {me?.user.isInstanceAdmin ? <RailLink to="/servers" label="Servers" icon={<Server />} /> : null}
-      </nav>
-
-      <main className="relative mr-2 mb-2 min-h-0 overflow-hidden rounded-xl border border-border">
+    <div className="relative h-full">
         {p && env ? (
           <Canvas
             projectId={projectId}
             services={services}
             selected={search.service}
             onSelect={(id) => {
-              if (id) setSharedOpen(false);
               setSearch({ env: search.env, service: id, tab: id ? search.tab : undefined });
             }}
             onPaneMenu={canEdit ? (at) => setMenu({ at }) : undefined}
@@ -417,16 +296,6 @@ export function ProjectPage({
           </div>
         ) : null}
 
-        {sharedMounted && env ? (
-          <SharedVariablesSheet
-            key={env.id}
-            environmentId={env.id}
-            environmentName={env.name}
-            canEdit={canDeploy}
-            leaving={sharedLeaving}
-            onClose={() => setSharedOpen(false)}
-          />
-        ) : null}
         {instanceId ? (
           <ServiceSheet
             key={instanceId}
@@ -448,7 +317,6 @@ export function ProjectPage({
             onClose={() => setSearch({ ...search, deployment: undefined })}
           />
         ) : null}
-      </main>
 
       {p && env ? (
         <NewServiceDialog
@@ -470,26 +338,6 @@ export function ProjectPage({
       {p && env ? (
         <SyncDialog open={syncing} onOpenChange={setSyncing} projectId={projectId} target={env} environments={p.environments} />
       ) : null}
-      {p && env ? (
-        <ProjectSettingsDialog
-          open={settings}
-          onOpenChange={setSettings}
-          project={p}
-          role={role}
-          environmentId={env.id}
-          onEnvironmentDeleted={() => setSearch({})}
-        />
-      ) : null}
-      {p ? (
-        <NewEnvironmentDialog
-          open={newEnv}
-          onOpenChange={setNewEnv}
-          projectId={projectId}
-          environments={p.environments}
-          current={env}
-          onCreated={(id) => setSearch({ env: id })}
-        />
-      ) : null}
       <DeleteServiceDialog
         service={deletingService}
         onClose={() => setDeletingService(undefined)}
@@ -498,207 +346,6 @@ export function ProjectPage({
           if (search.service === id) setSearch({ env: search.env });
         }}
       />
-      <DeleteEnvironmentDialog
-        environment={deletingEnv}
-        onClose={() => setDeletingEnv(undefined)}
-        projectId={projectId}
-        onDeleted={() => setSearch({})}
-      />
     </div>
-  );
-}
-
-function RailLink({ to, label, icon }: { to: string; label: string; icon: ReactNode }) {
-  return (
-    <Link
-      to={to}
-      title={label}
-      aria-label={label}
-      className={clsx("flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground [&>svg]:size-[18px]")}
-    >
-      {icon}
-    </Link>
-  );
-}
-
-function NewEnvironmentDialog({
-  open,
-  onOpenChange,
-  projectId,
-  environments,
-  current,
-  onCreated,
-}: {
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
-  projectId: string;
-  environments: Environment[];
-  /** Offered first when duplicating. */
-  current?: Environment;
-  onCreated: (id: string) => void;
-}) {
-  const qc = useQueryClient();
-  const [name, setName] = useState("");
-  // "" = empty: the server's default of the first environment's config, no variables.
-  const [from, setFrom] = useState("");
-  const [copyVariables, setCopyVariables] = useState(false);
-  const create = useMutation({
-    mutationFn: () =>
-      api.createEnvironment(projectId, {
-        name: name.trim(),
-        ...(from ? { cloneFrom: from, copyVariables } : {}),
-      }),
-    onSuccess: async (e) => {
-      await qc.invalidateQueries({ queryKey: ["project", projectId] });
-      onCreated(e.id);
-      setName("");
-      setFrom("");
-      setCopyVariables(false);
-      onOpenChange(false);
-    },
-  });
-  const ordered = current ? [current, ...environments.filter((e) => e.id !== current.id)] : environments;
-  return (
-    <Modal open={open} onOpenChange={onOpenChange} title="New environment" description="Each environment gets its own copy of every service, with its own variables and domains.">
-      <form
-        className="flex flex-col gap-4"
-        onSubmit={(e) => {
-          e.preventDefault();
-          create.mutate();
-        }}
-      >
-        {create.error ? <Alert>{create.error.message}</Alert> : null}
-        <Field label="Name">
-          {(p) => <Input {...p} autoFocus required maxLength={32} placeholder="staging" value={name} onChange={(e) => setName(e.target.value)} />}
-        </Field>
-        <Field label="Start from" hint={from ? undefined : "Services get the first environment's configuration, without variables."}>
-          {(p) => (
-            <Select {...p} value={from} onChange={(e) => setFrom(e.target.value)}>
-              <option value="">Empty</option>
-              {ordered.map((e) => (
-                <option key={e.id} value={e.id}>
-                  Duplicate {e.name}
-                </option>
-              ))}
-            </Select>
-          )}
-        </Field>
-        {from ? (
-          <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            <input type="checkbox" className="size-4 accent-foreground" checked={copyVariables} onChange={(e) => setCopyVariables(e.target.checked)} />
-            Copy variables (sealed ones are not copied)
-          </label>
-        ) : null}
-        <div className="flex justify-end gap-2">
-          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button type="submit" variant="primary" loading={create.isPending} disabled={!name.trim()}>
-            Create environment
-          </Button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-/** Deleting needs sudo; the API client opens the re-auth dialog and retries. */
-function DeleteEnvironmentDialog({
-  environment,
-  onClose,
-  projectId,
-  onDeleted,
-}: {
-  environment?: Environment;
-  onClose: () => void;
-  projectId: string;
-  onDeleted: () => void;
-}) {
-  const qc = useQueryClient();
-  // Keep the name on screen while the dialog fades out.
-  const [last, setLast] = useState(environment);
-  if (environment && environment !== last) setLast(environment);
-  const remove = useMutation({
-    mutationFn: (id: string) => api.deleteEnvironment(id),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["project", projectId] });
-      onDeleted();
-      onClose();
-    },
-  });
-  return (
-    <Modal
-      open={!!environment}
-      onOpenChange={(o) => {
-        if (!o) {
-          remove.reset();
-          onClose();
-        }
-      }}
-      title={`Delete ${last?.name ?? "environment"}?`}
-      description="Removes its services, variables and deployments, and stops their containers. This can't be undone."
-    >
-      <div className="flex flex-col gap-4">
-        {remove.error ? <Alert>{remove.error.message}</Alert> : null}
-        <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button variant="danger" loading={remove.isPending} onClick={() => last && remove.mutate(last.id)}>
-            Delete environment
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
-
-/** Deleting needs sudo; the API client opens the re-auth dialog and retries. */
-function DeleteServiceDialog({
-  service,
-  onClose,
-  projectId,
-  onDeleted,
-}: {
-  service?: { id: string; name: string };
-  onClose: () => void;
-  projectId: string;
-  onDeleted: (id: string) => void;
-}) {
-  const qc = useQueryClient();
-  const [last, setLast] = useState(service);
-  if (service && service !== last) setLast(service);
-  const remove = useMutation({
-    mutationFn: (id: string) => api.deleteService(id),
-    onSuccess: async (_, id) => {
-      await qc.invalidateQueries({ queryKey: ["project", projectId] });
-      onDeleted(id);
-      onClose();
-    },
-  });
-  return (
-    <Modal
-      open={!!service}
-      onOpenChange={(o) => {
-        if (!o) {
-          remove.reset();
-          onClose();
-        }
-      }}
-      title={`Delete ${last?.name ?? "service"}?`}
-      description="Removes it from every environment with its variables, domains, volumes and deployments, and stops its containers. This can't be undone."
-    >
-      <div className="flex flex-col gap-4">
-        {remove.error ? <Alert>{remove.error.message}</Alert> : null}
-        <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button variant="danger" loading={remove.isPending} onClick={() => last && remove.mutate(last.id)}>
-            Delete service
-          </Button>
-        </div>
-      </div>
-    </Modal>
   );
 }

@@ -55,6 +55,7 @@ message NodeMessage {
     RenewRequest renew = 5;
     Heartbeat heartbeat = 6;
     MetricsReport metrics = 7;
+    LogBatch log_batch = 8;
     BackupResult backup_result = 20;
     DbResponse db_result = 30;
     TunnelOpened tunnel_opened = 31;
@@ -371,6 +372,22 @@ enum LogKind {
   LOG_RUNTIME = 0;
   // The deployment's build output.
   LOG_BUILD = 1;
+}
+
+// Every running workload's output, shipped as it happens (batched every few
+// seconds) so the server can keep it after the container is gone and search
+// across an environment.
+message LogBatch {
+  repeated ShippedLine lines = 1;
+  // Lines dropped on the node since the last batch (buffer full).
+  uint32 dropped = 2;
+}
+
+message ShippedLine {
+  string deployment_id = 1;
+  int64 at_unix_ms = 2;
+  bool stderr = 3;
+  string text = 4;
 }
 
 message LogCancel {

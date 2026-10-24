@@ -156,6 +156,8 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             }
             kick.extend(old.into_iter().flatten());
             commit_status = Some("success");
+            crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentSucceeded)
+                .await?;
             // This node's routes now point at the new deployment.
             kick.push(node);
         }
@@ -170,6 +172,8 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             .await?;
             kick.push(node);
             commit_status = Some("failure");
+            crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentFailed)
+                .await?;
         }
         (DeploymentPhase::Crashed, "active") => {
             // Stays in the desired state so the restart policy can recover it.
@@ -177,6 +181,8 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
                 .bind(dep)
                 .bind(&message)
                 .execute(&mut *tx)
+                .await?;
+            crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentCrashed)
                 .await?;
         }
         _ => {}

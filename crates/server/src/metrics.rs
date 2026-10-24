@@ -84,6 +84,11 @@ pub struct Point {
 /// The instance's usage over `range`: per bucket, each deployment's average,
 /// summed (two deployments overlap while one replaces the other).
 pub async fn series(db: &PgPool, instance: Id, range: Range) -> sqlx::Result<Vec<Point>> {
+    series_of(db, &[instance], range).await
+}
+
+/// Several instances' usage summed (a project's in one environment).
+pub async fn series_of(db: &PgPool, instances: &[Id], range: Range) -> sqlx::Result<Vec<Point>> {
     let (span, step) = range.span_and_step();
     sqlx::query_as(
         "WITH per AS (
@@ -91,14 +96,14 @@ pub async fn series(db: &PgPool, instance: Id, range: Range) -> sqlx::Result<Vec
                     avg(cpu_percent) AS cpu, avg(memory_bytes) AS mem,
                     avg(net_rx_bps) AS rx, avg(net_tx_bps) AS tx
              FROM metric_samples
-             WHERE service_instance_id = $1 AND at > now() - make_interval(secs => $2)
+             WHERE service_instance_id = ANY($1) AND at > now() - make_interval(secs => $2)
              GROUP BY 1, 2
          )
          SELECT b * $3 * 1000 AS t, sum(cpu)::float8 AS cpu_percent, sum(mem)::bigint AS memory_bytes,
                 sum(rx)::float8 AS net_rx_bytes_per_sec, sum(tx)::float8 AS net_tx_bytes_per_sec
          FROM per GROUP BY b ORDER BY b",
     )
-    .bind(instance)
+    .bind(instances)
     .bind(span as f64)
     .bind(step)
     .fetch_all(db)

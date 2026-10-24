@@ -10,6 +10,7 @@ pub mod edge;
 pub mod identity;
 pub mod join;
 pub mod location;
+pub mod logship;
 pub mod metrics;
 pub mod reconcile;
 pub mod runtime;

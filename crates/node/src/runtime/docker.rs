@@ -492,6 +492,31 @@ impl Runtime for DockerRuntime {
         Ok(stream.boxed())
     }
 
+    async fn follow_since(
+        &self,
+        container_id: &str,
+        since_unix_secs: i64,
+    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LogLine>>> {
+        let opts = LogsOptionsBuilder::new()
+            .stdout(true)
+            .stderr(true)
+            .timestamps(true)
+            .follow(true)
+            .since(since_unix_secs.clamp(0, i32::MAX as i64) as i32)
+            .build();
+        let stream = self.docker.logs(container_id, Some(opts)).flat_map(|item| {
+            let lines: Vec<anyhow::Result<LogLine>> = match item {
+                Ok(LogOutput::StdOut { message }) => parse_lines(&message, false),
+                Ok(LogOutput::StdErr { message }) => parse_lines(&message, true),
+                Ok(LogOutput::Console { message }) => parse_lines(&message, false),
+                Ok(LogOutput::StdIn { .. }) => vec![],
+                Err(e) => vec![Err(e.into())],
+            };
+            futures::stream::iter(lines)
+        });
+        Ok(stream.boxed())
+    }
+
     async fn container_env(&self, container_id: &str) -> anyhow::Result<Vec<(String, String)>> {
         super::docker_exec::container_env(&self.docker, container_id).await
     }

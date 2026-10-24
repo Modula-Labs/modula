@@ -429,6 +429,38 @@ CREATE TABLE metric_samples (
 CREATE INDEX metric_samples_instance_at_idx ON metric_samples (service_instance_id, at);
 CREATE INDEX metric_samples_at_idx ON metric_samples (at);
 
+-- Every running workload's output, shipped by the nodes as it happens and
+-- kept a week: logs outlive the containers (each deploy replaces them) and
+-- are searchable across an environment.
+CREATE TABLE log_lines (
+    environment_id       id NOT NULL REFERENCES environments (id) ON DELETE CASCADE,
+    service_instance_id  id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    deployment_id        id NOT NULL REFERENCES deployments (id) ON DELETE CASCADE,
+    at                   timestamptz NOT NULL,
+    stderr               boolean NOT NULL,
+    line                 text NOT NULL
+);
+CREATE INDEX log_lines_environment_at_idx ON log_lines (environment_id, at);
+CREATE INDEX log_lines_at_idx ON log_lines (at);
+CREATE INDEX log_lines_deployment_idx ON log_lines (deployment_id);
+
+-- A project's outgoing webhooks: deployment events POSTed as JSON, signed
+-- with HMAC-SHA256 of the body (X-Modula-Signature: sha256=<hex>) under a
+-- secret shown once at creation and stored sealed.
+CREATE TABLE webhooks (
+    id             id PRIMARY KEY,
+    project_id     id NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    url            text NOT NULL,
+    events         text[] NOT NULL,
+    secret_sealed  bytea NOT NULL,
+    created_by     id REFERENCES users (id) ON DELETE SET NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    last_status    integer,
+    last_error     text,
+    last_at        timestamptz
+);
+CREATE INDEX webhooks_project_idx ON webhooks (project_id);
+
 ---------------------------------------------------------------------------
 -- Configuration changes (the project's activity feed)
 ---------------------------------------------------------------------------

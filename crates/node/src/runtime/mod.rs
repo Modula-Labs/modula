@@ -115,6 +115,17 @@ pub trait Runtime: Send + Sync + 'static {
         follow: bool,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LogLine>>>;
 
+    /// Follows a container's output from `since_unix_secs` on (whole
+    /// seconds, so the first lines may repeat ones seen before). Runtimes
+    /// that can't follow return an error and nothing is shipped.
+    async fn follow_since(
+        &self,
+        _container_id: &str,
+        _since_unix_secs: i64,
+    ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LogLine>>> {
+        anyhow::bail!("this runtime can't follow logs")
+    }
+
     /// A resource sample of a running container (None: not running, or the
     /// runtime can't measure it).
     async fn stats(&self, _container_id: &str) -> anyhow::Result<Option<Stats>> {

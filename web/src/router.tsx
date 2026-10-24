@@ -11,6 +11,10 @@ import { ServersPage } from "./pages/Servers";
 import { WorkspaceSettingsPage } from "./pages/WorkspaceSettings";
 import type { ProjectSearch } from "./pages/project/ProjectPage";
 import type { ServiceTab } from "./pages/project/ServiceSheet";
+import { LogsPage } from "./pages/project/LogsPage";
+import { ProjectObservability } from "./pages/project/ProjectObservability";
+import { ProjectSettingsPage } from "./pages/project/ProjectSettingsPage";
+import { ProjectShell } from "./pages/project/ProjectShell";
 import { SetupPage } from "./pages/Setup";
 import { TwoFactorPage } from "./pages/TwoFactor";
 
@@ -96,7 +100,8 @@ const ProjectPage = lazy(() => import("./pages/project/ProjectPage").then((m) =>
 const tabs: ServiceTab[] = ["deployments", "metrics", "database", "variables", "backups", "settings"];
 const str = (v: unknown) => (typeof v === "string" && v.length <= 64 ? v : undefined);
 
-/** The project canvas is full-bleed, outside the workspace sidebar. */
+/** A project is full-bleed, outside the workspace sidebar: the shell (top bar + left icon rail)
+ *  wraps the canvas, metrics, logs and settings pages. `?env=` is shared by all of them. */
 const projectRoute = createRoute({
   getParentRoute: () => appRoute,
   path: "/projects/$projectId",
@@ -111,13 +116,44 @@ const projectRoute = createRoute({
   }),
   component: function Project() {
     const { projectId } = projectRoute.useParams();
-    const search = projectRoute.useSearch();
-    const navigate = useNavigate({ from: projectRoute.fullPath });
+    const { env } = projectRoute.useSearch();
+    return <ProjectShell projectId={projectId} envId={env} />;
+  },
+});
+
+const projectCanvasRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: "/",
+  component: function ProjectCanvas() {
+    const { projectId } = projectCanvasRoute.useParams();
+    const search = projectCanvasRoute.useSearch();
+    const navigate = useNavigate({ from: projectCanvasRoute.fullPath });
     return (
       <Suspense fallback={null}>
         <ProjectPage projectId={projectId} search={search} setSearch={(s) => void navigate({ search: s })} />
       </Suspense>
     );
+  },
+});
+const projectMetricsRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: "/metrics",
+  component: ProjectObservability,
+});
+const projectLogsRoute = createRoute({ getParentRoute: () => projectRoute, path: "/logs", component: LogsPage });
+const projectSettingsIndexRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: "/settings",
+  beforeLoad: ({ params, search }) => {
+    throw redirect({ to: "/projects/$projectId/settings/$section", params: { projectId: params.projectId, section: "general" }, search: { env: search.env } });
+  },
+});
+const projectSettingsRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: "/settings/$section",
+  component: function ProjectSettings() {
+    const { projectId, section } = projectSettingsRoute.useParams();
+    return <ProjectSettingsPage projectId={projectId} section={section} />;
   },
 });
 
@@ -126,7 +162,8 @@ const routeTree = rootRoute.addChildren([
   setupRoute,
   loginRoute,
   twoFactorRoute,
-  appRoute.addChildren([workspaceRoute.addChildren([projectsRoute, settingsRoute, securityRoute, serversRoute]), projectRoute]),
+  appRoute.addChildren([workspaceRoute.addChildren([projectsRoute, settingsRoute, securityRoute, serversRoute]), projectRoute.addChildren([projectCanvasRoute, projectMetricsRoute, projectLogsRoute, projectSettingsIndexRoute, projectSettingsRoute]),
+  ]),
 ]);
 
 export function makeRouter(queryClient: QueryClient) {
