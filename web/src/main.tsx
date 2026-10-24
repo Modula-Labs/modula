@@ -18,9 +18,10 @@ const queryClient: QueryClient = new QueryClient({
     },
   },
   queryCache: new QueryCache({
-    // A session that expires mid-use sends the user back to sign in.
+    // A session that expires mid-use sends the user back to sign in. Invite
+    // pages are public and handle being signed out themselves.
     onError: (e) => {
-      if (e instanceof ApiError && e.status === 401 && !location.pathname.startsWith("/login")) {
+      if (e instanceof ApiError && e.status === 401 && !location.pathname.startsWith("/login") && !location.pathname.startsWith("/invite/")) {
         queryClient.clear();
         void router.navigate({ to: "/login", search: { expired: true } });
       }

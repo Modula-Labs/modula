@@ -2,18 +2,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { AuthCard } from "@/components/AuthCard";
+import { StrengthMeter } from "@/components/StrengthMeter";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/misc";
 import { ApiError, api } from "@/lib/api";
-
-function strength(pw: string): { score: 0 | 1 | 2 | 3; label: string } {
-  if (pw.length < 10) return { score: 0, label: "At least 10 characters" };
-  const classes = [/[a-z]/, /[A-Z]/, /\d/, /[^\w\s]/, /\s/].filter((r) => r.test(pw)).length;
-  if (pw.length >= 16 || (pw.length >= 12 && classes >= 3)) return { score: 3, label: "Strong" };
-  if (pw.length >= 12 || classes >= 3) return { score: 2, label: "Good" };
-  return { score: 1, label: "Fair — longer is better" };
-}
+import { strength } from "@/lib/password";
 
 export function SetupPage() {
   const navigate = useNavigate();
@@ -60,11 +54,7 @@ export function SetupPage() {
         <Field label="Password" hint={s.label}>
           {(p) => <Input {...p} type="password" required minLength={10} autoComplete="new-password" value={form.password} onChange={set("password")} />}
         </Field>
-        <div className="-mt-2 grid grid-cols-3 gap-1" aria-hidden>
-          {[1, 2, 3].map((i) => (
-            <div key={i} className={`h-1 rounded-full ${s.score >= i ? (s.score === 3 ? "bg-success" : s.score === 2 ? "bg-primary" : "bg-warning") : "bg-accent"}`} />
-          ))}
-        </div>
+        <StrengthMeter score={s.score} />
         <Button type="submit" variant="primary" loading={busy} disabled={s.score === 0}>
           Create admin
         </Button>

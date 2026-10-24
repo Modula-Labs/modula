@@ -8,7 +8,8 @@ import { OtpInput } from "@/components/ui/OtpInput";
 import { Alert } from "@/components/ui/misc";
 import { ApiError, api } from "@/lib/api";
 
-export function TwoFactorPage() {
+/** `invite`: the invite token to return to after the second factor. */
+export function TwoFactorPage({ invite }: { invite?: string }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [recovery, setRecovery] = useState(false);
@@ -24,7 +25,7 @@ export function TwoFactorPage() {
     try {
       const me = await api.mfa(recovery ? { backupCode: value } : { totpCode: value });
       qc.setQueryData(["me"], me);
-      await navigate({ to: "/projects" });
+      await (invite ? navigate({ to: "/invite/$token", params: { token: invite } }) : navigate({ to: "/projects" }));
     } catch (err) {
       const ae = err instanceof ApiError ? err : null;
       if (ae?.code === "rate_limited" || ae?.code === "unauthorized") {
@@ -43,7 +44,7 @@ export function TwoFactorPage() {
     <AuthCard
       title="Two-factor authentication"
       subtitle={recovery ? "Enter one of your recovery codes. Each code works once." : "Enter the 6-digit code from your authenticator app."}
-      footer={<Link to="/login" className="hover:text-foreground">← Back to sign in</Link>}
+      footer={<Link to="/login" search={invite ? { invite } : {}} className="hover:text-foreground">← Back to sign in</Link>}
     >
       <form
         className="flex flex-col gap-4"
@@ -61,7 +62,7 @@ export function TwoFactorPage() {
           <OtpInput value={code} onChange={setCode} onComplete={(v) => void submit(v)} autoFocus disabled={busy || expired} invalid={!!error} />
         )}
         {expired ? (
-          <Button type="button" variant="primary" onClick={() => void navigate({ to: "/login" })}>
+          <Button type="button" variant="primary" onClick={() => void navigate({ to: "/login", search: invite ? { invite } : {} })}>
             Sign in again
           </Button>
         ) : (
