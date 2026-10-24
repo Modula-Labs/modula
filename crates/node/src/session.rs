@@ -157,6 +157,10 @@ impl Ctx<'_> {
         // Closed (dropped) when this session ends.
         let tunnels = crate::tunnel::Tunnels::new(self.runtime.clone(), tx.clone());
         let mut heartbeat = tokio::time::interval(HEARTBEAT_EVERY);
+        let mut metrics_tick = tokio::time::interval(crate::metrics::EVERY);
+        let sampler = Arc::new(tokio::sync::Mutex::new(crate::metrics::Sampler::new(
+            self.runtime.clone(),
+        )));
         let result = loop {
             tokio::select! {
                 _ = self.stop.cancelled() => break Ok(()),
@@ -181,6 +185,19 @@ impl Ctx<'_> {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |d| d.as_millis() as i64);
                     let _ = tx.send(msg(Out::Heartbeat(pb::Heartbeat { at_unix_ms }))).await;
+                }
+                _ = metrics_tick.tick() => {
+                    // Sampling takes about a second (Docker measures CPU over
+                    // one); a slow round skips the next instead of piling up.
+                    if let Ok(mut s) = sampler.clone().try_lock_owned() {
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let report = s.sample().await;
+                            if !report.workloads.is_empty() {
+                                let _ = tx.send(msg(Out::Metrics(report))).await;
+                            }
+                        });
+                    }
                 }
             }
             logs.retain(|_, h| !h.is_finished());
@@ -370,7 +387,7 @@ impl Ctx<'_> {
             node_version: self
                 .upgrade
                 .map_or_else(|| crate::VERSION.to_owned(), |u| u.version()),
-            capabilities: ["logs", "renew", "backup", "tunnel"]
+            capabilities: ["logs", "renew", "backup", "tunnel", "metrics"]
                 .into_iter()
                 .chain(self.has_edge.then_some("edge"))
                 .chain(self.build_logs.is_some().then_some("build"))

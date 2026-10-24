@@ -18,6 +18,7 @@ pub mod jobs;
 pub mod keyring;
 pub mod listen;
 pub mod locations;
+pub mod metrics;
 pub mod nodes;
 pub mod pki;
 pub mod private;
@@ -92,6 +93,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 api::github::prune(&s.db).await?;
                 let purged = deploy::upload::purge(&s).await?;
                 tracing::info!(purged, "expired source uploads removed");
+                let samples = metrics::purge(&s.db).await?;
+                tracing::info!(samples, "old metric samples removed");
                 Ok(())
             })
             .on(github::app::STATUS_JOB, github::app::status_job)

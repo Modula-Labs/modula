@@ -54,6 +54,7 @@ message NodeMessage {
     LogChunk log = 4;
     RenewRequest renew = 5;
     Heartbeat heartbeat = 6;
+    MetricsReport metrics = 7;
     BackupResult backup_result = 20;
     DbResponse db_result = 30;
     TunnelOpened tunnel_opened = 31;
@@ -92,6 +93,24 @@ message NodeInfo {
 
 message Heartbeat {
   int64 at_unix_ms = 1;
+}
+
+// Resource usage of the node's running workloads, sampled every 30s
+// (capability "metrics").
+message MetricsReport {
+  repeated WorkloadMetrics workloads = 1;
+}
+
+message WorkloadMetrics {
+  string deployment_id = 1;
+  int64 at_unix_ms = 2;
+  // Percent of one CPU over the last second (100 = one full core).
+  double cpu_percent = 3;
+  // Memory in use, page cache excluded.
+  uint64 memory_bytes = 4;
+  // Network throughput since the previous sample.
+  double net_rx_bytes_per_sec = 5;
+  double net_tx_bytes_per_sec = 6;
 }
 
 enum DeploymentPhase {

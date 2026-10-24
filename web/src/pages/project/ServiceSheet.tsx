@@ -13,10 +13,11 @@ import { BackupsTab } from "./BackupsTab";
 import { ConnectDialog } from "./ConnectDialog";
 import { DatabaseTab } from "./database/DatabaseTab";
 import { DeploymentsTab } from "./DeploymentsTab";
+import { MetricsTab } from "./MetricsTab";
 import { SettingsTab } from "./SettingsTab";
 import { VariablesTab } from "./VariablesTab";
 
-export type ServiceTab = "deployments" | "database" | "variables" | "backups" | "settings";
+export type ServiceTab = "deployments" | "metrics" | "database" | "variables" | "backups" | "settings";
 
 export function ServiceSheet({
   instanceId,
@@ -109,6 +110,7 @@ export function ServiceSheet({
         onChange={onTab}
         tabs={[
           { value: "deployments", label: "Deployments" },
+          { value: "metrics", label: "Metrics" },
           ...(i?.template === "postgres" ? [{ value: "database" as const, label: "Database" }] : []),
           { value: "variables", label: "Variables" },
           ...(i?.template ? [{ value: "backups" as const, label: "Backups" }] : []),
@@ -117,6 +119,9 @@ export function ServiceSheet({
       >
         <TabPanel value="deployments">
           <DeploymentsTab instanceId={instanceId} selected={deploymentId} canDeploy={canDeploy} onOpen={onOpenDeployment} />
+        </TabPanel>
+        <TabPanel value="metrics">
+          <MetricsTab instanceId={instanceId} />
         </TabPanel>
         <TabPanel value="database">
           {i ? <DatabaseTab instance={i} canEdit={atLeast(role, "member")} onConnect={() => setConnecting(true)} /> : <Skeleton className="h-32" />}

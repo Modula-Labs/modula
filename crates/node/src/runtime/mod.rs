@@ -30,6 +30,18 @@ pub struct Container {
     pub restart_count: u32,
 }
 
+/// One resource sample of a running container.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Stats {
+    /// Percent of one CPU (100 = one full core).
+    pub cpu_percent: f64,
+    /// In use, page cache excluded.
+    pub memory_bytes: u64,
+    /// Totals since the container started.
+    pub net_rx_bytes: u64,
+    pub net_tx_bytes: u64,
+}
+
 /// Receives a one-off container's output, line by line.
 pub type OutputSink = Box<dyn Fn(LogLine) + Send + Sync>;
 
@@ -102,6 +114,12 @@ pub trait Runtime: Send + Sync + 'static {
         tail: u32,
         follow: bool,
     ) -> anyhow::Result<BoxStream<'static, anyhow::Result<LogLine>>>;
+
+    /// A resource sample of a running container (None: not running, or the
+    /// runtime can't measure it).
+    async fn stats(&self, _container_id: &str) -> anyhow::Result<Option<Stats>> {
+        Ok(None)
+    }
 
     /// The environment a container was created with, as `(name, value)`.
     async fn container_env(&self, container_id: &str) -> anyhow::Result<Vec<(String, String)>>;

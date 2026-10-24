@@ -8,6 +8,7 @@ pub mod domain;
 pub mod environment;
 pub mod logs;
 pub mod meta;
+pub mod metrics;
 pub mod project;
 pub mod service;
 pub mod storage;
@@ -53,6 +54,7 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
         }
         Command::Deployment { command } => return deploy::deployment(ctx, command).await,
         Command::Logs(args) => return logs::run(ctx, args).await,
+        Command::Metrics { range } => return metrics::run(ctx, &range).await,
         Command::Variables(args) => return variables::run(ctx, args).await,
         Command::Environment(args) => environment::run(ctx, args).await?,
         Command::Domain(args) => domain::run(ctx, args).await?,

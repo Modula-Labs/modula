@@ -21,7 +21,7 @@ use bollard::models::{
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     ListNetworksOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    RemoveVolumeOptionsBuilder,
+    RemoveVolumeOptionsBuilder, StatsOptionsBuilder,
 };
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
@@ -153,6 +153,21 @@ impl Runtime for DockerRuntime {
             .into_iter()
             .filter_map(|n| n.labels?.get(labels::ENVIRONMENT).cloned())
             .collect())
+    }
+
+    async fn stats(&self, container_id: &str) -> anyhow::Result<Option<super::Stats>> {
+        // Not one-shot: Docker samples twice a second apart, so the CPU
+        // percentage covers that second.
+        let opts = StatsOptionsBuilder::new()
+            .stream(false)
+            .one_shot(false)
+            .build();
+        let mut s = self.docker.stats(container_id, Some(opts));
+        match s.next().await {
+            Some(Ok(r)) => Ok(stats_from(&r)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
     }
 
     async fn containers(&self) -> anyhow::Result<Vec<Container>> {
@@ -599,5 +614,70 @@ mod tests {
         assert_eq!(lines[0].text, "hello");
         assert_eq!(lines[0].ts_unix_ms % 1000, 500);
         assert!(lines[1].stderr);
+    }
+}
+
+/// Docker's stats response as a [`super::Stats`]: CPU from the two samples'
+/// deltas (like `docker stats`), memory without inactive page cache.
+fn stats_from(r: &bollard::models::ContainerStatsResponse) -> Option<super::Stats> {
+    let cpu = r.cpu_stats.as_ref()?;
+    let pre = r.precpu_stats.as_ref();
+    let total = |c: &bollard::models::ContainerCpuStats| {
+        c.cpu_usage
+            .as_ref()
+            .and_then(|u| u.total_usage)
+            .unwrap_or(0)
+    };
+    let cpu_delta = total(cpu).saturating_sub(pre.map_or(0, total)) as f64;
+    let system_delta =
+        cpu.system_cpu_usage
+            .unwrap_or(0)
+            .saturating_sub(pre.and_then(|p| p.system_cpu_usage).unwrap_or(0)) as f64;
+    let online = f64::from(cpu.online_cpus.unwrap_or(1).max(1));
+    let cpu_percent = if system_delta > 0.0 {
+        cpu_delta / system_delta * online * 100.0
+    } else {
+        0.0
+    };
+    let memory_bytes = r.memory_stats.as_ref().map_or(0, |m| {
+        let cache = m.stats.as_ref().map_or(0, |s| {
+            s.get("inactive_file")
+                .or_else(|| s.get("total_inactive_file"))
+                .copied()
+                .unwrap_or(0)
+        });
+        m.usage.unwrap_or(0).saturating_sub(cache)
+    });
+    let (net_rx_bytes, net_tx_bytes) = r.networks.as_ref().map_or((0, 0), |n| {
+        n.values().fold((0, 0), |(rx, tx), i| {
+            (rx + i.rx_bytes.unwrap_or(0), tx + i.tx_bytes.unwrap_or(0))
+        })
+    });
+    Some(super::Stats {
+        cpu_percent,
+        memory_bytes,
+        net_rx_bytes,
+        net_tx_bytes,
+    })
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    #[test]
+    fn stats_like_docker_stats() {
+        let r: bollard::models::ContainerStatsResponse = serde_json::from_value(serde_json::json!({
+            "cpu_stats": { "cpu_usage": { "total_usage": 3_000_000_000u64 }, "system_cpu_usage": 104_000_000_000u64, "online_cpus": 4 },
+            "precpu_stats": { "cpu_usage": { "total_usage": 2_000_000_000u64 }, "system_cpu_usage": 100_000_000_000u64, "online_cpus": 4 },
+            "memory_stats": { "usage": 300_000_000u64, "stats": { "inactive_file": 100_000_000u64 } },
+            "networks": { "eth0": { "rx_bytes": 1000, "tx_bytes": 500 }, "eth1": { "rx_bytes": 24, "tx_bytes": 12 } }
+        }))
+        .unwrap();
+        let s = stats_from(&r).unwrap();
+        // 1s of CPU over 4s of system time on 4 CPUs: one full core.
+        assert!((s.cpu_percent - 100.0).abs() < 1e-9, "{}", s.cpu_percent);
+        assert_eq!(s.memory_bytes, 200_000_000);
+        assert_eq!((s.net_rx_bytes, s.net_tx_bytes), (1024, 512));
     }
 }

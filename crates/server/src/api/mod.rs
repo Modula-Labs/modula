@@ -9,6 +9,7 @@ pub mod env_config;
 pub mod github;
 pub mod install;
 pub mod instance;
+pub mod metrics;
 pub mod nodes;
 pub mod projects;
 pub mod services;
@@ -92,6 +93,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         // Deployments
         .post("/api/service-instances/{instance_id}/deployments", Resource(Action::DeploymentCreate), deployments::create)
         .get("/api/service-instances/{instance_id}/deployments", Resource(Action::InstanceRead), deployments::list)
+        .get("/api/service-instances/{instance_id}/metrics", Resource(Action::InstanceRead), metrics::get)
         .get("/api/deployments/{deployment_id}", Resource(Action::DeploymentRead), deployments::get)
         .delete("/api/deployments/{deployment_id}", Resource(Action::DeploymentRemove), deployments::remove)
         .get("/api/deployments/{deployment_id}/logs", Resource(Action::DeploymentRead), deployments::logs)

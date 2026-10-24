@@ -323,6 +323,7 @@ async fn handle(
                 .execute(&state.db)
                 .await?;
         }
+        In::Metrics(r) => crate::metrics::record(&state.db, node, &r).await?,
         In::Report(r) => {
             sqlx::query(
                 "UPDATE nodes SET applied_generation = GREATEST(applied_generation, $2), last_seen_at = now()

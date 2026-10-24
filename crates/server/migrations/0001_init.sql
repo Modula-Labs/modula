@@ -415,6 +415,20 @@ CREATE TABLE deployment_events (
 );
 CREATE INDEX deployment_events_dep_idx ON deployment_events (deployment_id, id);
 
+-- Resource usage samples from the nodes (every 30s per running deployment),
+-- kept a week for the dashboard's charts.
+CREATE TABLE metric_samples (
+    deployment_id        id NOT NULL REFERENCES deployments (id) ON DELETE CASCADE,
+    service_instance_id  id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    at                   timestamptz NOT NULL,
+    cpu_percent          real NOT NULL,
+    memory_bytes         bigint NOT NULL,
+    net_rx_bps           real NOT NULL,
+    net_tx_bps           real NOT NULL
+);
+CREATE INDEX metric_samples_instance_at_idx ON metric_samples (service_instance_id, at);
+CREATE INDEX metric_samples_at_idx ON metric_samples (at);
+
 ---------------------------------------------------------------------------
 -- Configuration changes (the project's activity feed)
 ---------------------------------------------------------------------------

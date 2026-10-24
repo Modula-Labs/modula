@@ -153,6 +153,12 @@ pub enum Command {
     },
     /// Show a deployment's logs.
     Logs(LogsArgs),
+    /// Show the service's CPU, memory and network usage.
+    Metrics {
+        /// How far back: 1h, 6h, 24h or 7d.
+        #[arg(long, default_value = "1h", value_parser = ["1h", "6h", "24h", "7d"])]
+        range: String,
+    },
     /// List, set or delete variables (values are write-only).
     #[command(visible_aliases = ["variable", "vars"])]
     Variables(VariablesArgs),

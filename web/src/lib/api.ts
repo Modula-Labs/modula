@@ -570,6 +570,25 @@ export interface DbCredentials {
 }
 
 /** True when the server doesn't have the database endpoints yet. */
+export type MetricsRange = "1h" | "6h" | "24h" | "7d";
+export interface MetricsPoint {
+  /** Unix ms. */
+  t: number;
+  /** Percent of ONE vCPU (100 = one core; may exceed 100). */
+  cpuPercent: number;
+  memoryBytes: number;
+  netRxBytesPerSec: number;
+  netTxBytesPerSec: number;
+}
+export interface InstanceMetrics {
+  range: MetricsRange;
+  stepSecs: number;
+  cpus: number;
+  memoryTotalBytes: number;
+  memoryLimitBytes: number | null;
+  points: MetricsPoint[];
+}
+
 export const isNotAvailable = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 501);
 
 const enc = encodeURIComponent;
@@ -650,6 +669,8 @@ export const api = {
   revealVariable: (id: string) => post<{ name: string; value: string }>(`/api/variables/${enc(id)}/reveal`),
 
   deployments: (instance: string) => get<Deployment[]>(`/api/service-instances/${enc(instance)}/deployments`),
+  instanceMetrics: (instance: string, range: MetricsRange) =>
+    get<InstanceMetrics>(`/api/service-instances/${enc(instance)}/metrics?range=${range}`),
   deploy: (instance: string) => post<DeploymentDetail>(`/api/service-instances/${enc(instance)}/deployments`),
   deployment: (id: string) => get<DeploymentDetail>(`/api/deployments/${enc(id)}`),
   redeployDeployment: (id: string) => post<DeploymentDetail>(`/api/deployments/${enc(id)}/redeploy`),
