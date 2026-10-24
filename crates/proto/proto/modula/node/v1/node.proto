@@ -532,6 +532,10 @@ message Workload {
   Pitr pitr = 95;
   // Scale to zero; absent = always running.
   Serverless serverless = 96;
+  // A JavaScript function the node runs in workerd instead of a container
+  // (image, command, limits, volume and health are unused); absent = a
+  // container. `env` becomes its text bindings.
+  Function function = 100;
 }
 
 // The node stops the container after `idle_secs` without requests and starts
@@ -539,6 +543,15 @@ message Workload {
 // volume. Only requests through the edge wake it.
 message Serverless {
   uint32 idle_secs = 1;
+}
+
+message Function {
+  // The module worker (`export default { fetch(request, env, ctx) }`) for
+  // code written in the dashboard. Empty: the bundle a FUNCTION build made
+  // (the workload then has a Build).
+  string code = 1;
+  // workerd's compatibility date, YYYY-MM-DD.
+  string compatibility_date = 2;
 }
 
 // The node bind-mounts its own WAL-G binary read-only at /usr/local/bin/wal-g
@@ -588,19 +601,26 @@ message Build {
   // Hex SHA-256 the downloaded archive must match (uploaded sources); empty =
   // not checked (GitHub tarballs come over TLS from GitHub itself).
   string source_sha256 = 55;
-  // Static sites hosted elsewhere (e.g. Cloudflare): instead of running the
-  // image, the node packs this directory of it (relative to the image's
-  // working directory, or absolute) as a gzipped tarball and PUTs it to
-  // output_url with output_auth as the Authorization header, then reports
-  // BUILT with the archive's hex SHA-256. Empty = run the image as usual.
+  // Output hosted elsewhere (a static site, or a function on Cloudflare):
+  // instead of running the image, the node packs this directory of it
+  // (relative to the image's working directory, or absolute) as a gzipped
+  // tarball and PUTs it to output_url with output_auth as the Authorization
+  // header, then reports BUILT with the archive's hex SHA-256. Empty = run
+  // the image as usual.
   string output_dir = 56;
   string output_url = 57;
   string output_auth = 58;
+  // FUNCTION builds: the function's entry module, relative to root_dir. The
+  // build installs the repository's dependencies and bundles the entry with
+  // esbuild into `<FUNCTION_OUTPUT_DIR>/<FUNCTION_MODULE>` of its image.
+  string function_entry = 59;
 }
 
 enum Builder {
   BUILDER_RAILPACK = 0;
   BUILDER_DOCKERFILE = 1;
+  // Bundles a JavaScript/TypeScript function (see Build.function_entry).
+  BUILDER_FUNCTION = 2;
 }
 
 message EnvVar {
