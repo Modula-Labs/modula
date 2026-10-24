@@ -208,6 +208,12 @@ impl Functions {
     fn write_modules(&self, spec: &FunctionSpec) -> std::io::Result<()> {
         let d = self.dir.join(&spec.deployment_id);
         std::fs::create_dir_all(&d)?;
+        // The code is workerd's user's alone, like the config.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700))?;
+        }
         std::fs::write(d.join(capnp::USER_MODULE), &spec.code)?;
         std::fs::write(
             d.join(capnp::CONSOLE_MODULE),

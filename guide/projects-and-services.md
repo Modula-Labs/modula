@@ -81,7 +81,8 @@ two places, switched in its settings:
   unprivileged user, and functions reach the public internet only: not the
   server, its other services, the private network or the cloud's metadata
   service. A deploy, or any change to a server's functions, restarts that
-  server's workerd: requests in flight get 5 seconds, new ones see a brief gap.
+  server's workerd: it gets up to 5 seconds to finish requests in flight, and
+  new ones see a brief gap.
 - **Cloudflare**: uploaded as a Worker with the workspace's Cloudflare
   connection ([integrations](integrations.md#cloudflare)), served on
   `<worker>.<subdomain>.workers.dev` and its custom domains, with every
