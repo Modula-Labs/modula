@@ -159,6 +159,7 @@ pub fn service_statuses(p: &ProjectDetail, env: &Environment) -> Vec<ServiceStat
             let source = match i.source_type.as_deref() {
                 _ if s.template.is_some() => s.template.clone(),
                 Some("repo") => i.repo.clone(),
+                Some("local") => Some("local files".into()),
                 _ => i.image.clone(),
             };
             Some(ServiceStatus {

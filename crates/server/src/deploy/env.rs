@@ -365,9 +365,36 @@ pub async fn open_vars_snapshot(
     Ok(serde_json::from_slice(&plain).map_err(anyhow::Error::from)?)
 }
 
+/// Whether a variable's value is masked in logs: its name looks like a
+/// credential, or the value looks like one (long, letters and digits mixed).
+/// Plain settings (`0.0.0.0`, `production`, `info`) stay readable.
+pub fn worth_masking(name: &str, value: &str) -> bool {
+    const SECRET_WORDS: [&str; 8] = [
+        "PASSWORD",
+        "PASSWD",
+        "SECRET",
+        "TOKEN",
+        "KEY",
+        "PRIVATE",
+        "CREDENTIAL",
+        "AUTH",
+    ];
+    if value.len() < Redactor::MIN_LEN {
+        return false;
+    }
+    let n = name.to_ascii_uppercase();
+    if SECRET_WORDS.iter().any(|w| n.contains(w)) {
+        return true;
+    }
+    value.len() >= 12
+        && value.bytes().any(|b| b.is_ascii_alphabetic())
+        && value.bytes().any(|b| b.is_ascii_digit())
+        && !value.contains(char::is_whitespace)
+}
+
 /// Hides secret values in text shown to users (logs). Matches the raw value
-/// and its base64 / URL-encoded forms; very short values are skipped because
-/// masking them would destroy unrelated text.
+/// and its base64 / URL-encoded forms; only values [`worth_masking`] are
+/// matched, because masking plain settings would destroy unrelated text.
 pub struct Redactor {
     needles: Vec<String>,
 }
@@ -379,9 +406,9 @@ impl Redactor {
     pub fn new(vars: &EnvMap) -> Self {
         use base64::Engine as _;
         let mut needles = Vec::new();
-        for v in vars.values() {
+        for (name, v) in vars {
             let v = v.expose_secret();
-            if v.len() < Self::MIN_LEN {
+            if !worth_masking(name, v) {
                 continue;
             }
             needles.push(v.to_owned());
@@ -434,5 +461,28 @@ mod tests {
         assert!(!out.contains("s3cr3t"), "{out}");
         assert!(!out.contains(&b64));
         assert!(out.contains("abc stays"));
+    }
+
+    #[test]
+    fn plain_settings_stay_readable() {
+        let mut m = EnvMap::new();
+        for (k, v) in [
+            ("ANTON_API_HOST", "0.0.0.0"),
+            ("NODE_ENV", "production"),
+            ("PUBLIC_URL", "https://example.com"),
+            ("API_KEY", "abcdefgh"),
+            ("DATABASE_URL", "postgres://app:Xy7pQ2rT9w@db:5432/app"),
+        ] {
+            m.insert(k.into(), SecretString::from(v));
+        }
+        let out = Redactor::new(&m).redact(
+            "listening on 0.0.0.0 in production for https://example.com key=abcdefgh db=postgres://app:Xy7pQ2rT9w@db:5432/app",
+        );
+        assert!(out.contains("0.0.0.0") && out.contains("production"));
+        assert!(out.contains("https://example.com"), "{out}");
+        assert!(
+            !out.contains("abcdefgh") && !out.contains("Xy7pQ2rT9w"),
+            "{out}"
+        );
     }
 }

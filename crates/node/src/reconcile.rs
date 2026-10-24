@@ -702,13 +702,37 @@ impl Reconciler {
     }
 }
 
+/// The server's `deploy::env::worth_masking`: a credential-looking name, or a
+/// long value mixing letters and digits.
+fn worth_masking(e: &pb::EnvVar) -> bool {
+    const SECRET_WORDS: [&str; 8] = [
+        "PASSWORD",
+        "PASSWD",
+        "SECRET",
+        "TOKEN",
+        "KEY",
+        "PRIVATE",
+        "CREDENTIAL",
+        "AUTH",
+    ];
+    let (name, value) = (e.name.to_ascii_uppercase(), e.value.as_str());
+    if value.len() < 6 {
+        return false;
+    }
+    SECRET_WORDS.iter().any(|w| name.contains(w))
+        || (value.len() >= 12
+            && value.bytes().any(|b| b.is_ascii_alphabetic())
+            && value.bytes().any(|b| b.is_ascii_digit())
+            && !value.contains(char::is_whitespace))
+}
+
 /// Masks the workload's variable values in text that leaves the node outside
 /// the log stream (which the server redacts itself), e.g. a failure message.
 fn redact(text: &str, env: &[pb::EnvVar]) -> String {
     let mut out = text.to_owned();
     let mut secrets: Vec<&str> = env
         .iter()
-        .filter(|e| !e.name.starts_with("MODULA_") && e.name != "PORT" && e.value.len() >= 6)
+        .filter(|e| !e.name.starts_with("MODULA_") && e.name != "PORT" && worth_masking(e))
         .map(|e| e.value.as_str())
         .collect();
     // Longest first, so a value containing another is masked whole.
@@ -1134,8 +1158,9 @@ mod tests {
             .insert("./migrate up".into(), 3);
         let mut w2 = workload(d2, env, "");
         w2.pre_deploy_command = migrate.clone();
+        // A credential-looking variable whose value shows up in the error.
         w2.env = vec![pb::EnvVar {
-            name: "DATABASE_URL".into(),
+            name: "MIGRATE_TOKEN".into(),
             value: "./migrate".into(),
         }];
         r.apply(&state(2, env, vec![workload(d1, env, ""), w2.clone()]))
