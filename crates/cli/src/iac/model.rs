@@ -34,6 +34,8 @@ pub const CONFIG_KEYS: &[&str] = &[
     "autoDeploy",
     "watchPaths",
     "hosting",
+    "cronSchedule",
+    "cronTimeoutSecs",
 ];
 
 /// Keys of a service table that aren't settings.
@@ -125,6 +127,11 @@ pub struct ServiceSpec {
     pub auto_deploy: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_paths: Option<Vec<String>>,
+    /// Run once per due time (5-field cron, UTC) instead of continuously.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_schedule: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_timeout_secs: Option<u32>,
 
     /// Custom domains (generated ones are never deleted).
     #[serde(default, skip_serializing_if = "Option::is_none")]

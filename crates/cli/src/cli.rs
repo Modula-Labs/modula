@@ -221,6 +221,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ServerCommand,
     },
+    /// A cron service's schedule and runs; run it now.
+    Cron {
+        #[command(subcommand)]
+        command: CronCommand,
+    },
     /// This Modula instance: its dashboard domain and apps domain.
     Instance {
         #[command(subcommand)]
@@ -260,6 +265,21 @@ pub struct ConfigPlanArgs {
     /// can't be compared, so they are otherwise only set when missing).
     #[arg(long)]
     pub update_sealed: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CronCommand {
+    /// The schedule, its next runs and the latest runs.
+    #[command(visible_alias = "ls")]
+    List {
+        /// Service name or id (default: the selected service).
+        service: Option<String>,
+    },
+    /// Run the service once now, from its serving deployment.
+    Run {
+        /// Service name or id (default: the selected service).
+        service: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

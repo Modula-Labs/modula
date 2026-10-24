@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod cron;
 pub mod db;
 pub mod deploy;
 pub mod domain;
@@ -77,6 +78,7 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
         Command::Server { command } => return crate::provision::run(ctx, command).await,
         Command::Config { command } => return config::run(ctx, command).await,
         Command::Instance { command } => instance::run(ctx, command).await?,
+        Command::Cron { command } => return cron::run(ctx, command).await,
     }
     Ok(0)
 }
