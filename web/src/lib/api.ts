@@ -427,14 +427,27 @@ export interface CreatedApp {
   warnings: string[];
 }
 export type BackupProvider = "s3" | "r2" | "b2" | "minio";
+export type BackupTargetKind = "s3" | "bucket" | "local";
 export interface BackupTarget {
   id: string;
   name: string;
-  provider: BackupProvider;
+  kind: BackupTargetKind;
+  /** Null for local targets. */
+  provider: BackupProvider | null;
+  /** Empty for bucket and local targets. */
   endpoint: string;
   region: string;
   bucket: string;
   prefix: string;
+  accessKeyId: string;
+  /** Bucket targets: the bucket service instance and where it lives. */
+  bucketInstanceId: string | null;
+  serviceName: string | null;
+  environmentName: string | null;
+  projectName: string | null;
+  /** Local targets: the server whose disk holds the backups. */
+  nodeId: string | null;
+  nodeName: string | null;
   createdAt: string;
 }
 export interface BackupTargetInput {
@@ -447,13 +460,53 @@ export interface BackupTargetInput {
   accessKeyId: string;
   secretAccessKey: string;
 }
+export interface BackupRetention {
+  dailyDays: number;
+  weeklyDays: number;
+  monthlyDays: number;
+}
+/** Exactly one of these selects where a backup is written. */
+export type BackupDestinationChoice =
+  | { targetId: string }
+  | { bucketInstanceId: string }
+  | { localDisk: true };
 export interface BackupSchedule {
   enabled: boolean;
   targetId: string;
+  targetName: string;
+  targetKind: BackupTargetKind;
   hourUtc: number;
-  retention: { dailyDays: number; weeklyDays: number; monthlyDays: number };
+  retention: BackupRetention;
 }
-export type BackupStatus = "running" | "completed" | "failed" | "deleted";
+export type BackupScheduleInput = {
+  enabled: boolean;
+  hourUtc: number;
+  retention?: BackupRetention;
+} & BackupDestinationChoice;
+export interface BackupBucketOption {
+  instanceId: string;
+  template: "r2" | "bucket";
+  serviceName: string;
+  environmentName: string;
+  projectName: string;
+  targetId: string | null;
+}
+export interface BackupServerOption {
+  nodeId: string;
+  name: string;
+  targetId: string | null;
+}
+export interface BackupDestinations {
+  targets: BackupTarget[];
+  buckets: BackupBucketOption[];
+  servers: BackupServerOption[];
+}
+export type BackupStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "deleting"
+  | "deleted";
 export interface Backup {
   id: string;
   status: BackupStatus;
@@ -463,6 +516,7 @@ export interface Backup {
   finishedAt: string | null;
   error: string | null;
   targetName: string;
+  targetKind: BackupTargetKind;
 }
 export interface BackupsInfo {
   schedule: BackupSchedule | null;
@@ -1165,17 +1219,21 @@ export const api = {
     del<{ ok: true }>(`/api/backup-targets/${enc(id)}`),
   backups: (instance: string) =>
     get<BackupsInfo>(`/api/service-instances/${enc(instance)}/backups`),
-  saveBackupSchedule: (instance: string, b: BackupSchedule) =>
+  backupDestinations: (instance: string) =>
+    get<BackupDestinations>(
+      `/api/service-instances/${enc(instance)}/backup-destinations`,
+    ),
+  saveBackupSchedule: (instance: string, b: BackupScheduleInput) =>
     request<BackupsInfo>(
       "PUT",
       `/api/service-instances/${enc(instance)}/backup-schedule`,
       b,
     ),
-  backupNow: (instance: string) =>
-    post<Backup>(`/api/service-instances/${enc(instance)}/backups`),
+  backupNow: (instance: string, dest?: BackupDestinationChoice) =>
+    post<Backup>(`/api/service-instances/${enc(instance)}/backups`, dest),
   restoreBackup: (id: string) =>
     post<{ ok: true }>(`/api/backups/${enc(id)}/restore`),
-  deleteBackup: (id: string) => del<{ ok: true }>(`/api/backups/${enc(id)}`),
+  deleteBackup: (id: string) => del<Backup>(`/api/backups/${enc(id)}`),
   selfBackup: () => get<SelfBackup>("/api/instance/self-backup"),
   saveSelfBackup: (b: SelfBackup) =>
     request<SelfBackup>("PUT", "/api/instance/self-backup", b),

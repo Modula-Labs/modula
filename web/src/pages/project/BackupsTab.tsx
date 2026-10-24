@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Checkbox } from "@/components/ui/Controls";
 import { Archive, DotsVertical, History, Trash } from "@/components/ui/icons";
@@ -8,19 +8,27 @@ import { Field, Input, Select } from "@/components/ui/Input";
 import { Menu, MenuItem } from "@/components/ui/Menu";
 import { Modal } from "@/components/ui/Modal";
 import { Alert, Badge, EmptyState, Skeleton, type Tone } from "@/components/ui/misc";
-import { api, type Backup, type BackupSchedule, type Instance } from "@/lib/api";
-import { hourLabel } from "@/lib/backup";
+import { api, type Backup, type BackupRetention, type Instance } from "@/lib/api";
+import { defaultDestination, destinationChoice, destinationGroups, destinationValue, hourLabel } from "@/lib/backup";
 import { formatBytes, relativeTime } from "@/lib/format";
 
-const DEFAULT_SCHEDULE: BackupSchedule = {
+interface ScheduleForm {
+  enabled: boolean;
+  hourUtc: number;
+  retention: BackupRetention;
+  /** Select value; empty until a destination is chosen. */
+  destination: string;
+}
+
+const DEFAULT_FORM: ScheduleForm = {
   enabled: true,
-  targetId: "",
   hourUtc: 3,
   retention: { dailyDays: 6, weeklyDays: 27, monthlyDays: 89 },
+  destination: "",
 };
 
-const statusTone: Record<Backup["status"], Tone> = { running: "info", completed: "success", failed: "danger", deleted: "neutral" };
-const statusLabel: Record<Backup["status"], string> = { running: "Running", completed: "Completed", failed: "Failed", deleted: "Deleted" };
+const statusTone: Record<Backup["status"], Tone> = { running: "info", completed: "success", failed: "danger", deleting: "neutral", deleted: "neutral" };
+const statusLabel: Record<Backup["status"], string> = { running: "Running", completed: "Completed", failed: "Failed", deleting: "Deleting", deleted: "Deleted" };
 
 function duration(b: Backup): string | null {
   if (!b.finishedAt) return null;
@@ -31,42 +39,52 @@ function duration(b: Backup): string | null {
 export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit: boolean }) {
   const qc = useQueryClient();
   const key = ["backups", instance.id];
-  const project = useQuery({ queryKey: ["project", instance.projectId], queryFn: () => api.project(instance.projectId) });
-  const workspaceId = project.data?.workspaceId;
-  const targets = useQuery({
-    queryKey: ["backup-targets", workspaceId],
-    queryFn: () => api.backupTargets(workspaceId!),
-    enabled: !!workspaceId,
-  });
+  const destKey = ["backup-destinations", instance.id];
+  const destinations = useQuery({ queryKey: destKey, queryFn: () => api.backupDestinations(instance.id) });
   const info = useQuery({
     queryKey: key,
     queryFn: () => api.backups(instance.id),
-    refetchInterval: (q) => (q.state.data?.backups.some((b) => b.status === "running") ? 3000 : false),
+    refetchInterval: (q) => (q.state.data?.backups.some((b) => b.status === "running" || b.status === "deleting") ? 3000 : false),
   });
-  const refresh = () => qc.invalidateQueries({ queryKey: key });
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: destKey });
+    return qc.invalidateQueries({ queryKey: key });
+  };
 
-  const [form, setForm] = useState<BackupSchedule>(DEFAULT_SCHEDULE);
+  const [form, setForm] = useState<ScheduleForm>(DEFAULT_FORM);
   const saved = info.data?.schedule;
+  const dests = destinations.data;
+  const groups = useMemo(() => (dests ? destinationGroups(dests) : []), [dests]);
+  const savedForm: ScheduleForm | null =
+    saved && dests
+      ? { enabled: saved.enabled, hourUtc: saved.hourUtc, retention: saved.retention, destination: destinationValue(saved.targetId, dests) }
+      : null;
   useEffect(() => {
-    setForm(saved ?? { ...DEFAULT_SCHEDULE, enabled: false });
-  }, [saved]);
-  const targetId = form.targetId || targets.data?.[0]?.id || "";
-  const body: BackupSchedule = { ...form, targetId };
-  const dirty = JSON.stringify(body) !== JSON.stringify(saved ?? { ...DEFAULT_SCHEDULE, enabled: false, targetId });
+    setForm(savedForm ?? { ...DEFAULT_FORM, enabled: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saved, dests]);
+  const destination = form.destination || defaultDestination(groups);
+  const choice = destinationChoice(destination);
+  const body = { ...form, destination };
+  const dirty = JSON.stringify(body) !== JSON.stringify(savedForm ?? { ...DEFAULT_FORM, enabled: false, destination });
 
-  const save = useMutation({ mutationFn: () => api.saveBackupSchedule(instance.id, body), onSuccess: refresh });
-  const now = useMutation({ mutationFn: () => api.backupNow(instance.id), onSuccess: refresh });
+  const save = useMutation({
+    mutationFn: () => api.saveBackupSchedule(instance.id, { enabled: form.enabled, hourUtc: form.hourUtc, retention: form.retention, ...choice! }),
+    onSuccess: refresh,
+  });
+  const now = useMutation({ mutationFn: () => api.backupNow(instance.id, choice ?? undefined), onSuccess: refresh });
   const remove = useMutation({ mutationFn: (id: string) => api.deleteBackup(id), onSuccess: refresh });
   const [restoring, setRestoring] = useState<Backup | null>(null);
 
-  if (info.isPending || targets.isPending) return <Skeleton className="h-48" />;
+  if (info.isPending || destinations.isPending) return <Skeleton className="h-48" />;
   if (info.error) return <Alert tone="danger">{info.error.message}</Alert>;
-  if (!targets.data?.length) {
+  if (destinations.error) return <Alert tone="danger">{destinations.error.message}</Alert>;
+  if (groups.length === 0) {
     return (
       <EmptyState
         icon={<Archive />}
         title="No backup storage yet"
-        body="Backups are written to an S3-compatible bucket you own. Add one in the workspace settings first."
+        body="Backups are written to an S3-compatible bucket you own. Add one in the workspace settings first. A bucket service or this server's disk can be used too."
         action={
           <Link to="/settings" className="text-sm underline">
             Open workspace settings
@@ -76,7 +94,15 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
     );
   }
 
-  const setRetention = (k: keyof BackupSchedule["retention"]) => (e: { target: { value: string } }) =>
+  const chosenBucket = destination.startsWith("bucket:") ? dests!.buckets.find((b) => `bucket:${b.instanceId}` === destination) : undefined;
+  const note =
+    destination === "local"
+      ? "Kept on that server only: if the server is lost, so are these backups. Restores need the database to run there."
+      : chosenBucket?.template === "bucket"
+        ? "Uploaded by the database's server over the private network."
+        : null;
+
+  const setRetention = (k: keyof BackupRetention) => (e: { target: { value: string } }) =>
     setForm((f) => ({ ...f, retention: { ...f.retention, [k]: Math.max(0, Math.floor(Number(e.target.value)) || 0) } }));
   const error = save.error ?? now.error ?? remove.error;
 
@@ -102,13 +128,17 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
           label="Run backups on a schedule"
         />
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Storage">
+          <Field label="Storage" hint={note ?? undefined}>
             {(p) => (
-              <Select {...p} disabled={!canEdit} value={targetId} onChange={(e) => setForm((f) => ({ ...f, targetId: e.target.value }))}>
-                {targets.data.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
+              <Select {...p} disabled={!canEdit} value={destination} onChange={(e) => setForm((f) => ({ ...f, destination: e.target.value }))}>
+                {groups.map((g) => (
+                  <optgroup key={g.label} label={g.label}>
+                    {g.options.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.hint ? `${o.label} · ${o.hint}` : o.label}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </Select>
             )}
@@ -138,7 +168,7 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
         </div>
         {canEdit ? (
           <div>
-            <Button variant="secondary" loading={save.isPending} disabled={!dirty || !targetId} onClick={() => save.mutate()}>
+            <Button variant="secondary" loading={save.isPending} disabled={!dirty || !choice} onClick={() => save.mutate()}>
               Save schedule
             </Button>
           </div>
@@ -166,7 +196,7 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
                   {b.error ? <div className="mt-1 text-[13px] break-words text-error">{b.error}</div> : null}
                 </div>
                 <span className="text-sm text-muted-foreground tabular-nums">{formatBytes(b.sizeBytes)}</span>
-                {canEdit && b.status !== "running" ? (
+                {canEdit && b.status !== "running" && b.status !== "deleting" ? (
                   <Menu
                     trigger={
                       <Button aria-label="Backup actions" variant="ghost" size="icon-sm" className="text-muted-foreground">
