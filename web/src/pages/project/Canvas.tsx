@@ -24,6 +24,7 @@ import { StatusDot } from "@/components/ui/misc";
 import type { DeploymentStatus } from "@/lib/api";
 import { serviceState } from "@/lib/status";
 import { load, save } from "@/lib/storage";
+import { GRID, snapPoint } from "./snap";
 import { dependencyPairs, edgeAnchors, layeredLayout, type Rect, type Side } from "./edges";
 
 export interface CanvasService {
@@ -241,14 +242,14 @@ function CanvasInner({
       const next = services.map((s) => {
         let position = prev.find((n) => n.id === s.id)?.position ?? saved[s.id];
         if (!position && place && prev.length > 0) {
-          position = { x: place.x - 144, y: place.y - 72 };
+          position = snapPoint({ x: place.x - 144, y: place.y - 72 });
           saved[s.id] = position;
           placed = true;
         }
         return {
           id: s.id,
           type: "service" as const,
-          position: position ?? layout[s.id] ?? { x: 0, y: 0 },
+          position: snapPoint(position ?? layout[s.id] ?? { x: 0, y: 0 }),
           data: { service: s, selected: s.id === selected },
         };
       });
@@ -280,8 +281,10 @@ function CanvasInner({
           onServiceMenu(n.id, point(e));
         }}
         onMoveStart={() => onViewportChange?.()}
+        snapToGrid
+        snapGrid={[GRID, GRID]}
         onNodeDragStop={() => {
-          const map = Object.fromEntries(flow.getNodes().map((n) => [n.id, n.position]));
+          const map = Object.fromEntries(flow.getNodes().map((n) => [n.id, snapPoint(n.position)]));
           save(`mc.canvas.${projectId}`, JSON.stringify(map));
         }}
         fitView
@@ -291,7 +294,7 @@ function CanvasInner({
         proOptions={{ hideAttribution: true }}
         className="bg-background"
       >
-        <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="var(--canvas-dot)" />
+        <Background variant={BackgroundVariant.Dots} gap={GRID} size={1.5} color="var(--canvas-dot)" />
         <div className="absolute bottom-4 left-4 z-10 flex flex-col gap-1 rounded-lg border border-border bg-card p-1">
           {[
             { label: "Zoom in", icon: <Plus />, run: () => flow.zoomIn() },

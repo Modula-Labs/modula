@@ -63,7 +63,7 @@
   /* ours (not in stock shadcn) */
   --brand-text: oklch(0.25 0 0);   /* links, active text: neutral (teal stays on buttons) */
   --brand-soft: oklch(0 0 0 / 0.05); /* selected rows, staged chips: neutral, no tint */
-  --canvas-dot: oklch(0 0 0 / 0.1);
+  --canvas-dot: oklch(0 0 0 / 0.22);
 
   /* status — Kobra's names (toast, alerts) */
   --error: oklch(0.5 0.21 27.3);
@@ -121,7 +121,7 @@
 
   --brand-text: oklch(0.93 0 0);
   --brand-soft: oklch(1 0 0 / 0.07);
-  --canvas-dot: oklch(1 0 0 / 0.07);
+  --canvas-dot: oklch(1 0 0 / 0.26);
 
   --error: oklch(0.704 0.191 22.2);
   --warning: oklch(0.704 0.15 75);
