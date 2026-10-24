@@ -609,7 +609,7 @@ pub fn plan(
         ));
     }
     for have in &r.services {
-        if !spec.services.contains_key(&have.service_name) {
+        if !spec.partial && !spec.services.contains_key(&have.service_name) {
             manual.push(format!(
                 "{}: not in the file; delete it in the dashboard (deleting needs a re-authenticated session) or add it to the file",
                 have.service_name
@@ -1043,6 +1043,19 @@ source = { local = "." }
         assert_eq!(p.shared.len(), 1);
         assert_eq!(p.shared[0].op, VarOp::Update);
         assert_eq!(p.shared[0].to.as_deref(), Some("us"));
+    }
+
+    #[test]
+    fn partial_files_leave_other_services_alone() {
+        let r = remote(vec![api_remote()]);
+        let p = plan(
+            "production",
+            &spec("partial = true\n[services.web]\nsource = { image = \"nginx\" }\n"),
+            Some(&r),
+            &BTreeMap::new(),
+            Options::default(),
+        );
+        assert!(p.manual.is_empty(), "{:?}", p.manual);
     }
 
     #[test]

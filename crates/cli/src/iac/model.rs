@@ -54,6 +54,10 @@ pub struct ProjectSpec {
     /// Project name or id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// This file describes only some of the project's services (one repo of
+    /// several, like Railway's `partial`): the others are left alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
     #[serde(default, skip_serializing_if = "SharedSpec::is_empty")]
     pub shared: SharedSpec,
     #[serde(default)]
@@ -359,9 +363,9 @@ impl ConfigFile {
 /// The typed spec of a merged table, with helpful errors for unknown keys.
 pub fn parse_spec(mut table: toml::Table) -> anyhow::Result<ProjectSpec> {
     for key in table.keys() {
-        if !matches!(key.as_str(), "project" | "services" | "shared") {
+        if !matches!(key.as_str(), "project" | "partial" | "services" | "shared") {
             bail!(
-                "unknown top-level key `{key}` (expected project, services, shared, environments)"
+                "unknown top-level key `{key}` (expected project, partial, services, shared, environments)"
             );
         }
     }
