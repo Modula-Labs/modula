@@ -252,12 +252,20 @@ impl pb::node_server::Node for NodeService {
             tracing::warn!(%node, error = ?e, "cannot queue the DNS resync");
         }
         // Private networking: its key and addresses (a /24 the first time).
-        // Its peers' tunnels to it change when they do.
+        // Its peers' tunnels to it change when they do, and Modula's Hetzner
+        // firewalls let its address in.
         match crate::mesh::record_hello(&state.db, node, &hello).await {
-            Ok(true) => match crate::mesh::bump_peers(&state.db, node).await {
-                Ok(peers) => state.hub.kick_all(&peers),
-                Err(e) => tracing::warn!(%node, error = ?e, "cannot update the node's peers"),
-            },
+            Ok(true) => {
+                match crate::mesh::bump_peers(&state.db, node).await {
+                    Ok(peers) => state.hub.kick_all(&peers),
+                    Err(e) => tracing::warn!(%node, error = ?e, "cannot update the node's peers"),
+                }
+                if let Err(e) =
+                    crate::integrations::hetzner::firewall::enqueue_sync(&state.db).await
+                {
+                    tracing::warn!(%node, error = ?e, "cannot queue the firewall update");
+                }
+            }
             Ok(false) => {}
             Err(e) => tracing::warn!(%node, error = ?e, "cannot record the node's mesh settings"),
         }
