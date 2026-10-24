@@ -188,6 +188,14 @@ pub fn render(cfg: &EdgeConfig, listeners: Listeners, admin_listen: &str, ask_ur
     }));
 
     let hosts: Vec<&String> = by_host.keys().collect();
+    // A server without a domain is reached by its IP: browsers send no SNI
+    // for IP literals, so its certificate is managed up front (not on
+    // demand) and is the default for connections without SNI.
+    let ips: Vec<&String> = hosts
+        .iter()
+        .copied()
+        .filter(|h| super::ipv4_host(h).is_some())
+        .collect();
     let mut server = json!({ "routes": routes });
     let mut servers = serde_json::Map::new();
     let mut apps = serde_json::Map::new();
@@ -232,15 +240,31 @@ pub fn render(cfg: &EdgeConfig, listeners: Listeners, admin_listen: &str, ask_ur
             if !cfg.acme_email.is_empty() {
                 issuer["email"] = json!(cfg.acme_email);
             }
-            apps.insert(
-                "tls".into(),
+            let mut policies = Vec::new();
+            let mut tls = serde_json::Map::new();
+            if !ips.is_empty() {
+                // Let's Encrypt issues IP certificates only with its 6-day
+                // profile (renewed automatically). Should that fail, Caddy's
+                // own CA keeps the connection encrypted (a browser warning
+                // instead of no dashboard).
+                let mut short = issuer.clone();
+                short["profile"] = json!("shortlived");
+                policies.push(json!({
+                    "subjects": ips,
+                    "issuers": [short, { "module": "internal" }]
+                }));
+                tls.insert("certificates".into(), json!({ "automate": ips }));
+                server["tls_connection_policies"] = json!([{ "default_sni": ips[0] }]);
+            }
+            policies.push(json!({ "issuers": [issuer], "on_demand": true }));
+            tls.insert(
+                "automation".into(),
                 json!({
-                    "automation": {
-                        "policies": [{ "issuers": [issuer], "on_demand": true }],
-                        "on_demand": { "permission": { "module": "http", "endpoint": ask_url } }
-                    }
+                    "policies": policies,
+                    "on_demand": { "permission": { "module": "http", "endpoint": ask_url } }
                 }),
             );
+            apps.insert("tls".into(), Value::Object(tls));
         }
     }
     servers.insert("modula".into(), server);
@@ -337,8 +361,11 @@ mod tests {
         let routes = c["apps"]["http"]["servers"]["modula"]["routes"]
             .as_array()
             .unwrap();
-        // One normalized host with both upstreams; the IP literal is dropped; then the 404.
-        assert_eq!(routes.len(), 2);
+        // The IP host (a server without a domain), one normalized host with
+        // both upstreams, then the 404.
+        assert_eq!(routes.len(), 3);
+        assert_eq!(routes[0]["match"][0]["host"][0], "10.0.0.1");
+        let routes = &routes[1..];
         assert_eq!(routes[0]["match"][0]["host"][0], "api.apps.example.com");
         assert_eq!(
             routes[0]["handle"][0]["upstreams"]
@@ -353,8 +380,22 @@ mod tests {
             auto["on_demand"]["permission"]["endpoint"],
             "http://127.0.0.1:7102/ask"
         );
+        // The IP: a 6-day Let's Encrypt certificate, managed up front, with
+        // Caddy's own CA as the fallback, and the default without SNI.
+        assert_eq!(auto["policies"][0]["subjects"], json!(["10.0.0.1"]));
+        assert_eq!(auto["policies"][0]["issuers"][0]["profile"], "shortlived");
+        assert_eq!(auto["policies"][0]["issuers"][1]["module"], "internal");
         assert_eq!(
-            auto["policies"][0]["issuers"][0]["email"],
+            c["apps"]["tls"]["certificates"]["automate"],
+            json!(["10.0.0.1"])
+        );
+        assert_eq!(
+            c["apps"]["http"]["servers"]["modula"]["tls_connection_policies"][0]["default_sni"],
+            "10.0.0.1"
+        );
+        assert_eq!(auto["policies"][1]["on_demand"], true);
+        assert_eq!(
+            auto["policies"][1]["issuers"][0]["email"],
             "ops@example.com"
         );
     }
@@ -449,7 +490,7 @@ mod tests {
         );
         assert_eq!(
             plain[0]["match"][0]["host"],
-            servers["modula"]["routes"][0]["match"][0]["host"]
+            json!(["10.0.0.1", "api.apps.example.com"])
         );
         assert!(
             !plain

@@ -434,7 +434,7 @@ fn domain_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
     }
     let mut t = Text::new("Dashboard domain")
         .with_help_message(
-            "e.g. deploy.example.com, pointed at the server once it exists · empty: an instant <ip>.sslip.io, no DNS · Esc: back",
+            "e.g. deploy.example.com, pointed at the server once it exists · empty: none yet, https://<ip> · Esc: back",
         )
         .with_validator(validator(|v: &str| {
             if v.trim().is_empty() || is_auto(v) {
@@ -674,7 +674,7 @@ fn confirm_step(out: &Output, d: &Draft) -> anyhow::Result<Nav> {
     if matches!(d.dns, Some(DnsPlan::Instant)) {
         row(
             "Dashboard",
-            out.accent("https://<server-ip>.sslip.io (instant, no DNS needed)"),
+            out.accent("https://<server-ip> (no domain yet; add one in the dashboard)"),
         );
     } else {
         row("Dashboard", out.accent(&format!("https://{domain}")));
@@ -692,7 +692,9 @@ fn confirm_step(out: &Output, d: &Draft) -> anyhow::Result<Nav> {
             Some(DnsPlan::Cloudflare { zone, .. }) => {
                 format!("Cloudflare creates the A record in {}", zone.name)
             }
-            Some(DnsPlan::Instant) => "nothing to set up: sslip.io resolves to the server".into(),
+            Some(DnsPlan::Instant) => {
+                "nothing to set up yet: the dashboard uses the server's IP".into()
+            }
             _ => "you add an A record → the server's IP (shown then)".into(),
         },
     );

@@ -62,10 +62,17 @@ pub fn parse_local_route(s: &str) -> Result<ResolvedRoute, String> {
 }
 
 /// Lowercase, no trailing dot; `None` for anything that is not a plain DNS
-/// name (IP literals, ports, empty labels, odd characters).
+/// name or an IPv4 address (IPv6 literals, ports, empty labels, odd
+/// characters). An IPv4 address is a server without a domain: its dashboard
+/// is served at `https://<ip>`.
 pub fn normalize_host(raw: &str) -> Option<String> {
     let h = raw.trim().trim_end_matches('.').to_ascii_lowercase();
-    if h.is_empty() || h.len() > 253 || h.parse::<std::net::IpAddr>().is_ok() {
+    if let Some(ip) = ipv4_host(&h) {
+        return Some(ip.to_string());
+    }
+    // Dotted numbers that aren't a canonical IPv4 (`01.2.3.4`) are neither.
+    let numeric = h.split('.').all(|l| l.bytes().all(|b| b.is_ascii_digit()));
+    if h.is_empty() || h.len() > 253 || numeric || h.parse::<std::net::IpAddr>().is_ok() {
         return None;
     }
     let ok = h.split('.').all(|l| {
@@ -78,21 +85,25 @@ pub fn normalize_host(raw: &str) -> Option<String> {
     ok.then_some(h)
 }
 
+/// `host` as an IPv4 address in its canonical form (no leading zeros).
+pub fn ipv4_host(host: &str) -> Option<std::net::Ipv4Addr> {
+    host.parse::<std::net::Ipv4Addr>()
+        .ok()
+        .filter(|ip| ip.to_string() == host)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn local_routes() {
+        let ip = parse_local_route("159.69.253.176=127.0.0.1:7100").unwrap();
+        assert_eq!(ip.hostname, "159.69.253.176");
         let r = parse_local_route("Deploy.Example.com=127.0.0.1:7100").unwrap();
         assert_eq!(r.hostname, "deploy.example.com");
         assert_eq!(r.upstream, "127.0.0.1:7100".parse().unwrap());
-        for bad in [
-            "deploy.example.com",
-            "1.2.3.4=127.0.0.1:1",
-            "a.com=localhost:1",
-            "a.com=127.0.0.1",
-        ] {
+        for bad in ["deploy.example.com", "a.com=localhost:1", "a.com=127.0.0.1"] {
             assert!(parse_local_route(bad).is_err(), "{bad}");
         }
     }
@@ -103,9 +114,10 @@ mod tests {
             normalize_host("API.Example.com.").as_deref(),
             Some("api.example.com")
         );
+        assert_eq!(normalize_host("1.2.3.4").as_deref(), Some("1.2.3.4"));
         for bad in [
             "",
-            "1.2.3.4",
+            "01.2.3.4",
             "::1",
             "a..b",
             "-a.com",

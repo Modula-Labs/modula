@@ -57,8 +57,8 @@ pub enum SshChoice {
 pub enum DnsPlan {
     /// The user adds the A record; we wait for it.
     Manual,
-    /// No domain of their own: `<ip>.sslip.io` for the dashboard and
-    /// `<service>.<ip>.sslip.io` for apps, which resolve by themselves.
+    /// No domain yet: the dashboard is served at `https://<ip>` (an IP
+    /// certificate); a domain is added later in the dashboard.
     /// `Plan::domain` is empty until the server has its IP.
     Instant,
     /// We create it, replacing these records first.
@@ -184,10 +184,10 @@ fn labels(plan: &Plan) -> BTreeMap<String, String> {
     ])
 }
 
-/// The dashboard's hostname for [`DnsPlan::Instant`]: `1-2-3-4.sslip.io`
-/// (the same name the bootstrap script derives on the server).
+/// The dashboard's address for [`DnsPlan::Instant`]: the server's IP (the
+/// installer serves it there when it gets no domain).
 pub fn instant_domain(ip: Ipv4Addr) -> String {
-    format!("{}.sslip.io", ip.to_string().replace('.', "-"))
+    ip.to_string()
 }
 
 /// Create the server and wait until its dashboard answers over HTTPS.
@@ -336,7 +336,7 @@ pub async fn provision(
         }
         DnsPlan::Instant => {
             progress.aside(&format!(
-                "Instant address: https://{} (apps get <name>.{0})",
+                "No domain yet: the dashboard is at https://{} (add a domain there later)",
                 plan.domain
             ));
         }

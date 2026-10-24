@@ -190,7 +190,9 @@ usage() {
   sed -n '2,20p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
   cat <<'EOF'
 Options (main server; asked for interactively when missing):
-  --domain HOST        dashboard hostname, e.g. deploy.example.com (DNS must point here)
+  --domain HOST        optional: a dashboard hostname that already points here. Without
+                       it the dashboard is served at https://<public IP> (an IP
+                       certificate) and you add a domain later in the dashboard
   --email ADDRESS      contact for Let's Encrypt
   --name NAME          this server's name on the Servers page (default: short hostname)
   --setup-token TOKEN  use this one-time setup token (mcsetup_…) instead of a random
@@ -246,6 +248,13 @@ done
 [[ $SERVER_RELEASES == __* ]] && SERVER_RELEASES=""
 
 valid_host() { [[ ${1,,} =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; }
+valid_ipv4() {
+  local o='(0|[1-9][0-9]{0,2})'
+  [[ $1 =~ ^$o\.$o\.$o\.$o$ ]] || return 1
+  for o in "${BASH_REMATCH[@]:1}"; do ((o <= 255)) || return 1; done
+}
+# The dashboard's address: a hostname, or the public IPv4 without a domain.
+valid_dashboard() { valid_host "$1" || valid_ipv4 "$1"; }
 valid_email() { [[ $1 =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; }
 valid_name() { [[ $1 =~ ^[A-Za-z0-9._-]{1,63}$ ]]; }
 
@@ -255,7 +264,7 @@ PROMPT=0 PROMPT_FD=""
 case $MODE in
   main)
     DOMAIN=${DOMAIN,,}; APPS_DOMAIN=${APPS_DOMAIN,,}
-    [[ -z $DOMAIN ]] || valid_host "$DOMAIN" || die "--domain must be a hostname like deploy.example.com" "Just the name, without https:// or a path."
+    [[ -z $DOMAIN ]] || valid_dashboard "$DOMAIN" || die "--domain must be a hostname like deploy.example.com, or this server's IPv4" "Just the name or address, without https:// or a path."
     [[ -z $APPS_DOMAIN ]] || valid_host "$APPS_DOMAIN" || die "--apps-domain must be a hostname like apps.example.com" "Just the name, without https:// or a path."
     [[ -z $EMAIL ]] || valid_email "$EMAIL" || die "--email is not an email address" "Let's Encrypt uses it to tell you about expiring certificates."
     [[ -z $NODE_NAME ]] || valid_name "$NODE_NAME" || die "--name may use letters, digits, . _ -" "Up to 63 characters, e.g. --name web-1."
@@ -266,11 +275,17 @@ case $MODE in
       SETUP_TOKEN_HASH=$(printf 'modula/token/v1\0%s' "$SETUP_TOKEN" | sha256sum | awk '{print $1}')
     fi
     [[ -z $PROGRESS_TOKEN || $PROGRESS_TOKEN =~ ^[A-Za-z0-9_-]{32,64}$ ]] || die "--progress-token must be 32–64 letters, digits, _ or -" "modula server create generates it; leave it out otherwise."
-    if [[ -z $DOMAIN || -z $EMAIL ]]; then
+    # No domain needed: the dashboard starts at https://<public IP> and a
+    # domain is added later in the dashboard (or `modula instance domain`).
+    if [[ -z $DOMAIN ]]; then
+      DOMAIN=$(public_ip)
+      [[ -n $DOMAIN ]] || die "couldn't find this server's public IPv4" "Pass it (or a domain that points here) with --domain."
+    fi
+    if [[ -z $EMAIL ]]; then
       if { exec 5</dev/tty; } 2>/dev/null; then
         PROMPT=1 PROMPT_FD=5
       else
-        die "no terminal to ask for the domain and email" "Pass them as flags instead: … | sudo bash -s -- --domain deploy.example.com --email you@example.com [--name web-1]"
+        die "no terminal to ask for an email" "Pass it as a flag instead: … | sudo bash -s -- --email you@example.com [--name web-1]"
       fi
     fi
     ;;
@@ -1247,19 +1262,6 @@ check_dns() {
 }
 
 questions() {
-  local ip; ip=$(public_ip)
-  if [[ -z $DOMAIN ]]; then
-    note "First, a domain for your dashboard, like deploy.example.com."
-    if [[ -n $ip ]]; then
-      note "Point an A record for it at ${ip} first."
-    else
-      note "Point an A record for it at this server's public IP first."
-    fi
-    ask DOMAIN "Dashboard domain" "" valid_host "That doesn't look like a hostname. Just the name, e.g. deploy.example.com."
-    DOMAIN=${DOMAIN,,}
-    check_dns "$ip"
-    printf '\n'
-  fi
   if [[ -z $EMAIL ]]; then
     note "An email for TLS certificates (Let's Encrypt) and your admin account."
     ask EMAIL "Email" "" valid_email "That doesn't look like an email address, e.g. you@example.com."
@@ -1297,6 +1299,7 @@ install_main() {
     questions
     exec 5<&- # the terminal isn't needed past this point
   fi
+  valid_ipv4 "$DOMAIN" || check_dns "$(public_ip)"
   if [[ -n ${MODULA_INSTALL_DRY_RUN:-} ]]; then
     card_top "Dry run: nothing was changed"
     card_kv "Running as" "$(id -un)"
@@ -1349,7 +1352,11 @@ install_main() {
   card "${B}Next:${N} open ${A}https://$DOMAIN/setup${N}${setup:+ and paste the setup token}."
   card "${D}Create your admin account there, e.g. as $EMAIL.${N}"
   security_card
-  card "${D}Point DNS for $DOMAIN${APPS_DOMAIN:+ and *.$APPS_DOMAIN} at this server. A cloud${N}"
+  if valid_ipv4 "$DOMAIN"; then
+    card "${D}Add a domain in the dashboard (or: modula instance domain set). A cloud${N}"
+  else
+    card "${D}Point DNS for $DOMAIN${APPS_DOMAIN:+ and *.$APPS_DOMAIN} at this server. A cloud${N}"
+  fi
   card "${D}firewall in front of it needs 80, 443 (tcp+udp) and $NODE_PORT open.${N}"
   card ""
   card_end "Have fun shipping things!"

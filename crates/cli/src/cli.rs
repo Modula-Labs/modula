@@ -625,7 +625,7 @@ pub struct ServerCreateArgs {
     #[arg(long)]
     pub name: Option<String>,
     /// The dashboard's hostname, e.g. deploy.example.com. `auto`: no domain
-    /// needed, an instant https://<ip>.sslip.io (apps get <name>.<ip>.sslip.io).
+    /// yet, the dashboard at https://<ip> (add a domain there later).
     #[arg(long, value_name = "HOST")]
     pub domain: Option<String>,
     /// For TLS certificates (Let's Encrypt) and the admin account.

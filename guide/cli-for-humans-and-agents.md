@@ -176,7 +176,7 @@ modula server create --provider hetzner \
 | `--provider hetzner` | The only provider so far (default). |
 | `--location`, `--type` | From `server options`. |
 | `--name` | Server name, a DNS label (default `modula-main`). |
-| `--domain`, `--email` | Dashboard hostname (or `auto`: an instant `https://<ip>.sslip.io`, no DNS, apps get `<name>.<ip>.sslip.io`); email for TLS and the admin. |
+| `--domain`, `--email` | Dashboard hostname (or `auto`: no domain yet, the dashboard at `https://<ip>` with an IP certificate); email for TLS and the admin. |
 | `--ssh-key-file PATH` / `--ssh-key-id ID` / `--no-ssh-key` | Exactly one is required without a terminal. A file's key is reused if Hetzner has it. |
 | `--cloudflare-dns` [`--replace-dns`] | Create the A record with Cloudflare; replace existing A/AAAA/CNAME records for the domain (otherwise their presence is an error). |
 | `--admin-name` | The admin's display name (default `Admin`). |
@@ -197,9 +197,10 @@ variables are reported together (exit 2), and so are an unknown location or
 type, an SSH key id that doesn't exist, a Cloudflare zone the token can't
 see or conflicting DNS records.
 
-**No domain yet?** `--domain auto` gives the dashboard `https://<ip>.sslip.io`
-and every app a generated `<name>.<ip>.sslip.io` with real certificates;
-nothing to set up. Add your own domain later.
+**No domain yet?** `--domain auto` serves the dashboard at `https://<ip>`
+(a Let's Encrypt IP certificate); nothing to set up. Add your domain later in
+the dashboard or with `modula instance domain set`. Until then apps are
+reached through custom domains or a TCP port.
 
 **Without `--cloudflare-dns`** you (or the agent) must add the A record once
 the IP is known: watch for the `dns_waiting` event, which carries the

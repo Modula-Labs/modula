@@ -204,7 +204,7 @@ pub fn check_values(args: &ServerCreateArgs, env: &EnvSecrets) -> anyhow::Result
     Ok(())
 }
 
-/// `--domain auto`: no domain of their own, an instant `<ip>.sslip.io`.
+/// `--domain auto`: no domain yet, the dashboard at `https://<ip>`.
 pub fn is_auto(domain: &str) -> bool {
     domain.trim().eq_ignore_ascii_case("auto")
 }
@@ -534,7 +534,7 @@ pub async fn create_with(
         server_type: plan.server_type.name.clone(),
         name: plan.name.clone(),
         domain: if matches!(plan.dns, DnsPlan::Instant) {
-            "<ip>.sslip.io".into()
+            "<ip>".into()
         } else {
             plan.domain.clone()
         },

@@ -13,8 +13,8 @@ pub const INSTALL_URL: &str = "https://usemodula.org/install.sh";
 pub struct MainBootstrap<'a> {
     /// Where install.sh comes from (normally [`INSTALL_URL`]).
     pub install_url: &'a str,
-    /// None: an instant `<ip>.sslip.io` address, derived on the server from
-    /// Hetzner's metadata (apps get `<name>.<ip>.sslip.io`).
+    /// None: no domain yet; the installer serves the dashboard at
+    /// `https://<public IP>` and a domain is added later in the dashboard.
     pub domain: Option<&'a str>,
     pub email: &'a str,
     pub name: &'a str,
@@ -37,22 +37,18 @@ impl MainBootstrap<'_> {
 # single use: the modula CLI finishes setup with it as soon as the dashboard
 # answers. Progress: /var/log/cloud-init-output.log
 set -euo pipefail
-{ssh_setup}{domain_setup}installer=$(mktemp)
+{ssh_setup}installer=$(mktemp)
 curl -fsSL --retry 10 --retry-delay 3 --retry-connrefused --retry-all-errors -o "$installer" {url}
-bash "$installer" {domain_args} --email {email} --name {name} --setup-token {token} --progress-token {progress}
+bash "$installer" {domain_args}--email {email} --name {name} --setup-token {token} --progress-token {progress}
 rm -f "$installer"
 # Drop the copies cloud-init keeps of this script (they hold the setup token).
 rm -f /var/lib/cloud/instance/user-data.txt /var/lib/cloud/instance/user-data.txt.i /var/lib/cloud/instance/scripts/part-* || true
 "#,
             url = q(self.install_url),
             ssh_setup = if self.key_only_ssh { KEY_ONLY_SSH } else { "" },
-            domain_setup = match self.domain {
-                Some(_) => String::new(),
-                None => INSTANT_DOMAIN.to_owned(),
-            },
             domain_args = match self.domain {
-                Some(d) => format!("--domain {}", q(d)),
-                None => r#"--domain "$domain" --apps-domain "$domain""#.to_owned(),
+                Some(d) => format!("--domain {} ", q(d)),
+                None => String::new(),
             },
             email = q(self.email),
             name = q(self.name),
@@ -66,13 +62,6 @@ rm -f /var/lib/cloud/instance/user-data.txt /var/lib/cloud/instance/user-data.tx
 /// `50-cloud-init.conf` (sshd keeps the first value it reads).
 const KEY_ONLY_SSH: &str = r#"printf "PasswordAuthentication no\nKbdInteractiveAuthentication no\nX11Forwarding no\n" > /etc/ssh/sshd_config.d/01-modula-key-only.conf
 sshd -t && { systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true; }
-"#;
-
-/// The public IPv4 from Hetzner's metadata service, as `1-2-3-4.sslip.io`
-/// (`flow::instant_domain` derives the same name).
-const INSTANT_DOMAIN: &str = r#"ip=$(curl -fsS --retry 10 --retry-delay 2 --retry-all-errors http://169.254.169.254/hetzner/v1/metadata/public-ipv4)
-[[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "no public IPv4 in the metadata: $ip" >&2; exit 1; }
-domain="${ip//./-}.sslip.io"
 "#;
 
 /// POSIX single quotes: nothing inside is special except `'` itself.
@@ -143,19 +132,18 @@ mod tests {
     }
 
     #[test]
-    fn instant_address_comes_from_the_metadata() {
+    fn no_domain_installs_on_the_ip() {
         let mut b = sample();
         b.domain = None;
         let s = b.render();
-        assert!(s.contains("http://169.254.169.254/hetzner/v1/metadata/public-ipv4"));
-        assert!(s.contains(r#"--domain "$domain" --apps-domain "$domain" --email"#));
-        // Same name as the CLI's `flow::instant_domain`: dots become dashes.
-        assert!(s.contains(r#"domain="${ip//./-}.sslip.io""#));
+        // The installer finds the public IP itself; nothing third-party.
+        assert!(s.contains(r#"bash "$installer" --email 'you@example.com'"#));
+        assert!(!s.contains("--domain") && !s.contains("--apps-domain"));
+        assert!(!s.contains("sslip") && !s.contains("nip.io"));
         assert_eq!(
             crate::provision::flow::instant_domain("203.0.113.7".parse().unwrap()),
-            "203-0-113-7.sslip.io"
+            "203.0.113.7"
         );
-        assert!(s.contains(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$"));
     }
 
     #[test]
