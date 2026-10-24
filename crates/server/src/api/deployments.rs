@@ -43,7 +43,7 @@ pub struct Deployment {
     pub commit_author_avatar: Option<String>,
     /// `owner/repo@branch`, the image, or `Uploaded via CLI`, from the config snapshot.
     pub source: String,
-    /// `github`, `image` or `upload`.
+    /// `github`, `image`, `upload` or `function` (inline code).
     pub source_kind: String,
     /// Uploads: the local branch and whether uncommitted changes were included
     /// (as the CLI reported them), and whether the files are still kept (so

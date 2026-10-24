@@ -7,6 +7,7 @@ describe("deployments", () => {
   it("labels the source", () => {
     expect(viaLabel(base)).toBe("via GitHub");
     expect(viaLabel({ ...base, sourceKind: "image" })).toBe("via Docker image");
+    expect(viaLabel({ ...base, commitSha: null, sourceKind: "function" })).toBe("via Code editor");
     expect(viaLabel({ ...base, sourceKind: "upload" })).toBe("Uploaded via CLI from abc1234");
     expect(viaLabel({ ...base, sourceKind: "upload", sourceBranch: "main", sourceDirty: true })).toBe(
       "Uploaded via CLI from main@abc1234 with uncommitted changes",
