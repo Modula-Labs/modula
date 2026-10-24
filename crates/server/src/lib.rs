@@ -1,6 +1,7 @@
 //! modula-server: the Modula Deploy control plane.
 
 pub mod activity;
+pub mod alerts;
 pub mod api;
 pub mod app_templates;
 pub mod audit;
@@ -104,6 +105,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 tracing::info!(lines, "old log lines removed");
                 let requests = http_logs::purge(&s.db).await?;
                 tracing::info!(requests, "old HTTP requests removed");
+                let pruned = alerts::purge(&s.db).await?;
+                tracing::info!(pruned, "old alert sends and disk samples removed");
                 Ok(())
             })
             .on(github::app::STATUS_JOB, github::app::status_job)
@@ -114,6 +117,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
             )
             .on(domains::RESYNC_JOB, domains::resync_job)
             .on(webhooks::DISPATCH_JOB, webhooks::dispatch_job)
+            .on(alerts::EVENT_JOB, alerts::eval::event_job)
+            .on(alerts::EVALUATE_JOB, alerts::eval::evaluate_job)
             .on(github::app::HOOK_SYNC_JOB, github::app::hook_sync_job)
             .on(
                 integrations::cloudflare::publish::JOB,
@@ -127,6 +132,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let backups = tokio::spawn(backup::schedule_loop(state.clone(), stop.clone()));
     let crons = tokio::spawn(cron::schedule_loop(state.clone(), stop.clone()));
     let domain_checks = tokio::spawn(domains::verify_loop(state.clone(), stop.clone()));
+    let alert_checks = tokio::spawn(alerts::eval::schedule_loop(state.clone(), stop.clone()));
     let updates = tokio::spawn(updates::run(state.clone(), stop.clone()));
     tokio::spawn(private::startup(state.clone()));
     let rollout = tokio::spawn(updates::rollout::run(
@@ -172,6 +178,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         let _ = backups.await;
         let _ = crons.await;
         let _ = domain_checks.await;
+        let _ = alert_checks.await;
         let _ = updates.await;
         let _ = rollout.await;
         let _ = node_endpoint.await;

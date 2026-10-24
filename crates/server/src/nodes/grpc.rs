@@ -444,7 +444,7 @@ impl Limits {
                         + 40
                 })
                 .sum::<usize>() as f64,
-            In::Metrics(_) | In::Event(_) => 0.0,
+            In::Metrics(_) | In::Disk(_) | In::Event(_) => 0.0,
             _ => return true,
         };
         self.msgs.refill();
@@ -495,6 +495,7 @@ async fn handle(
             }
         }
         In::Metrics(r) => crate::metrics::record(&state.db, node, &r).await?,
+        In::Disk(r) => crate::metrics::record_disk(&state.db, node, &r).await?,
         In::LogBatch(b) => crate::logs::record(&state.db, node, &b).await?,
         In::HttpLogBatch(b) => crate::http_logs::record(&state.db, node, &b).await?,
         In::Report(r) => {

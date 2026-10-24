@@ -9,6 +9,7 @@
 
 use std::net::IpAddr;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
@@ -95,6 +96,17 @@ pub fn validate_url(raw: &str) -> AppResult<Url> {
 /// Only globally routable addresses (the shared policy, see `modula_backup::net`).
 pub use modula_backup::net::public_ip;
 
+/// Lets tests deliver to a mock server on loopback (never set otherwise).
+static ALLOW_LOOPBACK: AtomicBool = AtomicBool::new(false);
+
+pub fn allow_loopback_for_tests(allow: bool) {
+    ALLOW_LOOPBACK.store(allow, Ordering::Relaxed);
+}
+
+fn allowed(ip: IpAddr) -> bool {
+    public_ip(ip) || (ALLOW_LOOPBACK.load(Ordering::Relaxed) && ip.is_loopback())
+}
+
 fn http() -> anyhow::Result<&'static reqwest::Client> {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     if let Some(c) = CLIENT.get() {
@@ -110,7 +122,7 @@ fn http() -> anyhow::Result<&'static reqwest::Client> {
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .dns_resolver(std::sync::Arc::new(GuardedResolver::new(
-            public_ip,
+            allowed,
             "public address",
         )))
         .no_proxy()
@@ -125,10 +137,46 @@ pub fn sign(secret: &[u8], body: &[u8]) -> String {
 }
 
 /// What one delivery got back.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Delivery {
     pub status: Option<u16>,
     pub error: Option<String>,
+}
+
+/// POSTs a JSON `body` to a user-chosen URL through the SSRF-guarded client
+/// (literal IP hosts skip the resolver, so they are checked here).
+pub async fn post(url: &str, headers: &[(&str, String)], body: Vec<u8>) -> AppResult<Delivery> {
+    let parsed: Url = url
+        .parse()
+        .map_err(|_| AppError::bad_request("invalid URL"))?;
+    let literal = match parsed.host() {
+        Some(Host::Ipv4(a)) => Some(IpAddr::V4(a)),
+        Some(Host::Ipv6(a)) => Some(IpAddr::V6(a)),
+        _ => None,
+    };
+    if literal.is_some_and(|ip| !allowed(ip)) {
+        return Ok(Delivery {
+            status: None,
+            error: Some("private and local addresses are refused".into()),
+        });
+    }
+    let mut req = http()?
+        .post(parsed)
+        .header("content-type", "application/json");
+    for (k, v) in headers {
+        req = req.header(*k, v);
+    }
+    Ok(match req.body(body).send().await {
+        Ok(r) => Delivery {
+            status: Some(r.status().as_u16()),
+            error: (!r.status().is_success())
+                .then(|| format!("the endpoint answered {}", r.status())),
+        },
+        Err(e) => Delivery {
+            status: None,
+            error: Some(describe(&e)),
+        },
+    })
 }
 
 /// POSTs `body` to the webhook and records the outcome on it.
@@ -152,26 +200,17 @@ pub async fn deliver(
         .open(&state.db, &sealed, aad(workspace, &row))
         .await?;
     let body = serde_json::to_vec(body).map_err(anyhow::Error::from)?;
-    let res = http()?
-        .post(&url)
-        .header("content-type", "application/json")
-        .header("x-modula-event", event)
-        .header("x-modula-delivery", Id::new().to_string())
-        .header("x-modula-signature", sign(&secret, &body))
-        .body(body)
-        .send()
-        .await;
-    let out = match res {
-        Ok(r) => Delivery {
-            status: Some(r.status().as_u16()),
-            error: (!r.status().is_success())
-                .then(|| format!("the endpoint answered {}", r.status())),
-        },
-        Err(e) => Delivery {
-            status: None,
-            error: Some(describe(&e)),
-        },
-    };
+    let signature = sign(&secret, &body);
+    let out = post(
+        &url,
+        &[
+            ("x-modula-event", event.to_owned()),
+            ("x-modula-delivery", Id::new().to_string()),
+            ("x-modula-signature", signature),
+        ],
+        body,
+    )
+    .await?;
     sqlx::query(
         "UPDATE webhooks SET last_status = $2, last_error = $3, last_at = now() WHERE id = $1",
     )

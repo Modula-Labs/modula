@@ -521,6 +521,25 @@ impl Runtime for DockerRuntime {
         Ok(())
     }
 
+    async fn data_root(&self) -> Option<std::path::PathBuf> {
+        let info = self.docker.info().await.ok()?;
+        info.docker_root_dir.map(std::path::PathBuf::from)
+    }
+
+    async fn volume_paths(&self) -> anyhow::Result<Vec<(String, std::path::PathBuf)>> {
+        let list = self
+            .docker
+            .list_volumes(None::<bollard::query_parameters::ListVolumesOptions>)
+            .await?;
+        Ok(list
+            .volumes
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|v| v.name.starts_with("modula-vol-") && !v.mountpoint.is_empty())
+            .map(|v| (v.name, std::path::PathBuf::from(v.mountpoint)))
+            .collect())
+    }
+
     async fn remove_volume(&self, name: &str) -> anyhow::Result<()> {
         let opts = RemoveVolumeOptionsBuilder::new().force(false).build();
         match self.docker.remove_volume(name, Some(opts)).await {

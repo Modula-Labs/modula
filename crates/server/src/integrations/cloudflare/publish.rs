@@ -561,6 +561,15 @@ async fn finish(
         crate::webhooks::Event::DeploymentFailed
     };
     crate::webhooks::enqueue(&mut tx, dep, hook).await?;
+    if commit_state != "success" {
+        let event = crate::alerts::Event {
+            kind: crate::alerts::Kind::DeploymentFailed,
+            service_instance_id: row.service_instance_id,
+            deployment_id: Some(dep),
+            backup_id: None,
+        };
+        crate::alerts::enqueue_event(&mut *tx, event).await?;
+    }
     crate::github::report(&mut tx, dep, commit_state, row.reports_commit).await?;
     kick.sort();
     kick.dedup();

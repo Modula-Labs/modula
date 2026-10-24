@@ -248,7 +248,7 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             kick.push(node);
             kick.extend(crate::mesh::bump_environment(&mut tx, environment).await?);
         }
-        (DeploymentPhase::Failed, "building" | "deploying") => {
+        (DeploymentPhase::Failed, was @ ("building" | "deploying")) => {
             sqlx::query(
                 "UPDATE deployments SET status = 'failed', error = $2, finished_at = now(), updated_at = now()
                  WHERE id = $1",
@@ -263,6 +263,13 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             commit_status = Some("failure");
             crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentFailed)
                 .await?;
+            let event = crate::alerts::Event {
+                kind: crate::alerts::failure_kind(was),
+                service_instance_id: instance,
+                deployment_id: Some(*dep),
+                backup_id: None,
+            };
+            crate::alerts::enqueue_event(&mut *tx, event).await?;
         }
         (DeploymentPhase::Crashed, "active") => {
             // Stays in the desired state so the restart policy can recover it.
@@ -273,6 +280,13 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
                 .await?;
             crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentCrashed)
                 .await?;
+            let event = crate::alerts::Event {
+                kind: crate::alerts::Kind::DeploymentCrashed,
+                service_instance_id: instance,
+                deployment_id: Some(*dep),
+                backup_id: None,
+            };
+            crate::alerts::enqueue_event(&mut *tx, event).await?;
         }
         _ => {}
     }

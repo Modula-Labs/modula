@@ -4,6 +4,7 @@ export const SETTINGS_SECTIONS = [
   { id: "environments", label: "Environments" },
   { id: "shared-variables", label: "Shared Variables" },
   { id: "webhooks", label: "Webhooks" },
+  { id: "alerts", label: "Alerts" },
   { id: "members", label: "Members" },
   { id: "tokens", label: "Tokens" },
   { id: "integrations", label: "Integrations" },

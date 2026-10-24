@@ -1,5 +1,6 @@
 pub mod account;
 pub mod activity;
+pub mod alerts;
 pub mod app_templates;
 pub mod auth;
 pub mod backups;
@@ -130,6 +131,17 @@ pub fn routes(state: AppState) -> ApiRouter {
         .post("/api/projects/{project_id}/webhooks", Resource(Action::WebhookCreate), webhooks::create)
         .delete("/api/webhooks/{webhook_id}", Resource(Action::WebhookDelete), webhooks::delete)
         .post("/api/webhooks/{webhook_id}/test", Resource(Action::WebhookTest), webhooks::test)
+        // Alerts: channels (Slack, Discord, webhooks), rules, history
+        .get("/api/workspaces/{workspace_id}/notification-channels", Resource(Action::NotificationChannelList), alerts::list_channels)
+        .post("/api/workspaces/{workspace_id}/notification-channels", Resource(Action::NotificationChannelCreate), alerts::create_channel)
+        .delete("/api/notification-channels/{notification_channel_id}", Resource(Action::NotificationChannelDelete), alerts::delete_channel)
+        .post("/api/notification-channels/{notification_channel_id}/test", Resource(Action::NotificationChannelTest), alerts::test_channel)
+        .get("/api/workspaces/{workspace_id}/alert-rules", Resource(Action::AlertRuleList), alerts::list_rules)
+        .post("/api/workspaces/{workspace_id}/alert-rules", Resource(Action::AlertRuleCreate), alerts::create_rule)
+        .patch("/api/alert-rules/{alert_rule_id}", Resource(Action::AlertRuleUpdate), alerts::update_rule)
+        .delete("/api/alert-rules/{alert_rule_id}", Resource(Action::AlertRuleDelete), alerts::delete_rule)
+        .get("/api/projects/{project_id}/alert-rules", Resource(Action::ProjectAlertRuleList), alerts::project_rules)
+        .get("/api/workspaces/{workspace_id}/alert-history", Resource(Action::AlertHistoryRead), alerts::history)
         .get("/api/deployments/{deployment_id}", Resource(Action::DeploymentRead), deployments::get)
         .delete("/api/deployments/{deployment_id}", Resource(Action::DeploymentRemove), deployments::remove)
         .get("/api/deployments/{deployment_id}/logs", Resource(Action::DeploymentRead), deployments::logs)

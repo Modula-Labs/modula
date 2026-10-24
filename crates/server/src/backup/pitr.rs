@@ -379,15 +379,21 @@ pub async fn on_result(state: &AppState, node: Id, r: pb::WalgResult) -> anyhow:
             tracing::info!(backup = %id, name = r.backup_name, "base backup completed");
         }
         Ok(pb::WalgOp::WalgBackupPush) => {
-            sqlx::query(
+            let mut tx = state.db.begin().await?;
+            let instance: Option<Option<Id>> = sqlx::query_scalar(
                 "UPDATE backups SET status = 'failed', error = $3, finished_at = now()
-                 WHERE id = $1 AND node_id = $2 AND status = 'running' AND method = 'walg'",
+                 WHERE id = $1 AND node_id = $2 AND status = 'running' AND method = 'walg'
+                 RETURNING service_instance_id",
             )
             .bind(id)
             .bind(node)
             .bind(&error)
-            .execute(&state.db)
+            .fetch_optional(&mut *tx)
             .await?;
+            if let Some(Some(instance)) = instance {
+                super::run::alert_failed(&mut tx, id, instance).await?;
+            }
+            tx.commit().await?;
             tracing::warn!(backup = %id, error, "base backup failed");
         }
         // The id is the oldest base backup kept: older ones and their WAL

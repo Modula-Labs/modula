@@ -224,6 +224,20 @@ pub enum Action {
     CronRunsRead,
     /// Run a cron service now.
     CronRunCreate,
+    /// A workspace's alert channels (Slack, Discord, webhooks; never their URLs).
+    NotificationChannelList,
+    NotificationChannelCreate,
+    /// Send a test notification now.
+    NotificationChannelTest,
+    NotificationChannelDelete,
+    /// A workspace's alert rules and the last notifications sent.
+    AlertRuleList,
+    AlertRuleCreate,
+    AlertRuleUpdate,
+    AlertRuleDelete,
+    AlertHistoryRead,
+    /// The alert rules that apply to a project.
+    ProjectAlertRuleList,
 }
 
 impl Action {
@@ -305,6 +319,16 @@ impl Action {
             Self::DeploymentExec => K::Deployment,
             Self::RunEnvRead => K::ServiceInstance,
             Self::CronRunsRead | Self::CronRunCreate => K::ServiceInstance,
+            Self::NotificationChannelList
+            | Self::NotificationChannelCreate
+            | Self::AlertRuleList
+            | Self::AlertRuleCreate
+            | Self::AlertHistoryRead => K::Workspace,
+            Self::NotificationChannelTest | Self::NotificationChannelDelete => {
+                K::NotificationChannel
+            }
+            Self::AlertRuleUpdate | Self::AlertRuleDelete => K::AlertRule,
+            Self::ProjectAlertRuleList => K::Project,
         })
     }
 
@@ -406,6 +430,17 @@ impl Action {
             // Like deployments: Viewers see runs, Deployers start them.
             Self::CronRunsRead => Role::Viewer,
             Self::CronRunCreate => Role::Deployer,
+            // Like project webhooks: channels point at third parties.
+            Self::NotificationChannelList
+            | Self::NotificationChannelCreate
+            | Self::NotificationChannelTest
+            | Self::NotificationChannelDelete
+            | Self::AlertRuleList
+            | Self::AlertRuleCreate
+            | Self::AlertRuleUpdate
+            | Self::AlertRuleDelete
+            | Self::AlertHistoryRead
+            | Self::ProjectAlertRuleList => Role::Member,
         }
     }
 
@@ -499,7 +534,17 @@ impl Action {
             | Self::WebhookList
             | Self::WebhookCreate
             | Self::WebhookTest
-            | Self::WebhookDelete => false,
+            | Self::WebhookDelete
+            | Self::NotificationChannelList
+            | Self::NotificationChannelCreate
+            | Self::NotificationChannelTest
+            | Self::NotificationChannelDelete
+            | Self::AlertRuleList
+            | Self::AlertRuleCreate
+            | Self::AlertRuleUpdate
+            | Self::AlertRuleDelete
+            | Self::AlertHistoryRead
+            | Self::ProjectAlertRuleList => false,
             Self::MemberUpdate | Self::MemberRemove => true,
             Self::MemberList | Self::MemberInvite | Self::InviteRevoke | Self::MemberLeave => false,
             // Sudo for dashboard sessions only: see `session_sudo`.
@@ -541,6 +586,8 @@ pub enum ResourceKind {
     /// One workspace membership (`workspace_members.id`).
     Member,
     Invite,
+    NotificationChannel,
+    AlertRule,
 }
 
 impl ResourceKind {
@@ -564,6 +611,8 @@ impl ResourceKind {
         ResourceKind::Webhook,
         ResourceKind::Member,
         ResourceKind::Invite,
+        ResourceKind::NotificationChannel,
+        ResourceKind::AlertRule,
     ];
 
     pub fn param(self) -> &'static str {
@@ -587,6 +636,8 @@ impl ResourceKind {
             Self::Webhook => "webhook_id",
             Self::Member => "member_id",
             Self::Invite => "invite_id",
+            Self::NotificationChannel => "notification_channel_id",
+            Self::AlertRule => "alert_rule_id",
         }
     }
 
@@ -609,7 +660,9 @@ impl ResourceKind {
             | Self::ProvisionedServer
             | Self::Webhook
             | Self::Member
-            | Self::Invite => OwnerKind::Workspace,
+            | Self::Invite
+            | Self::NotificationChannel
+            | Self::AlertRule => OwnerKind::Workspace,
         }
     }
 
@@ -683,6 +736,10 @@ impl ResourceKind {
             }
             Self::Member => "SELECT workspace_id FROM workspace_members WHERE id = $1",
             Self::Invite => "SELECT workspace_id FROM workspace_invites WHERE id = $1",
+            Self::NotificationChannel => {
+                "SELECT workspace_id FROM notification_channels WHERE id = $1"
+            }
+            Self::AlertRule => "SELECT workspace_id FROM alert_rules WHERE id = $1",
         };
         Ok(sqlx::query_scalar(sql).bind(id).fetch_optional(db).await?)
     }

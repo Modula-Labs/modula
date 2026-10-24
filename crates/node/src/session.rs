@@ -56,6 +56,12 @@ pub async fn run(
     if let Some(m) = &mesh {
         tokio::spawn(report_mesh(m.clone(), out_tx.clone(), stop.clone()));
     }
+    tokio::spawn(crate::disk::run(
+        dir.clone(),
+        runtime.clone(),
+        out_tx.clone(),
+        stop.clone(),
+    ));
     // Set by a finished upgrade (tests' fake one): reconnect to say Hello again.
     let reconnect = Arc::new(tokio::sync::Notify::new());
     // Backup results also go through the outbox, to survive reconnects.
@@ -439,6 +445,7 @@ impl Ctx<'_> {
                 .chain(self.db.is_some().then_some("db"))
                 .chain(self.upgrade.is_some().then_some("upgrade"))
                 .chain(self.mesh.map(|_| "mesh"))
+                .chain(Some("disk"))
                 .chain(crate::access::applier().map(|_| "cf-access"))
                 .chain(
                     crate::access::applier()

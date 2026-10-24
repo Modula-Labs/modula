@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { Skeleton } from "@/components/ui/misc";
 import { atLeast } from "@/lib/roles";
 import { useProject } from "./ProjectContext";
+import { AlertsSection } from "./settings/AlertsSection";
 import { DangerSection } from "./settings/DangerSection";
 import { EnvironmentsSection } from "./settings/EnvironmentsSection";
 import { GeneralSection } from "./settings/GeneralSection";
@@ -63,6 +64,8 @@ export function ProjectSettingsPage({ projectId, section }: { projectId: string;
             <SharedVariablesSection project={p} currentEnvId={env?.id} canEdit={canDeploy} />
           ) : active === "webhooks" ? (
             <WebhooksSection projectId={p.id} canEdit={canEdit} />
+          ) : active === "alerts" ? (
+            <AlertsSection projectId={p.id} />
           ) : active === "members" ? (
             <WorkspaceLinkSection
               title="Members"
