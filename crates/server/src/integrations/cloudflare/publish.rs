@@ -1,6 +1,7 @@
-//! Publishing a static site's build output to Cloudflare as Workers static
-//! assets (a job, once the node that built the deployment has uploaded the
-//! output; see `deploy::output` and `deploy::state`).
+//! Publishing to Cloudflare Workers (a job): a static site's build output as
+//! static assets, or a function as the Worker's module, once the node that
+//! built the deployment has uploaded the output (see `deploy::output` and
+//! `deploy::state`), or right away for a function's inline code.
 //!
 //! Why Workers static assets rather than Pages: Cloudflare recommends Workers
 //! for new projects; one script upload sets the assets, the SPA fallback
@@ -113,6 +114,24 @@ pub async fn preflight(state: &AppState, instance: Id) -> AppResult<()> {
     Ok(())
 }
 
+/// Queues publishing `dep`: `sha256` is that of the output its node
+/// uploaded (empty when there is none: a function's inline code).
+pub async fn enqueue(tx: &mut sqlx::PgConnection, dep: Id, sha256: &str) -> AppResult<()> {
+    let key = format!("publish:{dep}");
+    crate::jobs::enqueue(
+        &mut *tx,
+        crate::jobs::NewJob {
+            kind: JOB,
+            payload: serde_json::json!({ "deploymentId": dep, "sha256": sha256 }),
+            max_attempts: Some(3),
+            dedupe_key: Some(&key),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 /// The job: `{deploymentId, sha256}`.
 pub async fn job(state: AppState, job: Job) -> anyhow::Result<()> {
     let dep: Id = job
@@ -218,7 +237,138 @@ async fn run(
         Failed("the Cloudflare token can't see an account; reconnect with one".into())
     })?;
     let script = script_name(cf.script_name, &row.service_name, &row.environment_name);
+    match cfg.function() {
+        Some(f) => {
+            upload_function(state, dep, sha256, row, &conn, &account, &script, f).await?;
+        }
+        None => {
+            upload_site(
+                state, dep, sha256, row, scratch, &conn, &account, &script, cf,
+            )
+            .await?
+        }
+    }
 
+    let mut url = None;
+    match conn.client.workers_subdomain(&account).await {
+        Ok(Some(sub)) => {
+            conn.client.enable_workers_dev(&account, &script).await?;
+            url = Some(format!("https://{script}.{sub}.workers.dev"));
+        }
+        Ok(None) => {
+            event(
+                state,
+                dep,
+                "warning",
+                "This Cloudflare account has no workers.dev subdomain yet; choose one in the Cloudflare dashboard (Workers & Pages) or add a custom domain",
+            )
+            .await?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    if let Some(custom) = attach_domains(
+        state,
+        dep,
+        row.service_instance_id,
+        &conn,
+        &account,
+        &script,
+    )
+    .await?
+    {
+        url = Some(custom);
+    }
+    if cfg.function().is_some() {
+        event(
+            state,
+            dep,
+            "publishing",
+            &format!(
+                "Logs: Cloudflare dashboard → Workers & Pages → {script} → Logs (https://dash.cloudflare.com/{account}/workers/services/view/{script}/production/observability/logs)"
+            ),
+        )
+        .await?;
+    }
+    Ok(url)
+}
+
+/// A function's module: the code written in the dashboard, or the bundle
+/// its build made. Uploaded as the Worker's only module with the
+/// deployment's variables as bindings.
+#[allow(clippy::too_many_arguments)]
+async fn upload_function(
+    state: &AppState,
+    dep: Id,
+    sha256: &str,
+    row: &Row,
+    conn: &super::Connection,
+    account: &str,
+    script: &str,
+    f: crate::deploy::config::FunctionSource<'_>,
+) -> Result<(), Failed> {
+    let code = match f.code {
+        Some(code) => code.to_owned(),
+        None => {
+            let archive = output::file(state, dep);
+            let want = sha256.to_owned();
+            tokio::task::spawn_blocking(move || read_bundle(&archive, &want))
+                .await
+                .map_err(|e| Failed(format!("reading the function's bundle: {e}")))??
+        }
+    };
+    event(
+        state,
+        dep,
+        "publishing",
+        &format!(
+            "Uploading the function ({}) to Cloudflare Worker {script}",
+            human_size(code.len() as u64)
+        ),
+    )
+    .await?;
+    let (bindings, skipped) = bindings(state, dep, row, false).await?;
+    if !skipped.is_empty() {
+        event(
+            state,
+            dep,
+            "warning",
+            &format!(
+                "Not set on the Worker (reserved names): {}",
+                skipped.join(", ")
+            ),
+        )
+        .await?;
+    }
+    conn.client
+        .put_module_worker(account, script, &code, f.compatibility_date, &bindings)
+        .await?;
+    event(
+        state,
+        dep,
+        "publishing",
+        &format!(
+            "Deployed Worker {script} ({} variables, compatibility date {})",
+            bindings.len(),
+            f.compatibility_date
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// A static site's build output, uploaded as the Worker's static assets.
+#[allow(clippy::too_many_arguments)]
+async fn upload_site(
+    state: &AppState,
+    dep: Id,
+    sha256: &str,
+    row: &Row,
+    scratch: &Path,
+    conn: &super::Connection,
+    account: &str,
+    script: &str,
+    cf: crate::deploy::config::CloudflareHosting<'_>,
+) -> Result<(), Failed> {
     // The archive the node uploaded, checked against what it reported.
     let archive = output::file(state, dep);
     let want = sha256.to_owned();
@@ -255,7 +405,7 @@ async fn run(
         .collect();
     let session = conn
         .client
-        .assets_upload_session(&account, &script, &manifest)
+        .assets_upload_session(account, script, &manifest)
         .await?;
     let types: HashMap<&str, &str> = files
         .iter()
@@ -286,7 +436,7 @@ async fn run(
             .collect();
         if let Some(jwt) = conn
             .client
-            .upload_assets(&account, &session.jwt, &parts)
+            .upload_assets(account, &session.jwt, &parts)
             .await?
         {
             completion = jwt;
@@ -306,7 +456,7 @@ async fn run(
     }
 
     // Variables and secrets, exactly as Modula has them.
-    let (bindings, skipped) = bindings(state, dep, row).await?;
+    let (bindings, skipped) = bindings(state, dep, row, true).await?;
     if !skipped.is_empty() {
         event(
             state,
@@ -320,7 +470,7 @@ async fn run(
         .await?;
     }
     conn.client
-        .put_assets_worker(&account, &script, &completion, cf.spa, &bindings)
+        .put_assets_worker(account, script, &completion, cf.spa, &bindings)
         .await?;
     event(
         state,
@@ -333,37 +483,7 @@ async fn run(
         ),
     )
     .await?;
-
-    let mut url = None;
-    match conn.client.workers_subdomain(&account).await {
-        Ok(Some(sub)) => {
-            conn.client.enable_workers_dev(&account, &script).await?;
-            url = Some(format!("https://{script}.{sub}.workers.dev"));
-        }
-        Ok(None) => {
-            event(
-                state,
-                dep,
-                "warning",
-                "This Cloudflare account has no workers.dev subdomain yet; choose one in the Cloudflare dashboard (Workers & Pages) or add a custom domain",
-            )
-            .await?;
-        }
-        Err(e) => return Err(e.into()),
-    }
-    if let Some(custom) = attach_domains(
-        state,
-        dep,
-        row.service_instance_id,
-        &conn,
-        &account,
-        &script,
-    )
-    .await?
-    {
-        url = Some(custom);
-    }
-    Ok(url)
+    Ok(())
 }
 
 /// Attaches the instance's custom domains to the Worker. A domain whose zone
@@ -454,6 +574,7 @@ async fn bindings(
     state: &AppState,
     dep: Id,
     row: &Row,
+    site: bool,
 ) -> Result<(Vec<Binding>, Vec<String>), Failed> {
     let resolved = match &row.env_sealed {
         Some(s) => env::open_snapshot(&state.keys, &state.db, row.environment_id, dep, s).await?,
@@ -465,17 +586,22 @@ async fn bindings(
         }
         None => env::RawVars::new(),
     };
-    Ok(to_bindings(&resolved, &raw))
+    Ok(to_bindings(&resolved, &raw, site))
 }
 
-fn to_bindings(resolved: &env::EnvMap, raw: &env::RawVars) -> (Vec<Binding>, Vec<String>) {
+/// A static site (`site`) leaves out its assets binding's name and the
+/// variables only its build reads; a function gets every variable but
+/// Modula's own.
+fn to_bindings(
+    resolved: &env::EnvMap,
+    raw: &env::RawVars,
+    site: bool,
+) -> (Vec<Binding>, Vec<String>) {
     let mut out = Vec::new();
     let mut skipped = Vec::new();
     for (name, value) in resolved {
-        if name == "ASSETS"
-            || name.starts_with("MODULA_")
-            || BUILD_ONLY_PREFIXES.iter().any(|p| name.starts_with(p))
-        {
+        let site_only = name == "ASSETS" || BUILD_ONLY_PREFIXES.iter().any(|p| name.starts_with(p));
+        if name.starts_with("MODULA_") || (site && site_only) {
             skipped.push(name.clone());
             continue;
         }
@@ -660,6 +786,47 @@ fn unpack(archive: &Path, want_sha256: &str, dest: &Path) -> Result<Vec<OutputFi
     Ok(out.into_values().collect())
 }
 
+/// Largest function bundle Cloudflare takes (paid plans; free: 3 MB gzipped).
+const MAX_BUNDLE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Checks the archive's SHA-256, then returns its function bundle
+/// (`<top>/worker.js`, as the node packs the bundle directory).
+fn read_bundle(archive: &Path, want_sha256: &str) -> Result<String, Failed> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let io = |e: std::io::Error| Failed(format!("reading the function's bundle: {e}"));
+    let bytes = std::fs::read(archive).map_err(|_| {
+        Failed("the function's bundle never arrived from the server that built it".into())
+    })?;
+    if hex::encode(Sha256::digest(&bytes)) != want_sha256 {
+        return Err(Failed(
+            "the function's bundle doesn't match what the server that built it reported".into(),
+        ));
+    }
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
+    for entry in tar.entries().map_err(io)? {
+        let mut entry = entry.map_err(io)?;
+        let path = entry.path().map_err(io)?.into_owned();
+        let is_module = inside(&path).flatten().as_deref()
+            == Some(&format!("/{}", modula_proto::node::v1::FUNCTION_MODULE)[..]);
+        if !entry.header().entry_type().is_file() || !is_module {
+            continue;
+        }
+        if entry.size() > MAX_BUNDLE_BYTES {
+            return Err(Failed(format!(
+                "the function's bundle is {}; Cloudflare takes Workers up to 10 MiB",
+                human_size(entry.size())
+            )));
+        }
+        let mut code = String::new();
+        entry
+            .read_to_string(&mut code)
+            .map_err(|_| Failed("the function's bundle isn't UTF-8 text".into()))?;
+        return Ok(code);
+    }
+    Err(Failed("the build made no function bundle".into()))
+}
+
 /// `dist/assets/a.js` → `Some(Some("/assets/a.js"))`: the path inside the
 /// top-level directory. `Some(None)` for the directory itself; `None` for a
 /// path that isn't plainly inside it.
@@ -731,7 +898,7 @@ mod tests {
             "SEALED_ONE".into(),
             serde_json::from_value(json!({ "value": "x", "sealed": true })).unwrap(),
         );
-        let (b, skipped) = to_bindings(&resolved, &raw);
+        let (b, skipped) = to_bindings(&resolved, &raw, true);
         let kinds: Vec<(String, bool)> = b
             .iter()
             .map(|b| match b {

@@ -128,6 +128,7 @@ async fn setup(pool: PgPool) -> Setup {
         mesh: None,
         access_log: None,
         wake: None,
+        functions: None,
     };
     tokio::spawn(modula_node::session::run(dir, rt, caps, stop.child_token()));
     let node = id.meta.node_id;

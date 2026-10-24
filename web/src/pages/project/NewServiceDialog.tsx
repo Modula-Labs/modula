@@ -2,7 +2,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { ArrowLeft, BrandDocker, BrandGithub, Bucket, ChevronRight, LayoutGrid, Search } from "@/components/ui/icons";
+import { ArrowLeft, BrandDocker, BrandGithub, Bucket, ChevronRight, LayoutGrid, Search, Zap } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
 import { Alert, Badge } from "@/components/ui/misc";
 import { Segmented } from "@/components/ui/Tabs";
@@ -15,6 +15,8 @@ import { projectReturnPath } from "@/lib/github";
 import { isDatabaseTemplate, suggestBucketName, templateStack, uniqueName } from "@/lib/templates";
 import { useCloudflare } from "@/pages/settings/Integrations";
 import { R2ChoiceFields, r2Choice, type R2Mode } from "./BucketFields";
+import { codeError, FUNCTION_TEMPLATES, newFunctionConfig, type FunctionTarget } from "@/lib/functions";
+import { CodeEditor, CodeSize, TargetField, TemplatePicker } from "./FunctionFields";
 import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
 
 /** `ghcr.io/acme/api:1.2` → `api`, made a valid service name. */
@@ -43,7 +45,10 @@ export function parseRepo(input: string): string | null {
 /** `acme/My_App` → `my-app`, made a valid service name. */
 export const serviceNameFromRepo = (repo: string) => serviceNameFromImage(repo.split("/").pop() ?? "");
 
-export type NewServiceStep = "root" | "image" | "repo" | "database" | "bucket" | "templates" | "app";
+export type NewServiceStep = "root" | "image" | "repo" | "function" | "database" | "bucket" | "templates" | "app";
+
+/** A new function's name from its template: `json-api` → `api`. */
+export const functionName = (template: string) => (template === "json-api" ? "api" : template);
 type Step = NewServiceStep;
 
 /** Command-style picker for adding a service (Docker image or GitHub repo). */
@@ -86,6 +91,10 @@ export function NewServiceDialog({
   const [appQuery, setAppQuery] = useState("");
   const [app, setApp] = useState<AppTemplate | null>(null);
   const [namePrefix, setNamePrefix] = useState("");
+  const firstTemplate = FUNCTION_TEMPLATES[0]!;
+  const [fnTemplate, setFnTemplate] = useState(firstTemplate.id);
+  const [code, setCode] = useState(firstTemplate.code);
+  const [target, setTarget] = useState<FunctionTarget>("self");
 
   const reset = () => {
     setStep("root");
@@ -103,6 +112,9 @@ export function NewServiceDialog({
     setAppQuery("");
     setApp(null);
     setNamePrefix("");
+    setFnTemplate(firstTemplate.id);
+    setCode(firstTemplate.code);
+    setTarget("self");
   };
 
   const repo = parseRepo(repoInput);
@@ -214,6 +226,22 @@ export function NewServiceDialog({
 
   const dbTemplates = templates.data?.filter((t) => isDatabaseTemplate(t.id)) ?? [];
 
+  const fnName = name || uniqueName(functionName(fnTemplate), takenNames);
+  const fnCodeError = code === "" ? null : codeError(code);
+  const createFunction = useMutation({
+    mutationFn: async () => {
+      const svc = await api.createService(projectId, { name: fnName, config: newFunctionConfig(code, target) });
+      await deployNew(svc);
+      return svc;
+    },
+    onSuccess: async (svc) => {
+      await qc.invalidateQueries({ queryKey: ["project", projectId] });
+      onCreated(svc.id);
+      onOpenChange(false);
+      reset();
+    },
+  });
+
   const create = useMutation({
     mutationFn: async () => {
       const svc = await api.createService(
@@ -257,7 +285,7 @@ export function NewServiceDialog({
           onEscapeKeyDown={(e) => {
             if (document.activeElement?.getAttribute("aria-expanded") === "true") e.preventDefault();
           }}
-          className={`anim-modal fixed top-[16%] left-1/2 z-50 ${step === "templates" || step === "app" ? "w-[640px]" : "w-[480px]"} max-w-[calc(100vw-32px)] -translate-x-1/2 overflow-hidden rounded-2xl bg-popover text-popover-foreground shadow-modal outline-none`}>
+          className={`anim-modal fixed ${step === "function" ? "top-[8%]" : "top-[16%]"} left-1/2 z-50 ${step === "templates" || step === "app" || step === "function" ? "w-[640px]" : "w-[480px]"} max-w-[calc(100vw-32px)] -translate-x-1/2 overflow-hidden rounded-2xl bg-popover text-popover-foreground shadow-modal outline-none`}>
           <Dialog.Title className="sr-only">Add a service</Dialog.Title>
           <Dialog.Description className="sr-only">Choose where the service comes from.</Dialog.Description>
           <div className="flex h-12 items-center gap-2 border-b border-border px-3 text-muted-foreground">
@@ -279,6 +307,8 @@ export function NewServiceDialog({
                 ? "What would you like to add?"
                 : step === "repo"
                   ? "GitHub repo"
+                  : step === "function"
+                    ? "Function"
                   : step === "database"
                     ? "Database"
                     : step === "bucket"
@@ -297,6 +327,7 @@ export function NewServiceDialog({
                 <>
                   <PickerRow icon={<BrandGithub />} label="GitHub repo" onClick={() => setStep("repo")} />
                   <PickerRow icon={<BrandDocker />} label="Docker image" onClick={() => setStep("image")} />
+                  <PickerRow icon={<Zap />} label="Function" onClick={() => setStep("function")} />
                   <PickerRow icon={<Bucket />} label="Bucket" onClick={() => setStep("bucket")} />
                   <PickerRow icon={<LayoutGrid />} label="Template" onClick={() => setStep("templates")} />
                 </>
@@ -420,7 +451,53 @@ export function NewServiceDialog({
                 </Button>
               </div>
             </form>
+          ) : step === "function" ? (
+            <form
+              className="flex max-h-[80vh] flex-col gap-4 overflow-y-auto p-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                createFunction.mutate();
+              }}
+            >
+              {createFunction.error ? <Alert>{createFunction.error.message}</Alert> : null}
+              {notice ? <Alert tone="warn">{notice}</Alert> : null}
+              <TemplatePicker
+                value={fnTemplate}
+                onPick={(id, c) => {
+                  setFnTemplate(id);
+                  setCode(c);
+                }}
+              />
+              <Field
+                label="Code"
+                hint={
+                  <>
+                    A module worker in JavaScript: <span className="font-mono">export default {"{ fetch(request, env, ctx) }"}</span>.
+                    Variables are on <span className="font-mono">env</span>. For TypeScript or npm packages, deploy a repository.
+                  </>
+                }
+                error={fnCodeError}
+              >
+                {(p) => <CodeEditor {...p} value={code} onChange={setCode} rows={16} />}
+              </Field>
+              <div className="-mt-2 flex justify-end">
+                <CodeSize code={code} />
+              </div>
+              <TargetField target={target} onTarget={setTarget} connected={cf.isPending && workspaceId ? undefined : cfConnected} />
+              <Field label="Service name">
+                {(p) => <Input {...p} placeholder={fnName} value={name} onChange={(e) => setName(e.target.value)} />}
+              </Field>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+                  Cancel
+                </Button>
+                <Button type="submit" variant="primary" loading={createFunction.isPending} disabled={!!codeError(code)}>
+                  Deploy
+                </Button>
+              </div>
+            </form>
           ) : step === "bucket" ? (
+
             <form
               className="flex flex-col gap-4 p-4"
               onSubmit={(e) => {

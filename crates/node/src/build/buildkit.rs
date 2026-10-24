@@ -166,12 +166,12 @@ pub fn daemon_key(cache_key: &str) -> String {
 
 /// A user from /etc/passwd.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct User {
-    uid: u32,
-    gid: u32,
+pub(crate) struct User {
+    pub(crate) uid: u32,
+    pub(crate) gid: u32,
 }
 
-fn lookup_user(passwd: &str, name: &str) -> Option<User> {
+pub(crate) fn lookup_user(passwd: &str, name: &str) -> Option<User> {
     passwd.lines().find_map(|l| {
         let mut f = l.split(':');
         if f.next()? != name {
@@ -199,7 +199,7 @@ fn chown_tree(path: &Path, user: User) -> std::io::Result<()> {
 
 /// Lets other users traverse (not list) `dir`.
 #[cfg(unix)]
-fn traversable(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn traversable(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(dir)?.permissions().mode();
     if mode & 0o001 == 0 {
@@ -547,8 +547,14 @@ impl BuildkitBuilder {
         );
 
         let context = resolve_dir(&fetched.dir, &spec.root_dir)?;
-        // Config as code overrides the dashboard; bad values only warn.
-        let (config, warnings) = repo_config::load(&context);
+        let function = spec.builder == pb::Builder::Function as i32;
+        // Config as code overrides the dashboard; bad values only warn. A
+        // function has nothing in it to configure.
+        let (config, warnings) = if function {
+            (None, Vec::new())
+        } else {
+            repo_config::load(&context)
+        };
         let stack = super::stack::detect(&context);
         for warning in &warnings {
             log.line(true, &format!("Warning: {warning}"));
@@ -595,6 +601,19 @@ impl BuildkitBuilder {
                     "--opt".into(),
                     format!("source={RAILPACK_FRONTEND}"),
                 ]);
+            }
+            pb::Builder::Function => {
+                resolve_file(&context, &spec.function_entry).with_context(|| {
+                    format!("the function's entry file {}", spec.function_entry)
+                })?;
+                let defs = dir.join("function");
+                std::fs::create_dir_all(&defs)?;
+                std::fs::write(defs.join("Dockerfile"), FUNCTION_DOCKERFILE)?;
+                log.line(
+                    false,
+                    &format!("Bundling {} with esbuild", spec.function_entry),
+                );
+                args.extend(function_args(&defs, &spec.function_entry));
             }
             pb::Builder::Dockerfile => {
                 let rel = if spec.dockerfile_path.is_empty() {
@@ -950,6 +969,24 @@ async fn copy_lines(stream: impl AsyncRead + Unpin, log: BuildLog) {
     }
 }
 
+/// How a function is bundled (see the file).
+const FUNCTION_DOCKERFILE: &str = include_str!("function.Dockerfile");
+
+/// buildctl's arguments for a function build: the bundling Dockerfile in
+/// `defs`, with the entry module as its build argument.
+fn function_args(defs: &Path, entry: &str) -> Vec<String> {
+    vec![
+        "--local".into(),
+        format!("dockerfile={}", defs.display()),
+        "--frontend".into(),
+        "dockerfile.v0".into(),
+        "--opt".into(),
+        "filename=Dockerfile".into(),
+        "--opt".into(),
+        format!("build-arg:entry={entry}"),
+    ]
+}
+
 /// `root/rel` as a directory that really is inside `root`.
 fn resolve_dir(root: &Path, rel: &str) -> anyhow::Result<PathBuf> {
     let root = root.canonicalize()?;
@@ -977,6 +1014,36 @@ fn resolve_file(root: &Path, rel: &str) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn functions_bundle_with_the_pinned_dockerfile() {
+        let args = function_args(Path::new("/work/d/function"), "src/index.ts");
+        assert_eq!(
+            args,
+            [
+                "--local",
+                "dockerfile=/work/d/function",
+                "--frontend",
+                "dockerfile.v0",
+                "--opt",
+                "filename=Dockerfile",
+                "--opt",
+                "build-arg:entry=src/index.ts",
+            ]
+        );
+        // Pinned, without install scripts, into the path nodes and the server read.
+        assert!(FUNCTION_DOCKERFILE.contains("node:22-alpine@sha256:"));
+        assert!(
+            FUNCTION_DOCKERFILE
+                .contains("npx --yes esbuild@0.28.2 \"$entry\" --bundle --format=esm")
+        );
+        assert!(FUNCTION_DOCKERFILE.contains("npm ci --ignore-scripts"));
+        assert!(FUNCTION_DOCKERFILE.contains(&format!("--outfile=/out/{}", pb::FUNCTION_MODULE)));
+        assert!(FUNCTION_DOCKERFILE.contains(&format!(
+            "COPY --from=bundle /out/ {}/",
+            pb::FUNCTION_OUTPUT_DIR
+        )));
+    }
 
     #[test]
     fn security_options() {

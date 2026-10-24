@@ -130,6 +130,11 @@ pub async fn start(
             .bind(d.instance)
             .fetch_one(&mut *tx)
             .await?;
+    if has_volume && d.config.function().is_some() {
+        return Err(crate::error::AppError::Conflict(
+            "a function has no disk: remove the volume, or keep state in a database".into(),
+        ));
+    }
     if has_volume && d.config.replicas > 1 {
         return Err(crate::error::AppError::Conflict(
             "a service with a volume runs one replica: raise its CPU and memory instead".into(),
@@ -224,6 +229,7 @@ pub async fn start(
         ),
         (_, Some(_)) if d.prebuilt.is_none() => "Building uploaded files".to_owned(),
         (Some(c), None) => format!("Building {} at {}", d.config.source_label(), &c.sha[..7]),
+        _ if d.config.function().is_some() => "Deploying the function's code".to_owned(),
         _ => format!("Deploying {image}"),
     };
     sqlx::query(
@@ -236,6 +242,12 @@ pub async fn start(
     if status == "waiting_ci" {
         crate::github::ci::schedule_timeout(&mut *tx, id).await?;
     }
+    // Code written in the dashboard goes to Cloudflare as it is: no node
+    // takes part.
+    if status == "deploying" && d.config.cloudflare().is_some() && d.config.function().is_some() {
+        crate::integrations::cloudflare::publish::enqueue(&mut *tx, id, "").await?;
+    }
+
     if !resolved.missing.is_empty() {
         sqlx::query(
             "INSERT INTO deployment_events (deployment_id, phase, message) VALUES ($1, 'warning', $2)",

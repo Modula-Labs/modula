@@ -7,6 +7,11 @@ pub mod node {
         /// Wire protocol version. Bump on incompatible changes; the server
         /// accepts this version and the one before it.
         pub const PROTOCOL: u32 = 1;
+
+        /// Where a FUNCTION build leaves its bundle in the image it builds.
+        pub const FUNCTION_OUTPUT_DIR: &str = "/fn";
+        /// The bundle's one module, in [`FUNCTION_OUTPUT_DIR`].
+        pub const FUNCTION_MODULE: &str = "worker.js";
     }
 }
 

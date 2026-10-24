@@ -229,7 +229,8 @@ so they fail with "the server running this deployment is offline" when it is.
 ### `add`
 
 ```
-modula add (--database <ENGINE> | --image <REF> | --repo <OWNER/NAME> [--branch <BRANCH>] | --template <APP>)
+modula add (--database <ENGINE> | --image <REF> | --repo <OWNER/NAME> [--branch <BRANCH>] | --template <APP>
+            | --function <FILE> [--cloudflare] [--compatibility-date <DATE>])
                   [--name <NAME>] [--port <PORT>] [-v, --variables KEY=VALUE]…
 ```
 
@@ -239,6 +240,10 @@ modula add (--database <ENGINE> | --image <REF> | --repo <OWNER/NAME> [--branch 
 | `-i, --image` | A prebuilt image, e.g. `ghcr.io/acme/api:1.2`. |
 | `-r, --repo` | A GitHub repository, built on every deploy (needs the GitHub App installed for the workspace). |
 | `-b, --branch` | With `--repo`; default `main`. |
+| `-f, --function` | A JavaScript function from this file (a module worker, up to 1 MB), run in workerd on your servers; see [functions](projects-and-services.md#functions). The name defaults to the file's (`index.js` → `function`). |
+| `--cloudflare` | With `--function`: run it on Cloudflare Workers instead. |
+| `--compatibility-date` | With `--function`: the Workers runtime version it is written for; default `2026-10-01`. |
+
 | `-t, --template` | A one-click app with the databases it needs: `n8n`, `plausible`, `umami`, `metabase`, `uptime-kuma` or `ghost` (`--template list` lists them). Creates every service, volume, generated secret and reference, generates a domain for the app and deploys it all in the selected environment. `--name` becomes a prefix (`blog` → `blog-ghost`, `blog-mysql`); taken names get `-2`. |
 | `-n, --name` | Service name; default from the engine, image or repository name (lowercase letters, digits, `-`). |
 | `--port` | The port the app listens on (image and repo); default 8080. |

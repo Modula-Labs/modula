@@ -125,6 +125,7 @@ impl Cluster {
             mesh: None,
             access_log: None,
             wake: None,
+            functions: None,
         };
         tokio::spawn(modula_node::session::run(
             dir,

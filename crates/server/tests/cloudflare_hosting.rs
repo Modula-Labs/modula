@@ -1,7 +1,9 @@
-//! Static sites hosted on Cloudflare (`config.hosting`), end to end against
-//! a mock of the Cloudflare API: a node builds the site (FakeBuilder), uploads
-//! the output to the server over HTTP, and the publish job turns it into a
-//! Worker with static assets, its variables and its custom domain.
+//! Static sites and functions hosted on Cloudflare (`config.hosting`), end
+//! to end against a mock of the Cloudflare API: a node builds the site or
+//! bundles the function (FakeBuilder), uploads the output to the server over
+//! HTTP, and the publish job turns it into a Worker (with static assets, or
+//! the function as its module), its variables and its custom domain. A
+//! function's inline code goes to Cloudflare without a node.
 
 mod common;
 
@@ -36,6 +38,8 @@ struct Cf {
     manifest: Mutex<Value>,
     uploaded: Mutex<Vec<String>>,
     script: Mutex<String>,
+    /// A function Worker's module.
+    module: Mutex<String>,
     domains: Mutex<Vec<Value>>,
 }
 
@@ -186,11 +190,16 @@ async fn handle(
             let p = parts(&headers, &body);
             let meta = &p.iter().find(|(n, _)| n == "metadata").unwrap().1;
             let meta: Value = serde_json::from_str(meta).unwrap();
-            assert_eq!(meta["assets"]["jwt"], DONE_JWT);
-            assert!(
-                p.iter()
-                    .any(|(n, d)| n == "worker.js" && d.contains("env.ASSETS.fetch"))
-            );
+            if meta.get("assets").is_some() {
+                assert_eq!(meta["assets"]["jwt"], DONE_JWT);
+                assert!(
+                    p.iter()
+                        .any(|(n, d)| n == "worker.js" && d.contains("env.ASSETS.fetch"))
+                );
+            } else {
+                let main = meta["main_module"].as_str().unwrap();
+                *cf.module.lock().unwrap() = p.iter().find(|(n, _)| n == main).unwrap().1.clone();
+            }
             *cf.script.lock().unwrap() = format!("{name} {meta}");
             ok(json!({ "id": name }))
         }
@@ -594,6 +603,157 @@ async fn a_static_site_is_built_on_a_node_and_published_as_a_worker(pool: PgPool
         )
         .await;
     assert_eq!(r.status, StatusCode::CONFLICT, "{:?}", r.json);
+}
+
+impl Setup {
+    async fn function(&self, ws: Id, source: Value) -> Id {
+        let p = self
+            .app
+            .call(
+                Method::POST,
+                &format!("/api/workspaces/{ws}/projects"),
+                Some(&self.admin),
+                Some(json!({"name": "api"})),
+            )
+            .await;
+        let project = p.json["id"].as_str().unwrap().to_owned();
+        let s = self
+            .app
+            .call(
+                Method::POST,
+                &format!("/api/projects/{project}/services"),
+                Some(&self.admin),
+                Some(json!({ "name": "hello", "config": {
+                    "source": source,
+                    "hosting": { "type": "cloudflare" }
+                }})),
+            )
+            .await;
+        assert_eq!(s.status, StatusCode::OK, "{:?}", s.json);
+        let instance: Id = s.json["instances"][0]["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let r = self
+            .app
+            .call(
+                Method::PATCH,
+                &format!("/api/service-instances/{instance}/variables"),
+                Some(&self.admin),
+                Some(json!({
+                    "set": { "GREETING": "hi", "API_TOKEN": "t0ps3cr3t-0123456789", "VITE_FLAG": "1" },
+                })),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+        instance
+    }
+
+    fn worker(&self) -> (String, Value) {
+        let script = self.cf.script.lock().unwrap().clone();
+        let (name, meta) = script.split_once(' ').unwrap();
+        (name.to_owned(), serde_json::from_str(meta).unwrap())
+    }
+}
+
+fn binding_kinds(meta: &Value) -> Vec<(String, String)> {
+    let mut b: Vec<(String, String)> = meta["bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            (
+                b["name"].as_str().unwrap().to_owned(),
+                b["type"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    b.sort();
+    b
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn an_inline_function_goes_to_cloudflare_without_a_node(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.workspace(true).await;
+    let code = "export default { fetch(req, env) { return new Response(env.GREETING); } };";
+    let instance = s
+        .function(
+            ws,
+            json!({ "type": "function", "code": code, "compatibilityDate": "2025-06-01" }),
+        )
+        .await;
+    assert_eq!(s.deploy(instance).await, StatusCode::OK);
+    let d = s.wait_status(instance, "active").await;
+    assert_eq!(d["url"], "https://hello-production.acme.workers.dev", "{d}");
+    let phases: Vec<&str> = d["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["phase"].as_str().unwrap())
+        .collect();
+    assert_eq!(phases.first(), Some(&"queued"));
+    assert!(!phases.contains(&"building"), "nothing builds: {phases:?}");
+    let messages = d["events"].to_string();
+    assert!(
+        messages.contains("observability/logs"),
+        "a link to its logs"
+    );
+
+    // The Worker is the code as written, with every variable but Modula's.
+    let (name, meta) = s.worker();
+    assert_eq!(name, "hello-production");
+    assert_eq!(*s.cf.module.lock().unwrap(), code);
+    assert_eq!(meta["main_module"], "worker.js");
+    assert_eq!(meta["compatibility_date"], "2025-06-01");
+    assert!(meta.get("assets").is_none());
+    assert_eq!(
+        binding_kinds(&meta),
+        [
+            ("API_TOKEN".to_owned(), "secret_text".to_owned()),
+            ("GREETING".to_owned(), "plain_text".to_owned()),
+            ("VITE_FLAG".to_owned(), "plain_text".to_owned()),
+        ]
+    );
+    assert!(s.cf.manifest.lock().unwrap().is_null(), "no static assets");
+    assert!(s.rt.running_deployments().is_empty());
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn a_repository_function_is_bundled_on_a_node_then_published(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.workspace(true).await;
+    let instance = s
+        .function(
+            ws,
+            json!({ "type": "function", "repo": "acme/site", "branch": "main",
+                    "entry": "src/index.ts", "compatibilityDate": "2025-06-01" }),
+        )
+        .await;
+    assert_eq!(s.deploy(instance).await, StatusCode::OK);
+    let d = s.wait_status(instance, "active").await;
+    let phases: Vec<&str> = d["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["phase"].as_str().unwrap())
+        .collect();
+    assert!(
+        phases.starts_with(&["queued", "building", "built", "publishing"]),
+        "{phases:?}"
+    );
+    assert_eq!(
+        *s.cf.module.lock().unwrap(),
+        modula_node::build::FAKE_FUNCTION,
+        "the bundle the node made"
+    );
+    let (_, meta) = s.worker();
+    assert_eq!(meta["main_module"], "worker.js");
+    assert!(
+        s.rt.running_deployments().is_empty(),
+        "nothing runs on the node"
+    );
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]

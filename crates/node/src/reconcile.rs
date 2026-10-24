@@ -5,9 +5,11 @@
 //! A build with an output directory (a static site hosted elsewhere) ends at
 //! BUILT instead: the output is uploaded to the control plane and nothing
 //! runs here. A cron service's rollout ends ACTIVE with nothing started: its
-//! runs come one at a time ([`crate::cron`]). A periodic pass repairs drift and reports crashes and recoveries. Containers whose
-//! deployment is no longer desired are stopped and removed; nothing without
-//! our labels is ever touched.
+//! runs come one at a time ([`crate::cron`]). A function's rollout is
+//! [build →] check → join the node's workerd → ACTIVE ([`crate::functions`]).
+//! A periodic pass repairs drift and reports crashes and recoveries.
+//! Containers and functions whose deployment is no longer desired are
+//! stopped and removed; nothing without our labels is ever touched.
 //!
 //! Serverless deployments (`Workload.serverless`) scale to zero: once one
 //! had no request for its idle time (access log, requests in flight at the
@@ -84,6 +86,8 @@ pub struct Capabilities {
     pub access_log: Option<Arc<crate::edge::access::AccessLog>>,
     /// The wake proxy of sleeping serverless deployments.
     pub wake: Option<Arc<Waker>>,
+    /// JavaScript functions in workerd ([`crate::functions`]).
+    pub functions: Option<Arc<crate::functions::Functions>>,
 }
 
 pub struct Reconciler {
@@ -94,6 +98,7 @@ pub struct Reconciler {
     access_log: Option<Arc<crate::edge::access::AccessLog>>,
     /// Set only with an edge: nothing could wake a deployment otherwise.
     wake: Option<Arc<Waker>>,
+    functions: Option<Arc<crate::functions::Functions>>,
     out: mpsc::Sender<pb::NodeMessage>,
     tracked: Mutex<HashMap<String, Tracked>>,
     applied: AtomicU64,
@@ -140,6 +145,7 @@ impl Reconciler {
             mesh: caps.mesh,
             access_log: caps.access_log,
             wake,
+            functions: caps.functions,
             out,
             tracked: Mutex::new(HashMap::new()),
             applied: AtomicU64::new(0),
@@ -335,6 +341,14 @@ impl Reconciler {
                     self.runtime.remove(&c.id).await?;
                 }
             }
+        }
+        if let Some(f) = &self.functions {
+            let functions: HashSet<&str> = workloads
+                .iter()
+                .filter(|w| w.function.is_some())
+                .map(|w| w.deployment_id.as_str())
+                .collect();
+            f.retain(&functions);
         }
 
         // Data of deleted volumes. Only our own volumes, never anything else.
@@ -592,6 +606,18 @@ impl Reconciler {
         };
         let mut routes = Vec::new();
         for r in &ds.routes {
+            // A function: its socket in this node's workerd.
+            if let Some(port) = self
+                .functions
+                .as_ref()
+                .and_then(|f| f.port(&r.deployment_id))
+            {
+                routes.push(ResolvedRoute {
+                    hostname: r.hostname.clone(),
+                    upstream: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                });
+                continue;
+            }
             let Ok(port) = u16::try_from(r.port) else {
                 continue;
             };
@@ -743,6 +769,10 @@ impl Reconciler {
         if self.rollout_running(id) {
             return Ok(());
         }
+        if w.function.is_some() {
+            self.observe_function(w);
+            return Ok(());
+        }
         let phase = self.phase_of(id);
         if phase == Some(Phase::Failed) {
             return Ok(()); // the server removes it from the desired state
@@ -818,6 +848,40 @@ impl Reconciler {
         Ok(())
     }
 
+    /// A function: rolled out once, then watched through the functions
+    /// runtime (every change to the node's functions restarts it, so only
+    /// a longer outage is a crash).
+    fn observe_function(self: &Arc<Self>, w: &pb::Workload) {
+        let id = w.deployment_id.as_str();
+        let phase = self.phase_of(id);
+        if phase == Some(Phase::Failed) {
+            return;
+        }
+        let Some(fns) = &self.functions else {
+            self.set_phase(id, Phase::Failed, NO_FUNCTIONS);
+            return;
+        };
+        if !fns.contains(id) {
+            self.start_rollout(w.clone());
+            return;
+        }
+        if self.restart_due(id, w.restart_generation) {
+            fns.restart();
+            self.set_phase(id, Phase::Active, "restarted");
+            return;
+        }
+        let down = fns.down_for() > FUNCTIONS_DOWN_IS_A_CRASH;
+        match phase {
+            Some(Phase::Active) if down => self.set_phase(
+                id,
+                Phase::Crashed,
+                "The functions runtime on this server stopped; restarting it",
+            ),
+            Some(Phase::Crashed) if fns.up() => self.set_phase(id, Phase::Active, "recovered"),
+            _ => {}
+        }
+    }
+
     fn start_rollout(self: &Arc<Self>, w: pb::Workload) {
         let this = self.clone();
         let id = w.deployment_id.clone();
@@ -840,6 +904,9 @@ impl Reconciler {
 
     async fn rollout(&self, w: &pb::Workload) -> Result<(), String> {
         let id = w.deployment_id.as_str();
+        if let Some(f) = &w.function {
+            return self.rollout_function(w, f).await;
+        }
         let mut effective;
         let w = match &w.build {
             Some(spec) if !spec.output_dir.is_empty() => {
@@ -969,6 +1036,100 @@ impl Reconciler {
         }
         self.set_phase(id, Phase::Active, "Deployment is live");
         Ok(())
+    }
+
+    /// A function: its code (inline, bundled before, or bundled now), a
+    /// start of its own, then a place in this node's workerd.
+    async fn rollout_function(&self, w: &pb::Workload, f: &pb::Function) -> Result<(), String> {
+        let id = w.deployment_id.as_str();
+        let fns = self.functions.as_ref().ok_or(NO_FUNCTIONS)?;
+        let code = if !f.code.is_empty() {
+            f.code.clone()
+        } else if let Some(code) = fns.saved_code(id) {
+            code
+        } else {
+            let spec = w.build.as_ref().ok_or("The function has no code to run")?;
+            self.build(w, spec).await?;
+            let code = self.bundle(w).await?;
+            self.set_phase(
+                id,
+                Phase::Built,
+                format!("Bundled the function ({} KB)", code.len().div_ceil(1024)),
+            );
+            code
+        };
+        self.set_phase(id, Phase::Starting, "Starting the function");
+        let spec = crate::functions::FunctionSpec::new(w, f, code);
+        fns.check(&spec).await.map_err(|e| redact(&e, &w.env))?;
+        let version = fns
+            .upsert(spec)
+            .map_err(|e| format!("Cannot add the function: {e}"))?;
+        fns.wait_serving(version, FUNCTION_START_TIMEOUT).await?;
+        let health = w.health.clone().unwrap_or_default();
+        if !health.path.is_empty() {
+            let port = fns.port(id).ok_or("The function was removed meanwhile")?;
+            self.set_phase(
+                id,
+                Phase::Healthchecking,
+                format!("Waiting for {} to return 2xx", health.path),
+            );
+            let url = format!("http://127.0.0.1:{port}{}", health.path);
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let deadline = tokio::time::Instant::now()
+                + Duration::from_secs(u64::from(health.timeout_secs.max(1)));
+            loop {
+                let ok = reqwest::Client::new()
+                    .get(&url)
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .await
+                    .is_ok_and(|r| r.status().is_success());
+                if ok {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "Health check {} did not pass within {}s",
+                        health.path, health.timeout_secs
+                    ));
+                }
+                tokio::time::sleep(PROBE_EVERY).await;
+            }
+        }
+        self.set_phase(id, Phase::Active, "Function is live");
+        Ok(())
+    }
+
+    /// The bundle a FUNCTION build made: its image's one module.
+    async fn bundle(&self, w: &pb::Workload) -> Result<String, String> {
+        let id = w.deployment_id.as_str();
+        let b = self
+            .build
+            .as_ref()
+            .ok_or("This server can't build (no builder configured)")?;
+        let log = b
+            .logs
+            .append(id)
+            .map_err(|e| format!("Cannot write the build log: {e:#}"))?;
+        let _finish = FinishOnDrop(log.clone());
+        let archive = std::env::temp_dir().join(format!("modula-function-{id}.tar.gz"));
+        let result = async {
+            b.builder
+                .export(w, pb::FUNCTION_OUTPUT_DIR, &archive, &log)
+                .await?;
+            let path = archive.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::build::output::read_file(&path, pb::FUNCTION_MODULE)
+            })
+            .await?
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&archive).await;
+        result.map_err(|e| {
+            let message = format!("{e:#}");
+            log.line(true, &message);
+            format!("Bundling the function failed: {message}")
+        })
     }
 
     /// `outcome`, followed by the container's last output (redacted): the
@@ -1197,6 +1358,11 @@ fn idle_text(secs: u32) -> String {
         s => format!("{s} s"),
     }
 }
+const NO_FUNCTIONS: &str = "This server can't run functions (workerd isn't installed)";
+/// workerd must serve a new function within this.
+const FUNCTION_START_TIMEOUT: Duration = Duration::from_secs(60);
+/// The functions runtime down this long counts as a crash of its functions.
+const FUNCTIONS_DOWN_IS_A_CRASH: Duration = Duration::from_secs(15);
 
 /// A static-site build whose output is hosted elsewhere.
 fn exports_output(w: &pb::Workload) -> bool {
@@ -1780,6 +1946,108 @@ mod tests {
             }),
             ..workload(dep, env, "")
         }
+    }
+
+    /// Functions run in the node's workerd, not containers: inline code
+    /// right away, a repository's bundle after its build; their routes go
+    /// to their sockets, and they leave workerd with the desired state.
+    #[tokio::test]
+    async fn functions_run_in_workerd_and_are_routed_there() {
+        let rt = Arc::new(FakeRuntime::new());
+        let edge = Arc::new(crate::edge::RecordingEdge::default());
+        let (mut caps, dir) = with_builder();
+        let fake = Arc::new(crate::functions::FakeWorkerd::default());
+        let fns = crate::functions::Functions::new(dir.join("functions"), fake.clone()).unwrap();
+        let stop = CancellationToken::new();
+        let (out, _shipped) = mpsc::channel(64);
+        tokio::spawn(fns.clone().run(out, stop.clone()));
+        caps.edge = Some(edge.clone());
+        caps.functions = Some(fns.clone());
+        let (tx, mut rx) = mpsc::channel(256);
+        let r = Reconciler::new(rt.clone(), caps, tx);
+        let (env, inline, repo, broken) = (Id::new(), Id::new(), Id::new(), Id::new());
+        let function = |code: &str| pb::Function {
+            code: code.into(),
+            compatibility_date: "2026-10-01".into(),
+        };
+        let w_inline = pb::Workload {
+            function: Some(function("export default {}")),
+            ..workload(inline, env, "")
+        };
+        let w_repo = pb::Workload {
+            function: Some(function("")),
+            build: Some(pb::Build {
+                source_url: "https://example.com/src.tar.gz".into(),
+                builder: pb::Builder::Function as i32,
+                function_entry: "index.ts".into(),
+                ..Default::default()
+            }),
+            ..workload(repo, env, "/")
+        };
+        let w_broken = pb::Workload {
+            function: Some(function(crate::functions::process::FAIL_MARK)),
+            ..workload(broken, env, "")
+        };
+        let mut ds = state(1, env, vec![w_inline.clone(), w_repo.clone(), w_broken]);
+        r.apply(&ds).await.unwrap();
+        for d in [inline, repo, broken] {
+            settle(&r, d).await;
+        }
+        let events = drain(&mut rx);
+        assert_eq!(of(&events, inline), [Phase::Starting, Phase::Active]);
+        assert_eq!(
+            of(&events, repo),
+            [
+                Phase::Building,
+                Phase::Built,
+                Phase::Starting,
+                Phase::Healthchecking,
+                Phase::Active
+            ]
+        );
+        assert_eq!(of(&events, broken), [Phase::Starting, Phase::Failed]);
+        assert!(rt.containers().await.unwrap().is_empty(), "no containers");
+        assert_eq!(
+            fns.saved_code(&repo.to_string()).as_deref(),
+            Some(crate::build::FAKE_FUNCTION),
+            "the bundle is kept for node restarts"
+        );
+        assert!(!fns.contains(&broken.to_string()));
+
+        // Seen again: nothing new rolls out.
+        let launches = fake.launches().len();
+        r.apply(&ds).await.unwrap();
+        assert!(drain(&mut rx).is_empty());
+        assert_eq!(fake.launches().len(), launches);
+
+        ds.generation = 2;
+        ds.workloads.truncate(2);
+        ds.routes = vec![pb::Route {
+            hostname: "fn.apps.test".into(),
+            deployment_id: inline.to_string(),
+            port: 8080,
+            ..Default::default()
+        }];
+        r.apply(&ds).await.unwrap();
+        let cfg = edge.last.lock().unwrap().clone().unwrap();
+        let port = fns.port(&inline.to_string()).unwrap();
+        assert_eq!(
+            cfg.routes,
+            [ResolvedRoute {
+                hostname: "fn.apps.test".into(),
+                upstream: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            }]
+        );
+
+        // Out of the desired state: out of workerd.
+        ds.generation = 3;
+        ds.workloads = vec![w_repo];
+        ds.routes.clear();
+        r.apply(&ds).await.unwrap();
+        assert!(!fns.contains(&inline.to_string()));
+        assert!(fns.contains(&repo.to_string()));
+        stop.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test(start_paused = true)]

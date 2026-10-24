@@ -38,6 +38,8 @@ const STABLE_AFTER: Duration = Duration::from_secs(60);
 const RENEW_BEFORE: Duration = Duration::from_secs(10 * 24 * 3600);
 const LOG_BATCH_LINES: usize = 200;
 const LOG_BATCH_WAIT: Duration = Duration::from_millis(50);
+/// The largest message the server may send (a desired state with functions).
+const MAX_MESSAGE: usize = 64 * 1024 * 1024;
 
 /// Run until `stop` is cancelled.
 pub async fn run(
@@ -74,6 +76,10 @@ pub async fn run(
         out_tx.clone(),
         stop.clone(),
     ));
+    let functions = caps.functions.clone();
+    let functions_task = functions
+        .clone()
+        .map(|f| tokio::spawn(f.run(out_tx.clone(), stop.clone())));
     let reconciler = Reconciler::new(runtime.clone(), caps, out_tx);
     let (desired_tx, desired_rx) = watch::channel(None);
     let reconcile_task = tokio::spawn(reconciler.clone().run(desired_rx, stop.clone()));
@@ -100,6 +106,7 @@ pub async fn run(
             upgrade: upgrade.as_ref(),
             reconnect: &reconnect,
             mesh: mesh.as_ref(),
+            functions: functions.as_ref(),
         };
         match ctx.session().await {
             Ok(()) => break,
@@ -120,6 +127,9 @@ pub async fn run(
     }
     let _ = reconcile_task.await;
     let _ = logship.await;
+    if let Some(t) = functions_task {
+        let _ = t.await;
+    }
     Ok(())
 }
 
@@ -139,6 +149,7 @@ struct Ctx<'a> {
     upgrade: Option<&'a Arc<dyn crate::upgrade::Upgrader>>,
     reconnect: &'a Arc<tokio::sync::Notify>,
     mesh: Option<&'a Arc<crate::mesh::Mesh>>,
+    functions: Option<&'a Arc<crate::functions::Functions>>,
 }
 
 fn msg(m: Out) -> pb::NodeMessage {
@@ -156,7 +167,9 @@ impl Ctx<'_> {
         .await?;
         let (tx, rx) = mpsc::channel::<pb::NodeMessage>(256);
         tx.send(msg(Out::Hello(self.hello().await))).await?;
+        // Desired states carry functions' code (up to 1 MB each).
         let mut inbound = NodeClient::new(channel)
+            .max_decoding_message_size(MAX_MESSAGE)
             .attach(ReceiverStream::new(rx))
             .await
             .map_err(|s| anyhow::anyhow!("the server rejected this node: {}", s.message()))?
@@ -263,7 +276,12 @@ impl Ctx<'_> {
                         req.clone(),
                         tx.clone(),
                     )),
-                    _ => tokio::spawn(stream_logs(self.runtime.clone(), req.clone(), tx.clone())),
+                    _ => tokio::spawn(stream_logs(
+                        self.runtime.clone(),
+                        self.functions.cloned(),
+                        req.clone(),
+                        tx.clone(),
+                    )),
                 };
                 if let Some(old) = logs.insert(req.request_id, task) {
                     old.abort();
@@ -560,9 +578,10 @@ async fn stream_build_logs(
     let _ = tx.send(chunk(vec![], true, String::new())).await;
 }
 
-/// Stream a deployment's logs back in small batches (≤200 lines or 50 ms).
+/// Stream a deployment's output back: its container's, or its function's.
 async fn stream_logs(
     runtime: Arc<dyn Runtime>,
+    functions: Option<Arc<crate::functions::Functions>>,
     req: pb::LogRequest,
     tx: mpsc::Sender<pb::NodeMessage>,
 ) {
@@ -574,6 +593,11 @@ async fn stream_logs(
             error,
         }))
     };
+    // A function's output, from the functions runtime.
+    if let Some(stream) = functions.and_then(|f| f.logs(&req.deployment_id, req.tail, req.follow)) {
+        forward_logs(stream, &tx, chunk).await;
+        return;
+    }
     let container = match runtime.containers().await {
         Ok(cs) => cs
             .into_iter()
@@ -593,13 +617,22 @@ async fn stream_logs(
             .await;
         return;
     };
-    let mut stream = match runtime.logs(&container.id, req.tail, req.follow).await {
+    let stream = match runtime.logs(&container.id, req.tail, req.follow).await {
         Ok(s) => s,
         Err(e) => {
             let _ = tx.send(chunk(vec![], true, format!("{e:#}"))).await;
             return;
         }
     };
+    forward_logs(stream, &tx, chunk).await;
+}
+
+/// Sends `stream`'s lines back in small batches (≤200 lines or 50 ms).
+async fn forward_logs(
+    mut stream: futures::stream::BoxStream<'static, anyhow::Result<crate::runtime::LogLine>>,
+    tx: &mpsc::Sender<pb::NodeMessage>,
+    chunk: impl Fn(Vec<pb::LogLine>, bool, String) -> pb::NodeMessage,
+) {
     let mut batch = Vec::new();
     loop {
         // Either a line arrives, the stream ends, or the batch window elapses.

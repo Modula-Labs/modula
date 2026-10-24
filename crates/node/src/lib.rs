@@ -1,6 +1,7 @@
 //! modula-node: the daemon on every server. It joins the control plane once
 //! (`modula-node join`), then keeps one outbound mTLS stream open and
-//! reconciles the server's containers to the desired state it receives.
+//! reconciles the server's containers and functions to the desired state it
+//! receives.
 
 pub mod access;
 pub mod backup;
@@ -10,6 +11,7 @@ pub mod db;
 pub mod disk;
 pub mod edge;
 pub mod exec;
+pub mod functions;
 pub mod identity;
 pub mod join;
 pub mod location;

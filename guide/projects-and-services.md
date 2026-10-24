@@ -35,6 +35,7 @@ as pending changes in the **Deploy changes** bar; see
 | **GitHub repo** | `owner/name`, branch, optional root directory. Built on the server for every deployment, with Railpack (no Dockerfile needed) or your Dockerfile. Pushes to the branch deploy automatically. Needs the instance's GitHub App installed for the workspace; see [integrations](integrations.md#github). |
 | **Docker image** | Pulled and run as-is, e.g. `ghcr.io/acme/api:1.4` or `nginx@sha256:…`. |
 | **Database** | A template: PostgreSQL, MySQL, Redis or MongoDB, with a volume and generated credentials. See [databases](databases.md). |
+| **Function** | JavaScript that answers HTTP requests, written in the dashboard's editor (from a template) or bundled from a repository. See [functions](#functions). |
 
 Service names use lowercase letters, digits and `-`, start with a letter and are
 at most 63 characters. The name is also the private hostname
@@ -56,7 +57,56 @@ curl -fsS -X POST -H "Authorization: Bearer $MODULA_TOKEN" -H 'content-type: app
   }'
 ```
 
+### Functions
+
+A function is a module worker, the format of Cloudflare Workers:
+
+```js
+export default {
+  async fetch(request, env, ctx) {
+    return new Response(`Hello, ${env.GREETING}!`);
+  },
+};
+```
+
+Its variables (references included) are on `env`, as text. It runs in one of
+two places, switched in its settings:
+
+- **Your servers**: in [workerd](https://github.com/cloudflare/workerd), the
+  open-source Workers runtime, on the server it is placed on (each replica on
+  its own server). Functions are always warm; a server runs all of its
+  functions in one workerd process, each in its own isolate behind the edge,
+  so domains, edge rules and HTTP request logs work as for any service.
+  `console.log` output is the deployment's logs. workerd runs as its own
+  unprivileged user, and functions reach the public internet only: not the
+  server, its other services, the private network or the cloud's metadata
+  service. A deploy, or any change to a server's functions, restarts that
+  server's workerd: it gets up to 5 seconds to finish requests in flight, and
+  new ones see a brief gap.
+- **Cloudflare**: uploaded as a Worker with the workspace's Cloudflare
+  connection ([integrations](integrations.md#cloudflare)), served on
+  `<worker>.<subdomain>.workers.dev` and its custom domains, with every
+  variable as a binding (sealed and credential-like ones as secrets). Its logs
+  are in the Cloudflare dashboard; the deployment links to them.
+
+Code written in the dashboard is plain JavaScript, up to 1 MB, and deploys
+without a build. A function from a repository names its entry file (default
+`index.ts`; TypeScript is fine): each deploy installs the repository's
+dependencies with its lockfile's package manager (without install scripts)
+and bundles the entry with esbuild into one module. The compatibility date is
+the Workers runtime version the code is written for; on your servers it can be
+at most the date of the workerd release the servers run (2026-10-14).
+
+```json
+{ "source": { "type": "function", "code": "export default { … }", "compatibilityDate": "2026-10-01" } }
+{ "source": { "type": "function", "repo": "acme/fns", "branch": "main", "entry": "src/index.ts", "compatibilityDate": "2026-10-01" },
+  "hosting": { "type": "cloudflare" } }
+```
+
+From the CLI: `modula add --function hello.js [--cloudflare]`.
+
 ## Builders
+
 
 For repository sources:
 
