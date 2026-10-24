@@ -13,6 +13,7 @@ import { BackupStorage } from "./BackupStorage";
 import { DomainSection } from "./settings/Domain";
 import { IntegrationsSection } from "./settings/Integrations";
 import { MembersSection } from "./settings/Members";
+import { NotificationsSection } from "./settings/Notifications";
 import { PrivateAccessSection } from "./settings/PrivateAccess";
 import { UpdatesSection } from "./settings/Updates";
 
@@ -153,6 +154,13 @@ function Settings({ workspace }: { workspace: Membership }) {
         description="Optional providers this workspace can automate. Everything works without them."
       >
         <IntegrationsSection workspaceId={workspace.id} isAdmin={isAdmin} />
+      </Section>
+
+      <Section
+        title="Notifications"
+        description="Get told in Slack, Discord or a webhook when deployments fail or servers and services run hot."
+      >
+        <NotificationsSection workspaceId={workspace.id} />
       </Section>
 
       {me?.user.isInstanceAdmin && isAdmin ? (
