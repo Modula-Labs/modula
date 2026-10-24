@@ -4,6 +4,7 @@ pub mod app_templates;
 pub mod auth;
 pub mod backups;
 pub mod buckets;
+pub mod cron;
 pub mod database;
 pub mod deployments;
 pub mod domains;
@@ -115,6 +116,10 @@ pub fn routes(state: AppState) -> ApiRouter {
         .post("/api/deployments/{deployment_id}/redeploy", Resource(Action::DeploymentRollout), deployments::redeploy)
         .post("/api/deployments/{deployment_id}/rollback", Resource(Action::DeploymentRollout), deployments::rollback)
         .post("/api/deployments/{deployment_id}/restart", Resource(Action::DeploymentRollout), deployments::restart)
+        // Cron services: next due times and runs; run now (see crate::cron)
+        .get("/api/service-instances/{instance_id}/cron-runs", Resource(Action::CronRunsRead), cron::list)
+        .post("/api/service-instances/{instance_id}/cron-runs", Resource(Action::CronRunCreate), cron::run_now)
+        .get("/api/cron/preview", Authenticated, cron::preview)
         // Source uploads (`modula up`): gzipped tarball in, deployed with
         // POST …/deployments {source: {upload}}. Never downloadable by clients.
         .post("/api/service-instances/{instance_id}/uploads", Resource(Action::DeploymentCreate), uploads::create)

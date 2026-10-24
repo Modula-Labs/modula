@@ -4,8 +4,8 @@
 //! health check → ACTIVE (or FAILED, after which its container is removed).
 //! A build with an output directory (a static site hosted elsewhere) ends at
 //! BUILT instead: the output is uploaded to the control plane and nothing
-//! runs here. A periodic
-//! pass repairs drift and reports crashes and recoveries. Containers whose
+//! runs here. A cron service's rollout ends ACTIVE with nothing started: its
+//! runs come one at a time ([`crate::cron`]). A periodic pass repairs drift and reports crashes and recoveries. Containers whose
 //! deployment is no longer desired are stopped and removed; nothing without
 //! our labels is ever touched.
 
@@ -82,7 +82,7 @@ fn now_ms() -> i64 {
 
 /// The server validates these too; the node does not trust them blindly
 /// because they end up in container names and labels.
-fn workload_is_sane(w: &pb::Workload) -> bool {
+pub(crate) fn workload_is_sane(w: &pb::Workload) -> bool {
     let name_ok = !w.service_name.is_empty()
         && w.service_name.len() <= 63
         && w.service_name
@@ -523,6 +523,10 @@ impl Reconciler {
         if phase == Some(Phase::Built) && exports_output(w) {
             return Ok(()); // uploaded; the server takes it from here
         }
+        // A cron service has no container: ready is all there is to watch.
+        if w.cron && phase == Some(Phase::Active) {
+            return Ok(());
+        }
         // Extra containers for one deployment can only come from a crash
         // mid-rollout; keep the first.
         for extra in containers.iter().skip(1) {
@@ -633,6 +637,11 @@ impl Reconciler {
         // service's old container stops): a failure leaves the serving one alone.
         if !w.pre_deploy_command.is_empty() {
             self.pre_deploy(w).await?;
+        }
+        // Runs come later, one at a time.
+        if w.cron {
+            self.set_phase(id, Phase::Active, "Ready: runs on its cron schedule");
+            return Ok(());
         }
 
         // Two containers must never share a volume's data (a database would

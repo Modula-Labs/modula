@@ -38,6 +38,9 @@ pub struct FakeRuntime {
     /// Exit codes of one-off commands (`run_once`), by argv joined with
     /// spaces; anything else exits 0.
     pub once_exit: Mutex<HashMap<String, i64>>,
+    /// How long one-off commands take, by argv joined with spaces (none:
+    /// they finish at once). One longer than its timeout fails as timed out.
+    pub once_delay: Mutex<HashMap<String, std::time::Duration>>,
     /// Every one-off command run, in order.
     pub onces: Mutex<Vec<OnceCall>>,
     /// Report this as every container's address (e.g. 127.0.0.1, so tunnels
@@ -242,12 +245,13 @@ impl Runtime for FakeRuntime {
         Ok(())
     }
 
-    /// Prints one line naming the command, then exits with the scripted code.
+    /// Prints one line naming the command, then exits with the scripted code
+    /// after the scripted delay.
     async fn run_once(
         &self,
         w: &Workload,
         command: &[String],
-        _timeout: std::time::Duration,
+        timeout: std::time::Duration,
         output: OutputSink,
     ) -> anyhow::Result<i64> {
         let running = {
@@ -288,6 +292,19 @@ impl Runtime for FakeRuntime {
             stderr: code != 0,
             text: format!("ran {joined}"),
         });
+        let delay = self
+            .once_delay
+            .lock()
+            .expect("fake lock")
+            .get(&joined)
+            .copied();
+        if let Some(d) = delay {
+            if d > timeout {
+                tokio::time::sleep(timeout).await;
+                anyhow::bail!("timed out after {}s", timeout.as_secs());
+            }
+            tokio::time::sleep(d).await;
+        }
         Ok(code)
     }
 

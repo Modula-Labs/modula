@@ -56,12 +56,9 @@ struct RouteRow {
     remote_ips: Vec<String>,
 }
 
-pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
-    let generation: i64 = sqlx::query_scalar("SELECT desired_generation FROM nodes WHERE id = $1")
-        .bind(node)
-        .fetch_one(&state.db)
-        .await?;
-    let rows: Vec<Row> = sqlx::query_as(
+/// SQL: one [`Row`] per deployment replica (`r`), up to the WHERE clause.
+macro_rules! workload_rows {
+    () => {
         "SELECT d.id, d.status, d.image, d.commit_sha, d.created_at, u.sha256 AS upload_sha256,
                 p.workspace_id,
                 d.config, d.env_sealed, i.environment_id, e.name AS environment_name,
@@ -80,12 +77,24 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
          LEFT JOIN tcp_proxies t ON t.service_instance_id = i.id
          JOIN environments e ON e.id = i.environment_id
          JOIN services s ON s.id = i.service_id
-         JOIN projects p ON p.id = s.project_id
-         WHERE r.node_id = $1 AND d.status = ANY($2)
+         JOIN projects p ON p.id = s.project_id"
+    };
+}
+
+pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
+    let generation: i64 = sqlx::query_scalar("SELECT desired_generation FROM nodes WHERE id = $1")
+        .bind(node)
+        .fetch_one(&state.db)
+        .await?;
+    let rows: Vec<Row> = sqlx::query_as(concat!(
+        workload_rows!(),
+        " WHERE r.node_id = $1 AND d.status = ANY($2)
            -- Output hosted elsewhere: the node only builds it.
            AND (d.config->'hosting' IS NULL OR d.status = 'building')
-         ORDER BY d.created_at",
-    )
+           -- A cron service only until it is ready: its runs are sent one by one.
+           AND (d.config->'cronSchedule' IS NULL OR d.status IN ('building', 'deploying'))
+         ORDER BY d.created_at"
+    ))
     .bind(node)
     .bind(super::state::LIVE)
     .fetch_all(&state.db)
@@ -99,6 +108,20 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
         }
         workloads.push(workload(state, r).await?);
     }
+    // Cron services run here between snapshots: their networks stay.
+    let cron_networks: Vec<Id> = sqlx::query_scalar(
+        "SELECT DISTINCT i.environment_id FROM deployments d
+         JOIN service_instances i ON i.id = d.service_instance_id
+         WHERE d.node_id = $1 AND d.status = 'active' AND d.config->'cronSchedule' IS NOT NULL",
+    )
+    .bind(node)
+    .fetch_all(&state.db)
+    .await?;
+    for e in cron_networks {
+        if !networks.contains(&e) {
+            networks.push(e);
+        }
+    }
     let pb_routes = routes(state, node).await?;
     // TCP proxies point at the serving deployment, like routes.
     let proxies: Vec<(i32, Id, i32)> = sqlx::query_as(
@@ -106,7 +129,7 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
          FROM tcp_proxies t
          JOIN deployments d ON d.service_instance_id = t.service_instance_id
          WHERE t.node_id = $1 AND d.node_id = $1 AND d.status IN ('active', 'crashed')
-           AND d.config->'hosting' IS NULL
+           AND d.config->'hosting' IS NULL AND d.config->'cronSchedule' IS NULL
          ORDER BY t.public_port",
     )
     .bind(node)
@@ -150,6 +173,27 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
         }),
         mesh: crate::mesh::build(&state.db, node).await?,
     })
+}
+
+/// The workload of `deployment`'s replica on `node`, for a cron run (see
+/// `crate::cron`); None when it has none there.
+pub async fn cron_workload(
+    state: &AppState,
+    deployment: Id,
+    node: Id,
+) -> AppResult<Option<pb::Workload>> {
+    let row: Option<Row> = sqlx::query_as(concat!(
+        workload_rows!(),
+        " WHERE d.id = $1 AND r.node_id = $2"
+    ))
+    .bind(deployment)
+    .bind(node)
+    .fetch_optional(&state.db)
+    .await?;
+    match row {
+        Some(r) => Ok(Some(workload(state, r).await?)),
+        None => Ok(None),
+    }
 }
 
 /// One deployment replica on this node, as the node runs it.
@@ -302,6 +346,7 @@ async fn workload(state: &AppState, r: Row) -> AppResult<pb::Workload> {
             _ => 0,
         },
         mesh_ip: r.mesh_ip.unwrap_or_default(),
+        cron: cfg.cron_schedule.is_some(),
     })
 }
 
@@ -322,7 +367,7 @@ async fn routes(state: &AppState, node: Id) -> AppResult<Vec<pb::Route>> {
          JOIN deployments d ON d.service_instance_id = m.service_instance_id
          JOIN deployment_replicas r ON r.deployment_id = d.id AND r.node_id = $1
          WHERE d.status IN ('active', 'crashed') AND m.status = 'verified'
-           AND d.config->'hosting' IS NULL
+           AND d.config->'hosting' IS NULL AND d.config->'cronSchedule' IS NULL
          ORDER BY m.hostname",
     )
     .bind(node)

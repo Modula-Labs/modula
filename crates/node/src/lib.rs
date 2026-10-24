@@ -5,6 +5,7 @@
 pub mod access;
 pub mod backup;
 pub mod build;
+pub mod cron;
 pub mod db;
 pub mod edge;
 pub mod identity;

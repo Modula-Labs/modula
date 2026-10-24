@@ -196,6 +196,10 @@ pub enum Action {
     WebhookCreate,
     WebhookTest,
     WebhookDelete,
+    /// A cron service's schedule (next due times) and its runs.
+    CronRunsRead,
+    /// Run a cron service now.
+    CronRunCreate,
 }
 
 impl Action {
@@ -268,6 +272,7 @@ impl Action {
             Self::EnvironmentLogsRead => K::Environment,
             Self::WebhookList | Self::WebhookCreate => K::Project,
             Self::WebhookTest | Self::WebhookDelete => K::Webhook,
+            Self::CronRunsRead | Self::CronRunCreate => K::ServiceInstance,
         })
     }
 
@@ -359,6 +364,9 @@ impl Action {
             Self::WebhookList | Self::WebhookCreate | Self::WebhookTest | Self::WebhookDelete => {
                 Role::Member
             }
+            // Like deployments: Viewers see runs, Deployers start them.
+            Self::CronRunsRead => Role::Viewer,
+            Self::CronRunCreate => Role::Deployer,
         }
     }
 
@@ -450,6 +458,8 @@ impl Action {
             | Self::WebhookCreate
             | Self::WebhookTest
             | Self::WebhookDelete => false,
+            // `modula cron run` works with API tokens (never sudo).
+            Self::CronRunsRead | Self::CronRunCreate => false,
         }
     }
 }
