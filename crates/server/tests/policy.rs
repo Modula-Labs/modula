@@ -460,9 +460,7 @@ async fn function_code_is_written_by_members_only(pool: PgPool) {
         )
         .await;
     let project = p.json["id"].as_str().unwrap().to_owned();
-    let config = |code: &str| {
-        serde_json::json!({ "source": { "type": "function", "code": code, "compatibilityDate": "2026-10-01" } })
-    };
+    let config = |code: &str| serde_json::json!({ "source": { "type": "function", "code": code, "compatibilityDate": "2026-10-01" } });
     let s = app
         .call(
             Method::POST,
@@ -488,7 +486,11 @@ async fn function_code_is_written_by_members_only(pool: PgPool) {
         let r = app
             .call(Method::PATCH, &path, Some(&cookie), Some(evil.clone()))
             .await;
-        let want = if writes { StatusCode::OK } else { StatusCode::FORBIDDEN };
+        let want = if writes {
+            StatusCode::OK
+        } else {
+            StatusCode::FORBIDDEN
+        };
         assert_eq!(r.status, want, "{role}: {:?}", r.json);
         let r = app
             .call(
@@ -504,7 +506,6 @@ async fn function_code_is_written_by_members_only(pool: PgPool) {
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
 async fn instance_admin_has_no_implicit_workspace_access(pool: PgPool) {
-
     let app = TestApp::new(pool);
     let admin = app.setup_admin().await;
     let (_, other) = app.user("other@example.com").await;

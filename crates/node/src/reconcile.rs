@@ -20,7 +20,6 @@
 //! sleeping deployment is expected, never a crash. Without an edge and a wake
 //! proxy serverless deployments just keep running.
 
-
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
