@@ -151,8 +151,10 @@ async fn trace_body() -> Option<String> {
         .timeout(Duration::from_secs(3))
         .build()
         .ok()?;
+    // By IPv4 address: over IPv6 the trace would report the v6 address and
+    // the server's public IPv4 (what DNS records point at) stay unknown.
     let body = http
-        .get("https://www.cloudflare.com/cdn-cgi/trace")
+        .get("https://1.1.1.1/cdn-cgi/trace")
         .send()
         .await
         .ok()?
