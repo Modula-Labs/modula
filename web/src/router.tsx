@@ -5,6 +5,7 @@ import { SudoDialog } from "./components/SudoDialog";
 import { WorkspaceShell } from "./components/shell/WorkspaceShell";
 import { ApiError, api } from "./lib/api";
 import { AccountSecurityPage } from "./pages/AccountSecurity";
+import { DomainOnboardingPage } from "./pages/DomainOnboarding";
 import { LoginPage } from "./pages/Login";
 import { ProjectsPage } from "./pages/Projects";
 import { ServersPage } from "./pages/Servers";
@@ -87,6 +88,8 @@ const appRoute = createRoute({
   component: Outlet,
 });
 
+const domainOnboardingRoute = createRoute({ getParentRoute: () => appRoute, path: "/welcome/domain", component: DomainOnboardingPage });
+
 /** Pages inside the workspace sidebar. */
 const workspaceRoute = createRoute({ getParentRoute: () => appRoute, id: "workspace", component: WorkspaceShell });
 const projectsRoute = createRoute({ getParentRoute: () => workspaceRoute, path: "/projects", component: ProjectsPage });
@@ -162,7 +165,7 @@ const routeTree = rootRoute.addChildren([
   setupRoute,
   loginRoute,
   twoFactorRoute,
-  appRoute.addChildren([workspaceRoute.addChildren([projectsRoute, settingsRoute, securityRoute, serversRoute]), projectRoute.addChildren([projectCanvasRoute, projectMetricsRoute, projectLogsRoute, projectSettingsIndexRoute, projectSettingsRoute]),
+  appRoute.addChildren([domainOnboardingRoute, workspaceRoute.addChildren([projectsRoute, settingsRoute, securityRoute, serversRoute]), projectRoute.addChildren([projectCanvasRoute, projectMetricsRoute, projectLogsRoute, projectSettingsIndexRoute, projectSettingsRoute]),
   ]),
 ]);
 

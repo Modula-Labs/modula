@@ -9,6 +9,7 @@ import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import { api, type Membership } from "@/lib/api";
 import { useCurrentWorkspace, useMe } from "@/lib/workspace";
 import { BackupStorage } from "./BackupStorage";
+import { DomainSection } from "./settings/Domain";
 import { IntegrationsSection } from "./settings/Integrations";
 import { PrivateAccessSection } from "./settings/PrivateAccess";
 import { UpdatesSection } from "./settings/Updates";
@@ -154,6 +155,14 @@ function Settings({ workspace }: { workspace: Membership }) {
         >
           <PrivateAccessSection workspaceId={workspace.id} />
         </Section>
+      ) : null}
+
+      {me?.user.isInstanceAdmin ? (
+        <div id="domain" className="scroll-mt-4">
+          <Section title="Domain" description="Where the dashboard and your services are reachable. Instance admins only.">
+            <DomainSection />
+          </Section>
+        </div>
       ) : null}
 
       {me?.user.isInstanceAdmin ? (

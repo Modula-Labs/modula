@@ -630,6 +630,14 @@ export interface Webhook {
   lastAt: string | null;
 }
 
+export interface InstanceDomain {
+  installUrl: string;
+  serverIp: string | null;
+  dashboard: string | null;
+  appsDomain: string | null;
+  appsDomainFromEnv: boolean;
+}
+
 export const isNotAvailable = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 501);
 
 const enc = encodeURIComponent;
@@ -771,6 +779,9 @@ export const api = {
   saveUpdates: (b: { mode: UpdateMode; channel: "stable"; window: UpdateWindow }) => request<UpdateStatus>("PUT", "/api/instance/updates", b),
   runUpdate: () => request<UpdateStatus>("POST", "/api/instance/updates/run", {}),
   checkUpdates: () => request<UpdateStatus>("POST", "/api/instance/updates/check", {}),
+  instanceDomain: () => get<InstanceDomain>("/api/instance/domain"),
+  saveInstanceDomain: (b: { dashboard: string | null; appsDomain: string | null; skipDnsCheck?: boolean }) =>
+    request<InstanceDomain>("PUT", "/api/instance/domain", b),
   privateAccess: () => get<PrivateAccessStatus>("/api/instance/private-access"),
   privateAccessCheck: (workspaceId: string) =>
     get<PrivateAccessCheck>(`/api/instance/private-access/check?workspaceId=${encodeURIComponent(workspaceId)}`),

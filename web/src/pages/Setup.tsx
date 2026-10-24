@@ -36,7 +36,7 @@ export function SetupPage() {
             const me = await api.setup(form);
             qc.setQueryData(["me"], me);
             qc.setQueryData(["instance"], { setupRequired: false });
-            await navigate({ to: "/projects" });
+            await navigate({ to: "/welcome/domain" });
           } catch (err) {
             const ae = err instanceof ApiError ? err : null;
             setError(

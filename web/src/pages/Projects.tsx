@@ -2,13 +2,41 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { LayoutGrid, Plus, Search } from "@/components/ui/icons";
+import { LayoutGrid, Plus, Search, X } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
 import { Alert, EmptyState, Skeleton } from "@/components/ui/misc";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
+import { dismissDomainBanner, domainBannerDismissed } from "@/lib/domain";
 import { relativeTime } from "@/lib/format";
 import { useCurrentWorkspace, useMe } from "@/lib/workspace";
+import { useInstanceDomain } from "./settings/Domain";
+
+function DomainBanner() {
+  const [hidden, setHidden] = useState(domainBannerDismissed);
+  const q = useInstanceDomain();
+  if (hidden || !q.data || q.data.dashboard) return null;
+  return (
+    <div className="mb-6 flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-sm">
+      <span className="min-w-0 flex-1">
+        The dashboard is served at the server's IP address. Add a domain for a proper address and generated service URLs.{" "}
+        <Link to="/settings" hash="domain" className="font-medium underline">
+          Settings → Domain
+        </Link>
+      </span>
+      <button
+        aria-label="Dismiss"
+        className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+        onClick={() => {
+          dismissDomainBanner();
+          setHidden(true);
+        }}
+      >
+        <X className="size-4" />
+      </button>
+    </div>
+  );
+}
 
 export function ProjectsPage() {
   const { data: me } = useMe();
@@ -25,6 +53,7 @@ export function ProjectsPage() {
 
   return (
     <div>
+      {me?.user.isInstanceAdmin ? <DomainBanner /> : null}
       <div className="flex items-center justify-between gap-4">
         <h1 className="text-[30px] leading-9 font-normal tracking-[-0.01em]">Projects</h1>
         <div className="flex items-center gap-2">

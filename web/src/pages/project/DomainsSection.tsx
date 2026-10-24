@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { CopyButton } from "@/components/ui/CopyButton";
 import { Plus, Refresh, Settings, Trash, World } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
 import { Alert, Badge } from "@/components/ui/misc";
-import { api, type Domain } from "@/lib/api";
+import { ApiError, api, type Domain } from "@/lib/api";
 import { domainStatus, parsePort, parseRateLimit } from "./domains";
 import { CloudflareIngress } from "../settings/CloudflareIngress";
 
@@ -27,7 +28,19 @@ export function DomainsSection({ instanceId, canEdit }: { instanceId: string; ca
   return (
     <div className="flex flex-col gap-2">
       <div className="text-sm font-medium">Public domains</div>
-      {error ? <Alert>{error.message}</Alert> : null}
+      {error ? (
+        <Alert>
+          {error.message}
+          {generate.error instanceof ApiError && generate.error.status === 409 ? (
+            <>
+              {" "}
+              <Link to="/settings" hash="domain" className="font-medium underline">
+                Open Settings → Domain
+              </Link>
+            </>
+          ) : null}
+        </Alert>
+      ) : null}
       {domains.data?.map((d) => (
         <DomainRow key={d.id} domain={d} canEdit={canEdit} onRemove={() => remove.mutate(d.id)} onChange={invalidate} />
       ))}
