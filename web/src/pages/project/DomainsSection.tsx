@@ -11,7 +11,7 @@ import { domainStatus, parsePort, parseRateLimit } from "./domains";
 import { CloudflareIngress } from "../settings/CloudflareIngress";
 
 /** Public domains of one service instance: generated ones and custom ones with DNS verification. */
-export function DomainsSection({ instanceId, canEdit }: { instanceId: string; canEdit: boolean }) {
+export function DomainsSection({ instanceId, canEdit, cloudflare }: { instanceId: string; canEdit: boolean; cloudflare?: boolean }) {
   const qc = useQueryClient();
   const key = ["domains", instanceId];
   const domains = useQuery({
@@ -28,6 +28,11 @@ export function DomainsSection({ instanceId, canEdit }: { instanceId: string; ca
   return (
     <div className="flex flex-col gap-2">
       <div className="text-sm leading-none font-normal">Public domains</div>
+      {cloudflare ? (
+        <p className="text-sm text-muted-foreground">
+          This service is hosted on Cloudflare. Custom domains are attached to the Worker on the next deploy, and Cloudflare adds the DNS record and certificate. The domain's zone must be in the connected Cloudflare account. Generated domains don't apply.
+        </p>
+      ) : null}
       {error ? (
         <Alert>
           {error.message}
@@ -42,7 +47,7 @@ export function DomainsSection({ instanceId, canEdit }: { instanceId: string; ca
         </Alert>
       ) : null}
       {domains.data?.map((d) => (
-        <DomainRow key={d.id} domain={d} canEdit={canEdit} onRemove={() => remove.mutate(d.id)} onChange={invalidate} />
+        <DomainRow key={d.id} domain={d} canEdit={canEdit} cloudflare={cloudflare} onRemove={() => remove.mutate(d.id)} onChange={invalidate} />
       ))}
       {adding ? <AddCustomDomain instanceId={instanceId} onDone={() => setAdding(false)} onAdded={invalidate} /> : null}
       {canEdit && !adding ? (
@@ -59,7 +64,7 @@ export function DomainsSection({ instanceId, canEdit }: { instanceId: string; ca
   );
 }
 
-function DomainRow({ domain: d, canEdit, onRemove, onChange }: { domain: Domain; canEdit: boolean; onRemove: () => void; onChange: () => void }) {
+function DomainRow({ domain: d, canEdit, cloudflare, onRemove, onChange }: { domain: Domain; canEdit: boolean; cloudflare?: boolean; onRemove: () => void; onChange: () => void }) {
   const status = domainStatus(d);
   const [settings, setSettings] = useState(false);
   const check = useMutation({ mutationFn: () => api.checkDomain(d.id), onSuccess: onChange });
@@ -90,7 +95,7 @@ function DomainRow({ domain: d, canEdit, onRemove, onChange }: { domain: Domain;
           </Button>
         ) : null}
       </div>
-      {d.kind === "custom" && !live ? (
+      {d.kind === "custom" && !live && !cloudflare ? (
         <div className="flex flex-col gap-2 border-t border-border px-3 py-3">
           <p className="text-sm text-muted-foreground">Add these records at your DNS provider. The domain goes live and gets a certificate once the TXT record is found.</p>
           <DnsRecords domain={d} />
@@ -105,7 +110,7 @@ function DomainRow({ domain: d, canEdit, onRemove, onChange }: { domain: Domain;
           ) : null}
         </div>
       ) : null}
-      {d.kind === "custom" && live && d.dnsTargetOk === false ? (
+      {d.kind === "custom" && live && d.dnsTargetOk === false && !cloudflare ? (
         <p className="border-t border-border px-3 py-2 text-sm text-muted-foreground">
           The domain's {d.dnsRecords[0]?.type ?? "DNS"} record doesn't point here. That's expected behind a proxy such as Cloudflare; otherwise update it to the value below.
         </p>

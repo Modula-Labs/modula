@@ -82,6 +82,8 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
          JOIN services s ON s.id = i.service_id
          JOIN projects p ON p.id = s.project_id
          WHERE r.node_id = $1 AND d.status = ANY($2)
+           -- Output hosted elsewhere: the node only builds it.
+           AND (d.config->'hosting' IS NULL OR d.status = 'building')
          ORDER BY d.created_at",
     )
     .bind(node)
@@ -104,6 +106,7 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
          FROM tcp_proxies t
          JOIN deployments d ON d.service_instance_id = t.service_instance_id
          WHERE t.node_id = $1 AND d.node_id = $1 AND d.status IN ('active', 'crashed')
+           AND d.config->'hosting' IS NULL
          ORDER BY t.public_port",
     )
     .bind(node)
@@ -220,8 +223,23 @@ async fn workload(state: &AppState, r: Row) -> AppResult<pb::Workload> {
         )),
         _ => None,
     };
+    // A static site hosted elsewhere: the node uploads the output here.
+    let (output_dir, output_url, output_auth) = match cfg.cloudflare() {
+        Some(cf) => (
+            cf.output_dir.to_owned(),
+            output_url(state),
+            format!(
+                "Bearer {}",
+                super::output::token(&state.keys, r.id, r.created_at)
+            ),
+        ),
+        None => Default::default(),
+    };
     let build = match source {
         Some((source_url, source_auth, source_sha256)) => Some(pb::Build {
+            output_dir,
+            output_url,
+            output_auth,
             source_url,
             source_auth,
             source_sha256,
@@ -304,6 +322,7 @@ async fn routes(state: &AppState, node: Id) -> AppResult<Vec<pb::Route>> {
          JOIN deployments d ON d.service_instance_id = m.service_instance_id
          JOIN deployment_replicas r ON r.deployment_id = d.id AND r.node_id = $1
          WHERE d.status IN ('active', 'crashed') AND m.status = 'verified'
+           AND d.config->'hosting' IS NULL
          ORDER BY m.hostname",
     )
     .bind(node)
@@ -362,6 +381,12 @@ async fn secrets_hash(state: &AppState, environment: Id, vars: &env::EnvMap) -> 
 fn upload_url(state: &AppState) -> String {
     let base = state.cfg.internal_base().as_str().trim_end_matches('/');
     format!("{base}{}", super::upload::DOWNLOAD_PATH)
+}
+
+/// The URL nodes upload build output to.
+fn output_url(state: &AppState) -> String {
+    let base = state.cfg.internal_base().as_str().trim_end_matches('/');
+    format!("{base}{}", super::output::UPLOAD_PATH)
 }
 
 /// argv → one POSIX shell string, quoting where needed. Only used for a start

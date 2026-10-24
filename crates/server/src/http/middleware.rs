@@ -7,8 +7,13 @@ use crate::api::tokens;
 use crate::error::AppError;
 use crate::state::AppState;
 
-/// The one endpoint that authenticates by signature instead of cookies (no Origin check).
-const SIGNED_WEBHOOK: (Method, &str) = (Method::POST, crate::api::github::WEBHOOK_PATH);
+/// Endpoints that authenticate by a signature of their own instead of cookies
+/// or API tokens (no Origin check): GitHub's webhook, and nodes uploading
+/// build output with a deployment-bound token (`deploy::output`).
+const SIGNED: &[(Method, &str)] = &[
+    (Method::POST, crate::api::github::WEBHOOK_PATH),
+    (Method::PUT, crate::deploy::output::UPLOAD_PATH),
+];
 
 /// CSRF defence: every state-changing request must come from our exact origin.
 /// Browsers always send `Origin` on cross-origin and same-origin non-GET fetches,
@@ -25,6 +30,12 @@ pub async fn require_same_origin(
     next: Next,
 ) -> Response {
     let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+    let signed = SIGNED
+        .iter()
+        .any(|(m, p)| req.method() == m && req.uri().path() == *p);
+    if signed {
+        return next.run(req).await;
+    }
     // Safe methods need no exemption; the route guard checks their token.
     if let Some(presented) = tokens::bearer(req.headers()).filter(|_| !safe) {
         let actor = match presented {
@@ -40,8 +51,7 @@ pub async fn require_same_origin(
             Err(e) => e.into_response(),
         };
     }
-    let webhook = *req.method() == SIGNED_WEBHOOK.0 && req.uri().path() == SIGNED_WEBHOOK.1;
-    if safe || webhook {
+    if safe {
         return next.run(req).await;
     }
     let origin_ok = req

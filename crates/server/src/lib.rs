@@ -92,6 +92,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 api::github::prune(&s.db).await?;
                 let purged = deploy::upload::purge(&s).await?;
                 tracing::info!(purged, "expired source uploads removed");
+                let outputs = deploy::output::purge(&s).await?;
+                tracing::info!(outputs, "abandoned build outputs removed");
                 let samples = metrics::purge(&s.db).await?;
                 tracing::info!(samples, "old metric samples removed");
                 let lines = logs::purge(&s.db).await?;
@@ -102,6 +104,10 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
             .on(domains::RESYNC_JOB, domains::resync_job)
             .on(webhooks::DISPATCH_JOB, webhooks::dispatch_job)
             .on(github::app::HOOK_SYNC_JOB, github::app::hook_sync_job)
+            .on(
+                integrations::cloudflare::publish::JOB,
+                integrations::cloudflare::publish::job,
+            )
             .on(provision::track::TRACK_JOB, provision::track::track_job),
         format!("server-{}", modula_id::Id::new()),
         stop.clone(),

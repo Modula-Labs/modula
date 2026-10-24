@@ -7,6 +7,10 @@
 //!    failed              failed             removed
 //!
 //! Image deployments start at `deploying`; repository deployments at `building`.
+//! A static site hosted elsewhere (`config.hosting`) leaves its node at
+//! BUILT: the node has uploaded the output (see `deploy::output`), and the
+//! server publishes it while the deployment is `deploying`, then makes it
+//! active or failed itself (see `integrations::cloudflare::publish`).
 //!
 //! A node may only report on deployments placed on it; anything else is ignored.
 //!
@@ -143,6 +147,42 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             .execute(&mut *tx)
             .await?;
         }
+        (DeploymentPhase::Built, "building") if config.get("hosting").is_some() => {
+            let sha256 = message.trim().to_ascii_lowercase();
+            sqlx::query(
+                "UPDATE deployments SET status = 'deploying', build_finished_at = now(), updated_at = now()
+                 WHERE id = $1",
+            )
+            .bind(dep)
+            .execute(&mut *tx)
+            .await?;
+            if let Some(stack) = ev
+                .build
+                .as_ref()
+                .map(|b| b.stack.as_str())
+                .filter(|s| valid_stack(s))
+            {
+                sqlx::query("UPDATE service_instances SET stack = $2 WHERE id = $1")
+                    .bind(instance)
+                    .bind(stack)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let key = format!("publish:{dep}");
+            jobs::enqueue(
+                &mut *tx,
+                NewJob {
+                    kind: crate::integrations::cloudflare::publish::JOB,
+                    payload: serde_json::json!({ "deploymentId": dep, "sha256": sha256 }),
+                    max_attempts: Some(3),
+                    dedupe_key: Some(&key),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            // The build is off the node's desired state now.
+            kick.push(node);
+        }
         (DeploymentPhase::Built, "building") => {
             // Only a well-formed image id is recorded; rollbacks run exactly it.
             let digest = message.strip_prefix("sha256:").filter(|h| {
@@ -184,28 +224,10 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
                     .await?;
             }
         }
-        (DeploymentPhase::Active, "deploying" | "crashed") => {
-            // Supersede the previous active deployment in the same transaction:
-            // the one-active-per-instance unique index requires it.
-            let old: Vec<Option<Id>> = sqlx::query_scalar(
-                "WITH old AS (
-                     UPDATE deployments SET status = 'removed', finished_at = now(), updated_at = now()
-                     WHERE service_instance_id = $1 AND status IN ('active', 'crashed') AND id <> $2
-                     RETURNING id)
-                 SELECT r.node_id FROM deployment_replicas r JOIN old ON old.id = r.deployment_id",
-            )
-            .bind(instance)
-            .bind(dep)
-            .fetch_all(&mut *tx)
-            .await?;
-            sqlx::query(
-                "UPDATE deployments SET status = 'active', error = NULL, updated_at = now() WHERE id = $1",
-            )
-            .bind(dep)
-            .execute(&mut *tx)
-            .await?;
+        (DeploymentPhase::Active, "deploying" | "crashed") if config.get("hosting").is_none() => {
+            let old = activate(&mut tx, instance, *dep).await?;
             // Moved to other servers: custom domains' A records follow.
-            if old.iter().flatten().any(|n| *n != node) {
+            if old.iter().any(|n| *n != node) {
                 let job = NewJob {
                     kind: crate::domains::RESYNC_JOB,
                     payload: serde_json::json!({ "serviceInstanceId": instance }),
@@ -213,7 +235,7 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
                 };
                 jobs::enqueue(&mut *tx, job).await?;
             }
-            kick.extend(old.into_iter().flatten());
+            kick.extend(old);
             commit_status = Some("success");
             crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentSucceeded)
                 .await?;
@@ -274,6 +296,30 @@ async fn replica_nodes(tx: &mut sqlx::PgConnection, deployment: Id) -> AppResult
     .bind(deployment)
     .fetch_all(&mut *tx)
     .await?)
+}
+
+/// Makes `dep` its instance's serving deployment, retiring the previous one
+/// in the same transaction (the one-active-per-instance unique index requires
+/// it). Returns the nodes the retired deployments' replicas ran on.
+pub async fn activate(tx: &mut sqlx::PgConnection, instance: Id, dep: Id) -> AppResult<Vec<Id>> {
+    let old: Vec<Option<Id>> = sqlx::query_scalar(
+        "WITH old AS (
+             UPDATE deployments SET status = 'removed', finished_at = now(), updated_at = now()
+             WHERE service_instance_id = $1 AND status IN ('active', 'crashed') AND id <> $2
+             RETURNING id)
+         SELECT r.node_id FROM deployment_replicas r JOIN old ON old.id = r.deployment_id",
+    )
+    .bind(instance)
+    .bind(dep)
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE deployments SET status = 'active', error = NULL, updated_at = now() WHERE id = $1",
+    )
+    .bind(dep)
+    .execute(&mut *tx)
+    .await?;
+    Ok(old.into_iter().flatten().collect())
 }
 
 /// Stack ids are short slugs (`nextjs`, `python`); anything else from a node is dropped.

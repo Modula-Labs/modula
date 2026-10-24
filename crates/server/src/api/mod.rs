@@ -117,6 +117,9 @@ pub fn routes(state: AppState) -> ApiRouter {
         // Nodes fetch an upload they are building; authorized by a signed,
         // deployment-bound token from their desired state (see deploy::upload).
         .get(crate::deploy::upload::DOWNLOAD_PATH, Public, uploads::download)
+        // …and upload the output of a static site hosted elsewhere, with a
+        // signed token of the same kind (see deploy::output).
+        .put(crate::deploy::output::UPLOAD_PATH, Public, uploads::receive_output)
         // Domains
         .get("/api/service-instances/{instance_id}/domains", Resource(Action::InstanceRead), domains::list)
         .post("/api/service-instances/{instance_id}/domains", Resource(Action::DomainCreate), domains::generate)

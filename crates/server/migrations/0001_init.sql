@@ -422,6 +422,9 @@ CREATE TABLE deployments (
     build_finished_at   timestamptz,
     -- Bumped to restart the running containers without a new deployment.
     restart_generation  integer NOT NULL DEFAULT 0,
+    -- Where a deployment hosted elsewhere (config.hosting) is served, e.g.
+    -- https://web-production.acme.workers.dev.
+    url                 text,
     created_at          timestamptz NOT NULL DEFAULT now(),
     updated_at          timestamptz NOT NULL DEFAULT now(),
     finished_at         timestamptz

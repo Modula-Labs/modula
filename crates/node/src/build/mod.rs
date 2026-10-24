@@ -9,6 +9,7 @@
 
 pub mod buildkit;
 pub mod logs;
+pub mod output;
 pub mod repo_config;
 pub mod source;
 pub mod stack;
@@ -49,6 +50,18 @@ pub trait Builder: Send + Sync + 'static {
         spec: &pb::Build,
         log: &BuildLog,
     ) -> anyhow::Result<Built>;
+
+    /// Packs directory `dir` of the image built for `w` (relative to the
+    /// image's working directory, or absolute) into a gzipped tarball at
+    /// `dest` with that directory at its top, then deletes the image (it
+    /// never runs here).
+    async fn export(
+        &self,
+        w: &pb::Workload,
+        dir: &str,
+        dest: &std::path::Path,
+        log: &BuildLog,
+    ) -> anyhow::Result<()>;
 }
 
 /// Pretends to build (tests): logs a line and returns a fixed image id, or
@@ -97,6 +110,26 @@ impl Builder for FakeBuilder {
             overrides: self.overrides.clone(),
             stack: String::new(),
         })
+    }
+
+    /// A tiny site: `index.html` and `assets/app.js`.
+    async fn export(
+        &self,
+        _w: &pb::Workload,
+        dir: &str,
+        dest: &std::path::Path,
+        log: &BuildLog,
+    ) -> anyhow::Result<()> {
+        let top = dir.trim_matches('/').rsplit('/').next().unwrap_or("out");
+        log.line(false, &format!("exporting {dir}"));
+        output::pack(
+            dest,
+            top,
+            &[
+                ("index.html", b"<!doctype html><h1>fake</h1>"),
+                ("assets/app.js", b"console.log('fake')"),
+            ],
+        )
     }
 }
 

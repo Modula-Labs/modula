@@ -27,6 +27,9 @@ const PUBLIC_ROUTES: &[(&str, &str)] = &[
     // Nodes downloading an upload they build: a signed token bound to a
     // deployment that must still be building it (deploy::upload).
     ("GET", "/api/build-source"),
+    // Nodes uploading a static site's build output: a signed token bound to
+    // a deployment that must still be building (deploy::output).
+    ("PUT", "/api/build-output"),
 ];
 
 fn fill(path: &str, id: Id) -> String {

@@ -33,6 +33,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "buildCommand",
     "autoDeploy",
     "watchPaths",
+    "hosting",
 ];
 
 /// Keys of a service table that aren't settings.

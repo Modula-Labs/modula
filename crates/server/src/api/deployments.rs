@@ -54,6 +54,10 @@ pub struct Deployment {
     /// The deployment a redeploy or rollback repeated.
     pub source_deployment_id: Option<Id>,
     pub error: Option<String>,
+    /// Where the deployment is hosted when not on the servers (`cloudflare`).
+    pub hosting: Option<String>,
+    /// Where such a deployment is served, once published.
+    pub url: Option<String>,
     pub created_by: Option<Id>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -100,7 +104,8 @@ macro_rules! select_deployments {
                     CASE WHEN d.config->'source'->>'type' = 'upload'
                          THEN u.id IS NOT NULL AND u.purged_at IS NULL END AS upload_available,
                     d.source_deployment_id,
-                    d.error, d.created_by, d.created_at, d.updated_at, d.finished_at,
+                    d.error, d.config->'hosting'->>'type' AS hosting, d.url,
+                    d.created_by, d.created_at, d.updated_at, d.finished_at,
                     d.build_started_at, d.build_finished_at
              FROM deployments d LEFT JOIN source_uploads u ON u.id = d.upload_id ",
             $rest
@@ -519,14 +524,15 @@ pub async fn restart(
     let mut tx = state.db.begin().await?;
     let node: Option<Option<Id>> = sqlx::query_scalar(
         "UPDATE deployments SET restart_generation = restart_generation + 1, updated_at = now()
-         WHERE id = $1 AND status IN ('active', 'crashed') RETURNING node_id",
+         WHERE id = $1 AND status IN ('active', 'crashed') AND config->'hosting' IS NULL
+         RETURNING node_id",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(Some(node)) = node else {
         return Err(AppError::Conflict(
-            "only a running deployment can be restarted".into(),
+            "only a deployment running on your servers can be restarted".into(),
         ));
     };
     sqlx::query(

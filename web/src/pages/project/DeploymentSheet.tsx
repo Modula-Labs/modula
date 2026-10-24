@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { clsx } from "clsx";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { CopyButton } from "@/components/ui/CopyButton";
@@ -103,6 +104,24 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
                     <dd className="truncate font-mono text-[13px]">{d.source}</dd>
                   </>
                 ) : null}
+                {d.hosting === "cloudflare" ? (
+                  <>
+                    <dt className="text-muted-foreground">Hosting</dt>
+                    <dd>
+                      <Badge>Cloudflare</Badge>
+                    </dd>
+                    {d.url ? (
+                      <>
+                        <dt className="text-muted-foreground">URL</dt>
+                        <dd className="min-w-0">
+                          <a href={d.url} target="_blank" rel="noreferrer" className="block truncate text-[13px] hover:underline">
+                            {d.url}
+                          </a>
+                        </dd>
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
                 <dt className="text-muted-foreground">Image</dt>
                 <dd className="truncate font-mono text-[13px]">{d.image}</dd>
                 {d.imageDigest ? (
@@ -141,7 +160,7 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
                     <span className="w-20 shrink-0 text-muted-foreground tabular-nums">
                       {new Date(e.at).toLocaleTimeString([], { hour12: false })}
                     </span>
-                    <span className="w-24 shrink-0 font-bold">{e.phase}</span>
+                    <span className={clsx("w-24 shrink-0 font-bold", e.phase === "warning" && "text-warning")}>{e.phase}</span>
                     <span className="min-w-0 break-words text-muted-foreground">{e.message}</span>
                   </li>
                 ))}

@@ -240,6 +240,17 @@ export interface ServiceConfig {
   cpuMillis?: number;
   /** Each replica runs on a different server. */
   replicas?: number;
+  /** Static sites only (repo or local source): absent = served from your servers. */
+  hosting?: CloudflareHosting;
+}
+export interface CloudflareHosting {
+  type: "cloudflare";
+  /** Build output, relative to the root directory. */
+  outputDir: string;
+  /** Serve index.html for unknown paths. */
+  spa: boolean;
+  /** Worker name; unset = `<service>-<environment>`. */
+  scriptName?: string;
 }
 export interface Location {
   id: string;
@@ -486,6 +497,9 @@ export interface Deployment {
   uploadAvailable?: boolean | null;
   /** manual | push | rollback | redeploy | restart | upload */
   trigger: string;
+  /** "cloudflare": a static site served by a Cloudflare Worker at `url`. */
+  hosting?: "cloudflare" | null;
+  url?: string | null;
   commitAuthorAvatar?: string | null;
   error: string | null;
   createdBy: string | null;

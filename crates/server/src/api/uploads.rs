@@ -180,7 +180,11 @@ pub async fn create(
 
 /// Stream `body` into `path`, hashing as it goes. `None` once it passes `max`
 /// bytes. The first bytes must be a gzip header.
-async fn receive(body: Body, path: &std::path::Path, max: u64) -> AppResult<Option<(String, u64)>> {
+pub(crate) async fn receive(
+    body: Body,
+    path: &std::path::Path,
+    max: u64,
+) -> AppResult<Option<(String, u64)>> {
     let mut file = tokio::fs::File::create(path)
         .await
         .map_err(anyhow::Error::from)?;
@@ -213,6 +217,57 @@ async fn receive(body: Body, path: &std::path::Path, max: u64) -> AppResult<Opti
     file.flush().await.map_err(anyhow::Error::from)?;
     file.sync_all().await.map_err(anyhow::Error::from)?;
     Ok(Some((hex::encode(hasher.finalize()), size)))
+}
+
+/// `PUT /api/build-output` for nodes: the output directory of a deployment
+/// hosted elsewhere (`config.hosting`), authorized by the token in its
+/// desired state. Accepted only while the deployment is building; replaces
+/// an earlier attempt. Answers with the archive's hex SHA-256.
+pub async fn receive_output(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> AppResult<Json<serde_json::Value>> {
+    use crate::deploy::output;
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(AppError::Unauthorized)?;
+    let deployment = output::verify(&state.keys, token.trim()).ok_or(AppError::Unauthorized)?;
+    let building: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM deployments
+                        WHERE id = $1 AND status = 'building' AND config->'hosting' IS NOT NULL)",
+    )
+    .bind(deployment)
+    .fetch_one(&state.db)
+    .await?;
+    if !building {
+        return Err(AppError::NotFound);
+    }
+    let max = state.cfg.upload_max_bytes;
+    tokio::fs::create_dir_all(output::dir(&state))
+        .await
+        .map_err(anyhow::Error::from)?;
+    let part = output::partial(&state, deployment);
+    let (sha256, size) = match receive(body, &part, max).await {
+        Ok(Some(done)) => done,
+        Ok(None) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(AppError::PayloadTooLarge(format!(
+                "the build output is larger than this server's {} MB limit",
+                max / 1024 / 1024
+            )));
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(e);
+        }
+    };
+    tokio::fs::rename(&part, output::file(&state, deployment))
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(Json(json!({ "sha256": sha256, "sizeBytes": size })))
 }
 
 /// `GET /api/build-source` for nodes: the archive of the upload a deployment

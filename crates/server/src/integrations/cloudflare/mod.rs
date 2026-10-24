@@ -10,7 +10,9 @@
 //!   domain's zone is in the account, optionally proxied (orange cloud);
 //! - a one-step "Use Cloudflare R2" backup target;
 //! - R2 buckets on the project canvas, each with its own bucket-scoped
-//!   credentials (see `r2` and `api::buckets`).
+//!   credentials (see `r2` and `api::buckets`);
+//! - hosting a static site's build output as a Worker with static assets
+//!   (`config.hosting`, see [`publish`]).
 //!
 //! The token lives in `integrations` (kind `cloudflare`), sealed with the
 //! workspace data key (AAD `integrations/secret/<id>`), and is never returned
@@ -24,7 +26,9 @@
 pub mod api;
 pub mod client;
 pub mod dns;
+pub mod publish;
 pub mod r2;
+pub mod workers;
 pub mod zero_trust;
 
 use modula_crypto::envelope::FieldAad;
@@ -68,6 +72,11 @@ pub const PERMISSIONS: &[(&str, &str, bool)] = &[
         false,
     ),
     (
+        "Account · Workers Scripts · Edit",
+        "host static sites as Workers, with their custom domains (optional)",
+        false,
+    ),
+    (
         "Account · Cloudflare Tunnel · Edit",
         "run the dashboard through a tunnel (for private mode)",
         false,
@@ -82,7 +91,7 @@ pub const PERMISSIONS: &[(&str, &str, bool)] = &[
 /// Cloudflare's dashboard with a new user API token pre-filled with exactly
 /// [`PERMISSIONS`] for all zones and accounts (the user can narrow both).
 pub fn token_template_url() -> String {
-    let keys = r#"[{"key":"zone","type":"read"},{"key":"dns","type":"edit"},{"key":"zone_settings","type":"read"},{"key":"workers_r2","type":"edit"},{"key":"account_api_tokens","type":"edit"},{"key":"argotunnel","type":"edit"},{"key":"access","type":"edit"}]"#;
+    let keys = r#"[{"key":"zone","type":"read"},{"key":"dns","type":"edit"},{"key":"zone_settings","type":"read"},{"key":"workers_r2","type":"edit"},{"key":"account_api_tokens","type":"edit"},{"key":"workers_scripts","type":"edit"},{"key":"argotunnel","type":"edit"},{"key":"access","type":"edit"}]"#;
     let mut url =
         url::Url::parse("https://dash.cloudflare.com/profile/api-tokens").expect("static");
     url.query_pairs_mut()
@@ -213,6 +222,7 @@ mod tests {
                 "zone_settings:read",
                 "workers_r2:edit",
                 "account_api_tokens:edit",
+                "workers_scripts:edit",
                 "argotunnel:edit",
                 "access:edit"
             ]

@@ -115,6 +115,51 @@ pub struct ServiceConfig {
     /// Only pushes touching these paths (gitignore-style globs) deploy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub watch_paths: Vec<String>,
+
+    /// Where a built static site is served from; None = this instance's own
+    /// servers (the built image runs behind the edge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosting: Option<Hosting>,
+}
+
+/// Hosting a static site's build output somewhere other than the servers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type",
+    deny_unknown_fields
+)]
+pub enum Hosting {
+    /// Built on a server, then uploaded as Cloudflare Workers static assets
+    /// with the workspace's Cloudflare connection.
+    Cloudflare {
+        /// The build output, relative to the root directory (e.g. `dist`).
+        output_dir: String,
+        /// Serve `/index.html` for paths that match no file (client-side routing).
+        #[serde(default)]
+        spa: bool,
+        /// The Worker's name; default: `<service>-<environment>`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script_name: Option<String>,
+    },
+}
+
+/// Cloudflare's rules for Worker names, kept to the DNS-label-safe subset
+/// (the name becomes `<name>.<subdomain>.workers.dev`).
+pub fn validate_script_name(n: &str) -> AppResult<()> {
+    let ok = (1..=63).contains(&n.len())
+        && n.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !n.starts_with('-')
+        && !n.ends_with('-');
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(
+            "Worker name must be 1–63 lowercase letters, digits or dashes",
+        ))
+    }
 }
 
 fn yes() -> bool {
@@ -194,6 +239,21 @@ impl ServiceConfig {
         }
     }
 
+    /// The Cloudflare hosting settings, when the build output is hosted there.
+    pub fn cloudflare(&self) -> Option<CloudflareHosting<'_>> {
+        self.hosting.as_ref().map(|h| match h {
+            Hosting::Cloudflare {
+                output_dir,
+                spa,
+                script_name,
+            } => CloudflareHosting {
+                output_dir: output_dir.trim_matches('/'),
+                spa: *spa,
+                script_name: script_name.as_deref(),
+            },
+        })
+    }
+
     /// For instance configs (what the dashboard and API set): everything
     /// [`validate`](Self::validate) checks, and no snapshot-only source.
     pub fn validate_for_instance(&self) -> AppResult<()> {
@@ -228,6 +288,27 @@ impl ServiceConfig {
         }
         if let Some(p) = &self.dockerfile_path {
             validate_rel_path(p, "Dockerfile path")?;
+        }
+        if let Some(cf) = self.cloudflare() {
+            if !self.builds_from_source() {
+                return Err(AppError::bad_request(
+                    "Cloudflare hosting serves a build's output: use a repository or local files as the source",
+                ));
+            }
+            validate_rel_path(cf.output_dir, "output directory")?;
+            if cf.output_dir.is_empty() {
+                return Err(AppError::bad_request(
+                    "output directory is required (e.g. dist)",
+                ));
+            }
+            if let Some(n) = cf.script_name {
+                validate_script_name(n)?;
+            }
+            if self.replicas != 1 {
+                return Err(AppError::bad_request(
+                    "a site hosted on Cloudflare is built once: set replicas to 1",
+                ));
+            }
         }
         if !(1..=MAX_REPLICAS).contains(&self.replicas) {
             return Err(AppError::bad_request(format!(
@@ -342,6 +423,15 @@ pub fn validate_branch(b: &str) -> AppResult<()> {
     } else {
         Err(AppError::bad_request("invalid branch name"))
     }
+}
+
+/// [`Hosting::Cloudflare`], borrowed.
+#[derive(Debug, Clone, Copy)]
+pub struct CloudflareHosting<'a> {
+    /// Without leading or trailing slashes.
+    pub output_dir: &'a str,
+    pub spa: bool,
+    pub script_name: Option<&'a str>,
 }
 
 /// A relative path inside the repository: no absolute paths, no `..`.
