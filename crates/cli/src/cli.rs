@@ -220,6 +220,15 @@ pub enum Command {
         #[command(subcommand)]
         command: ServerCommand,
     },
+    /// A workspace's members and invite links.
+    #[command(visible_alias = "member")]
+    Members {
+        /// Workspace id or name (default: your only one).
+        #[arg(short, long, global = true)]
+        workspace: Option<String>,
+        #[command(subcommand)]
+        command: Option<MembersCommand>,
+    },
     /// This Modula instance: its dashboard domain and apps domain.
     Instance {
         #[command(subcommand)]
@@ -259,6 +268,29 @@ pub struct ConfigPlanArgs {
     /// can't be compared, so they are otherwise only set when missing).
     #[arg(long)]
     pub update_sealed: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MembersCommand {
+    /// List members with their role and whether 2FA is on (the default).
+    #[command(visible_alias = "ls")]
+    List,
+    /// Create a single-use invite link and print it (shown once; no email
+    /// is sent, share it yourself).
+    Invite {
+        /// The role the link grants.
+        #[arg(long, default_value = "member", value_parser = ["admin", "member", "deployer", "viewer"])]
+        role: String,
+        /// Days until the link expires (1-30, default 7).
+        #[arg(long, value_name = "DAYS")]
+        expires_in_days: Option<i64>,
+    },
+    /// Remove a member by email. Needs a re-authenticated dashboard session,
+    /// so with an API token this points you to the dashboard.
+    Remove {
+        /// The member's email.
+        email: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
