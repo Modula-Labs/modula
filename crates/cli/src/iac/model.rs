@@ -545,10 +545,10 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = r#"
-project = "anton"
+project = "acme"
 
 [services.api]
-source = { repo = "acme/anton", branch = "main" }
+source = { repo = "acme/web", branch = "main" }
 builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 preDeployCommand = ["sh", "apps/api/scripts/predeploy.sh"]
@@ -575,7 +575,7 @@ template = "postgres"
 REGION = "eu"
 
 [environments.staging]
-services.api.source = { repo = "acme/anton", branch = "staging" }
+services.api.source = { repo = "acme/web", branch = "staging" }
 services.api.domains = []
 services.api.variables.AUTH_URL = "https://staging.example.com"
 "#;
@@ -587,7 +587,7 @@ services.api.variables.AUTH_URL = "https://staging.example.com"
     #[test]
     fn the_example_parses() {
         let f = parse(EXAMPLE).unwrap();
-        assert_eq!(f.project(), Some("anton"));
+        assert_eq!(f.project(), Some("acme"));
         let base = f.resolve(None).unwrap();
         let api = &base.services["api"];
         assert_eq!(api.builder, Some(Builder::Dockerfile));

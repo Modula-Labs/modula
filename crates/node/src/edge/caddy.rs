@@ -422,7 +422,7 @@ mod tests {
         let mut c = cfg(TlsMode::TlsAcme);
         c.dashboard_hosts = vec!["Deploy.Example.com".into(), "bad host".into()];
         let local = vec![ResolvedRoute {
-            hostname: "159.69.253.176".into(),
+            hostname: "203.0.113.10".into(),
             upstream: "127.0.0.1:7100".parse().unwrap(),
         }];
         let out = with_local_routes(&c, &local, &[]);
@@ -432,11 +432,11 @@ mod tests {
             .filter(|r| r.upstream.port() == 7100)
             .map(|r| r.hostname.as_str())
             .collect();
-        assert_eq!(dash, ["deploy.example.com", "159.69.253.176"]);
+        assert_eq!(dash, ["deploy.example.com", "203.0.113.10"]);
         // Not a dashboard node: the names mean nothing here.
         assert_eq!(with_local_routes(&c, &[], &[]).routes.len(), 3);
         // Private mode hides the dashboard under every name.
-        let hidden = ["159.69.253.176".to_owned(), "deploy.example.com".to_owned()];
+        let hidden = ["203.0.113.10".to_owned(), "deploy.example.com".to_owned()];
         assert_eq!(with_local_routes(&c, &local, &hidden).routes.len(), 3);
     }
 

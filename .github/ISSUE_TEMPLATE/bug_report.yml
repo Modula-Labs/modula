@@ -1,0 +1,61 @@
+name: Bug report
+description: Something in Modula Deploy doesn't work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Security vulnerabilities must not be reported here**;
+        use [private vulnerability reporting](https://github.com/Modula-Labs/modula/security/advisories/new) instead.
+        Please remove secrets, tokens and private hostnames from anything you paste.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create a service from …
+        2. Deploy …
+        3. See …
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Dashboard (web UI)
+        - Control plane (modula-server / API)
+        - Server daemon (modula-node), builds, edge
+        - CLI (modula)
+        - Installer
+        - Docs
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `modula-server --version`, `modula-node --version` or `modula --version`.
+      placeholder: "0.1.3"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS / distribution and architecture of the control plane and servers, browser if relevant.
+      placeholder: "Ubuntu 24.04 amd64 (Hetzner CX22), Firefox 140"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: For example `journalctl -u modula-server` or `journalctl -u modula-node`. Redact secrets.
+      render: shell

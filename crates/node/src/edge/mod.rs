@@ -100,8 +100,8 @@ mod tests {
 
     #[test]
     fn local_routes() {
-        let ip = parse_local_route("159.69.253.176=127.0.0.1:7100").unwrap();
-        assert_eq!(ip.hostname, "159.69.253.176");
+        let ip = parse_local_route("203.0.113.10=127.0.0.1:7100").unwrap();
+        assert_eq!(ip.hostname, "203.0.113.10");
         let r = parse_local_route("Deploy.Example.com=127.0.0.1:7100").unwrap();
         assert_eq!(r.hostname, "deploy.example.com");
         assert_eq!(r.upstream, "127.0.0.1:7100".parse().unwrap());
