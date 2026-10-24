@@ -284,7 +284,18 @@ export type ServiceSource =
   | { type: "repo"; repo: string; branch: string; rootDir?: string }
   | { type: "local"; rootDir?: string }
   /** A Cloudflare R2 bucket: nothing runs or deploys. */
-  | { type: "r2" };
+  | { type: "r2" }
+  /** A JavaScript function (module worker): inline `code`, or bundled from `repo` at `entry`.
+   *  Runs in workerd on your servers, or on Cloudflare Workers with `hosting`. */
+  | {
+      type: "function";
+      code?: string;
+      repo?: string;
+      branch?: string;
+      rootDir?: string;
+      entry?: string;
+      compatibilityDate: string;
+    };
 export type Builder = "railpack" | "dockerfile";
 export interface ServiceConfig {
   source: ServiceSource;
@@ -316,7 +327,7 @@ export interface ServiceConfig {
   replicas?: number;
   /** Scale to zero: stops after `idleMinutes` (1–1440) without requests, starts on the next one. Absent = always running. */
   serverless?: { idleMinutes: number };
-  /** Static sites only (repo or local source): absent = served from your servers. */
+  /** Static sites (repo or local source) and functions: absent = served from your servers. */
   hosting?: CloudflareHosting;
   /** Edge rules, applied in order to every request to the service's domains (omitted when empty). */
   edgeRules?: EdgeRule[];
@@ -344,7 +355,7 @@ export interface EdgeRule {
 }
 export interface CloudflareHosting {
   type: "cloudflare";
-  /** Build output, relative to the root directory. */
+  /** Build output, relative to the root directory (empty for a function). */
   outputDir: string;
   /** Serve index.html for unknown paths. */
   spa: boolean;
@@ -785,7 +796,7 @@ export interface Deployment {
   buildFinishedAt: string | null;
   /** Active, but a replica of it crashed and isn't running again yet. */
   degraded?: boolean;
-  sourceKind?: "github" | "image" | "upload";
+  sourceKind?: "github" | "image" | "upload" | "function";
   /** Uploads (`modula up`): the local branch, whether uncommitted changes were included,
    * and whether the files are still kept (so it can be redeployed or rolled back to). */
   sourceBranch?: string | null;

@@ -63,7 +63,9 @@ export function ServiceSheet({
   const r2 = i?.config.source.type === "r2";
   const bucket = isBucketTemplate(i?.template);
   // A shell sees the container's secrets: Member+ (and sudo, asked on open).
-  const canShell = !r2 && atLeast(role, "member");
+  // A function has no container to open one in.
+  const canShell = !r2 && i?.config.source.type !== "function" && atLeast(role, "member");
+
   const shown: ServiceTab = r2 && tab !== "variables" ? "bucket" : tab === "shell" && !canShell ? "deployments" : tab;
 
   return (

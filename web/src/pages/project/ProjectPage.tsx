@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { Activity, BrandDocker, BrandGithub, Bucket, Copy, Database, Disk, LayoutGrid, Plus, Power, Refresh, Rocket, Trash } from "@/components/ui/icons";
+import { Activity, BrandDocker, BrandGithub, Bucket, Copy, Database, Disk, LayoutGrid, Plus, Power, Refresh, Rocket, Trash, Zap } from "@/components/ui/icons";
 import { ContextMenu, MenuItem, MenuLabel, MenuSeparator } from "@/components/ui/Menu";
 import { useLingering } from "@/components/ui/Sheet";
 import { api, type DeploymentStatus } from "@/lib/api";
@@ -195,9 +195,13 @@ export function ProjectPage({
                 <MenuItem icon={<BrandDocker />} onSelect={() => openAdd("image", menu.at)}>
                   Docker Image
                 </MenuItem>
+                <MenuItem icon={<Zap />} onSelect={() => openAdd("function", menu.at)}>
+                  Function
+                </MenuItem>
                 <MenuItem icon={<Bucket />} onSelect={() => openAdd("bucket", menu.at)}>
                   Bucket
                 </MenuItem>
+
                 {search.service && !instanceOf(search.service)?.volume ? (
                   <MenuItem
                     icon={<Disk />}

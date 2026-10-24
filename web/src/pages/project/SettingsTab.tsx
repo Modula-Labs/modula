@@ -20,15 +20,16 @@ import { hostingError } from "@/lib/hosting";
 import { CronFields } from "./CronFields";
 import { DomainsSection } from "./DomainsSection";
 import { EdgeSection } from "./EdgeSection";
+import { FunctionSettings } from "./FunctionSettings";
 import { HostingFields } from "./HostingSection";
 import { parseRepo } from "./NewServiceDialog";
 import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
 import { ResourceSliders, SectionRail, ServerPicker, useNodes } from "./SettingsParts";
 import { TcpProxySection, VolumeSection } from "./StorageSections";
 
-const sectionId = (title: string) => `settings-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+export const sectionId = (title: string) => `settings-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
 
-function Section({
+export function Section({
   title,
   description,
   children,
@@ -105,9 +106,10 @@ export interface Form {
   edgeRules: EdgeRule[];
 }
 
-// R2 buckets (source `r2`) have no settings form: the sheet never shows it.
+// R2 buckets (source `r2`) have no settings form: the sheet never shows it;
+// functions have their own (FunctionSettings).
 export const toForm = (c: ServiceConfig): Form => ({
-  kind: c.source.type === "r2" ? "image" : c.source.type,
+  kind: c.source.type === "r2" || c.source.type === "function" ? "image" : c.source.type,
   image: c.source.type === "image" ? c.source.image : "",
   repo: c.source.type === "repo" ? c.source.repo : "",
   branch: c.source.type === "repo" ? c.source.branch : "main",
@@ -264,7 +266,16 @@ export const toConfig = (f: Form): ServiceConfig => {
   };
 };
 
-export function SettingsTab({
+export function SettingsTab(props: {
+  instance: Instance;
+  canEdit: boolean;
+  canDelete: boolean;
+  onDeleted: () => void;
+}) {
+  return props.instance.config.source.type === "function" ? <FunctionSettings {...props} /> : <ServiceSettings {...props} />;
+}
+
+function ServiceSettings({
   instance,
   canEdit,
   canDelete,
@@ -276,6 +287,7 @@ export function SettingsTab({
   onDeleted: () => void;
 }) {
   const qc = useQueryClient();
+
   const [form, setForm] = useState(() => toForm(instance.config));
   // After the edge dialog saves, the other unsaved edits stay in the form.
   const keepForm = useRef<Form | null>(null);
