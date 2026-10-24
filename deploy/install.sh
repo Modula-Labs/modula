@@ -660,10 +660,17 @@ print_tips() {
 
 # ---------------------------------------------------------------- release files
 
-# artifact NAME DEST — the instance first (same version, close by), then the public release.
+# artifact NAME DEST [SUMS] — the instance first (same version, close by), then
+# the public release: binaries are stored once by checksum (files/<sha256>, as
+# listed in the release's SHA256SUMS; verified against its signature after),
+# older releases by name.
 artifact() {
-  local name=$1 dest=$2 url
+  local name=$1 dest=$2 sums=${3:-} url sum=""
   if [[ -n $SERVER_RELEASES ]] && curl -fsSL --retry 2 -o "$dest" "$SERVER_RELEASES$name" 2>/dev/null; then
+    return 0
+  fi
+  [[ -n $sums ]] && sum=$(awk -v n="$name" '$2 == n { print $1; exit }' "$sums")
+  if [[ $sum =~ ^[0-9a-f]{64}$ ]] && curl -fsSL --retry 3 -o "$dest" "$RELEASE_URL/files/$sum" 2>/dev/null; then
     return 0
   fi
   if [[ $VERSION == latest ]]; then url="$RELEASE_URL/latest/download/$name"; else url="$RELEASE_URL/download/v$VERSION/$name"; fi
@@ -680,7 +687,7 @@ download() {
   artifact SHA256SUMS "$tmp/SHA256SUMS"
   artifact SHA256SUMS.sig "$tmp/SHA256SUMS.sig"
   local pids=()
-  for n in "${names[@]}"; do artifact "$n" "$tmp/$n" & pids+=($!); done
+  for n in "${names[@]}"; do artifact "$n" "$tmp/$n" "$tmp/SHA256SUMS" & pids+=($!); done
   for p in "${pids[@]}"; do wait "$p" || { rm -rf "$tmp"; return 1; }; done
 
   printf -- "-----BEGIN PUBLIC KEY-----\n%s\n-----END PUBLIC KEY-----\n" "$RELEASE_PUBKEY" >"$tmp/release.pub.pem"

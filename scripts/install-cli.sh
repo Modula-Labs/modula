@@ -142,7 +142,9 @@ if [[ -z $expected ]]; then
 fi
 
 begin "Downloading $name"
-curl -fsSL --retry 3 -o "$tmp/$name" "$base/$name" \
+# Stored once by checksum (files/<sha256>); older releases by name.
+curl -fsSL --retry 3 -o "$tmp/$name" "$RELEASE_URL/files/$expected" 2>/dev/null \
+  || curl -fsSL --retry 3 -o "$tmp/$name" "$base/$name" \
   || die "couldn't download $base/$name" "Check your connection, then try again."
 actual=$(sha256 "$tmp/$name" | awk '{ print $1 }')
 [[ $actual == "$expected" ]] || die "checksum mismatch; refusing to install" \

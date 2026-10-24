@@ -92,3 +92,4 @@ openssl pkeyutl -verify -pubin -inkey deploy/release.pub.pem -rawin \
 cp deploy/install.sh "$OUT/install.sh"
 cp scripts/install-cli.sh "$OUT/install-cli.sh"
 echo "release: $OUT ($(cd "$OUT" && ls | tr '\n' ' '))"
+echo "publish: CLOUDFLARE_ACCOUNT_ID=… scripts/publish.sh (binaries by checksum, unchanged ones skipped)"
