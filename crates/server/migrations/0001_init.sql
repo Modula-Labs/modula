@@ -565,6 +565,108 @@ CREATE TABLE webhooks (
 );
 CREATE INDEX webhooks_project_idx ON webhooks (project_id);
 
+-- Where a workspace's alerts go: a Slack or Discord incoming webhook, or a
+-- generic JSON webhook signed like `webhooks` (X-Modula-Signature). The URL
+-- carries the receiver's token, so it is sealed with the workspace's data key
+-- (AAD notification_channels/url/<id>; the secret: …/secret/<id>); `host`
+-- is kept in clear for display.
+CREATE TABLE notification_channels (
+    id             id PRIMARY KEY,
+    workspace_id   id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    kind           text NOT NULL CHECK (kind IN ('slack', 'discord', 'webhook')),
+    name           text NOT NULL CHECK (length(name) BETWEEN 1 AND 100),
+    host           text NOT NULL,
+    url_sealed     bytea NOT NULL,
+    secret_sealed  bytea,
+    created_by     id REFERENCES users (id) ON DELETE SET NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    last_status    integer,
+    last_error     text,
+    last_at        timestamptz
+);
+CREATE INDEX notification_channels_workspace_idx ON notification_channels (workspace_id);
+
+-- What to alert on, workspace-wide or scoped to a project (and one of its
+-- services). Event kinds fire on the event; metric kinds (cpu, memory,
+-- disk) compare against `threshold` percent, cpu and memory over the last
+-- `window_minutes`; node_offline fires after `window_minutes` offline.
+CREATE TABLE alert_rules (
+    id                id PRIMARY KEY,
+    workspace_id      id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    name              text NOT NULL CHECK (length(name) BETWEEN 1 AND 100),
+    kind              text NOT NULL CHECK (kind IN ('deployment_failed', 'build_failed',
+                          'deployment_crashed', 'backup_failed', 'cpu', 'memory', 'disk',
+                          'node_offline')),
+    project_id        id REFERENCES projects (id) ON DELETE CASCADE,
+    service_id        id REFERENCES services (id) ON DELETE CASCADE,
+    threshold         real CHECK (threshold > 0 AND threshold <= 100),
+    window_minutes    integer CHECK (window_minutes BETWEEN 1 AND 1440),
+    cooldown_minutes  integer NOT NULL DEFAULT 30 CHECK (cooldown_minutes BETWEEN 0 AND 1440),
+    enabled           boolean NOT NULL DEFAULT true,
+    created_by        id REFERENCES users (id) ON DELETE SET NULL,
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    CHECK (service_id IS NULL OR project_id IS NOT NULL)
+);
+CREATE INDEX alert_rules_workspace_idx ON alert_rules (workspace_id);
+
+CREATE TABLE alert_rule_channels (
+    rule_id     id NOT NULL REFERENCES alert_rules (id) ON DELETE CASCADE,
+    channel_id  id NOT NULL REFERENCES notification_channels (id) ON DELETE CASCADE,
+    PRIMARY KEY (rule_id, channel_id)
+);
+CREATE INDEX alert_rule_channels_channel_idx ON alert_rule_channels (channel_id);
+
+-- Per rule and subject ("instance:<id>", "node:<id>", …): whether the
+-- condition holds, and when it was last notified (the cooldown). `notified`
+-- says the current incident was sent, so only those get a "resolved".
+CREATE TABLE alert_states (
+    rule_id      id NOT NULL REFERENCES alert_rules (id) ON DELETE CASCADE,
+    subject      text NOT NULL,
+    firing       boolean NOT NULL,
+    notified     boolean NOT NULL DEFAULT false,
+    since        timestamptz NOT NULL DEFAULT now(),
+    notified_at  timestamptz,
+    PRIMARY KEY (rule_id, subject)
+);
+
+-- Every notification sent (the dashboard shows the last 100; a month kept).
+CREATE TABLE alert_sends (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    workspace_id  id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    rule_id       id REFERENCES alert_rules (id) ON DELETE SET NULL,
+    rule_name     text NOT NULL,
+    channel_id    id REFERENCES notification_channels (id) ON DELETE SET NULL,
+    channel_name  text NOT NULL,
+    channel_kind  text NOT NULL,
+    phase         text NOT NULL CHECK (phase IN ('fired', 'resolved', 'test')),
+    subject       text NOT NULL,
+    title         text NOT NULL,
+    status        integer,
+    error         text,
+    at            timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX alert_sends_workspace_idx ON alert_sends (workspace_id, id DESC);
+
+-- Disk usage the nodes report every 5 minutes: the filesystem holding the
+-- node's data dir and the one holding Docker's (volumes live there), and
+-- each volume's size. Kept a week.
+CREATE TABLE disk_samples (
+    node_id      id NOT NULL REFERENCES nodes (id) ON DELETE CASCADE,
+    at           timestamptz NOT NULL DEFAULT now(),
+    path         text NOT NULL,
+    total_bytes  bigint NOT NULL,
+    free_bytes   bigint NOT NULL
+);
+CREATE INDEX disk_samples_node_at_idx ON disk_samples (node_id, at);
+CREATE INDEX disk_samples_at_idx ON disk_samples (at);
+
+CREATE TABLE volume_usage (
+    volume_id    id PRIMARY KEY REFERENCES volumes (id) ON DELETE CASCADE,
+    node_id      id NOT NULL REFERENCES nodes (id) ON DELETE CASCADE,
+    used_bytes   bigint NOT NULL,
+    at           timestamptz NOT NULL DEFAULT now()
+);
+
 ---------------------------------------------------------------------------
 -- Configuration changes (the project's activity feed)
 ---------------------------------------------------------------------------

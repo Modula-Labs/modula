@@ -71,6 +71,7 @@ message NodeMessage {
     MeshReport mesh_report = 80;
     CronResult cron_result = 90;
     HttpLogBatch http_log_batch = 100;
+    DiskReport disk = 91;
   }
 }
 
@@ -128,6 +129,26 @@ message WorkloadMetrics {
   // Network throughput since the previous sample.
   double net_rx_bytes_per_sec = 5;
   double net_tx_bytes_per_sec = 6;
+}
+
+// Disk usage, sent every 5 minutes (capability "disk"): the filesystems
+// holding the node's data dir and Docker's data (where volumes live), and
+// the size of each of the node's volumes.
+message DiskReport {
+  repeated FilesystemUsage filesystems = 1;
+  repeated VolumeUsage volumes = 2;
+}
+
+message FilesystemUsage {
+  string path = 1;
+  uint64 total_bytes = 2;
+  uint64 free_bytes = 3;
+}
+
+message VolumeUsage {
+  // The Docker volume's name (modula-vol-<volume id>).
+  string name = 1;
+  uint64 used_bytes = 2;
 }
 
 enum DeploymentPhase {

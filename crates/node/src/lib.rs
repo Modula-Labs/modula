@@ -7,6 +7,7 @@ pub mod backup;
 pub mod build;
 pub mod cron;
 pub mod db;
+pub mod disk;
 pub mod edge;
 pub mod exec;
 pub mod identity;

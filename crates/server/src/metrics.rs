@@ -109,3 +109,58 @@ pub async fn series_of(db: &PgPool, instances: &[Id], range: Range) -> sqlx::Res
     .fetch_all(db)
     .await
 }
+
+/// Store a node's disk report: its filesystems (for disk alerts) and the
+/// size of its volumes (only volumes of instances placed on that node).
+pub async fn record_disk(db: &PgPool, node: Id, r: &pb::DiskReport) -> anyhow::Result<()> {
+    let fs = &r.filesystems[..r.filesystems.len().min(8)];
+    if !fs.is_empty() {
+        sqlx::query(
+            "INSERT INTO disk_samples (node_id, path, total_bytes, free_bytes)
+             SELECT $1, f.path, f.total, f.free
+             FROM unnest($2::text[], $3::bigint[], $4::bigint[]) AS f(path, total, free)",
+        )
+        .bind(node)
+        .bind(
+            fs.iter()
+                .map(|f| f.path.chars().take(512).collect::<String>())
+                .collect::<Vec<_>>(),
+        )
+        .bind(
+            fs.iter()
+                .map(|f| f.total_bytes.min(i64::MAX as u64) as i64)
+                .collect::<Vec<_>>(),
+        )
+        .bind(
+            fs.iter()
+                .map(|f| f.free_bytes.min(i64::MAX as u64) as i64)
+                .collect::<Vec<_>>(),
+        )
+        .execute(db)
+        .await?;
+    }
+    let vols: Vec<(String, i64)> = r.volumes[..r.volumes.len().min(512)]
+        .iter()
+        .filter_map(|v| {
+            let id = v.name.strip_prefix("modula-vol-")?;
+            Some((id.to_owned(), v.used_bytes.min(i64::MAX as u64) as i64))
+        })
+        .collect();
+    if !vols.is_empty() {
+        sqlx::query(
+            "INSERT INTO volume_usage (volume_id, node_id, used_bytes, at)
+             SELECT v.id, $1, u.used, now()
+             FROM unnest($2::text[], $3::bigint[]) AS u(vol, used)
+             JOIN volumes v ON v.id = u.vol
+             JOIN service_instances i ON i.id = v.service_instance_id AND i.node_id = $1
+             ON CONFLICT (volume_id) DO UPDATE
+                 SET node_id = EXCLUDED.node_id, used_bytes = EXCLUDED.used_bytes, at = now()",
+        )
+        .bind(node)
+        .bind(vols.iter().map(|v| v.0.clone()).collect::<Vec<_>>())
+        .bind(vols.iter().map(|v| v.1).collect::<Vec<_>>())
+        .execute(db)
+        .await?;
+    }
+    Ok(())
+}

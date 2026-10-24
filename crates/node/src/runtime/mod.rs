@@ -155,6 +155,17 @@ pub trait Runtime: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Where Docker keeps its data (images, containers, volumes), if known.
+    async fn data_root(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// The host directory of each managed volume (`modula-vol-…`), as
+    /// `(name, path)`. Runtimes without host volumes return none.
+    async fn volume_paths(&self) -> anyhow::Result<Vec<(String, std::path::PathBuf)>> {
+        Ok(Vec::new())
+    }
+
     /// The environment a container was created with, as `(name, value)`.
     async fn container_env(&self, container_id: &str) -> anyhow::Result<Vec<(String, String)>>;
 
