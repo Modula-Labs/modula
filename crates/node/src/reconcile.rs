@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::build::{BuildLog, BuildSupport, Built, LOCAL_PREFIX};
 use crate::edge::tcp::TcpProxies;
-use crate::edge::{EdgeConfig, EdgeSink, ResolvedRoute};
+use crate::edge::{EdgeConfig, EdgeSink, ResolvedRoute, Site};
 use crate::runtime::{Container, Runtime};
 
 const REPAIR_EVERY: Duration = Duration::from_secs(2);
@@ -55,6 +55,8 @@ pub struct Capabilities {
     pub upgrade: Option<Arc<dyn crate::upgrade::Upgrader>>,
     /// Private networking between servers ([`crate::mesh`]).
     pub mesh: Option<Arc<crate::mesh::Mesh>>,
+    /// The edge's HTTP access log collector ([`crate::edge::access`]).
+    pub access_log: Option<Arc<crate::edge::access::AccessLog>>,
 }
 
 pub struct Reconciler {
@@ -328,6 +330,11 @@ impl Reconciler {
                     restart_count: c.restart_count,
                 })
                 .collect(),
+            edge_unsupported: self
+                .edge
+                .as_ref()
+                .map(|e| e.unsupported())
+                .unwrap_or_default(),
         };
         self.emit(pb::NodeMessage {
             msg: Some(Msg::Report(report)),
@@ -432,9 +439,25 @@ impl Reconciler {
                 }
             }
         }
+        let sites = ds
+            .routes
+            .iter()
+            .filter_map(|r| {
+                let host = crate::edge::normalize_host(&r.hostname)?;
+                Some((
+                    host,
+                    Site {
+                        deployment_id: r.deployment_id.clone(),
+                        proxied: r.proxied,
+                        rules: r.rules.clone(),
+                    },
+                ))
+            })
+            .collect();
         let settings = ds.edge.clone().unwrap_or_default();
         let cfg = EdgeConfig {
             routes,
+            sites,
             tls: pb::TlsMode::try_from(settings.tls).unwrap_or(pb::TlsMode::TlsAcme),
             acme_email: settings.acme_email,
             dashboard_hosts: settings.dashboard_hosts,
@@ -1175,9 +1198,14 @@ mod tests {
         settle(&r, dep).await;
         ds.generation = 2;
         ds.routes = vec![pb::Route {
-            hostname: "api.apps.test".into(),
+            hostname: "API.apps.test".into(),
             deployment_id: dep.to_string(),
             port: 8080,
+            proxied: true,
+            rules: vec![pb::EdgeRule {
+                any: vec![],
+                action: Some(pb::edge_rule::Action::Allow(pb::EdgeAllow {})),
+            }],
             ..Default::default()
         }];
         ds.edge = Some(pb::EdgeSettings {
@@ -1190,6 +1218,11 @@ mod tests {
         assert_eq!(cfg.tls, pb::TlsMode::TlsInternal);
         assert_eq!(cfg.routes.len(), 1);
         assert_eq!(cfg.routes[0].upstream.port(), 8080);
+        // Rules and Cloudflare proxying come along, by normalized host.
+        let site = &cfg.sites["api.apps.test"];
+        assert_eq!(site.deployment_id, dep.to_string());
+        assert!(site.proxied);
+        assert_eq!(site.rules.len(), 1);
         // A crashed container is not routed to.
         rt.crash(&dep.to_string(), 1);
         r.apply(&ds).await.unwrap();

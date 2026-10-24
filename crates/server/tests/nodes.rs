@@ -123,6 +123,7 @@ impl Cluster {
             db: None,
             upgrade: None,
             mesh: None,
+            access_log: None,
         };
         tokio::spawn(modula_node::session::run(
             dir,

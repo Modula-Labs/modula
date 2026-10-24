@@ -6,15 +6,18 @@
 //! endpoint's allowlist in sync, so certificates are only ever issued for
 //! hostnames this node actually routes.
 
+pub mod access;
 pub mod ask;
 pub mod caddy;
 mod http;
+pub mod rules;
 pub mod tcp;
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use modula_proto::node::v1::TlsMode;
+use modula_proto::node::v1::{EdgeRule, TlsMode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedRoute {
@@ -22,9 +25,21 @@ pub struct ResolvedRoute {
     pub upstream: SocketAddr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A deployment's public hostname: its edge rules, and what its access log
+/// lines are attributed to. This node's own routes (the dashboard) have none.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Site {
+    pub deployment_id: String,
+    /// Proxied by Cloudflare (client IP and country from its headers).
+    pub proxied: bool,
+    pub rules: Vec<EdgeRule>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct EdgeConfig {
     pub routes: Vec<ResolvedRoute>,
+    /// By normalized hostname.
+    pub sites: BTreeMap<String, Site>,
     pub tls: TlsMode,
     pub acme_email: String,
     /// More names for this node's own dashboard route, if it serves one.
@@ -37,6 +52,11 @@ pub trait EdgeSink: Send + Sync + 'static {
     /// Hostnames of this node's own routes (`--route`) to stop serving, e.g.
     /// the dashboard in private mode. Applied from the next `apply`.
     fn set_hidden(&self, _hosts: Vec<String>) {}
+    /// Rule actions left out of the config because the edge lacks their
+    /// module (see [`rules::action_name`]).
+    fn unsupported(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Records the last config instead of serving it (tests).
