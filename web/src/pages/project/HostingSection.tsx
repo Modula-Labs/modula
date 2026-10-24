@@ -41,7 +41,7 @@ export function HostingFields({
   return (
     <>
       <div className="flex flex-col gap-1.5">
-        <div className="text-sm font-medium">Host on</div>
+        <div className="text-sm leading-none font-normal">Host on</div>
         <div className={canChoose ? undefined : "pointer-events-none opacity-50"}>
           <Segmented
             label="Host on"
@@ -77,7 +77,7 @@ export function HostingFields({
           <label className="flex items-start gap-2.5 text-sm">
             <input type="checkbox" disabled={!canEdit} checked={form.spa} onChange={(e) => patch({ spa: e.target.checked })} className="mt-0.5 size-4 accent-foreground" />
             <span>
-              <span className="font-medium">Single-page app</span>
+              <span className="leading-none font-normal">Single-page app</span>
               <span className="block text-xs text-muted-foreground">Serve index.html for unknown paths.</span>
             </span>
           </label>

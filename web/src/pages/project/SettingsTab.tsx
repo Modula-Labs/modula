@@ -250,6 +250,7 @@ export function SettingsTab({
   const node = nodes.data?.find((n) => n.id === instance.nodeId);
   const railItems = [
     "Source",
+    ...(form.kind !== "image" ? ["Hosting"] : []),
     "Networking",
     "Deploy",
     "Teardown",
@@ -550,7 +551,11 @@ export function SettingsTab({
         title="Networking"
         description="Generated and custom domains. HTTPS is set up automatically."
       >
-        <DomainsSection instanceId={instance.id} canEdit={canEdit} cloudflare={instance.config.hosting?.type === "cloudflare"} />
+        <DomainsSection
+          instanceId={instance.id}
+          canEdit={canEdit}
+          cloudflare={instance.config.hosting?.type === "cloudflare"}
+        />
         <TcpProxySection instance={instance} canEdit={canEdit} />
         <Field
           label="Port"
