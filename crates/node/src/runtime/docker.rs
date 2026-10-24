@@ -63,7 +63,7 @@ impl DockerRuntime {
 }
 
 /// MTU of the interface carrying the default route (Linux), if known.
-fn host_mtu() -> Option<u32> {
+pub(crate) fn host_mtu() -> Option<u32> {
     let routes = std::fs::read_to_string("/proc/net/route").ok()?;
     let iface = routes.lines().skip(1).find_map(|l| {
         let mut f = l.split_whitespace();
@@ -132,6 +132,8 @@ impl Runtime for DockerRuntime {
                 ..Default::default()
             })
             .await?;
+        // A new bridge: make sure Docker's chain still drops metadata traffic.
+        super::firewall::spawn_block_metadata();
         Ok(())
     }
 

@@ -145,9 +145,14 @@ pub fn unpack(archive: &Path, dest: &Path) -> anyhow::Result<usize> {
             continue;
         };
         let kind = entry.header().entry_type();
-        let target = root.join(&rel);
+        let name = rel.file_name().context("entry without a name")?.to_owned();
+        // Every directory on the way is checked (and created) before the
+        // entry itself: a symlink planted by an earlier entry is never
+        // followed, so the lexical checks below are the physical truth.
         if kind.is_dir() {
-            std::fs::create_dir_all(&target)?;
+            if let Some(parent) = prepare_parent(&root, &rel)? {
+                make_dir(&parent.join(&name))?;
+            }
         } else if kind.is_file() {
             total += entry.size();
             if total > MAX_UNPACKED {
@@ -156,13 +161,19 @@ pub fn unpack(archive: &Path, dest: &Path) -> anyhow::Result<usize> {
                     MAX_UNPACKED >> 30
                 );
             }
-            let Some(parent) = inside(&root, &target)? else {
+            let Some(parent) = prepare_parent(&root, &rel)? else {
                 continue;
             };
             let executable = entry.header().mode().is_ok_and(|m| m & 0o111 != 0);
-            let out = parent.join(target.file_name().context("file without a name")?);
+            let out = parent.join(&name);
+            if std::fs::symlink_metadata(&out).is_ok_and(|m| m.is_dir()) {
+                continue; // a file over a directory: skipped
+            }
             let _ = std::fs::remove_file(&out); // never write through an existing symlink
-            let mut f = std::fs::File::create(&out)?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&out)?;
             std::io::copy(&mut entry, &mut f)?;
             #[cfg(unix)]
             if executable {
@@ -177,10 +188,13 @@ pub fn unpack(archive: &Path, dest: &Path) -> anyhow::Result<usize> {
             if !link_stays_inside(&rel, &link) {
                 continue;
             }
-            let Some(parent) = inside(&root, &target)? else {
+            let Some(parent) = prepare_parent(&root, &rel)? else {
                 continue;
             };
-            let out = parent.join(target.file_name().context("link without a name")?);
+            let out = parent.join(&name);
+            if std::fs::symlink_metadata(&out).is_ok_and(|m| m.is_dir()) {
+                continue;
+            }
             let _ = std::fs::remove_file(&out);
             #[cfg(unix)]
             std::os::unix::fs::symlink(&link, &out)?;
@@ -190,13 +204,38 @@ pub fn unpack(archive: &Path, dest: &Path) -> anyhow::Result<usize> {
     Ok(files)
 }
 
-/// Creates `target`'s parent and returns its real path, or `None` if it
-/// resolves outside `root` (through a symlink planted by an earlier entry).
-fn inside(root: &Path, target: &Path) -> anyhow::Result<Option<PathBuf>> {
-    let parent = target.parent().context("path without a parent")?;
-    std::fs::create_dir_all(parent)?;
-    let real = parent.canonicalize()?;
-    Ok(real.starts_with(root).then_some(real))
+/// Creates the directories above `rel` inside `root` (canonical) and
+/// returns the parent's path, or `None` (nothing created further) when one
+/// of them already exists as anything but a real directory: a symlink, even
+/// one pointing inside the tree, or a file.
+fn prepare_parent(root: &Path, rel: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let mut dir = root.to_path_buf();
+    let Some(parent) = rel.parent() else {
+        return Ok(Some(dir));
+    };
+    for c in parent.components() {
+        let Component::Normal(part) = c else {
+            return Ok(None);
+        };
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => make_dir(&dir)?,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(Some(dir))
+}
+
+/// `create_dir` that accepts an existing entry of that name.
+fn make_dir(dir: &Path) -> anyhow::Result<()> {
+    match std::fs::create_dir(dir) {
+        Ok(()) => Ok(()),
+        // A file or link of the same name is left as it is.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// `owner-repo-sha/a/b` → `a/b`; `None` for the top directory itself or
@@ -213,16 +252,23 @@ fn strip_top(path: &Path) -> Option<PathBuf> {
     plain.then_some(rest)
 }
 
-/// A relative symlink at `rel` pointing to `link` must resolve inside the tree.
+/// A relative symlink at `rel` pointing to `link` must resolve inside the
+/// tree. Its `..`s must all come first: they climb from the link's real
+/// directory (no directory above `rel` is a symlink, see
+/// [`prepare_parent`]); a `..` after a name could climb out of wherever an
+/// in-tree symlink of that name points (`s -> .`, then `k -> s/s/../..`).
+/// Each link checked this way resolves inside, so following several does
+/// too.
 fn link_stays_inside(rel: &Path, link: &Path) -> bool {
     if link.is_absolute() {
         return false;
     }
     let mut depth: i64 = rel.components().count() as i64 - 1;
+    let mut named = false;
     for c in link.components() {
         match c {
-            Component::Normal(_) => depth += 1,
-            Component::ParentDir => depth -= 1,
+            Component::Normal(_) => named = true,
+            Component::ParentDir if !named => depth -= 1,
             Component::CurDir => {}
             _ => return false,
         }
@@ -255,6 +301,125 @@ mod tests {
             Path::new("link"),
             Path::new("/etc/passwd")
         ));
+        assert!(link_stays_inside(
+            Path::new("a/b/l"),
+            Path::new("../../c/./d")
+        ));
+        // Climbing after a name can leave the tree through a symlink.
+        assert!(!link_stays_inside(Path::new("k"), Path::new("s/s/s/../..")));
+        assert!(!link_stays_inside(Path::new("a/k"), Path::new("b/../c")));
+    }
+
+    type Entry<'a> = (&'a str, tar::EntryType, &'a [u8], Option<&'a str>);
+
+    /// A gzipped tarball of `entries`, names written raw (hostile ones too).
+    fn tgz(dir: &Path, entries: &[Entry]) -> PathBuf {
+        let path = dir.join("src.tar.gz");
+        let gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&path).unwrap(),
+            flate2::Compression::fast(),
+        );
+        let mut b = tar::Builder::new(gz);
+        for &(name, kind, data, link) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(kind);
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            if let Some(l) = link {
+                // Raw too: the builder refuses some hostile link names.
+                let raw = &mut h.as_gnu_mut().unwrap().linkname;
+                raw[..l.len()].copy_from_slice(l.as_bytes());
+            }
+            let raw = &mut h.as_old_mut().name;
+            raw[..name.len()].copy_from_slice(name.as_bytes());
+            h.set_cksum();
+            b.append(&h, data).unwrap();
+        }
+        b.into_inner().unwrap().finish().unwrap();
+        path
+    }
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("modula-src-{}", modula_id::Id::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Every path under `dir`, symlinks not followed.
+    fn tree(dir: &Path) -> Vec<String> {
+        let mut out = vec![];
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            out.push(p.strip_prefix(dir).unwrap().display().to_string());
+            if e.file_type().unwrap().is_dir() {
+                out.extend(
+                    tree(&p)
+                        .into_iter()
+                        .map(|c| format!("{}/{c}", e.file_name().display())),
+                );
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn never_unpacks_through_a_symlink() {
+        use tar::EntryType::{Directory, Regular, Symlink};
+        let dir = scratch();
+        let tgz = tgz(
+            &dir,
+            &[
+                ("t/", Directory, b"", None),
+                ("t/s", Symlink, b"", Some(".")),
+                // Lexically inside (8 levels up from 8 levels down); really
+                // /etc/passwd if created through the `s -> .` loop.
+                (
+                    "t/s/s/s/s/s/s/s/s/k",
+                    Symlink,
+                    b"",
+                    Some("../../../../../../../../etc/passwd"),
+                ),
+                ("t/s/f", Regular, b"x", None),
+                ("t/s/d/", Directory, b"", None),
+                // A `..` after a name climbs out through `s`.
+                ("t/j", Symlink, b"", Some("s/s/s/../../etc")),
+                ("t/ok", Regular, b"y", None),
+            ],
+        );
+        let out = dir.join("out");
+        assert_eq!(unpack(&tgz, &out).unwrap(), 1);
+        assert_eq!(tree(&out), ["ok", "s"]);
+        assert!(out.join("s").is_symlink());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn never_creates_anything_outside() {
+        use tar::EntryType::{Directory, Regular, Symlink};
+        let dir = scratch();
+        let (out, outside) = (dir.join("out"), dir.join("outside"));
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        // A link already in the destination (as an earlier entry could
+        // leave one) pointing out of the tree.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, out.join("d")).unwrap();
+        let tgz = tgz(
+            &dir,
+            &[
+                ("t/d/sub/", Directory, b"", None),
+                ("t/d/sub/f", Regular, b"x", None),
+                ("t/d/f", Regular, b"x", None),
+                ("t/d/l", Symlink, b"", Some("f")),
+                ("t/e", Symlink, b"", Some("../outside")),
+                ("t/e/sub/", Directory, b"", None),
+            ],
+        );
+        assert_eq!(unpack(&tgz, &out).unwrap(), 0);
+        assert!(tree(&outside).is_empty(), "{:?}", tree(&outside));
+        assert!(!out.join("e").is_symlink(), "escaping link skipped");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A gzipped tarball shaped like GitHub's, plus hostile entries.

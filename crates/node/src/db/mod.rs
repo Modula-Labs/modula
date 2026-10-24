@@ -9,6 +9,10 @@
 //! Credentials come from the newest desired state's workload (falling back to
 //! the container's environment), so a password the server rotated reaches the
 //! node with the next snapshot, without restarting the database.
+//!
+//! Reads (tables, rows, stats, extensions, read-only queries) don't use
+//! those credentials: they connect as `modula_reader`, a role this node
+//! keeps in each database with read-only privileges (see [`pg`]).
 
 pub mod fake;
 pub mod pg;
@@ -37,6 +41,10 @@ pub const RESPONSE_BUDGET: usize = 2 * 1024 * 1024;
 /// Where and as whom to connect. The password is never printed.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Target {
+    /// The database's container (whose roles the node has set up).
+    pub container_id: String,
+    /// Its service: what the reader's password is derived from.
+    pub service_id: String,
     pub addr: SocketAddr,
     pub user: String,
     pub password: String,
@@ -46,6 +54,7 @@ pub struct Target {
 impl std::fmt::Debug for Target {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Target")
+            .field("container_id", &self.container_id)
             .field("addr", &self.addr)
             .field("user", &self.user)
             .field("database", &self.database)
@@ -80,6 +89,15 @@ impl Op {
         };
         serde_json::from_value(serde_json::json!({ "op": op, "args": args }))
             .map_err(|e| DbError::BadRequest(format!("invalid database operation: {e}")))
+    }
+
+    /// Only reads: runs as the read-only role.
+    pub fn is_read(&self) -> bool {
+        match self {
+            Self::Tables | Self::Rows(_) | Self::Stats | Self::Extensions => true,
+            Self::Query(a) => a.read_only,
+            _ => false,
+        }
     }
 
     pub fn name(&self) -> &'static str {
@@ -228,6 +246,8 @@ pub async fn target(
         .map_err(unavailable)?
         .ok_or_else(|| DbError::Unavailable("the database has no network address yet".into()))?;
     Ok(Target {
+        container_id: container.id.clone(),
+        service_id: container.service_id.clone(),
         addr: SocketAddr::new(ip, PORT),
         user,
         password,
@@ -325,6 +345,17 @@ mod tests {
         ));
         let p = Op::parse("password", r#"{"password":"hunter2hunter2"}"#).unwrap();
         assert!(!format!("{p:?}").contains("hunter2"));
+        assert!(!p.is_read());
+        assert!(Op::Tables.is_read() && Op::Stats.is_read() && Op::Extensions.is_read());
+        let q = |ro| Op::parse("query", &format!(r#"{{"sql":"select 1","readOnly":{ro}}}"#));
+        assert!(q(true).unwrap().is_read());
+        assert!(!q(false).unwrap().is_read());
+        assert!(!Op::parse("vacuum", r#"{"table":"t"}"#).unwrap().is_read());
+        assert!(
+            !Op::parse("extension", r#"{"name":"x","install":true}"#)
+                .unwrap()
+                .is_read()
+        );
     }
 
     #[test]
