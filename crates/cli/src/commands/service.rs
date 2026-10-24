@@ -1,5 +1,5 @@
-//! `add`: create a service from a database template, an image or a
-//! repository, or an app template's services.
+//! `add`: create a service from a database template, an image, a
+//! repository or a function file, or an app template's services.
 
 use serde_json::{Value, json};
 
@@ -47,8 +47,39 @@ pub fn name_from_repo(repo: &str) -> String {
     service_name(repo.rsplit('/').next().unwrap_or(repo))
 }
 
+/// Inline function code is at most this big (the server's limit).
+const MAX_FUNCTION_BYTES: usize = 1024 * 1024;
+
 /// The request body for `args`.
 pub fn new_service(args: &AddArgs) -> anyhow::Result<NewService> {
+    if args.cloudflare && args.function.is_none() {
+        return Err(usage("--cloudflare is for --function"));
+    }
+    if let Some(file) = &args.function {
+        let code = std::fs::read_to_string(file)
+            .map_err(|e| usage(format!("cannot read {}: {e}", file.display())))?;
+        if code.len() > MAX_FUNCTION_BYTES {
+            return Err(usage(
+                "a function file is at most 1 MB: deploy bigger functions from a repository in the dashboard",
+            ));
+        }
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !matches!(*s, "index" | "worker" | "main"))
+            .unwrap_or("function");
+        let mut config = json!({
+            "source": { "type": "function", "code": code, "compatibilityDate": args.compatibility_date },
+        });
+        if args.cloudflare {
+            config["hosting"] = json!({ "type": "cloudflare" });
+        }
+        return Ok(NewService {
+            name: args.name.clone().unwrap_or_else(|| service_name(stem)),
+            template: None,
+            config: Some(config),
+        });
+    }
     let source = match (&args.database, &args.image, &args.repo) {
         (Some(db), _, _) => {
             return Ok(NewService {
@@ -252,5 +283,45 @@ mod tests {
             json!({ "source": { "type": "repo", "repo": "acme/api", "branch": "main" } })
         );
         assert!(new_service(&add_args(&["--repo", "acme"])).is_err());
+
+        let dir = std::env::temp_dir().join(format!("modula-cli-fn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hello_world.js");
+        std::fs::write(
+            &file,
+            "export default { fetch() { return new Response('hi'); } };",
+        )
+        .unwrap();
+        let path = file.to_str().unwrap();
+        let r = new_service(&add_args(&["--function", path, "--cloudflare"])).unwrap();
+        assert_eq!(r.name, "hello-world");
+        let c = r.config.unwrap();
+        assert_eq!(c["source"]["type"], "function");
+        assert!(
+            c["source"]["code"]
+                .as_str()
+                .unwrap()
+                .contains("Response('hi')")
+        );
+        assert_eq!(
+            c["source"]["compatibilityDate"],
+            crate::cli::DEFAULT_COMPATIBILITY_DATE
+        );
+        assert_eq!(c["hosting"]["type"], "cloudflare");
+        let index = dir.join("index.js");
+        std::fs::write(&index, "export default {};").unwrap();
+        let r = new_service(&add_args(&["--function", index.to_str().unwrap()])).unwrap();
+        assert_eq!(r.name, "function");
+        assert!(r.config.unwrap().get("hosting").is_none(), "your servers");
+        assert!(
+            new_service(&add_args(&[
+                "--function",
+                dir.join("nope.js").to_str().unwrap()
+            ]))
+            .is_err()
+        );
+        assert!(new_service(&add_args(&["--image", "nginx", "--cloudflare"])).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

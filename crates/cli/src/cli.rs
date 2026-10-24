@@ -118,8 +118,8 @@ pub enum Command {
         /// Service name or id; omitted: list the project's services.
         name: Option<String>,
     },
-    /// Create a service from a database template, an image or a repository,
-    /// or an app and its databases from a template.
+    /// Create a service from a database template, an image, a repository or
+    /// a JavaScript function file, or an app and its databases from a template.
     Add(AddArgs),
     /// Upload the current directory, build it and deploy it to the service.
     Up(UpArgs),
@@ -417,12 +417,16 @@ impl Database {
     }
 }
 
+/// What `add --function` writes functions for (the newest the servers'
+/// workerd supports is the server's `WORKERD_COMPATIBILITY_DATE`).
+pub const DEFAULT_COMPATIBILITY_DATE: &str = "2026-10-01";
+
 #[derive(Debug, Args)]
 #[group(skip)]
 #[command(group(
     clap::ArgGroup::new("source")
         .required(true)
-        .args(["database", "image", "repo", "template"])
+        .args(["database", "image", "repo", "template", "function"])
 ))]
 pub struct AddArgs {
     /// A database from its template.
@@ -442,7 +446,19 @@ pub struct AddArgs {
     /// The repository branch.
     #[arg(short, long, default_value = "main", requires = "repo")]
     pub branch: String,
-    /// The service name (default: derived from the database, image or repo).
+    /// A JavaScript function from this file: a module worker
+    /// (`export default { fetch(request, env) { … } }`), up to 1 MB, run in
+    /// workerd on your servers (or Cloudflare Workers with `--cloudflare`).
+    #[arg(short, long, value_name = "FILE", conflicts_with = "port")]
+    pub function: Option<std::path::PathBuf>,
+    /// The function runs on Cloudflare Workers (the workspace's Cloudflare
+    /// connection) instead of your servers.
+    #[arg(long)]
+    pub cloudflare: bool,
+    /// The Workers runtime version the function is written for.
+    #[arg(long, value_name = "YYYY-MM-DD", default_value = DEFAULT_COMPATIBILITY_DATE)]
+    pub compatibility_date: String,
+    /// The service name (default: derived from the database, image, repo or file).
     #[arg(short, long)]
     pub name: Option<String>,
     /// The port the app listens on (image and repo services; default 8080).
@@ -955,6 +971,19 @@ mod tests {
         assert!(parse(&["add", "--image", "nginx", "--repo", "a/b"]).is_err());
         assert!(parse(&["add", "--database", "oracle"]).is_err());
         assert!(parse(&["add", "--database", "redis", "--port", "1"]).is_err());
+        let cli = parse(&["add", "--function", "hello.js", "--cloudflare"]).unwrap();
+        let Command::Add(a) = cli.command else {
+            panic!()
+        };
+        assert_eq!(
+            a.function.as_deref(),
+            Some(std::path::Path::new("hello.js"))
+        );
+        assert!(a.cloudflare);
+        assert_eq!(a.compatibility_date, DEFAULT_COMPATIBILITY_DATE);
+        assert!(parse(&["add", "--function", "a.js", "--image", "nginx"]).is_err());
+        assert!(parse(&["add", "--function", "a.js", "--port", "80"]).is_err());
+
         let cli = parse(&["add", "--template", "ghost", "--name", "blog"]).unwrap();
         let Command::Add(a) = cli.command else {
             panic!()
