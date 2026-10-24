@@ -63,6 +63,8 @@ pub enum Action {
     ProjectUpdate,
     ProjectDelete,
     EnvironmentCreate,
+    /// Rename.
+    EnvironmentUpdate,
     EnvironmentDelete,
     /// Copy another environment's config (and missing variables) into this one.
     EnvironmentSync,
@@ -208,6 +210,7 @@ impl Action {
             Self::ProjectRead | Self::ProjectUpdate | Self::ProjectDelete => K::Project,
             Self::EnvironmentCreate | Self::ServiceCreate => K::Project,
             Self::EnvironmentDelete
+            | Self::EnvironmentUpdate
             | Self::EnvironmentSync
             | Self::SharedVariablesRead
             | Self::SharedVariablesWrite
@@ -290,6 +293,7 @@ impl Action {
             Self::ProjectCreate
             | Self::ProjectUpdate
             | Self::EnvironmentCreate
+            | Self::EnvironmentUpdate
             | Self::EnvironmentSync
             | Self::ServiceCreate
             | Self::ServiceDelete
@@ -379,6 +383,7 @@ impl Action {
             | Self::ProjectRead
             | Self::ProjectUpdate
             | Self::EnvironmentCreate
+            | Self::EnvironmentUpdate
             | Self::EnvironmentSync
             | Self::ServiceCreate
             | Self::InstanceRead

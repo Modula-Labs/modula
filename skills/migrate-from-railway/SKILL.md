@@ -102,11 +102,10 @@ their volumes. By hand (API/CLI):
 4. Variables: copy literals; rewrite references to lowercase service names;
    replace Railway-only values (e.g. `*.railway.internal` hosts) with
    references (`${{api.MODULA_PRIVATE_DOMAIN}}`). Ask before sealing.
-5. Environments: create `staging` with `cloneFrom` production and
-   `copyVariables`, then per environment: set each repo service's `branch`, add
-   a volume to each database at its template path
-   (`/var/lib/postgresql/data`, `/var/lib/mysql`, `/data`, `/data/db`) — volumes
-   aren't cloned — and set sealed variables again.
+5. Environments: create `staging` with `duplicateFrom` production and
+   `branches` mapping each repo service to its staging branch. Variables
+   (sealed ones too) are copied; databases get empty volumes and fresh
+   passwords.
 6. Deploy pending changes per environment; check every service reaches
    `active` and logs are clean.
 

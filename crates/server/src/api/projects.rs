@@ -1,5 +1,6 @@
 //! Projects and environments. Every project starts with a `production`
-//! environment; services exist in every environment of their project.
+//! environment, its default (the oldest: it can be renamed but not deleted);
+//! services exist in every environment of their project.
 
 use std::collections::BTreeMap;
 
@@ -41,6 +42,18 @@ pub struct Environment {
     pub name: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// The project's oldest environment (production): never deleted, and its
+    /// generated domains carry no environment suffix.
+    pub is_default: bool,
+}
+
+/// Columns of [`Environment`] for a query over `environments e`.
+macro_rules! environment_columns {
+    () => {
+        "e.id, e.name, e.created_at,
+         e.id = (SELECT f.id FROM environments f WHERE f.project_id = e.project_id
+                 ORDER BY f.created_at, f.id LIMIT 1) AS is_default"
+    };
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -57,6 +70,8 @@ pub struct InstanceSummary {
     /// `image` or `repo`, and the repository for repo sources (card icon/subtitle).
     pub source_type: Option<String>,
     pub repo: Option<String>,
+    /// The branch a repo source deploys from.
+    pub branch: Option<String>,
     pub image: Option<String>,
     /// Detected by the last build (e.g. `nextjs`), for the card icon.
     pub stack: Option<String>,
@@ -235,9 +250,11 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
-    let environments = sqlx::query_as(
-        "SELECT id, name, created_at FROM environments WHERE project_id = $1 ORDER BY created_at",
-    )
+    let environments = sqlx::query_as(concat!(
+        "SELECT ",
+        environment_columns!(),
+        " FROM environments e WHERE e.project_id = $1 ORDER BY e.created_at, e.id"
+    ))
     .bind(id)
     .fetch_all(&state.db)
     .await?;
@@ -254,6 +271,7 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
                  ORDER BY created_at LIMIT 1) AS domain,
                 i.config->'source'->>'type' AS source_type,
                 i.config->'source'->>'repo' AS repo,
+                i.config->'source'->>'branch' AS branch,
                 i.config->'source'->>'image' AS image,
                 i.stack,
                 ARRAY(
@@ -384,12 +402,27 @@ pub async fn delete(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateEnvironment {
     pub name: String,
-    /// The environment to copy service configs from (default: the first).
+    /// Duplicate this environment: its service configs and all its variables
+    /// (sealed ones stay sealed, re-encrypted server-side under the new
+    /// environment's key). Omitted: an empty environment, whose services get
+    /// the default environment's configs and no variables.
     #[serde(default)]
-    pub clone_from: Option<Id>,
-    /// Also copy its variables (sealed ones excepted).
+    pub duplicate_from: Option<Id>,
+    /// The branch each repo service (by service id) deploys from in the new
+    /// environment; services not listed keep their source's branch.
     #[serde(default)]
-    pub copy_variables: bool,
+    pub branches: BTreeMap<Id, String>,
+}
+
+async fn environment(db: &sqlx::PgPool, id: Id) -> AppResult<Environment> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT ",
+        environment_columns!(),
+        " FROM environments e WHERE e.id = $1"
+    ))
+    .bind(id)
+    .fetch_one(db)
+    .await?)
 }
 
 pub async fn create_environment(
@@ -401,8 +434,26 @@ pub async fn create_environment(
 ) -> AppResult<Json<Environment>> {
     let project = grant.id();
     let name = validate::display_name(&req.name, "environment name")?.to_lowercase();
+    for branch in req.branches.values() {
+        deploy::config::validate_branch(branch)?;
+    }
     let id = Id::new();
     let mut tx = state.db.begin().await?;
+    // Every service exists in every environment. A duplicate starts from its
+    // source's configs; an empty one from the default environment's.
+    let source: Option<Id> = sqlx::query_scalar(
+        "SELECT id FROM environments WHERE project_id = $1 AND ($2::text IS NULL OR id = $2)
+         ORDER BY created_at, id LIMIT 1",
+    )
+    .bind(project)
+    .bind(req.duplicate_from)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if req.duplicate_from.is_some() && source.is_none() {
+        return Err(AppError::bad_request(
+            "duplicateFrom must be an environment of this project",
+        ));
+    }
     let inserted = sqlx::query(
         "INSERT INTO environments (id, project_id, name) VALUES ($1, $2, $3)
          ON CONFLICT (project_id, name) DO NOTHING",
@@ -417,22 +468,6 @@ pub async fn create_environment(
             "an environment named {name} already exists"
         )));
     }
-    // Every service exists in every environment. New environments start from
-    // the configuration of another (by default the project's first).
-    let source: Option<Id> = sqlx::query_scalar(
-        "SELECT id FROM environments WHERE project_id = $1 AND id <> $2 AND ($3::text IS NULL OR id = $3)
-         ORDER BY created_at LIMIT 1",
-    )
-    .bind(project)
-    .bind(id)
-    .bind(req.clone_from)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if req.clone_from.is_some() && source.is_none() {
-        return Err(AppError::bad_request(
-            "cloneFrom must be an environment of this project",
-        ));
-    }
     sqlx::query(
         "INSERT INTO service_instances (id, service_id, environment_id, config)
          SELECT new_id(), i.service_id, $2, i.config FROM service_instances i WHERE i.environment_id = $1",
@@ -441,6 +476,22 @@ pub async fn create_environment(
     .bind(id)
     .execute(&mut *tx)
     .await?;
+    for (service, branch) in &req.branches {
+        let set = sqlx::query(
+            "UPDATE service_instances SET config = jsonb_set(config, '{source,branch}', to_jsonb($3::text))
+             WHERE environment_id = $1 AND service_id = $2 AND config->'source'->>'type' = 'repo'",
+        )
+        .bind(id)
+        .bind(service)
+        .bind(branch)
+        .execute(&mut *tx)
+        .await?;
+        if set.rows_affected() == 0 {
+            return Err(AppError::bad_request(format!(
+                "branches: {service} is not a repo service of this project"
+            )));
+        }
+    }
     // Volume definitions too (a fresh, empty volume each, never the data), so
     // databases keep their persistence. Domains and TCP proxies are not
     // copied: public exposure is always explicit.
@@ -459,31 +510,91 @@ pub async fn create_environment(
         .actor(&actor)
         .workspace(grant.workspace_id()?)
         .target("environment", id)
-        .metadata(json!({ "project": project, "name": name }))
+        .metadata(json!({
+            "project": project,
+            "name": name,
+            "duplicateFrom": req.duplicate_from,
+            "branches": req.branches,
+        }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
-    // Fresh template passwords go in first so a variable copy can't bring
+    // Fresh template passwords go in first so the variable copy can't bring
     // the source's; the template's other variables fill whatever is still
     // missing afterwards.
     seed_template_variables(&state, id, true).await?;
-    if let (true, Some(from)) = (req.copy_variables, source) {
-        copy_environment(&state, actor.user_id, id, from).await?;
+    if let Some(from) = req.duplicate_from {
+        copy_environment(
+            &state,
+            actor.user_id,
+            id,
+            from,
+            CopyScope {
+                configs: false,
+                sealed: true,
+            },
+        )
+        .await?;
     }
     seed_template_variables(&state, id, false).await?;
-    Ok(Json(
-        sqlx::query_as("SELECT id, name, created_at FROM environments WHERE id = $1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await?,
-    ))
+    environment(&state.db, id).await.map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateEnvironment {
+    pub name: String,
+}
+
+/// Rename an environment. Generated domains keep their hostnames; references
+/// and links use ids, so nothing else changes.
+pub async fn update_environment(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+    Json(req): Json<UpdateEnvironment>,
+) -> AppResult<Json<Environment>> {
+    let id = grant.id();
+    let name = validate::display_name(&req.name, "environment name")?.to_lowercase();
+    let mut tx = state.db.begin().await?;
+    let old: String = sqlx::query_scalar("SELECT name FROM environments WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM environments WHERE name = $2 AND id <> $1
+                        AND project_id = (SELECT project_id FROM environments WHERE id = $1))",
+    )
+    .bind(id)
+    .bind(&name)
+    .fetch_one(&mut *tx)
+    .await?;
+    if taken {
+        return Err(AppError::Conflict(format!(
+            "an environment named {name} already exists"
+        )));
+    }
+    sqlx::query("UPDATE environments SET name = $2 WHERE id = $1")
+        .bind(id)
+        .bind(&name)
+        .execute(&mut *tx)
+        .await?;
+    Entry::new("environment.update", &meta)
+        .actor(&actor)
+        .workspace(grant.workspace_id()?)
+        .target("environment", id)
+        .metadata(json!({ "from": old, "name": name }))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    environment(&state.db, id).await.map(Json)
 }
 
 /// Give the template (database) services of a new environment the
-/// variables their template creates, with freshly generated passwords: sealed
-/// values are never copied, and a clone shouldn't share credentials with its
-/// source anyway. `secrets_only` adds just the passwords. Existing variables
-/// are kept.
+/// variables their template creates, with freshly generated passwords: a
+/// duplicate shouldn't share credentials with its source. `secrets_only` adds
+/// just the passwords. Existing variables are kept.
 async fn seed_template_variables(
     state: &AppState,
     environment: Id,
@@ -542,16 +653,17 @@ pub async fn delete_environment(
 ) -> AppResult<Json<serde_json::Value>> {
     let id = grant.id();
     let mut tx = state.db.begin().await?;
-    let others: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM environments
-         WHERE project_id = (SELECT project_id FROM environments WHERE id = $1) AND id <> $1",
-    )
+    let default: bool = sqlx::query_scalar(concat!(
+        "SELECT is_default FROM (SELECT ",
+        environment_columns!(),
+        " FROM environments e WHERE e.id = $1) x"
+    ))
     .bind(id)
     .fetch_one(&mut *tx)
     .await?;
-    if others == 0 {
+    if default {
         return Err(AppError::Conflict(
-            "a project needs at least one environment".into(),
+            "the default environment can't be deleted".into(),
         ));
     }
     crate::api::buckets::release_best_effort(&state, crate::api::buckets::Scope::Environment(id))
@@ -609,7 +721,17 @@ pub async fn sync_environment(
             "pick another environment of the same project",
         ));
     }
-    let (created, updated) = copy_environment(&state, actor.user_id, target, from).await?;
+    let (created, updated) = copy_environment(
+        &state,
+        actor.user_id,
+        target,
+        from,
+        CopyScope {
+            configs: true,
+            sealed: false,
+        },
+    )
+    .await?;
     Entry::new("environment.sync", &meta)
         .actor(&actor)
         .workspace(grant.workspace_id()?)
@@ -620,25 +742,37 @@ pub async fn sync_environment(
     Ok(Json(json!({ "created": created, "updated": updated })))
 }
 
-/// Copy `from`'s service configs into `target` and add the (non-sealed)
-/// variables `target` lacks; returns (variables added, services updated).
-/// Both environments must belong to the same project.
+/// What [`copy_environment`] copies besides the non-sealed variables.
+#[derive(Clone, Copy)]
+struct CopyScope {
+    /// Service configs (sync); a new duplicate already has them.
+    configs: bool,
+    /// Sealed variables too, still sealed (duplicates). Sync leaves them out:
+    /// they're write-only, so nobody could see what it would bring over.
+    sealed: bool,
+}
+
+/// Add the variables `target` lacks from `from` (re-encrypted under
+/// `target`'s key) and, with `copy.configs`, copy `from`'s service configs;
+/// returns (variables added, services updated). Both environments must
+/// belong to the same project.
 async fn copy_environment(
     state: &AppState,
     user: Id,
     target: Id,
     from: Id,
+    copy: CopyScope,
 ) -> AppResult<(u32, u32)> {
     // Copy variables first (sealing needs the keyring, outside the transaction).
     // An R2 bucket's variables are its own credentials: never copied.
-    // (target instance or None for shared, source variable, name, value, refs)
+    // (target instance or None for shared, source variable, name, value, sealed, refs)
     #[allow(clippy::type_complexity)]
-    let missing: Vec<(Option<Id>, Id, String, Vec<u8>, Vec<String>)> = sqlx::query_as(
-        "SELECT ti.id, v.id, v.name, v.value_sealed, v.refs
+    let missing: Vec<(Option<Id>, Id, String, Vec<u8>, bool, Vec<String>)> = sqlx::query_as(
+        "SELECT ti.id, v.id, v.name, v.value_sealed, v.sealed, v.refs
          FROM variables v
          LEFT JOIN service_instances si ON si.id = v.service_instance_id
          LEFT JOIN service_instances ti ON ti.service_id = si.service_id AND ti.environment_id = $1
-         WHERE v.environment_id = $2 AND NOT v.sealed
+         WHERE v.environment_id = $2 AND ($3 OR NOT v.sealed)
            AND (v.service_instance_id IS NULL OR ti.id IS NOT NULL)
            AND NOT EXISTS (SELECT 1 FROM r2_buckets r WHERE r.service_instance_id = v.service_instance_id)
            AND NOT EXISTS (SELECT 1 FROM variables t WHERE t.environment_id = $1
@@ -646,29 +780,34 @@ async fn copy_environment(
     )
     .bind(target)
     .bind(from)
+    .bind(copy.sealed)
     .fetch_all(&state.db)
     .await?;
     let mut copies = Vec::with_capacity(missing.len());
-    for (instance, var, name, sealed, refs) in missing {
-        let value = env::open_variable(&state.keys, &state.db, from, var, &sealed).await?;
+    for (instance, var, name, value_sealed, sealed, refs) in missing {
+        let value = env::open_variable(&state.keys, &state.db, from, var, &value_sealed).await?;
         let id = Id::new();
         let resealed =
             env::seal_variable(&state.keys, &state.db, target, id, value.expose_secret()).await?;
-        copies.push((instance, id, name, resealed, refs));
+        copies.push((instance, id, name, resealed, sealed, refs));
     }
 
     let mut tx = state.db.begin().await?;
-    let pairs: Vec<(Id, Id, serde_json::Value, serde_json::Value)> = sqlx::query_as(
-        "SELECT ti.id, ti.service_id, ti.config, si.config
-         FROM service_instances ti
-         JOIN service_instances si ON si.service_id = ti.service_id AND si.environment_id = $2
-         WHERE ti.environment_id = $1
-         FOR UPDATE OF ti",
-    )
-    .bind(target)
-    .bind(from)
-    .fetch_all(&mut *tx)
-    .await?;
+    let pairs: Vec<(Id, Id, serde_json::Value, serde_json::Value)> = if copy.configs {
+        sqlx::query_as(
+            "SELECT ti.id, ti.service_id, ti.config, si.config
+             FROM service_instances ti
+             JOIN service_instances si ON si.service_id = ti.service_id AND si.environment_id = $2
+             WHERE ti.environment_id = $1
+             FOR UPDATE OF ti",
+        )
+        .bind(target)
+        .bind(from)
+        .fetch_all(&mut *tx)
+        .await?
+    } else {
+        Vec::new()
+    };
     let mut changes: BTreeMap<Option<Id>, Vec<Change>> = BTreeMap::new();
     let mut updated = 0;
     for (instance, service, old, new) in pairs {
@@ -685,16 +824,17 @@ async fn copy_environment(
         changes.entry(Some(service)).or_default().extend(diff);
     }
     let mut created = 0;
-    for (instance, id, name, sealed, refs) in &copies {
+    for (instance, id, name, value_sealed, sealed, refs) in &copies {
         let r = sqlx::query(
-            "INSERT INTO variables (id, environment_id, service_instance_id, name, value_sealed, refs)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            "INSERT INTO variables (id, environment_id, service_instance_id, name, value_sealed, sealed, refs)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (environment_id, service_instance_id, name) DO NOTHING",
         )
         .bind(id)
         .bind(target)
         .bind(instance)
         .bind(name)
+        .bind(value_sealed)
         .bind(sealed)
         .bind(refs)
         .execute(&mut *tx)
