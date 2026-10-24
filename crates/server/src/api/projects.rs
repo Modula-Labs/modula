@@ -469,8 +469,11 @@ pub async fn create_environment(
         )));
     }
     sqlx::query(
+        // A Worker name names one environment's Cloudflare resources: the
+        // copy falls back to its own default (`<service>-<environment>`).
         "INSERT INTO service_instances (id, service_id, environment_id, config)
-         SELECT new_id(), i.service_id, $2, i.config FROM service_instances i WHERE i.environment_id = $1",
+         SELECT new_id(), i.service_id, $2, i.config #- '{hosting,scriptName}'
+         FROM service_instances i WHERE i.environment_id = $1",
     )
     .bind(source)
     .bind(id)
@@ -810,7 +813,8 @@ async fn copy_environment(
     };
     let mut changes: BTreeMap<Option<Id>, Vec<Change>> = BTreeMap::new();
     let mut updated = 0;
-    for (instance, service, old, new) in pairs {
+    for (instance, service, old, mut new) in pairs {
+        deploy::config::keep_script_name(&mut new, &old);
         let diff = activity::config_changes(&old, &new);
         if diff.is_empty() {
             continue;

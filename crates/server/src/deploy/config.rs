@@ -145,6 +145,26 @@ pub enum Hosting {
     },
 }
 
+/// A config copied from another environment (`copied`) keeps the Worker name
+/// this environment had (`own`), or none: two environments never publish to
+/// the same Worker.
+pub fn keep_script_name(copied: &mut serde_json::Value, own: &serde_json::Value) {
+    let Some(hosting) = copied
+        .get_mut("hosting")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    match own.pointer("/hosting/scriptName") {
+        Some(name) => {
+            hosting.insert("scriptName".into(), name.clone());
+        }
+        None => {
+            hosting.remove("scriptName");
+        }
+    }
+}
+
 /// Cloudflare's rules for Worker names, kept to the DNS-label-safe subset
 /// (the name becomes `<name>.<subdomain>.workers.dev`).
 pub fn validate_script_name(n: &str) -> AppResult<()> {

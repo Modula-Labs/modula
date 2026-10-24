@@ -685,3 +685,64 @@ async fn build_output_uploads_need_a_valid_token_for_a_building_deployment(pool:
     let r = app.send(put(Some(format!("Bearer {t}"))), None, None).await;
     assert_eq!(r.status, StatusCode::NOT_FOUND);
 }
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn duplicated_environments_never_share_a_worker(pool: PgPool) {
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    let p = app
+        .call(
+            Method::POST,
+            &format!("/api/workspaces/{ws}/projects"),
+            Some(&admin),
+            Some(json!({"name": "marketing"})),
+        )
+        .await;
+    let project = p.json["id"].as_str().unwrap().to_owned();
+    let s = app
+        .call(
+            Method::POST,
+            &format!("/api/projects/{project}/services"),
+            Some(&admin),
+            Some(json!({ "name": "web", "config": {
+                "source": { "type": "repo", "repo": "acme/site", "branch": "main" },
+                "hosting": { "type": "cloudflare", "outputDir": "dist", "scriptName": "acme-site" }
+            }})),
+        )
+        .await;
+    assert_eq!(s.status, StatusCode::OK, "{:?}", s.json);
+    let prod: Id = sqlx::query_scalar("SELECT environment_id FROM service_instances")
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    let config = |env: Id| {
+        let db = app.db().clone();
+        async move {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT config FROM service_instances WHERE environment_id = $1",
+            )
+            .bind(env)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        }
+    };
+
+    // The copy keeps the hosting settings but not the Worker name: it
+    // publishes to its own `web-staging`.
+    let r = app
+        .call(
+            Method::POST,
+            &format!("/api/projects/{project}/environments"),
+            Some(&admin),
+            Some(json!({ "name": "staging", "duplicateFrom": prod })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let staging: Id = r.json["id"].as_str().unwrap().parse().unwrap();
+    let copied = config(staging).await;
+    assert_eq!(copied["hosting"]["outputDir"], "dist");
+    assert!(copied["hosting"].get("scriptName").is_none(), "{copied}");
+    assert_eq!(config(prod).await["hosting"]["scriptName"], "acme-site");
+}
