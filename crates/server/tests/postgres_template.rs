@@ -157,7 +157,10 @@ fn real_streaming_replica_and_promotion() {
         &replica,
         &net,
         "replica",
-        &[("MODULA_REPLICA_OF", "primary")],
+        &[
+            ("MODULA_REPLICA_OF", "primary"),
+            ("MODULA_SERVICE_NAME", "shop-replica"),
+        ],
         &[],
     );
     wait_for(&replica, "SELECT pg_is_in_recovery()", "t", 120);
@@ -174,8 +177,8 @@ fn real_streaming_replica_and_promotion() {
     );
     wait_for(
         &primary,
-        "SELECT count(*) FROM pg_stat_replication WHERE state = 'streaming'",
-        "1",
+        "SELECT application_name FROM pg_stat_replication WHERE state = 'streaming'",
+        "shop-replica",
         30,
     );
 

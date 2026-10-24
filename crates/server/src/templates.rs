@@ -58,6 +58,8 @@ const fn urls(private: &'static str, public: &'static str) -> [Connect; 2] {
 /// Clients use `sslmode=require` (encrypted, unverified, like Railway); the
 /// private network still accepts plain connections. pg_stat_statements is
 /// preloaded so the Database tab's slow-query view works once installed.
+/// `cluster_name` is the service's name, which a replica's WAL receiver
+/// reports as its `application_name` in the primary's `pg_stat_replication`.
 ///
 /// The rest follows the environment the control plane sets:
 /// - Read replicas connect as `modula_replicator` (`REPLICATION_PASSWORD`,
@@ -83,7 +85,7 @@ pub const POSTGRES_START: &str = concat!(
     "chmod 600 \"$d/server.key\"\n",
     "as_pg() { if [ -n \"$root\" ]; then gosu postgres \"$@\"; else \"$@\"; fi; }\n",
     "set -- -c ssl=on -c \"ssl_cert_file=$d/server.crt\" -c \"ssl_key_file=$d/server.key\"",
-    " -c shared_preload_libraries=pg_stat_statements\n",
+    " -c shared_preload_libraries=pg_stat_statements -c \"cluster_name=${MODULA_SERVICE_NAME:-postgres}\"\n",
     "hba='host replication modula_replicator all scram-sha-256'\n",
     "if [ -s \"$PGDATA/pg_hba.conf\" ]; then\n",
     "  grep -qxF \"$hba\" \"$PGDATA/pg_hba.conf\" || echo \"$hba\" >>\"$PGDATA/pg_hba.conf\"\n",
