@@ -39,6 +39,9 @@ pub enum Source {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         root_dir: Option<String>,
     },
+    /// A Cloudflare R2 bucket (see `api::buckets`): nothing runs or deploys,
+    /// the service only carries the bucket's credentials as variables.
+    R2,
 }
 
 /// How a repository source is turned into an image.
@@ -146,6 +149,7 @@ impl ServiceConfig {
             Source::Repo { repo, branch, .. } => format!("{repo}@{branch}"),
             Source::Upload { .. } => "Uploaded via CLI".into(),
             Source::Local { .. } => "Local files (modula up)".into(),
+            Source::R2 => "Cloudflare R2".into(),
         }
     }
 
@@ -156,7 +160,9 @@ impl ServiceConfig {
                 branch,
                 root_dir,
             } => Some((repo, branch, root_dir.as_deref())),
-            Source::Image { .. } | Source::Upload { .. } | Source::Local { .. } => None,
+            Source::Image { .. } | Source::Upload { .. } | Source::Local { .. } | Source::R2 => {
+                None
+            }
         }
     }
 
@@ -170,7 +176,12 @@ impl ServiceConfig {
 
     /// Whether deployments build an image on the node (repository or upload).
     pub fn builds_from_source(&self) -> bool {
-        !matches!(self.source, Source::Image { .. })
+        !matches!(self.source, Source::Image { .. } | Source::R2)
+    }
+
+    /// Whether anything runs: an R2 bucket has no container to deploy.
+    pub fn deployable(&self) -> bool {
+        !matches!(self.source, Source::R2)
     }
 
     /// The directory to build from, for sources that are built.
@@ -179,7 +190,7 @@ impl ServiceConfig {
             Source::Repo { root_dir, .. }
             | Source::Upload { root_dir, .. }
             | Source::Local { root_dir } => root_dir.as_deref(),
-            Source::Image { .. } => None,
+            Source::Image { .. } | Source::R2 => None,
         }
     }
 
@@ -197,6 +208,7 @@ impl ServiceConfig {
     pub fn validate(&self) -> AppResult<()> {
         match &self.source {
             Source::Image { image } => validate_image_ref(image)?,
+            Source::R2 => {}
             Source::Upload { root_dir, .. } | Source::Local { root_dir } => {
                 if let Some(d) = root_dir {
                     validate_rel_path(d, "root directory")?;

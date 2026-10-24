@@ -1,6 +1,8 @@
-//! One-click databases: an image, a volume, generated credentials and
-//! connection-string variables built from references, so other services can
-//! use `${{postgres.DATABASE_URL}}` and the URLs follow renames and proxies.
+//! One-click databases and buckets: an image, a volume, generated
+//! credentials and connection variables built from references, so other
+//! services can use `${{postgres.DATABASE_URL}}` and the URLs follow renames
+//! and proxies. Cloudflare R2 buckets are not templates (their credentials
+//! come from Cloudflare): see `api::buckets`.
 
 use serde::Serialize;
 use serde_json::json;
@@ -187,6 +189,60 @@ pub const CATALOG: &[Template] = &[
                 "mongodb://${{MONGOUSER}}:${{MONGOPASSWORD}}@${{MODULA_TCP_PROXY_DOMAIN}}:${{MODULA_TCP_PROXY_PORT}}",
             ),
         ],
+    },
+    // rclone's S3 server (MIT, alpine, ~30 MB RAM), serving /data with the
+    // one bucket as its only top-level directory. The volume is mounted at
+    // /data/bucket, so the bucket exists from the first start and holds all
+    // the data. The image's entrypoint is `rclone`, so the start command is
+    // its arguments; rclone reads `--auth-key` from RCLONE_AUTH_KEY, a CSV
+    // list, hence the quotes around the `id,secret` pair.
+    Template {
+        id: "bucket",
+        name: "Bucket",
+        description: "S3-compatible storage on your own servers",
+        image: "rclone/rclone:1.75.2@sha256:2687085f718d3c628f7fdfb77c52a1d344332aed543110bb88088f2c70d43eb5",
+        default_name: "bucket",
+        connect: BUCKET_CONNECT,
+        port: 9000,
+        mount_path: "/data/bucket",
+        start_command: Some(&["serve", "s3", "/data", "--addr", ":9000"]),
+        variables: &[
+            ("S3_BUCKET", "bucket"),
+            ("BUCKET_NAME", "${{S3_BUCKET}}"),
+            ("S3_ENDPOINT", "http://${{MODULA_PRIVATE_DOMAIN}}:9000"),
+            ("S3_REGION", "us-east-1"),
+            ("S3_FORCE_PATH_STYLE", "true"),
+            ("AWS_ACCESS_KEY_ID", SECRET),
+            ("AWS_SECRET_ACCESS_KEY", SECRET),
+            (
+                "RCLONE_AUTH_KEY",
+                "\"${{AWS_ACCESS_KEY_ID}},${{AWS_SECRET_ACCESS_KEY}}\"",
+            ),
+        ],
+    },
+];
+
+/// The S3 variables a bucket (self-hosted or R2) exposes, in Connect order.
+pub const BUCKET_CONNECT: &[Connect] = &[
+    Connect {
+        label: "Endpoint",
+        variable: "S3_ENDPOINT",
+    },
+    Connect {
+        label: "Bucket",
+        variable: "S3_BUCKET",
+    },
+    Connect {
+        label: "Region",
+        variable: "S3_REGION",
+    },
+    Connect {
+        label: "Access key ID",
+        variable: "AWS_ACCESS_KEY_ID",
+    },
+    Connect {
+        label: "Secret access key",
+        variable: "AWS_SECRET_ACCESS_KEY",
     },
 ];
 

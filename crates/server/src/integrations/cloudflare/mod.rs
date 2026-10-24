@@ -8,7 +8,9 @@
 //! What a connection enables:
 //! - DNS records for custom domains are written automatically when the
 //!   domain's zone is in the account, optionally proxied (orange cloud);
-//! - a one-step "Use Cloudflare R2" backup target.
+//! - a one-step "Use Cloudflare R2" backup target;
+//! - R2 buckets on the project canvas, each with its own bucket-scoped
+//!   credentials (see `r2` and `api::buckets`).
 //!
 //! The token lives in `integrations` (kind `cloudflare`), sealed with the
 //! workspace data key (AAD `integrations/secret/<id>`), and is never returned
@@ -22,6 +24,7 @@
 pub mod api;
 pub mod client;
 pub mod dns;
+pub mod r2;
 pub mod zero_trust;
 
 use modula_crypto::envelope::FieldAad;
@@ -56,7 +59,12 @@ pub const PERMISSIONS: &[(&str, &str, bool)] = &[
     ),
     (
         "Account · Workers R2 Storage · Edit",
-        "create backup buckets (optional)",
+        "create R2 buckets for backups and projects (optional)",
+        false,
+    ),
+    (
+        "Account · Account API Tokens · Edit",
+        "give each R2 bucket its own credentials (optional)",
         false,
     ),
     (
@@ -74,7 +82,7 @@ pub const PERMISSIONS: &[(&str, &str, bool)] = &[
 /// Cloudflare's dashboard with a new user API token pre-filled with exactly
 /// [`PERMISSIONS`] for all zones and accounts (the user can narrow both).
 pub fn token_template_url() -> String {
-    let keys = r#"[{"key":"zone","type":"read"},{"key":"dns","type":"edit"},{"key":"zone_settings","type":"read"},{"key":"workers_r2","type":"edit"},{"key":"argotunnel","type":"edit"},{"key":"access","type":"edit"}]"#;
+    let keys = r#"[{"key":"zone","type":"read"},{"key":"dns","type":"edit"},{"key":"zone_settings","type":"read"},{"key":"workers_r2","type":"edit"},{"key":"account_api_tokens","type":"edit"},{"key":"argotunnel","type":"edit"},{"key":"access","type":"edit"}]"#;
     let mut url =
         url::Url::parse("https://dash.cloudflare.com/profile/api-tokens").expect("static");
     url.query_pairs_mut()
@@ -204,6 +212,7 @@ mod tests {
                 "dns:edit",
                 "zone_settings:read",
                 "workers_r2:edit",
+                "account_api_tokens:edit",
                 "argotunnel:edit",
                 "access:edit"
             ]

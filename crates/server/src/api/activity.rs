@@ -306,7 +306,8 @@ async fn diffs(state: &AppState, environment: Id) -> AppResult<Vec<(PendingServi
              FROM service_instances i JOIN services s ON s.id = i.service_id
              LEFT JOIN LATERAL (SELECT id, created_at FROM deployments
                                 WHERE service_instance_id = i.id ORDER BY created_at DESC LIMIT 1) d ON true
-             WHERE i.environment_id = $1
+             -- R2 buckets never deploy, so their changes are never pending.
+             WHERE i.environment_id = $1 AND s.template IS DISTINCT FROM 'r2'
          )
          SELECT l.service_id, l.service_name, l.instance_id, l.deployment_id, c.service_id IS NULL AS shared,
                 c.kind, c.op, c.key, c.created_at AS at

@@ -9,7 +9,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 
 use crate::activity::{self, Change};
-use crate::api::variables;
+use crate::api::{buckets, variables};
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
@@ -61,6 +61,9 @@ pub struct Instance {
     pub volume: Option<serde_json::Value>,
     #[sqlx(json(nullable))]
     pub tcp_proxy: Option<serde_json::Value>,
+    /// An R2 bucket service's bucket in this environment (None = none yet).
+    #[sqlx(json(nullable))]
+    pub r2: Option<serde_json::Value>,
     #[serde(skip)]
     pub tcp_node_ip: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
@@ -76,6 +79,9 @@ pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
                  FROM volumes v WHERE v.service_instance_id = i.id) AS volume,
                 (SELECT json_build_object('id', t.id, 'publicPort', t.public_port, 'targetPort', t.target_port)
                  FROM tcp_proxies t WHERE t.service_instance_id = i.id) AS tcp_proxy,
+                (SELECT json_build_object('bucket', r.bucket, 'accountId', r.account_id, 'created', r.created,
+                                          'createdAt', r.created_at)
+                 FROM r2_buckets r WHERE r.service_instance_id = i.id) AS r2,
                 (SELECT tn.public_ip FROM tcp_proxies t JOIN nodes tn ON tn.id = t.node_id
                  WHERE t.service_instance_id = i.id) AS tcp_node_ip,
                 CASE
@@ -139,6 +145,11 @@ pub async fn create(
     let project = grant.id();
     validate_service_name(&req.name)?;
     let template = match req.template.as_deref() {
+        Some(buckets::R2_TEMPLATE) => {
+            return Err(AppError::bad_request(
+                "R2 buckets need Cloudflare: add them from the dashboard (POST /api/projects/{id}/buckets)",
+            ));
+        }
         Some(t) => {
             Some(templates::get(t).ok_or_else(|| AppError::bad_request("unknown template"))?)
         }
@@ -150,6 +161,11 @@ pub async fn create(
         (None, None) => return Err(AppError::bad_request("config or template is required")),
     };
     cfg.validate_for_instance()?;
+    if !cfg.deployable() {
+        return Err(AppError::bad_request(
+            "R2 buckets are added with POST /api/projects/{id}/buckets",
+        ));
+    }
     let config = serde_json::to_value(&cfg).map_err(anyhow::Error::from)?;
     let id = Id::new();
 
@@ -239,8 +255,10 @@ pub async fn delete(
     actor: Actor,
     grant: Grant,
     meta: RequestMeta,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Json<buckets::Released>> {
     let id = grant.id();
+    // An R2 bucket's tokens are revoked first; its buckets stay.
+    let warnings = buckets::release(&state, buckets::Scope::Service(id)).await?;
     let mut tx = state.db.begin().await?;
     let mut nodes = deploy::remove_live(&mut tx, LiveFilter::Service, id).await?;
     nodes.extend(deploy::queue_volume_removals(&mut tx, LiveFilter::Service, id).await?);
@@ -256,7 +274,7 @@ pub async fn delete(
         .await?;
     tx.commit().await?;
     state.hub.kick_all(&nodes);
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(buckets::Released { ok: true, warnings }))
 }
 
 pub async fn get_instance(
@@ -306,12 +324,22 @@ pub(crate) async fn set_config(
     new.validate_for_instance()?;
     let config = serde_json::to_value(new).map_err(anyhow::Error::from)?;
     let mut tx = state.db.begin().await?;
-    let (env, service, old): (Id, Id, serde_json::Value) = sqlx::query_as(
-        "SELECT environment_id, service_id, config FROM service_instances WHERE id = $1 FOR UPDATE",
-    )
-    .bind(id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let (env, service, old, template): (Id, Id, serde_json::Value, Option<String>) =
+        sqlx::query_as(
+            "SELECT i.environment_id, i.service_id, i.config, s.template
+             FROM service_instances i JOIN services s ON s.id = i.service_id
+             WHERE i.id = $1 FOR UPDATE OF i",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    // An R2 bucket has nothing to configure, and nothing else can become one.
+    let r2 = template.as_deref() == Some(crate::api::buckets::R2_TEMPLATE);
+    if r2 == new.deployable() {
+        return Err(AppError::bad_request(
+            "an R2 bucket's settings can't be changed, and a service can't become one",
+        ));
+    }
     sqlx::query("UPDATE service_instances SET config = $2, updated_at = now() WHERE id = $1")
         .bind(id)
         .bind(&config)

@@ -249,8 +249,10 @@ CREATE TABLE services (
     project_id  id NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     name        text NOT NULL CHECK (name ~ '^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'),
     icon        text,
-    -- The database template it was created from (icon, Connect, backups).
-    template    text CHECK (template IN ('postgres', 'mysql', 'redis', 'mongo')),
+    -- The template it was created from (icon, Connect, backups): a database,
+    -- a self-hosted S3 bucket ('bucket') or a Cloudflare R2 bucket ('r2', no
+    -- container: see r2_buckets).
+    template    text CHECK (template IN ('postgres', 'mysql', 'redis', 'mongo', 'bucket', 'r2')),
     created_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (project_id, name)
 );
@@ -743,6 +745,20 @@ CREATE TABLE integrations (
     updated_at      timestamptz NOT NULL DEFAULT now(),
     UNIQUE (workspace_id, kind)
 );
+
+-- The Cloudflare R2 bucket behind an instance of an 'r2' service, and the
+-- account-owned API token scoped to it whose derived S3 credentials are the
+-- instance's variables. An instance without a row has no bucket yet.
+-- `created`: Modula created the bucket (only then may it delete it).
+CREATE TABLE r2_buckets (
+    service_instance_id id PRIMARY KEY REFERENCES service_instances (id) ON DELETE CASCADE,
+    account_id          text NOT NULL,
+    bucket              text NOT NULL CHECK (bucket ~ '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'),
+    token_id            text NOT NULL,
+    created             boolean NOT NULL,
+    created_at          timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX r2_buckets_bucket_idx ON r2_buckets (account_id, bucket);
 
 ---------------------------------------------------------------------------
 -- Provisioning: servers created at a cloud provider on a user's request

@@ -131,6 +131,8 @@ pub async fn delete(
             "delete this workspace's servers first".into(),
         ));
     }
+    crate::api::buckets::release_best_effort(&state, crate::api::buckets::Scope::Workspace(ws))
+        .await;
     sqlx::query("DELETE FROM workspaces WHERE id = $1")
         .bind(ws)
         .execute(&mut *tx)
