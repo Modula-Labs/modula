@@ -67,8 +67,8 @@ export function AddServerDialog({
         created
           ? "Hetzner is creating the server. It installs modula-node on first boot and joins this instance."
           : provider === "hetzner"
-            ? "Create a server at Hetzner. It boots, installs Docker, Caddy and modula-node, and joins over mutual TLS."
-            : "Run one command on a fresh Ubuntu or Debian server. It installs Docker, Caddy and modula-node, then joins this instance."
+            ? "Create a server at Hetzner. It boots, installs Docker, Caddy and modula-node, and adds itself as a node over mutual TLS."
+            : "Run one command on a fresh Ubuntu or Debian server. It installs Docker, Caddy and modula-node, then adds it to this instance as a node."
       }
     >
       {created ? (
@@ -81,7 +81,7 @@ export function AddServerDialog({
             onChange={setProvider}
             options={[
               { value: "hetzner", label: "Hetzner Cloud" },
-              { value: "manual", label: "Manual join" },
+              { value: "manual", label: "Manual" },
             ]}
           />
           {provider === "hetzner" ? (
@@ -97,7 +97,7 @@ export function AddServerDialog({
             ) : (
               <Alert tone="info" title="Hetzner is not connected">
                 A workspace admin can connect it in Settings → Integrations.
-                Until then, use a manual join.
+                Until then, add one manually.
               </Alert>
             )
           ) : (
@@ -392,7 +392,7 @@ function ManualJoin({ onDone }: { onDone: () => void }) {
               <code className="min-w-0 flex-1 font-mono text-[13px] leading-5 break-all text-foreground">
                 {token.nodeCommand}
               </code>
-              <CopyButton value={token.nodeCommand} label="Copy join command" />
+              <CopyButton value={token.nodeCommand} label="Copy command" />
             </div>
           </details>
           <p className="text-[13px] text-muted-foreground">
@@ -416,7 +416,7 @@ function ManualJoin({ onDone }: { onDone: () => void }) {
             loading={create.isPending}
             onClick={() => create.mutate()}
           >
-            Create join command
+            Create command
           </Button>
         </div>
       )}

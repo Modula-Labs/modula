@@ -36,4 +36,14 @@ describe("raw editor diff", () => {
   it("keeps references verbatim", () => {
     expect(parseDotenv("U=${{postgres.DATABASE_URL}}").vars.U).toBe("${{postgres.DATABASE_URL}}");
   });
+
+  it("round-trips revealed values and diffs against them", () => {
+    const values = { A: "plain", B: 'has "quotes" and spaces', C: "multi\nline", D: "${{pg.URL}}" };
+    const names = Object.keys(values);
+    const text = envTemplate(names, values);
+    expect(parseDotenv(text).vars).toEqual(values);
+    expect(diffEnv(names, parseDotenv(text).vars, values).set).toEqual({});
+    const d = diffEnv(names, parseDotenv(text.replace("A=plain", "A=")).vars, values);
+    expect(d.set).toEqual({ A: "" });
+  });
 });

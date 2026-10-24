@@ -1,5 +1,5 @@
 import { clsx } from "clsx";
-import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type ComponentProps, type Ref } from "react";
 import { Input } from "@/components/ui/Input";
 import { filterReferenceOptions, findReferenceQuery, insertReference, type ReferenceOption } from "@/lib/references";
 
@@ -9,13 +9,16 @@ export function ReferenceInput({
   value,
   onValueChange,
   options,
+  ref,
   ...rest
-}: Omit<ComponentProps<typeof Input>, "value" | "onChange"> & {
+}: Omit<ComponentProps<typeof Input>, "value" | "onChange" | "ref"> & {
+  ref?: Ref<HTMLInputElement>;
   value: string;
   onValueChange: (v: string) => void;
   options: ReferenceOption[];
 }) {
   const input = useRef<HTMLInputElement>(null);
+  useImperativeHandle(ref, () => input.current!, []);
   const activeItem = useRef<HTMLButtonElement>(null);
   const [caret, setCaret] = useState(0);
   const [open, setOpen] = useState(true);
@@ -24,7 +27,9 @@ export function ReferenceInput({
   const q = findReferenceQuery(value, caret);
   const items = q ? filterReferenceOptions(options, q.query) : [];
   const show = !!q && open && items.length > 0;
-  useEffect(() => activeItem.current?.scrollIntoView({ block: "nearest" }), [active, show]);
+  useEffect(() => {
+    activeItem.current?.scrollIntoView({ block: "nearest" });
+  }, [active, show]);
 
   const pick = (o: ReferenceOption) => {
     if (!q) return;

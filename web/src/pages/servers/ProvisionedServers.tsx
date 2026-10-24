@@ -16,7 +16,7 @@ import {
 const LABEL: Record<ProvisionStatus, string> = {
   creating: "Creating",
   booting: "Booting",
-  joining: "Joining",
+  joining: "Adding node",
   ready: "Ready",
   failed: "Failed",
   deleting: "Deleting",

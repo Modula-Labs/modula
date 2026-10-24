@@ -100,7 +100,7 @@ export const euros = (cents: number) => `€${(cents / 100).toFixed(2)}`;
 export const PROVISION_STEPS: { status: ProvisionStatus; label: string }[] = [
   { status: "creating", label: "Creating" },
   { status: "booting", label: "Booting" },
-  { status: "joining", label: "Joining" },
+  { status: "joining", label: "Adding node" },
   { status: "ready", label: "Ready" },
 ];
 

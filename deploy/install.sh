@@ -1549,7 +1549,7 @@ install_main() {
   progress_stop
   step "Writing services" units
   step "Starting the control plane" start_main
-  step "Joining this server" join_local
+  step "Adding this server as a node" join_local
   step "Starting the node and edge" start_node
   step "Writing the recovery kit" recovery_kit
   local_only

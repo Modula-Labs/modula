@@ -1,5 +1,6 @@
 import { clsx } from "clsx";
 import { useEffect, useState, type ReactNode } from "react";
+import { ErrorBoundary } from "../ErrorBoundary";
 import { X } from "./icons";
 
 /** Keeps `value` around for `ms` after it goes undefined so an exit animation
@@ -72,7 +73,7 @@ export function Sheet({
           <X className="size-4" />
         </button>
       </header>
-      {children}
+      <ErrorBoundary>{children}</ErrorBoundary>
     </section>
   );
 }

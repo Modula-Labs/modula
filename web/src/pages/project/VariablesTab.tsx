@@ -1,9 +1,10 @@
+import { clsx } from "clsx";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Checkbox } from "@/components/ui/Controls";
 import { CopyButton } from "@/components/ui/CopyButton";
-import { DotsVertical, Eye, EyeOff, FileText, Lock, Plus, Trash, Variable } from "@/components/ui/icons";
+import { DotsVertical, Eye, EyeOff, FileText, Lock, Pencil, Plus, Trash, Variable } from "@/components/ui/icons";
 import { Input, Textarea } from "@/components/ui/Input";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { Alert, Badge, EmptyState, Skeleton } from "@/components/ui/misc";
@@ -68,6 +69,8 @@ export function VariablesEditor({ scope, canEdit, noun }: { scope: VariablesScop
   const options = useMemo(() => (names.data ? referenceOptions(names.data, scope.serviceId) : []), [names.data, scope.serviceId]);
   const [adding, setAdding] = useState(false);
   const [raw, setRaw] = useState(false);
+  // Sealed ones last: they're write-only, so there's less to do with them.
+  const sorted = useMemo(() => (vars.data ? [...vars.data].sort((a, b) => Number(a.sealed) - Number(b.sealed)) : undefined), [vars.data]);
   const update = useMutation({
     mutationFn: scope.save,
     onSuccess: (list) => {
@@ -142,7 +145,7 @@ export function VariablesEditor({ scope, canEdit, noun }: { scope: VariablesScop
         />
       ) : (
         <div className="divide-y divide-border overflow-hidden rounded-xl border border-border">
-          {vars.data?.map((v) => (
+          {sorted?.map((v) => (
             <VariableRow
               key={v.id}
               v={v}
@@ -175,6 +178,23 @@ function VariableRow({
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  const input = useRef<HTMLInputElement>(null);
+  /** Edit in place: the current value (when revealable) goes in selected. */
+  const edit = async () => {
+    setError(null);
+    let current = revealed ?? "";
+    if (!v.sealed && revealed === null) {
+      try {
+        current = (await api.revealVariable(v.id)).value;
+      } catch {
+        // Not revealable right now (e.g. sudo declined): start empty.
+      }
+    }
+    setValue(current);
+    setEditing(true);
+    requestAnimationFrame(() => input.current?.select());
+  };
 
   const reveal = async () => {
     setError(null);
@@ -218,7 +238,7 @@ function VariableRow({
               setValue("");
             }}
           >
-            <ReferenceInput mono autoFocus placeholder="New value" aria-label={`New value for ${v.name}`} value={value} onValueChange={setValue} options={options} />
+            <ReferenceInput ref={input} mono autoFocus placeholder={v.sealed ? "New value (sealed)" : "New value"} aria-label={`New value for ${v.name}`} value={value} onValueChange={setValue} options={options} />
             <Button type="submit" size="sm" variant="secondary">
               Save
             </Button>
@@ -235,7 +255,13 @@ function VariableRow({
             </Button>
           </>
         ) : (
-          <span className="font-mono text-[13px] tracking-widest text-muted-foreground">*******</span>
+          <span
+            className={clsx("font-mono text-[13px] tracking-widest text-muted-foreground", canEdit && "cursor-text select-none")}
+            title={canEdit ? "Double-click to edit" : undefined}
+            onDoubleClick={canEdit ? () => void edit() : undefined}
+          >
+            *******
+          </span>
         )}
         {error ? <span className="text-[13px] text-error">{error}</span> : null}
       </div>
@@ -254,8 +280,8 @@ function VariableRow({
               Reveal value
             </MenuItem>
           ) : null}
-          <MenuItem icon={<Variable />} onSelect={() => setEditing(true)}>
-            Set new value
+          <MenuItem icon={<Pencil />} onSelect={() => void edit()}>
+            Edit
           </MenuItem>
           <MenuSeparator />
           <MenuItem danger icon={<Trash />} onSelect={onDelete}>
@@ -329,11 +355,40 @@ function RawEditor({
   onSubmit: (patch: VariablePatch) => Promise<unknown>;
   onCancel: () => void;
 }) {
-  const existing = variables.map((v) => v.name);
-  const sealed = variables.filter((v) => v.sealed).length;
-  const [text, setText] = useState(() => envTemplate(existing));
+  // Sealed variables stay out: they can't be shown, and leaving them out
+  // can't delete them (the diff only covers the names listed here).
+  const existing = variables.filter((v) => !v.sealed).map((v) => v.name);
+  const sealed = variables.length - existing.length;
+  // Current values, revealed (audited, sudo-gated) when the editor opens.
+  const [values, setValues] = useState<Record<string, string> | null>(null);
+  const [text, setText] = useState("");
+  useEffect(() => {
+    let off = false;
+    void (async () => {
+      const open = variables.filter((v) => !v.sealed);
+      const out: Record<string, string> = {};
+      try {
+        // One first, so a sudo prompt shows once; the rest ride on it.
+        if (open[0]) out[open[0].name] = (await api.revealVariable(open[0].id)).value;
+        const rest = await Promise.allSettled(open.slice(1).map((v) => api.revealVariable(v.id)));
+        rest.forEach((r, i) => {
+          if (r.status === "fulfilled") out[open[i + 1]!.name] = r.value.value;
+        });
+      } catch {
+        // Not revealable now: fall back to bare NAME= lines.
+      }
+      if (off) return;
+      setValues(out);
+      setText(envTemplate(existing, out));
+    })();
+    return () => {
+      off = true;
+    };
+    // Once per opening: the list it was opened with is what it edits.
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const parsed = parseDotenv(text);
-  const diff = diffEnv(existing, parsed.vars);
+  const diff = diffEnv(existing, parsed.vars, values ?? {});
+  const hidden = existing.filter((n) => !(values && n in values)).length;
   const total = Object.keys(diff.set).length + diff.delete.length;
   const summary = [
     diff.added.length ? `${diff.added.length} added` : "",
@@ -345,11 +400,20 @@ function RawEditor({
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border p-4">
       <p className="text-sm text-muted-foreground">
-        Existing values stay hidden. Leave a <span className="font-mono">NAME=</span> line empty to keep its value, type one to replace it, add lines for
-        new variables, or delete a line to remove the variable.
-        {sealed ? ` ${sealed} sealed variable${sealed === 1 ? " is" : "s are"} listed the same way and can only be replaced.` : ""}
+        Edit values in place, add lines for new variables, or delete a line to remove the variable.
+        {hidden ? (
+          <>
+            {" "}
+            {hidden} value{hidden === 1 ? "" : "s"} couldn't be shown: leave <span className="font-mono">NAME=</span> empty to keep {hidden === 1 ? "it" : "them"}.
+          </>
+        ) : null}
+        {sealed ? ` ${sealed} sealed variable${sealed === 1 ? " isn't" : "s aren't"} listed here; edit ${sealed === 1 ? "it" : "them"} from the list.` : ""}
       </p>
-      <Textarea aria-label="Raw variables" className="min-h-48" spellCheck={false} value={text} onChange={(e) => setText(e.target.value)} />
+      {values === null ? (
+        <Skeleton className="h-48" />
+      ) : (
+        <Textarea aria-label="Raw variables" className="min-h-48 font-mono" spellCheck={false} value={text} onChange={(e) => setText(e.target.value)} />
+      )}
       {parsed.errors.length ? <Alert tone="warn">{parsed.errors.slice(0, 5).join(" · ")}</Alert> : null}
       {diff.delete.length ? (
         <Alert tone="warn">

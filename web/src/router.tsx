@@ -1,6 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { Suspense, lazy } from "react";
 import { Outlet, createRootRouteWithContext, createRoute, createRouter, redirect, useNavigate } from "@tanstack/react-router";
+import { RouteError, Toaster } from "./components/ErrorBoundary";
 import { SudoDialog } from "./components/SudoDialog";
 import { WorkspaceShell } from "./components/shell/WorkspaceShell";
 import { ApiError, api } from "./lib/api";
@@ -28,6 +29,7 @@ const rootRoute = createRootRouteWithContext<Ctx>()({
     <>
       <Outlet />
       <SudoDialog />
+      <Toaster />
     </>
   ),
 });
@@ -170,7 +172,7 @@ const routeTree = rootRoute.addChildren([
 ]);
 
 export function makeRouter(queryClient: QueryClient) {
-  return createRouter({ routeTree, context: { queryClient }, defaultPreload: "intent" });
+  return createRouter({ routeTree, context: { queryClient }, defaultPreload: "intent", defaultErrorComponent: RouteError });
 }
 
 declare module "@tanstack/react-router" {
