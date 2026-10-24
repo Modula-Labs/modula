@@ -162,8 +162,10 @@ pub async fn generate(
     meta: RequestMeta,
 ) -> AppResult<Json<Domain>> {
     let instance = grant.id();
-    let apps = state.cfg.apps_domain.clone().ok_or_else(|| {
-        AppError::Conflict("generated domains are off: set MODULA_APPS_DOMAIN".into())
+    let apps = state.apps_domain().ok_or_else(|| {
+        AppError::Conflict(
+            "generated domains need an apps domain: add one in Settings → Domain (or use a custom domain)".into(),
+        )
     })?;
     let (service, environment): (String, String) = sqlx::query_as(
         "SELECT s.name, e.name FROM service_instances i
@@ -251,7 +253,8 @@ pub async fn create_custom(
 ) -> AppResult<Json<Domain>> {
     let instance = grant.id();
     let workspace = grant.workspace_id()?;
-    let host = domains::parse_custom(&body.hostname, &state.cfg).map_err(AppError::BadRequest)?;
+    let host = domains::parse_custom(&body.hostname, &state.cfg, &state.hosts())
+        .map_err(AppError::BadRequest)?;
     check_port(body.target_port)?;
     let provider = domains::provider_for(&state, workspace).await;
     if host.wildcard && !provider.as_ref().is_some_and(|p| p.supports_dns01()) {

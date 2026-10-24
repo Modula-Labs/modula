@@ -216,6 +216,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ServerCommand,
     },
+    /// This Modula instance: its dashboard domain and apps domain.
+    Instance {
+        #[command(subcommand)]
+        command: InstanceCommand,
+    },
     /// Config as code: plan and apply modula.toml (see `config --help`).
     Config {
         #[command(subcommand)]
@@ -250,6 +255,36 @@ pub struct ConfigPlanArgs {
     /// can't be compared, so they are otherwise only set when missing).
     #[arg(long)]
     pub update_sealed: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InstanceCommand {
+    /// Show or set the dashboard's domain and the apps domain (a server
+    /// installs without one and is reached at its IP until then).
+    Domain {
+        #[command(subcommand)]
+        command: Option<InstanceDomainCommand>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InstanceDomainCommand {
+    /// Set the domains. DNS must point at the server first (A records for the
+    /// dashboard domain and *.<apps domain>); flags left out keep their value.
+    Set {
+        /// The dashboard's domain, e.g. deploy.example.com.
+        #[arg(long)]
+        dashboard: Option<String>,
+        /// Parent of generated app domains, e.g. apps.example.com.
+        #[arg(long)]
+        apps_domain: Option<String>,
+        /// Save even if DNS doesn't answer with this server (e.g. a proxied
+        /// Cloudflare record).
+        #[arg(long)]
+        skip_dns_check: bool,
+    },
+    /// Remove the dashboard's domain (back to the IP address).
+    Clear,
 }
 
 #[derive(Debug, Subcommand)]

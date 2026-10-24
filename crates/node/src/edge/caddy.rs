@@ -134,6 +134,28 @@ impl CaddyEdge {
     }
 }
 
+/// `cfg` plus this node's own routes (not hidden), and the dashboard's
+/// domain names on the same upstream as its own route.
+fn with_local_routes(cfg: &EdgeConfig, local: &[ResolvedRoute], hidden: &[String]) -> EdgeConfig {
+    let mut cfg = cfg.clone();
+    let local: Vec<&ResolvedRoute> = local
+        .iter()
+        .filter(|r| !hidden.contains(&r.hostname))
+        .collect();
+    if let Some(dashboard) = local.first() {
+        for h in cfg.dashboard_hosts.iter().filter_map(|h| normalize_host(h)) {
+            if !hidden.contains(&h) {
+                cfg.routes.push(ResolvedRoute {
+                    hostname: h,
+                    upstream: dashboard.upstream,
+                });
+            }
+        }
+    }
+    cfg.routes.extend(local.into_iter().cloned());
+    cfg
+}
+
 /// The full Caddy JSON config for `cfg`.
 /// Plain-HTTP routes: every known hostname redirects to HTTPS (308 keeps
 /// the method and body); anything else is the usual 404.
@@ -286,14 +308,8 @@ impl EdgeSink for CaddyEdge {
     }
 
     async fn apply(&self, cfg: &EdgeConfig) -> anyhow::Result<()> {
-        let mut cfg = cfg.clone();
         let hidden = self.hidden.lock().expect("edge lock").clone();
-        cfg.routes.extend(
-            self.local_routes
-                .iter()
-                .filter(|r| !hidden.contains(&r.hostname))
-                .cloned(),
-        );
+        let cfg = with_local_routes(cfg, &self.local_routes, &hidden);
         let cfg = &cfg;
         let hosts: HashSet<String> = cfg
             .routes
@@ -345,6 +361,7 @@ mod tests {
             ],
             tls,
             acme_email: "ops@example.com".into(),
+            dashboard_hosts: vec![],
         }
     }
 
@@ -398,6 +415,29 @@ mod tests {
             auto["policies"][1]["issuers"][0]["email"],
             "ops@example.com"
         );
+    }
+
+    #[test]
+    fn the_dashboard_domain_shares_the_dashboard_route() {
+        let mut c = cfg(TlsMode::TlsAcme);
+        c.dashboard_hosts = vec!["Deploy.Example.com".into(), "bad host".into()];
+        let local = vec![ResolvedRoute {
+            hostname: "159.69.253.176".into(),
+            upstream: "127.0.0.1:7100".parse().unwrap(),
+        }];
+        let out = with_local_routes(&c, &local, &[]);
+        let dash: Vec<_> = out
+            .routes
+            .iter()
+            .filter(|r| r.upstream.port() == 7100)
+            .map(|r| r.hostname.as_str())
+            .collect();
+        assert_eq!(dash, ["deploy.example.com", "159.69.253.176"]);
+        // Not a dashboard node: the names mean nothing here.
+        assert_eq!(with_local_routes(&c, &[], &[]).routes.len(), 3);
+        // Private mode hides the dashboard under every name.
+        let hidden = ["159.69.253.176".to_owned(), "deploy.example.com".to_owned()];
+        assert_eq!(with_local_routes(&c, &local, &hidden).routes.len(), 3);
     }
 
     #[test]

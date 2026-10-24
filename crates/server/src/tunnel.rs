@@ -337,7 +337,7 @@ pub async fn open(
         let same_origin = headers
             .get(header::ORIGIN)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|o| o == state.cfg.public_origin());
+            .is_some_and(|o| state.is_dashboard_origin(o));
         if !same_origin {
             return Err(AppError::Forbidden);
         }

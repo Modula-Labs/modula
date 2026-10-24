@@ -32,6 +32,11 @@ CREATE TABLE instance (
     setup_token_hash        bytea,
     setup_token_expires_at  timestamptz,
     setup_completed_at      timestamptz,
+    -- Set in the dashboard after install (the server starts on its IP):
+    -- another name for the dashboard, and the parent of generated domains
+    -- (MODULA_APPS_DOMAIN until set).
+    dashboard_domain        text,
+    apps_domain             text,
     created_at              timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO instance (id) VALUES (true);

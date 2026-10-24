@@ -673,7 +673,7 @@ pub async fn status_job(state: AppState, job: Job) -> anyhow::Result<()> {
     let token = installation_token(&state, installation, TokenScope::Statuses(repo.to_owned()))
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut target = state.cfg.public_url.clone();
+    let mut target = state.public_url();
     target.set_path(&format!("/projects/{project}"));
     target
         .query_pairs_mut()

@@ -349,6 +349,7 @@ impl Reconciler {
             routes,
             tls: pb::TlsMode::try_from(settings.tls).unwrap_or(pb::TlsMode::TlsAcme),
             acme_email: settings.acme_email,
+            dashboard_hosts: settings.dashboard_hosts,
         };
         if let Err(e) = edge.apply(&cfg).await {
             tracing::warn!(error = format!("{e:#}"), "edge update failed; will retry");
@@ -1014,6 +1015,7 @@ mod tests {
         ds.edge = Some(pb::EdgeSettings {
             tls: pb::TlsMode::TlsInternal as i32,
             acme_email: String::new(),
+            dashboard_hosts: vec![],
         });
         r.apply(&ds).await.unwrap();
         let cfg = edge.last.lock().unwrap().clone().unwrap();

@@ -70,7 +70,7 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<AppStatus>>
         slug,
         html_url,
         owner_login,
-        webhook_url: format!("{}{WEBHOOK_PATH}", state.cfg.public_origin()),
+        webhook_url: format!("{}{WEBHOOK_PATH}", state.public_origin()),
     }))
 }
 
@@ -254,8 +254,9 @@ pub async fn manifest(
     {
         return Err(AppError::Forbidden);
     }
-    let origin = state.cfg.public_origin();
-    let host = state.cfg.public_url.host_str().unwrap_or("self-hosted");
+    let origin = state.public_origin();
+    let public_url = state.public_url();
+    let host = public_url.host_str().unwrap_or("self-hosted");
     // App names are global on GitHub: another instance may have this one.
     let mut name = app_name(host, None);
     if app::app_name_taken(&state, &name).await {

@@ -49,7 +49,11 @@ impl Hostname {
 
 /// Validates a user-entered custom domain. Pasted URLs (`https://x.com/`) are
 /// accepted; internationalized names must be entered in punycode.
-pub fn parse_custom(raw: &str, cfg: &Config) -> Result<Hostname, String> {
+pub fn parse_custom(
+    raw: &str,
+    cfg: &Config,
+    hosts: &crate::instance_domain::Hosts,
+) -> Result<Hostname, String> {
     let mut h = raw.trim();
     for scheme in ["https://", "http://"] {
         if let Some(rest) = h.strip_prefix(scheme) {
@@ -106,16 +110,18 @@ pub fn parse_custom(raw: &str, cfg: &Config) -> Result<Hostname, String> {
         }
     }
     let under = |parent: &str| base == parent || base.ends_with(&format!(".{parent}"));
-    if let Some(apps) = cfg.apps_domain.as_deref()
+    if let Some(apps) = hosts.apps.as_deref()
         && under(apps)
     {
         return Err(format!(
             "names under {apps} are generated domains; use \"Generate domain\" instead"
         ));
     }
-    if let Some(dashboard) = cfg.public_url.host_str()
-        && under(&dashboard.to_ascii_lowercase())
-    {
+    let dashboards = [
+        cfg.public_url.host_str().map(str::to_ascii_lowercase),
+        hosts.dashboard.clone(),
+    ];
+    if dashboards.iter().flatten().any(|d| under(d)) {
         return Err("that name belongs to this dashboard".into());
     }
     if cfg.tcp_proxy_host.as_deref() == Some(base) {
@@ -555,11 +561,18 @@ mod tests {
     #[test]
     fn hostnames() {
         let c = cfg();
-        let ok = |s: &str| parse_custom(s, &c).map(|h| h.name);
+        let ok = |s: &str| {
+            parse_custom(s, &c, &crate::instance_domain::Hosts::from_config(&c)).map(|h| h.name)
+        };
         assert_eq!(ok(" WWW.Shop.com. ").unwrap(), "www.shop.com");
         assert_eq!(ok("https://shop.com/").unwrap(), "shop.com");
         assert_eq!(ok("xn--bcher-kva.de").unwrap(), "xn--bcher-kva.de");
-        let wc = parse_custom("*.shop.com", &c).unwrap();
+        let wc = parse_custom(
+            "*.shop.com",
+            &c,
+            &crate::instance_domain::Hosts::from_config(&c),
+        )
+        .unwrap();
         assert!(wc.wildcard);
         assert_eq!(wc.base(), "shop.com");
         // The dashboard's parent is fine; the dashboard itself is not.
@@ -590,7 +603,10 @@ mod tests {
             "x.deploy.example.com",
             "1.2.3.400",
         ] {
-            assert!(parse_custom(bad, &c).is_err(), "{bad:?} should be rejected");
+            assert!(
+                parse_custom(bad, &c, &crate::instance_domain::Hosts::from_config(&c)).is_err(),
+                "{bad:?} should be rejected"
+            );
         }
         assert!(ok(&format!("{}.com", "a".repeat(64))).is_err());
         assert!(ok(&format!("{}.com", "a".repeat(63))).is_ok());

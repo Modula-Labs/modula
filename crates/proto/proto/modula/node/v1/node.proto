@@ -247,6 +247,9 @@ enum TlsMode {
 message EdgeSettings {
   TlsMode tls = 1;
   string acme_email = 2;
+  // The dashboard's domain(s) set in the dashboard: the node that serves the
+  // dashboard (its own --route) serves it under these names too.
+  repeated string dashboard_hosts = 3;
 }
 
 // One isolated bridge network per environment.

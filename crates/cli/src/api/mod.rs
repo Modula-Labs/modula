@@ -215,6 +215,15 @@ impl Api {
             .await
     }
 
+    pub async fn put<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> anyhow::Result<T> {
+        self.send(self.http.put(self.url(path)?).json(body), path)
+            .await
+    }
+
     pub async fn patch<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         path: &str,

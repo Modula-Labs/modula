@@ -37,12 +37,15 @@ pub struct Inner {
     pub uploads_in_flight: std::sync::Mutex<std::collections::HashMap<modula_id::Id, u32>>,
     /// Private dashboard (Cloudflare Tunnel + Access): the gate and node answers.
     pub private: crate::private::Runtime,
+    /// The dashboard's domain and the apps domain set in the dashboard.
+    hosts: std::sync::RwLock<crate::instance_domain::Hosts>,
     pki: tokio::sync::OnceCell<Pki>,
 }
 
 impl AppState {
     pub fn new(db: PgPool, cfg: Config, keys: Keyring, limiter: RateLimiter) -> Self {
         let github = github::Client::new(cfg.github_api.clone()).expect("HTTP client");
+        let hosts = crate::instance_domain::Hosts::from_config(&cfg);
         Self(Arc::new(Inner {
             db,
             cfg,
@@ -56,6 +59,7 @@ impl AppState {
             dns: std::sync::RwLock::new(Arc::new(crate::domains::dns::PublicDns)),
             uploads_in_flight: Default::default(),
             private: Default::default(),
+            hosts: std::sync::RwLock::new(hosts),
             pki: tokio::sync::OnceCell::new(),
         }))
     }
@@ -63,6 +67,10 @@ impl AppState {
     /// Replaces the DNS resolver used to verify custom domains (tests).
     pub fn set_dns_resolver(&self, r: Arc<dyn crate::domains::dns::Resolver>) {
         *self.0.dns.write().expect("dns lock") = r;
+    }
+
+    pub(crate) fn hosts_lock(&self) -> &std::sync::RwLock<crate::instance_domain::Hosts> {
+        &self.0.hosts
     }
 
     /// The internal CA, created on first use.

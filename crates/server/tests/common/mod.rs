@@ -65,6 +65,8 @@ pub fn state_with(pool: PgPool, cfg: Config) -> AppState {
 pub struct TestApp {
     pub state: AppState,
     pub router: Router,
+    /// The `Origin` mutations send (the configured dashboard's).
+    pub origin: String,
 }
 
 impl TestApp {
@@ -73,10 +75,15 @@ impl TestApp {
     }
 
     pub fn with_config(pool: PgPool, cfg: Config) -> Self {
+        let origin = cfg.public_origin();
         let state = state_with(pool, cfg);
         let router = modula_server::http::app(state.clone())
             .layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, 1], 4000))));
-        Self { state, router }
+        Self {
+            state,
+            router,
+            origin,
+        }
     }
 
     pub fn db(&self) -> &PgPool {
@@ -90,9 +97,22 @@ impl TestApp {
         cookie: Option<&str>,
         body: Option<Value>,
     ) -> Resp {
+        self.call_at(&self.origin.clone(), method, path, cookie, body)
+            .await
+    }
+
+    /// Like [`Self::call`], sending `origin` with mutations.
+    pub async fn call_at(
+        &self,
+        origin: &str,
+        method: Method,
+        path: &str,
+        cookie: Option<&str>,
+        body: Option<Value>,
+    ) -> Resp {
         let mut b = Request::builder().method(method.clone()).uri(path);
         if method != Method::GET {
-            b = b.header(header::ORIGIN, ORIGIN);
+            b = b.header(header::ORIGIN, origin);
         }
         self.send(b, cookie, body).await
     }

@@ -27,6 +27,8 @@ pub struct EdgeConfig {
     pub routes: Vec<ResolvedRoute>,
     pub tls: TlsMode,
     pub acme_email: String,
+    /// More names for this node's own dashboard route, if it serves one.
+    pub dashboard_hosts: Vec<String>,
 }
 
 #[async_trait]

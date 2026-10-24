@@ -13,6 +13,7 @@ pub mod domains;
 pub mod error;
 pub mod github;
 pub mod http;
+pub mod instance_domain;
 pub mod integrations;
 pub mod jobs;
 pub mod keyring;
@@ -85,6 +86,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     // Sockets systemd holds across restarts (modula-server.socket), if any.
     let mut inherited = listen::Inherited::from_env()?;
     let state = AppState::new(db, cfg, Keyring::new(kek), RateLimiter::Redis(redis));
+    instance_domain::load(&state).await?;
     let stop = state.shutdown.clone();
     let worker = tokio::spawn(jobs::run_worker(
         state.clone(),

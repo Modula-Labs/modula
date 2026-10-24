@@ -293,6 +293,7 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
         edge: Some(pb::EdgeSettings {
             tls: tls as i32,
             acme_email: state.cfg.acme_email.clone().unwrap_or_default(),
+            dashboard_hosts: state.hosts().dashboard.into_iter().collect(),
         }),
     })
 }

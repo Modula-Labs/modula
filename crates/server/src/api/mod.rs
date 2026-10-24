@@ -142,6 +142,8 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/instance/self-backup", Instance(Action::SelfBackupRead), backups::get_self_backup)
         .put("/api/instance/self-backup", Instance(Action::SelfBackupUpdate), backups::put_self_backup)
         // Updates: versions, mode and maintenance window; "Update now" hands the upgrade to install.sh (modula-upgrade unit)
+        .get("/api/instance/domain", Instance(Action::InstanceDomainRead), crate::instance_domain::get)
+        .put("/api/instance/domain", Instance(Action::InstanceDomainUpdate), crate::instance_domain::put)
         .get("/api/instance/updates", Instance(Action::UpdatesRead), updates::get)
         .put("/api/instance/updates", Instance(Action::UpdatesUpdate), updates::put)
         .post("/api/instance/updates/check", Instance(Action::UpdatesRead), updates::check)

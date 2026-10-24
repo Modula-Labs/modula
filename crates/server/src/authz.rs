@@ -174,6 +174,9 @@ pub enum Action {
     ServerSuggest,
     /// Delete a provisioned server at the provider and remove its node.
     ServerDelete,
+    /// Instance-level: the dashboard's domain and the apps domain.
+    InstanceDomainRead,
+    InstanceDomainUpdate,
     /// Search an environment's stored logs (every service in it).
     EnvironmentLogsRead,
     /// A project's outgoing webhooks (list, add, send a test, remove).
@@ -241,6 +244,7 @@ impl Action {
             | Self::ServerProvision
             | Self::ServerSuggest => K::Workspace,
             Self::ServerRead | Self::ServerDelete => K::ProvisionedServer,
+            Self::InstanceDomainRead | Self::InstanceDomainUpdate => return None,
             Self::EnvironmentLogsRead => K::Environment,
             Self::WebhookList | Self::WebhookCreate => K::Project,
             Self::WebhookTest | Self::WebhookDelete => K::Webhook,
@@ -322,6 +326,7 @@ impl Action {
             | Self::HetznerCatalog
             | Self::ServerProvision
             | Self::ServerDelete => Role::Admin,
+            Self::InstanceDomainRead | Self::InstanceDomainUpdate => Role::Admin,
             // Same audience as a deployment's logs.
             Self::EnvironmentLogsRead => Role::Viewer,
             Self::WebhookList | Self::WebhookCreate | Self::WebhookTest | Self::WebhookDelete => {
@@ -404,7 +409,10 @@ impl Action {
             | Self::HetznerDisconnect
             | Self::ServerProvision
             | Self::ServerDelete => true,
-            Self::EnvironmentLogsRead
+            // Not destructive and reveals nothing; the CLI's API tokens set it.
+            Self::InstanceDomainUpdate
+            | Self::InstanceDomainRead
+            | Self::EnvironmentLogsRead
             | Self::WebhookList
             | Self::WebhookCreate
             | Self::WebhookTest

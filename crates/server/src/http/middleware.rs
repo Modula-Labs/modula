@@ -48,7 +48,7 @@ pub async fn require_same_origin(
         .headers()
         .get(header::ORIGIN)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|o| o == state.cfg.public_origin());
+        .is_some_and(|o| state.is_dashboard_origin(o));
     if !origin_ok {
         tracing::warn!(path = %req.uri().path(), "rejected cross-origin or origin-less mutation");
         return AppError::Forbidden.into_response();

@@ -6,6 +6,7 @@ pub mod db;
 pub mod deploy;
 pub mod domain;
 pub mod environment;
+pub mod instance;
 pub mod logs;
 pub mod meta;
 pub mod metrics;
@@ -74,6 +75,7 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
         Command::Guide => meta::guide(ctx),
         Command::Server { command } => return crate::provision::run(ctx, command).await,
         Command::Config { command } => return config::run(ctx, command).await,
+        Command::Instance { command } => instance::run(ctx, command).await?,
     }
     Ok(0)
 }
