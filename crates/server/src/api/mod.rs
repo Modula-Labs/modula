@@ -1,5 +1,6 @@
 pub mod account;
 pub mod activity;
+pub mod app_templates;
 pub mod auth;
 pub mod backups;
 pub mod buckets;
@@ -85,6 +86,9 @@ pub fn routes(state: AppState) -> ApiRouter {
         .post("/api/environments/{environment_id}/discard", Resource(Action::EnvironmentDiscard), activity::discard)
         // Services, per-environment config, variables
         .post("/api/projects/{project_id}/services", Resource(Action::ServiceCreate), services::create)
+        // App templates: several services (an app and its databases) at once
+        .get("/api/app-templates", Authenticated, app_templates::list)
+        .post("/api/projects/{project_id}/app-templates", Resource(Action::ServiceCreate), app_templates::create)
         .delete("/api/services/{service_id}", Resource(Action::ServiceDelete), services::delete)
         .get("/api/service-instances/{instance_id}", Resource(Action::InstanceRead), services::get_instance)
         .patch("/api/service-instances/{instance_id}", Resource(Action::InstanceUpdate), services::update_instance)

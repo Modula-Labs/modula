@@ -82,6 +82,27 @@ impl Api {
             .await
     }
 
+    /// The app template gallery: `[{ id, name, description, services: [...] }]`.
+    pub async fn app_templates(&self) -> anyhow::Result<Vec<Value>> {
+        self.get("/api/app-templates").await
+    }
+
+    /// Creates an app's services; returns `{ services: [{ id, name, role,
+    /// instanceId, web }], domain, warnings }`.
+    pub async fn create_app(
+        &self,
+        project: &str,
+        template: &str,
+        environment: &str,
+        name_prefix: Option<&str>,
+    ) -> anyhow::Result<Value> {
+        self.post(
+            &format!("/api/projects/{project}/app-templates"),
+            &json!({ "template": template, "environmentId": environment, "namePrefix": name_prefix }),
+        )
+        .await
+    }
+
     pub async fn instance(&self, id: &str) -> anyhow::Result<InstanceDetail> {
         self.get(&format!("/api/service-instances/{id}")).await
     }

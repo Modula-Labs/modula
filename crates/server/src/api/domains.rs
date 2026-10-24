@@ -156,6 +156,35 @@ fn generated_label(service: &str, environment: Option<&str>) -> anyhow::Result<S
     Ok(format!("{}-{suffix}", base.trim_matches('-')))
 }
 
+/// Insert a generated domain `<label>.<apps>` for `instance` (see
+/// [`generated_label`]; `environment` None = the project's default one).
+pub(crate) async fn insert_generated(
+    tx: &mut sqlx::PgConnection,
+    instance: Id,
+    service: &str,
+    environment: Option<&str>,
+    apps: &str,
+) -> AppResult<(Id, String)> {
+    let id = Id::new();
+    // A collision on the random suffix is astronomically unlikely; retry once.
+    for _ in 0..2 {
+        let hostname = format!("{}.{apps}", generated_label(service, environment)?);
+        let inserted = sqlx::query(
+            "INSERT INTO domains (id, service_instance_id, hostname, kind) VALUES ($1, $2, $3, 'generated')
+             ON CONFLICT (hostname) DO NOTHING",
+        )
+        .bind(id)
+        .bind(instance)
+        .bind(&hostname)
+        .execute(&mut *tx)
+        .await?;
+        if inserted.rows_affected() == 1 {
+            return Ok((id, hostname));
+        }
+    }
+    Err(anyhow::anyhow!("no free generated domain for {service}").into())
+}
+
 pub async fn generate(
     State(state): State<AppState>,
     actor: Actor,
@@ -191,27 +220,14 @@ pub async fn generate(
             "a service can have at most {MAX_GENERATED} generated domains"
         )));
     }
-    let id = Id::new();
-    // A collision on the random suffix is astronomically unlikely; retry once.
-    let mut hostname = String::new();
-    for _ in 0..2 {
-        hostname = format!(
-            "{}.{apps}",
-            generated_label(&service, (!default).then_some(environment.as_str()))?
-        );
-        let inserted = sqlx::query(
-            "INSERT INTO domains (id, service_instance_id, hostname, kind) VALUES ($1, $2, $3, 'generated')
-             ON CONFLICT (hostname) DO NOTHING",
-        )
-        .bind(id)
-        .bind(instance)
-        .bind(&hostname)
-        .execute(&mut *tx)
-        .await?;
-        if inserted.rows_affected() == 1 {
-            break;
-        }
-    }
+    let (id, hostname) = insert_generated(
+        &mut tx,
+        instance,
+        &service,
+        (!default).then_some(environment.as_str()),
+        &apps,
+    )
+    .await?;
     let nodes = bump_serving_nodes(&mut tx, instance).await?;
     Entry::new("domain.create", &meta)
         .actor(&actor)

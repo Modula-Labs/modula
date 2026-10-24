@@ -147,6 +147,8 @@ export interface ServiceSummary {
   icon: string | null;
   /** Database template the service was created from, if any. */
   template?: string | null;
+  /** The gallery app it was deployed with (see `AppTemplate`). */
+  appTemplate?: string | null;
 }
 export type DeploymentStatus =
   | "queued"
@@ -311,6 +313,32 @@ export interface Template {
   defaultName: string;
   /** Variables a client connects with, e.g. DATABASE_URL. */
   connect: { label: string; variable: string }[];
+}
+/** A one-click app from the gallery: the app and the databases it needs. */
+export interface AppTemplate {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  docsUrl: string;
+  /** In creation order (databases first). */
+  services: AppTemplateService[];
+}
+export interface AppTemplateService {
+  /** Default service name. */
+  role: string;
+  /** A database template, for databases. */
+  template: TemplateId | null;
+  image: string;
+  mountPath: string | null;
+  /** Gets a generated domain (the web service). */
+  domain: boolean;
+}
+export interface CreatedApp {
+  template: string;
+  services: { id: string; name: string; role: string; instanceId: string; web: boolean }[];
+  domain: string | null;
+  warnings: string[];
 }
 export type BackupProvider = "s3" | "r2" | "b2" | "minio";
 export interface BackupTarget {
@@ -999,6 +1027,9 @@ export const api = {
   deleteDomain: (id: string) => del<{ ok: true }>(`/api/domains/${enc(id)}`),
 
   templates: () => get<Template[]>("/api/templates"),
+  appTemplates: () => get<AppTemplate[]>("/api/app-templates"),
+  createApp: (project: string, b: { template: string; environmentId: string; namePrefix?: string }) =>
+    post<CreatedApp>(`/api/projects/${enc(project)}/app-templates`, b),
   createVolume: (instance: string, mountPath: string) =>
     post<Instance>(`/api/service-instances/${enc(instance)}/volume`, {
       mountPath,
