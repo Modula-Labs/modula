@@ -154,7 +154,7 @@ export function ruleKindInfo(kind: RuleKind): RuleKindInfo {
 
 /** Only kinds about a service can be scoped to one; disk and server rules are per server. */
 export function kindSupportsServiceScope(kind: RuleKind): boolean {
-  return kind !== "disk" && kind !== "node_offline" && kind !== "backup_failed";
+  return kind !== "disk" && kind !== "node_offline";
 }
 
 function minutes(n: number): string {
