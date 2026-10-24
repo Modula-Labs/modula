@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
+import { Checkbox } from "@/components/ui/Controls";
 import { Field, Input, Select, Textarea } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/misc";
 import { Segmented } from "@/components/ui/Tabs";
@@ -31,10 +32,10 @@ function Section({
   children: ReactNode;
 }) {
   return (
-    <section id={sectionId(title)} className="grid scroll-mt-2 gap-4 @container border-b border-border py-6 first:pt-0 last:border-b-0">
+    <section id={sectionId(title)} className="grid scroll-mt-2 gap-4 @container border-b border-border py-8 first:pt-0 last:border-b-0">
       <div className="grid gap-4 @2xl:grid-cols-[200px_1fr] @2xl:gap-8">
         <div>
-          <h3 className="text-base font-semibold">{title}</h3>
+          <h3 className="text-base leading-6 font-bold">{title}</h3>
           {description ? (
             <p className="mt-1 text-sm text-muted-foreground">{description}</p>
           ) : null}
@@ -355,8 +356,8 @@ export function SettingsTab({
                 )}
               </Field>
             </div>
-            <div className="flex flex-col gap-1.5">
-              <div className="text-sm font-medium">Builder</div>
+            <div className="flex flex-col gap-2">
+              <div className="text-sm leading-none font-normal">Builder</div>
               <div
                 className={
                   canEdit ? undefined : "pointer-events-none opacity-50"
@@ -372,7 +373,7 @@ export function SettingsTab({
                   ]}
                 />
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-sm text-muted-foreground">
                 {form.builder === "railpack"
                   ? "Detects your language and builds without a Dockerfile."
                   : form.kind === "repo"
@@ -416,19 +417,18 @@ export function SettingsTab({
         ) : null}
         {form.kind === "repo" ? (
           <>
-            <label className="flex items-start gap-2.5 text-sm">
-              <input
-                type="checkbox"
+            <label className="flex items-start gap-2 text-sm">
+              <Checkbox
                 disabled={!canEdit}
                 checked={form.autoDeploy}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, autoDeploy: e.target.checked }))
+                onCheckedChange={(autoDeploy) =>
+                  setForm((f) => ({ ...f, autoDeploy }))
                 }
-                className="mt-0.5 size-4 accent-foreground"
+                className="mt-0.5"
               />
-              <span>
-                <span className="font-medium">Auto-deploy</span>
-                <span className="block text-xs text-muted-foreground">
+              <span className="flex flex-col gap-1">
+                <span className="leading-none font-normal">Auto-deploy</span>
+                <span className="text-sm text-muted-foreground">
                   Deploy automatically when the branch gets new commits.
                 </span>
               </span>
@@ -451,7 +451,7 @@ export function SettingsTab({
         ) : null}
         {form.kind === "repo" && canEdit ? (
           confirmDisconnect ? (
-            <div className="flex flex-col gap-3 rounded-lg border border-border p-4 text-sm">
+            <div className="flex flex-col gap-3 rounded-xl border border-border p-4 text-sm">
               <p className="text-muted-foreground">
                 Future deploys will come from local files with{" "}
                 <code className="font-mono text-foreground">modula up</code>,
@@ -694,9 +694,9 @@ export function SettingsTab({
       {canDelete ? (
         <Section title="Danger zone">
           {remove.error ? <Alert>{remove.error.message}</Alert> : null}
-          <div className="flex items-center justify-between gap-4 rounded-lg border border-destructive/40 p-4">
+          <div className="flex items-center justify-between gap-4 rounded-xl border border-destructive/40 p-4">
             <div className="text-sm">
-              <div className="font-medium">Delete service</div>
+              <div className="font-bold">Delete service</div>
               <div className="text-muted-foreground">
                 Removes it from every environment and stops its containers.
               </div>
@@ -713,7 +713,7 @@ export function SettingsTab({
       ) : null}
 
       {canEdit && (dirty || save.isSuccess || save.error || deploy.error) ? (
-        <div className="sticky bottom-0 mt-4 flex items-center justify-between gap-3 rounded-lg border border-border bg-popover px-4 py-3 shadow-menu">
+        <div className="sticky bottom-0 mt-4 flex items-center justify-between gap-3 rounded-xl border border-border bg-popover px-4 py-3 shadow-menu">
           <div className="min-w-0 text-sm">
             {save.error ? (
               <span className="text-error">{save.error.message}</span>

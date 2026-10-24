@@ -2,6 +2,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { X } from "@/components/ui/icons";
+import { Checkbox } from "@/components/ui/Controls";
 import { Textarea, Input } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
 import { Alert } from "@/components/ui/misc";
@@ -63,10 +64,10 @@ export function RowDrawer({
     <Dialog.Root open onOpenChange={(o) => !o && onClose()}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40" />
-        <Dialog.Content className="anim-sheet fixed top-3 right-3 bottom-3 z-50 flex w-[min(460px,calc(100vw-24px))] flex-col rounded-xl border border-border bg-card shadow-modal">
-          <div className="flex items-center justify-between gap-3 px-5 pt-5 pb-3">
+        <Dialog.Content className="anim-sheet fixed top-3 right-3 bottom-3 z-50 flex w-[min(460px,calc(100vw-24px))] flex-col rounded-xl bg-card text-card-foreground shadow-modal ring-1 ring-foreground/10">
+          <div className="flex items-center justify-between gap-3 px-6 pt-6 pb-3">
             <div>
-              <Dialog.Title className="text-lg font-semibold">{inserting ? "New row" : "Row"}</Dialog.Title>
+              <Dialog.Title className="text-lg font-bold">{inserting ? "New row" : "Row"}</Dialog.Title>
               <Dialog.Description className="text-sm text-muted-foreground">
                 {inserting
                   ? "Leave a field empty to use its default."
@@ -75,11 +76,13 @@ export function RowDrawer({
                     : `Identified by ${pk.map((c) => c.name).join(", ")}.`}
               </Dialog.Description>
             </div>
-            <Dialog.Close aria-label="Close" className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground">
-              <X className="size-4" />
+            <Dialog.Close asChild>
+              <Button variant="ghost" size="icon" aria-label="Close" className="text-muted-foreground">
+                <X />
+              </Button>
             </Dialog.Close>
           </div>
-          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-5 py-3">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-6 py-3">
             {error ? <Alert>{error}</Alert> : null}
             {columns.map((c) => {
               const f = fields[c.name]!;
@@ -88,9 +91,9 @@ export function RowDrawer({
               return (
                 <div key={c.name} className="flex flex-col gap-1.5">
                   <div className="flex items-center justify-between gap-2">
-                    <label htmlFor={id} className="text-sm font-medium">
+                    <label htmlFor={id} className="text-sm font-bold">
                       {c.name}
-                      {c.primaryKey ? <span className="ml-1.5 text-xs font-normal text-muted-foreground">primary key</span> : null}
+                      {c.primaryKey ? <span className="ml-1.5 text-[13px] font-normal text-muted-foreground">primary key</span> : null}
                     </label>
                     <span className="font-mono text-xs text-muted-foreground">{c.type}</span>
                   </div>
@@ -114,21 +117,13 @@ export function RowDrawer({
                     />
                   )}
                   {c.nullable && editable ? (
-                    <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <input
-                        type="checkbox"
-                        className="size-3.5 accent-foreground"
-                        checked={f.isNull}
-                        onChange={(e) => set(c.name, { isNull: e.target.checked })}
-                      />
-                      NULL
-                    </label>
+                    <Checkbox label="NULL" checked={f.isNull} onCheckedChange={(v) => set(c.name, { isNull: v })} />
                   ) : null}
                 </div>
               );
             })}
           </div>
-          <div className="flex items-center justify-between gap-2 border-t border-border px-5 py-3">
+          <div className="flex items-center justify-between gap-2 border-t border-border px-6 py-4">
             {!inserting && editable ? (
               <Button variant="danger-outline" onClick={() => setConfirm(true)}>
                 Delete row
@@ -141,7 +136,7 @@ export function RowDrawer({
                 {editable ? "Cancel" : "Close"}
               </Button>
               {editable ? (
-                <Button variant="secondary" loading={saving} disabled={!dirty} onClick={() => onSave(changes())}>
+                <Button variant="primary" loading={saving} disabled={!dirty} onClick={() => onSave(changes())}>
                   {inserting ? "Insert" : "Save"}
                 </Button>
               ) : null}

@@ -78,7 +78,7 @@ export function LogsHistogram({
       </svg>
       {hb ? (
         <div
-          className="pointer-events-none absolute top-1 z-10 rounded-md border border-border bg-popover px-2 py-1 text-xs shadow-raise"
+          className="pointer-events-none absolute top-1 z-10 rounded-lg border border-border bg-popover px-2 py-1 text-xs shadow-raise"
           style={hoverX > w * 0.6 ? { right: w - hoverX - 4 } : { left: hoverX + 8 }}
         >
           <div className="text-muted-foreground">{formatWindowTime(hb.t, span)}</div>

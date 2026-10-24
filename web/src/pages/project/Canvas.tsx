@@ -61,22 +61,28 @@ function ServiceCard({ data }: NodeProps<ServiceNode>) {
   return (
     <div
       className={clsx(
-        "flex h-36 w-72 cursor-pointer flex-col rounded-xl border bg-card p-5 transition-colors",
-        selected ? "border-foreground/50" : "border-border hover:border-input",
+        // Selected: Kobra's 3px ring fades and grows in (and back out), over a very soft shadow.
+        "flex h-36 w-72 cursor-pointer flex-col rounded-xl border bg-card p-4",
+        "transition-[box-shadow,border-color] duration-200 ease-out motion-reduce:transition-none",
+        selected
+          ? "border-foreground/40 shadow-[0_1px_2px_rgb(0_0_0/0.04),0_6px_16px_-6px_rgb(0_0_0/0.10)] ring-3 ring-ring/40"
+          : "border-border ring-0 ring-ring/0 hover:border-foreground/25",
       )}
     >
       <Handle type="target" position={Position.Left} className="!opacity-0" />
       <div className="flex items-center gap-2.5">
         <ServiceIcon stack={service.stack} image={service.image} repo={service.repo} />
-        <span className="min-w-0 flex-1 truncate text-base font-semibold">{service.name}</span>
+        <span className="min-w-0 flex-1 truncate text-sm font-bold">{service.name}</span>
         {pending > 0 ? (
-          <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground">Edited</span>
+          <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs font-normal text-muted-foreground">Edited</span>
         ) : null}
       </div>
-      <div className="mt-1 truncate text-sm text-muted-foreground">{service.domain ?? service.repo ?? " "}</div>
+      <div className="mt-1 truncate text-[13px] text-muted-foreground">{service.domain ?? service.repo ?? " "}</div>
       <div className="mt-auto flex items-center justify-between gap-2">
-        <span className="flex min-w-0 items-center gap-2 text-sm">
-          <StatusDot tone={state.tone}>{state.label}</StatusDot>
+        <span className="flex min-w-0 items-center gap-2 text-[13px] whitespace-nowrap">
+          <span className="shrink-0">
+            <StatusDot tone={state.tone}>{state.label}</StatusDot>
+          </span>
           {pending > 0 ? (
             <span className="truncate text-muted-foreground">
               · {pending} {pending === 1 ? "Change" : "Changes"}
@@ -86,7 +92,7 @@ function ServiceCard({ data }: NodeProps<ServiceNode>) {
         {service.volume ? (
           <span
             title={`Volume mounted at ${service.volume}`}
-            className="inline-flex max-w-[55%] items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground [&_svg]:size-3.5"
+            className="inline-flex min-w-0 max-w-[45%] shrink items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground [&_svg]:size-3.5"
           >
             <Disk aria-hidden />
             <span className="truncate font-mono">{service.volume}</span>
@@ -295,7 +301,7 @@ function CanvasInner({
         className="bg-background"
       >
         <Background variant={BackgroundVariant.Dots} gap={GRID} size={1.5} color="var(--canvas-dot)" />
-        <div className="absolute bottom-4 left-4 z-10 flex flex-col gap-1 rounded-lg border border-border bg-card p-1">
+        <div className="absolute bottom-4 left-4 z-10 flex flex-col gap-1 rounded-xl border border-border bg-card p-1">
           {[
             { label: "Zoom in", icon: <Plus />, run: () => flow.zoomIn() },
             { label: "Zoom out", icon: <Minus />, run: () => flow.zoomOut() },
@@ -306,7 +312,7 @@ function CanvasInner({
               title={b.label}
               aria-label={b.label}
               onClick={b.run}
-              className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground [&_svg]:size-4"
+              className="flex size-8 cursor-pointer items-center justify-center rounded-lg text-muted-foreground hover:bg-nav-hover hover:text-foreground [&_svg]:size-4"
             >
               {b.icon}
             </button>

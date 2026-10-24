@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { Checkbox } from "@/components/ui/Controls";
 import { Field, Input, Select } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
 import { Alert } from "@/components/ui/misc";
@@ -69,10 +70,7 @@ export function NewEnvironmentDialog({
           )}
         </Field>
         {from ? (
-          <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            <input type="checkbox" className="size-4 accent-foreground" checked={copyVariables} onChange={(e) => setCopyVariables(e.target.checked)} />
-            Copy variables (sealed ones are not copied)
-          </label>
+          <Checkbox checked={copyVariables} onCheckedChange={setCopyVariables} label="Copy variables (sealed ones are not copied)" />
         ) : null}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>

@@ -18,7 +18,7 @@ function Avatar({ name, size = 24, round }: { name: string; size?: number; round
     <span
       aria-hidden
       style={{ width: size, height: size, fontSize: size * 0.45 }}
-      className={clsx("inline-flex shrink-0 items-center justify-center bg-brand-soft font-semibold text-brand-text", round ? "rounded-full" : "rounded-md")}
+      className={clsx("inline-flex shrink-0 items-center justify-center bg-muted font-bold text-foreground", round ? "rounded-full" : "rounded-md")}
     >
       {name.trim().charAt(0).toUpperCase() || "?"}
     </span>
@@ -29,8 +29,8 @@ function NavItem({ to, icon, children, badge }: { to: string; icon: ReactNode; c
   return (
     <Link
       to={to}
-      className="flex h-9 items-center gap-2.5 rounded-md px-2.5 text-base text-muted-foreground hover:bg-accent hover:text-foreground [&>svg]:size-4"
-      activeProps={{ className: "!bg-accent !text-foreground [&>svg]:text-brand-text" }}
+      className="flex h-8 items-center gap-2 rounded-lg px-2 text-sm font-normal text-muted-foreground hover:bg-nav-hover hover:text-foreground [&>svg]:size-4 [&>svg]:text-muted-foreground"
+      activeProps={{ className: "!bg-nav-hover !text-foreground [&>svg]:!text-foreground" }}
     >
       {icon}
       {children}
@@ -39,7 +39,9 @@ function NavItem({ to, icon, children, badge }: { to: string; icon: ReactNode; c
   );
 }
 
-const menuItem = "flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-sm text-foreground hover:bg-accent [&>svg]:size-4 [&>svg]:text-muted-foreground";
+const menuItem = "flex min-h-8 w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-foreground hover:bg-accent [&>svg]:size-4 [&>svg]:text-muted-foreground";
+const sectionLabel = "px-2 pb-1 pt-3 text-xs text-muted-foreground";
+const popPanel = "anim-pop z-30 w-64 rounded-xl bg-popover p-1.5 text-popover-foreground shadow-menu";
 
 function NewWorkspaceDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (o: boolean) => void; onCreated: (w: Membership) => void }) {
   const qc = useQueryClient();
@@ -95,7 +97,7 @@ export function WorkspaceShell() {
     staleTime: 5 * 60_000,
     retry: false,
   });
-  const updateBadge = me?.user.isInstanceAdmin && updates.data?.updateAvailable ? <span className="text-caps ml-auto text-info">Update</span> : null;
+  const updateBadge = me?.user.isInstanceAdmin && updates.data?.updateAvailable ? <span className="ml-auto text-xs text-info">Update</span> : null;
 
   if (!me || !current) return null;
 
@@ -106,28 +108,27 @@ export function WorkspaceShell() {
   };
 
   return (
-    <div className="grid h-full grid-cols-[224px_1fr] grid-rows-[56px_1fr]">
-      <header className="col-span-2 flex items-center justify-between px-4">
-        <Link to="/projects" aria-label="Modula Deploy home"><Logo /></Link>
-      </header>
-
+    <div className="grid h-full grid-cols-[240px_1fr] bg-background">
       <aside className="flex min-h-0 flex-col px-2 pb-2">
+        <div className="flex h-12 items-center px-2">
+          <Link to="/projects" aria-label="Modula Deploy home"><Logo /></Link>
+        </div>
         <Popover.Root open={wsOpen} onOpenChange={setWsOpen}>
-          <Popover.Trigger className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-accent">
+          <Popover.Trigger className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-nav-hover">
             <Avatar name={current.name} />
             <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-1 text-sm font-semibold"><span className="truncate">{current.name}</span><ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /></span>
-              <span className="text-caps text-info">{current.role}</span>
+              <span className="flex items-center gap-1 text-sm font-bold"><span className="truncate">{current.name}</span><ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /></span>
+              <span className="block text-xs text-muted-foreground">{current.role}</span>
             </span>
           </Popover.Trigger>
           <Popover.Portal>
-            <Popover.Content align="start" sideOffset={4} className="anim-pop z-30 w-64 rounded-md bg-card p-1 shadow-menu">
-              <div className="text-caps px-2.5 py-1.5 text-muted-foreground">Workspaces</div>
+            <Popover.Content align="start" sideOffset={4} className={popPanel}>
+              <div className="px-2.5 py-1.5 text-xs text-muted-foreground">Workspaces</div>
               {me.workspaces.map((w) => (
                 <button key={w.id} className={menuItem} onClick={() => { select(w.id); setWsOpen(false); }}>
                   <Avatar name={w.name} size={20} />
                   <span className="flex-1 truncate text-left">{w.name}</span>
-                  {w.id === current.id ? <Check className="!text-brand-text" /> : null}
+                  {w.id === current.id ? <Check className="!text-foreground" /> : null}
                 </button>
               ))}
               <div className="my-1 h-px bg-border" />
@@ -138,38 +139,37 @@ export function WorkspaceShell() {
           </Popover.Portal>
         </Popover.Root>
 
-        <div className="my-2 h-px bg-border" />
+        <div className={sectionLabel}>Workspace</div>
         <nav className="flex flex-col gap-0.5" aria-label="Workspace">
           <NavItem to="/projects" icon={<LayoutGrid />}>Projects</NavItem>
           <NavItem to="/settings" icon={<Settings />} badge={updateBadge}>Settings</NavItem>
         </nav>
         {me.user.isInstanceAdmin ? (
           <>
-            <div className="my-2 h-px bg-border" />
+            <div className={sectionLabel}>Instance</div>
             <nav className="flex flex-col gap-0.5" aria-label="Instance">
               <NavItem to="/servers" icon={<Server />}>Servers</NavItem>
             </nav>
           </>
         ) : null}
-        <div className="my-2 h-px bg-border" />
+        <div className={sectionLabel}>Account</div>
         <nav className="flex flex-col gap-0.5" aria-label="Account">
           <NavItem to="/account/security" icon={<ShieldLock />}>Security</NavItem>
         </nav>
 
         <div className="mt-auto">
-          <div className="my-2 h-px bg-border" />
           <Popover.Root open={acctOpen} onOpenChange={setAcctOpen}>
-            <Popover.Trigger className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left hover:bg-accent" aria-label="Account menu">
+            <Popover.Trigger className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-nav-hover" aria-label="Account menu">
               <Avatar name={me.user.name} round />
               <span className="min-w-0 flex-1 truncate text-sm">{me.user.name}</span>
               <DotsVertical className="size-4 text-muted-foreground" />
             </Popover.Trigger>
             <Popover.Portal>
-              <Popover.Content side="top" align="start" sideOffset={6} className="anim-pop z-30 w-64 rounded-md bg-card p-1 shadow-menu">
+              <Popover.Content side="top" align="start" sideOffset={6} className={popPanel}>
                 <div className="flex items-center gap-3 px-2.5 py-3">
                   <Avatar name={me.user.name} size={40} round />
                   <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold">{me.user.name}</div>
+                    <div className="truncate text-sm font-bold">{me.user.name}</div>
                     <div className="truncate text-xs text-muted-foreground">{me.user.email}</div>
                   </div>
                 </div>
@@ -177,11 +177,11 @@ export function WorkspaceShell() {
                 <Link to="/account/security" className={menuItem} onClick={() => setAcctOpen(false)}><ShieldLock /> Account security</Link>
                 <div className="my-1 h-px bg-border" />
                 <div className="flex items-center justify-between px-1">
-                  <button className="flex h-9 items-center gap-2 rounded-md px-1.5 text-sm text-muted-foreground hover:text-foreground" onClick={toggle}>
+                  <button className="flex h-8 cursor-pointer items-center gap-2 rounded-lg px-1.5 text-sm text-muted-foreground hover:text-foreground" onClick={toggle}>
                     {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
                     {theme === "dark" ? "Light theme" : "Dark theme"}
                   </button>
-                  <button className="flex h-9 items-center gap-2 rounded-md px-1.5 text-sm text-error hover:bg-destructive/10" onClick={() => void logout()}>
+                  <button className="flex h-8 cursor-pointer items-center gap-2 rounded-lg px-1.5 text-sm text-error hover:bg-destructive/10" onClick={() => void logout()}>
                     Log out <Logout className="size-4" />
                   </button>
                 </div>
@@ -191,8 +191,8 @@ export function WorkspaceShell() {
         </div>
       </aside>
 
-      <main className="mr-2 mb-2 min-h-0 overflow-auto rounded-md border border-border bg-card">
-        <div className="mx-auto max-w-[880px] px-8 py-10">
+      <main className="min-h-0 overflow-auto border-l border-border bg-background">
+        <div className="mx-auto max-w-[880px] px-8 py-8">
           <Outlet />
         </div>
       </main>

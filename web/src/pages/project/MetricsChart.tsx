@@ -74,11 +74,11 @@ export function MetricsChart({
   return (
     <section className="rounded-xl border border-border bg-card p-4">
       <div className="mb-2 flex items-baseline justify-between gap-3">
-        <h3 className="text-sm font-medium">{title}</h3>
+        <h3 className="text-base leading-6 font-bold">{title}</h3>
         <div className="flex items-center gap-3 text-sm tabular-nums">
           {series.length > 1
             ? series.map((s) => (
-                <span key={s.name} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span key={s.name} className="flex items-center gap-1.5 text-[13px] text-muted-foreground">
                   <span className="inline-block h-0.5 w-3" style={{ background: s.color }} />
                   {s.name}
                 </span>
@@ -161,7 +161,7 @@ export function MetricsChart({
         </svg>
         {hover !== null ? (
           <div
-            className="pointer-events-none absolute top-0 z-10 rounded-md border border-border bg-popover px-2 py-1 text-xs shadow-raise"
+            className="pointer-events-none absolute top-0 z-10 rounded-lg border border-border bg-popover px-2 py-1 text-xs shadow-raise"
             style={tipLeft ? { right: w - hoverX + 8 } : { left: hoverX + 8 }}
           >
             <div className="text-muted-foreground">{formatAxisTime(hover, range)}</div>

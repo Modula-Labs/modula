@@ -184,16 +184,16 @@ export function NewServiceDialog({
           onEscapeKeyDown={(e) => {
             if (document.activeElement?.getAttribute("aria-expanded") === "true") e.preventDefault();
           }}
-          className="anim-modal fixed top-[16%] left-1/2 z-50 w-[480px] max-w-[calc(100vw-32px)] -translate-x-1/2 overflow-hidden rounded-xl bg-popover shadow-modal">
+          className="anim-modal fixed top-[16%] left-1/2 z-50 w-[480px] max-w-[calc(100vw-32px)] -translate-x-1/2 overflow-hidden rounded-2xl bg-popover text-popover-foreground shadow-modal outline-none">
           <Dialog.Title className="sr-only">Add a service</Dialog.Title>
           <Dialog.Description className="sr-only">Choose where the service comes from.</Dialog.Description>
           <div className="flex h-12 items-center gap-2 border-b border-border px-3 text-muted-foreground">
             {step === "root" ? (
               <Search className="size-4" />
             ) : (
-              <button aria-label="Back" onClick={() => setStep("root")} className="rounded p-0.5 hover:text-foreground">
-                <ArrowLeft className="size-4" />
-              </button>
+              <Button variant="ghost" size="icon-sm" aria-label="Back" onClick={() => setStep("root")} className="-ml-1 text-muted-foreground">
+                <ArrowLeft />
+              </Button>
             )}
             <span className="text-sm text-foreground">
               {step === "root" ? "What would you like to add?" : step === "repo" ? "GitHub repo" : step === "database" ? "Database" : "Docker image"}
@@ -210,7 +210,7 @@ export function NewServiceDialog({
               ) : null}
               {templates.data?.length ? (
                 <>
-                  {step === "root" ? <div className="text-caps px-3 pt-3 pb-1 text-muted-foreground">Database</div> : null}
+                  {step === "root" ? <div className="px-3 pt-3 pb-1 text-xs text-muted-foreground">Database</div> : null}
                   {createDatabase.error ? (
                     <div className="px-1.5 pb-1.5">
                       <Alert>{createDatabase.error.message}</Alert>
@@ -359,7 +359,7 @@ function PickerRow({
     <button
       disabled={!onClick || disabled}
       onClick={onClick}
-      className="flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-accent disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent [&>svg]:size-4 [&>svg]:text-muted-foreground"
+      className="flex h-10 w-full cursor-pointer items-center gap-3 rounded-lg px-3 text-left text-sm hover:bg-accent disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent [&>svg]:size-4 [&>svg]:text-muted-foreground"
     >
       {icon}
       <span className="flex-1">{label}</span>

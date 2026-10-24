@@ -40,7 +40,7 @@ export function ProjectShell({ projectId, envId }: { projectId: string; envId: s
     return (
       <div className="flex h-full items-center justify-center p-8">
         <div className="flex max-w-sm flex-col items-center gap-3 text-center">
-          <div className="text-lg font-semibold">{missing ? "Project not found" : "Couldn't load the project"}</div>
+          <div className="text-lg font-bold">{missing ? "Project not found" : "Couldn't load the project"}</div>
           <p className="text-sm text-muted-foreground">{missing ? "It may have been deleted, or you don't have access." : project.error.message}</p>
           <Link to="/projects" className="text-sm underline">
             Back to projects
@@ -53,7 +53,7 @@ export function ProjectShell({ projectId, envId }: { projectId: string; envId: s
   return (
     <ProjectContext.Provider value={ctx}>
       <div className="grid h-full grid-cols-[56px_1fr] grid-rows-[52px_1fr]">
-        <Link to="/projects" aria-label="All projects" className="flex items-center justify-center rounded-md text-foreground">
+        <Link to="/projects" aria-label="All projects" className="flex items-center justify-center rounded-lg text-foreground">
           <LogoMark />
         </Link>
         <header className="flex min-w-0 items-center gap-2 pr-3">
@@ -61,13 +61,13 @@ export function ProjectShell({ projectId, envId }: { projectId: string; envId: s
             Projects
           </Link>
           <span className="text-muted-foreground">/</span>
-          {p ? <span className="truncate text-sm font-semibold">{p.name}</span> : <Skeleton className="h-5 w-32" />}
+          {p ? <span className="truncate text-sm font-bold">{p.name}</span> : <Skeleton className="h-5 w-32" />}
           <span className="text-muted-foreground">/</span>
           {p && env ? (
             <Menu
               align="start"
               trigger={
-                <button className="flex h-8 items-center gap-1.5 rounded-md px-2 text-sm hover:bg-accent">
+                <button className="flex h-8 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-sm hover:bg-nav-hover">
                   {env.name}
                   <ChevronDown className="size-3.5 text-muted-foreground" />
                 </button>
@@ -116,7 +116,7 @@ export function ProjectShell({ projectId, envId }: { projectId: string; envId: s
           </div>
         </nav>
 
-        <main className="relative mr-2 mb-2 min-h-0 overflow-hidden rounded-xl border border-border">
+        <main className="relative mr-2 mb-2 min-h-0 overflow-hidden rounded-xl border border-border bg-background">
           <Outlet />
         </main>
       </div>
@@ -137,14 +137,14 @@ export function ProjectShell({ projectId, envId }: { projectId: string; envId: s
 }
 
 const railClass =
-  "group relative flex size-9 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:text-foreground [&>svg]:size-[18px]";
-const railActive = { className: "!bg-accent !text-foreground [&>svg]:text-brand-text", "aria-current": "page" as const };
+  "group relative flex size-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-nav-hover hover:text-foreground focus-visible:bg-nav-hover focus-visible:text-foreground [&>svg]:size-4";
+const railActive = { className: "!bg-nav-hover !text-foreground [&>svg]:!text-foreground", "aria-current": "page" as const };
 
 function Tip({ children }: { children: ReactNode }) {
   return (
     <span
       role="tooltip"
-      className="pointer-events-none absolute top-1/2 left-full z-30 ml-2 -translate-y-1/2 rounded-md border border-border bg-popover px-2 py-1 text-xs whitespace-nowrap text-popover-foreground opacity-0 shadow-raise transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+      className="pointer-events-none absolute top-1/2 left-full z-30 ml-2 -translate-y-1/2 rounded-lg bg-popover px-2 py-1 text-xs whitespace-nowrap text-popover-foreground opacity-0 shadow-menu transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
     >
       {children}
     </span>

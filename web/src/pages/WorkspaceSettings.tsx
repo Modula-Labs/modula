@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
+import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { CopyButton } from "@/components/ui/CopyButton";
 import { Field, Input } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
@@ -24,17 +25,15 @@ function Section({
   children: ReactNode;
 }) {
   return (
-    <section className="grid gap-4 @container border-b border-border py-6 first:pt-0 last:border-b-0">
-      <div className="grid gap-4 @2xl:grid-cols-[200px_1fr] @2xl:gap-8">
-        <div>
-          <h3 className="text-base font-semibold">{title}</h3>
-          {description ? (
-            <p className="mt-1 text-sm text-muted-foreground">{description}</p>
-          ) : null}
-        </div>
-        <div className="flex min-w-0 flex-col gap-4">{children}</div>
-      </div>
-    </section>
+    <Card>
+      <CardHeader
+        title={<span className="font-bold">{title}</span>}
+        description={description}
+      />
+      <CardContent className="flex min-w-0 flex-col gap-4">
+        {children}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -45,13 +44,11 @@ export function WorkspaceSettingsPage() {
 
   return (
     <div>
-      <h1 className="text-[30px] leading-9 font-normal tracking-[-0.01em]">
-        Settings
-      </h1>
-      <p className="mt-2 text-sm text-muted-foreground">
+      <h1 className="text-2xl leading-8 font-bold">Settings</h1>
+      <p className="mt-1 text-sm text-muted-foreground">
         Manage this workspace.
       </p>
-      <div className="mt-8">
+      <div className="mt-6">
         {workspace ? (
           <Settings workspace={workspace} />
         ) : (
@@ -82,7 +79,7 @@ function Settings({ workspace }: { workspace: Membership }) {
   };
 
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col gap-6">
       <Section
         title="General"
         description="How this workspace appears in the switcher."
@@ -112,7 +109,7 @@ function Settings({ workspace }: { workspace: Membership }) {
               </Button>
             </div>
           ) : (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-[13px] text-muted-foreground">
               Only workspace admins can rename it.
             </p>
           )}
@@ -124,11 +121,11 @@ function Settings({ workspace }: { workspace: Membership }) {
         description="Your role here and the workspace's identifier."
       >
         <div className="flex items-center gap-3 text-sm">
-          <span className="w-24 text-muted-foreground">Your role</span>
+          <span className="w-28 text-muted-foreground">Your role</span>
           <Badge>{workspace.role}</Badge>
         </div>
         <div className="flex items-center gap-3 text-sm">
-          <span className="w-24 text-muted-foreground">Workspace ID</span>
+          <span className="w-28 text-muted-foreground">Workspace ID</span>
           <code className="font-mono text-[13px]">{workspace.id}</code>
           <CopyButton value={workspace.id} label="Copy workspace ID" />
         </div>
@@ -159,23 +156,29 @@ function Settings({ workspace }: { workspace: Membership }) {
 
       {me?.user.isInstanceAdmin ? (
         <div id="domain" className="scroll-mt-4">
-          <Section title="Domain" description="Where the dashboard and your services are reachable. Instance admins only.">
+          <Section
+            title="Domain"
+            description="Where the dashboard and your services are reachable. Instance admins only."
+          >
             <DomainSection />
           </Section>
         </div>
       ) : null}
 
       {me?.user.isInstanceAdmin ? (
-        <Section title="Updates" description="Modula Deploy versions for this instance. Instance admins only.">
+        <Section
+          title="Updates"
+          description="Modula Deploy versions for this instance. Instance admins only."
+        >
           <UpdatesSection />
         </Section>
       ) : null}
 
       {isAdmin ? (
         <Section title="Danger zone">
-          <div className="flex items-center justify-between gap-4 rounded-lg border border-destructive/40 p-4">
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-destructive/40 px-3 py-2.5">
             <div className="text-sm">
-              <div className="font-medium">Delete workspace</div>
+              <div>Delete workspace</div>
               <div className="text-muted-foreground">
                 Permanently removes its projects, services and members.
               </div>

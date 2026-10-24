@@ -81,15 +81,15 @@ export function ServiceSheet({
               image={i.config.source.type === "image" ? i.config.source.image : null}
               repo={i.config.source.type === "repo" ? i.config.source.repo : null}
             />
-            <h2 className="truncate text-xl font-semibold">{i.serviceName}</h2>
+            <h2 className="truncate text-xl leading-7 font-bold">{i.serviceName}</h2>
             <div className="ml-auto flex items-center gap-2 pr-2">
               {i.template ? (
-                <Button size="sm" variant="secondary" icon={<Plug />} onClick={() => setConnecting(true)}>
+                <Button variant="secondary" icon={<Plug />} onClick={() => setConnecting(true)}>
                   Connect
                 </Button>
               ) : null}
               {canDeploy ? (
-                <Button size="sm" variant="secondary" icon={<Rocket />} loading={deploy.isPending} onClick={() => deploy.mutate()}>
+                <Button variant="primary" icon={<Rocket />} loading={deploy.isPending} onClick={() => deploy.mutate()}>
                   Deploy
                 </Button>
               ) : null}

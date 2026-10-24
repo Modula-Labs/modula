@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { Button } from "@/components/ui/Button";
 import { ChevronDown, ChevronRight, X } from "@/components/ui/icons";
 import { Select } from "@/components/ui/Input";
 import { Skeleton } from "@/components/ui/misc";
@@ -53,17 +54,13 @@ export function ActivityPanel({
   return (
     <aside
       aria-label="Activity"
-      className="anim-sheet absolute top-14 right-3 bottom-3 z-10 flex w-[380px] max-w-[calc(100%-24px)] flex-col rounded-xl border border-border bg-card shadow-modal"
+      className="anim-sheet absolute top-14 right-3 bottom-3 z-10 flex w-[380px] max-w-[calc(100%-24px)] flex-col rounded-xl border border-border bg-popover shadow-menu"
     >
       <header className="flex items-center justify-between px-4 pt-3 pb-2">
-        <h2 className="text-sm font-semibold">Activity</h2>
-        <button
-          onClick={onClose}
-          aria-label="Close activity"
-          className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-        >
-          <X className="size-4" />
-        </button>
+        <h2 className="text-base font-bold">Activity</h2>
+        <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close activity">
+          <X />
+        </Button>
       </header>
       <div className="flex gap-2 px-4 pb-3">
         <Select aria-label="Filter by activity" value={kind} onChange={(e) => setKind(e.target.value as ActivityKind | "")}>
@@ -96,9 +93,9 @@ export function ActivityPanel({
             const open = !collapsed.has(g.id);
             return (
               <section key={g.id} className="border-b border-border px-4 py-3 last:border-b-0">
-                <button onClick={() => toggle(g.id)} aria-expanded={open} className="flex w-full items-center gap-2 text-left">
+                <button onClick={() => toggle(g.id)} aria-expanded={open} className="flex w-full cursor-pointer items-center gap-2 text-left">
                   {open ? <ChevronDown className="size-4 text-muted-foreground" /> : <ChevronRight className="size-4 text-muted-foreground" />}
-                  <span className="min-w-0 flex-1 truncate text-sm font-medium">{groupTitle(g)}</span>
+                  <span className="min-w-0 flex-1 truncate text-sm font-bold">{groupTitle(g)}</span>
                 </button>
                 <div className="mt-1 flex items-center gap-2 pl-6 text-xs text-muted-foreground">
                   <Avatar actor={g.actor} />
@@ -138,7 +135,7 @@ export function ActivityPanel({
 function Avatar({ actor }: { actor: ActivityGroup["actor"] }) {
   if (actor?.avatarUrl) return <img src={actor.avatarUrl} alt="" className="size-4 rounded-full" />;
   return (
-    <span aria-hidden className="flex size-4 items-center justify-center rounded-full bg-muted text-[8px] font-semibold text-foreground">
+    <span aria-hidden className="flex size-4 items-center justify-center rounded-full bg-muted text-[8px] font-bold text-foreground">
       {actor ? initials(actor.name) : "·"}
     </span>
   );

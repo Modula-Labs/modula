@@ -65,7 +65,7 @@ export function SetupPage() {
             <div key={i} className={`h-1 rounded-full ${s.score >= i ? (s.score === 3 ? "bg-success" : s.score === 2 ? "bg-primary" : "bg-warning") : "bg-accent"}`} />
           ))}
         </div>
-        <Button type="submit" variant="primary" size="lg" loading={busy} disabled={s.score === 0}>
+        <Button type="submit" variant="primary" loading={busy} disabled={s.score === 0}>
           Create admin
         </Button>
       </form>

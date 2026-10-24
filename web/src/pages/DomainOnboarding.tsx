@@ -30,8 +30,8 @@ export function DomainOnboardingPage() {
       <div className="mb-8">
         <Logo />
       </div>
-      <main className="anim-modal w-full max-w-[560px] rounded-lg border border-border bg-card p-8 shadow-modal">
-        <h1 className="text-xl font-semibold">Add a domain</h1>
+      <main className="anim-modal w-full max-w-[560px] rounded-xl bg-card p-7 text-card-foreground shadow-sm ring-1 ring-foreground/10">
+        <h1 className="text-xl font-bold">Add a domain</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Give the dashboard a name and let services get addresses like api-acme-store.apps.example.com. Optional: you can keep using the server's IP address.
         </p>
@@ -39,7 +39,7 @@ export function DomainOnboardingPage() {
           {q.isPending ? <Skeleton className="h-48" /> : q.data ? <DomainForm data={q.data} /> : null}
           {q.error ? <Alert>{q.error.message}</Alert> : null}
           <div className="flex items-center justify-between border-t border-border pt-4">
-            <span className="text-[13px] text-muted-foreground">You can do this later in Settings → Domain.</span>
+            <span className="text-sm text-muted-foreground">You can do this later in Settings → Domain.</span>
             {done ? (
               <Button variant="secondary" onClick={leave}>
                 Continue

@@ -188,21 +188,23 @@ export function RepoField({
           href={configureUrl}
           target="_blank"
           rel="noreferrer"
-          className="font-medium text-foreground underline underline-offset-4"
+          className="font-normal text-foreground underline underline-offset-4"
         >
           Configure access on GitHub
         </a>
       ) : null}
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon-xs"
         onClick={s.refresh}
         disabled={s.reposLoading}
         aria-label="Refresh repositories"
         title="Refresh repositories"
-        className="inline-flex size-5 items-center justify-center rounded text-muted-foreground hover:text-foreground disabled:opacity-50 [&_svg]:size-3.5"
+        className="text-muted-foreground"
       >
         <Refresh className={s.reposLoading ? "animate-spin" : undefined} />
-      </button>
+      </Button>
     </span>
   ) : (
     "Public repositories work as is: paste owner/name or a GitHub URL."
@@ -299,11 +301,12 @@ function AccountPicker({
         <Menu
           align="start"
           trigger={
-            <button
+            <Button
               type="button"
+              variant="outline"
               id={p.id}
               disabled={disabled}
-              className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-transparent px-3 text-left text-sm hover:bg-accent focus:border-ring focus:outline-none disabled:opacity-50"
+              className="w-full justify-start gap-2 px-2.5"
             >
               {current ? (
                 <AccountLabel i={current} />
@@ -311,7 +314,7 @@ function AccountPicker({
                 <span className="text-muted-foreground">Choose an account</span>
               )}
               <ChevronDown className="ml-auto size-4 shrink-0 text-muted-foreground" />
-            </button>
+            </Button>
           }
         >
           {s.accounts.map((i) => (
@@ -352,8 +355,8 @@ function AccountLabel({ i }: { i: GithubInstallation }) {
         alt=""
         className="size-5 shrink-0 rounded-full border border-border"
       />
-      <span className="min-w-0 truncate font-medium">{i.accountLogin}</span>
-      <span className="text-caps shrink-0 rounded-full bg-muted px-2 py-0.5 text-muted-foreground">
+      <span className="min-w-0 truncate">{i.accountLogin}</span>
+      <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
         {i.accountType === "Organization" ? "Org" : "User"}
       </span>
     </>
@@ -371,8 +374,8 @@ function ConnectPanel({
   const c = s.connect;
   if (c.loading) return null;
   return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted/40 p-3">
-      <div className="flex items-center gap-2 text-sm font-medium">
+    <div className="flex flex-col gap-2 rounded-xl border border-border bg-muted/40 p-4">
+      <div className="flex items-center gap-2 text-sm font-bold">
         <BrandGithub className="size-4 text-muted-foreground" />
         Connect GitHub
       </div>
@@ -384,7 +387,6 @@ function ConnectPanel({
       {c.mode === "connect" ? (
         <Button
           type="button"
-          size="sm"
           variant="secondary"
           className="w-fit"
           icon={<BrandGithub />}

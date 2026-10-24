@@ -27,14 +27,14 @@ export function DomainsSection({ instanceId, canEdit }: { instanceId: string; ca
   const error = generate.error ?? remove.error;
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-sm font-medium">Public domains</div>
+      <div className="text-sm leading-none font-normal">Public domains</div>
       {error ? (
         <Alert>
           {error.message}
           {generate.error instanceof ApiError && generate.error.status === 409 ? (
             <>
               {" "}
-              <Link to="/settings" hash="domain" className="font-medium underline">
+              <Link to="/settings" hash="domain" className="font-bold underline">
                 Open Settings → Domain
               </Link>
             </>
@@ -65,8 +65,8 @@ function DomainRow({ domain: d, canEdit, onRemove, onChange }: { domain: Domain;
   const check = useMutation({ mutationFn: () => api.checkDomain(d.id), onSuccess: onChange });
   const live = d.status === "verified";
   return (
-    <div className="rounded-md border border-border">
-      <div className="flex h-10 items-center gap-2 pr-1 pl-3">
+    <div className="overflow-hidden rounded-xl border border-border">
+      <div className="flex min-h-11 items-center gap-2 py-1 pr-2 pl-3">
         <World className="size-4 text-muted-foreground" />
         {live ? (
           <a href={`${d.hostname.endsWith(".localhost") ? "http" : "https"}://${d.hostname}`} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-sm hover:underline">
@@ -75,26 +75,26 @@ function DomainRow({ domain: d, canEdit, onRemove, onChange }: { domain: Domain;
         ) : (
           <span className="min-w-0 flex-1 truncate text-sm">{d.hostname}</span>
         )}
-        {d.targetPort ? <span className="font-mono text-xs text-muted-foreground">:{d.targetPort}</span> : null}
+        {d.targetPort ? <span className="font-mono text-sm text-muted-foreground">:{d.targetPort}</span> : null}
         {d.kind === "generated" ? <Badge>Generated</Badge> : null}
         {status ? <Badge tone={status.tone}>{status.label}</Badge> : null}
         <CopyButton value={d.hostname} label="Copy domain" />
         {canEdit && d.kind === "custom" ? (
-          <button aria-label={`Settings for ${d.hostname}`} aria-expanded={settings} onClick={() => setSettings((s) => !s)} className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground">
-            <Settings className="size-4" />
-          </button>
+          <Button aria-label={`Settings for ${d.hostname}`} aria-expanded={settings} variant="ghost" size="icon-sm" className="text-muted-foreground" onClick={() => setSettings((s) => !s)}>
+            <Settings />
+          </Button>
         ) : null}
         {canEdit ? (
-          <button aria-label={`Remove ${d.hostname}`} onClick={onRemove} className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-error">
-            <Trash className="size-4" />
-          </button>
+          <Button aria-label={`Remove ${d.hostname}`} variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-error" onClick={onRemove}>
+            <Trash />
+          </Button>
         ) : null}
       </div>
       {d.kind === "custom" && !live ? (
         <div className="flex flex-col gap-2 border-t border-border px-3 py-3">
-          <p className="text-[13px] text-muted-foreground">Add these records at your DNS provider. The domain goes live and gets a certificate once the TXT record is found.</p>
+          <p className="text-sm text-muted-foreground">Add these records at your DNS provider. The domain goes live and gets a certificate once the TXT record is found.</p>
           <DnsRecords domain={d} />
-          {d.lastError ? <p className={d.status === "failed" ? "text-[13px] text-error" : "text-[13px] text-muted-foreground"}>{d.lastError}</p> : null}
+          {d.lastError ? <p className={d.status === "failed" ? "text-sm text-error" : "text-sm text-muted-foreground"}>{d.lastError}</p> : null}
           {check.error ? <Alert>{check.error.message}</Alert> : null}
           {canEdit ? (
             <div>
@@ -106,7 +106,7 @@ function DomainRow({ domain: d, canEdit, onRemove, onChange }: { domain: Domain;
         </div>
       ) : null}
       {d.kind === "custom" && live && d.dnsTargetOk === false ? (
-        <p className="border-t border-border px-3 py-2 text-[13px] text-muted-foreground">
+        <p className="border-t border-border px-3 py-2 text-sm text-muted-foreground">
           The domain's {d.dnsRecords[0]?.type ?? "DNS"} record doesn't point here. That's expected behind a proxy such as Cloudflare; otherwise update it to the value below.
         </p>
       ) : null}
@@ -120,9 +120,9 @@ function DnsRecords({ domain: d }: { domain: Domain }) {
   if (d.dnsRecords.length === 0) return null;
   const routing = d.dnsRecords.some((r) => r.type !== "TXT");
   return (
-    <div className="overflow-x-auto rounded-md border border-border">
-      <table className="w-full text-[13px]">
-        <thead className="text-caps text-muted-foreground">
+    <div className="overflow-x-auto rounded-lg border border-border">
+      <table className="w-full text-sm">
+        <thead className="text-muted-foreground">
           <tr className="border-b border-border">
             <th className="px-2.5 py-1.5 text-left font-normal">Type</th>
             <th className="px-2.5 py-1.5 text-left font-normal">Name</th>
@@ -149,7 +149,7 @@ function DnsRecords({ domain: d }: { domain: Domain }) {
           ))}
         </tbody>
       </table>
-      {routing ? null : <p className="px-2.5 py-1.5 text-[13px] text-muted-foreground">Deploy the service to see where to point the domain.</p>}
+      {routing ? null : <p className="px-2.5 py-1.5 text-sm text-muted-foreground">Deploy the service to see where to point the domain.</p>}
     </div>
   );
 }
@@ -167,7 +167,7 @@ function AddCustomDomain({ instanceId, onDone, onAdded }: { instanceId: string; 
   });
   return (
     <form
-      className="flex flex-col gap-3 rounded-md border border-border p-3"
+      className="flex flex-col gap-3 rounded-xl border border-border p-4"
       onSubmit={(e) => {
         e.preventDefault();
         if ("port" in parsed && hostname.trim()) add.mutate();

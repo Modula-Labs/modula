@@ -16,7 +16,7 @@ export function ProjectMetrics({ projectId, environmentId }: { projectId: string
   });
   const m = q.data;
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <Segmented label="Time range" value={range} onChange={setRange} options={METRICS_RANGES.map((r) => ({ value: r, label: r }))} />
       </div>

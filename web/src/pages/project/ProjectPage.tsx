@@ -159,8 +159,7 @@ export function ProjectPage({
         {p && env ? (
           <div className="absolute top-3 right-3 z-10 flex items-center gap-2">
             <Button
-              variant="secondary"
-              size="sm"
+              variant="outline"
               icon={<Activity />}
               aria-pressed={activityOpen}
               onClick={() => setActivityOpen((o) => !o)}
@@ -170,8 +169,7 @@ export function ProjectPage({
             {canEdit ? (
               <>
                 <Button
-                  variant="secondary"
-                  size="sm"
+                  variant="outline"
                   icon={<Refresh />}
                   disabled={p.environments.length < 2}
                   title={p.environments.length < 2 ? "Create another environment to sync from" : undefined}
@@ -179,7 +177,7 @@ export function ProjectPage({
                 >
                   Sync
                 </Button>
-                <Button variant={hasPending ? "secondary" : "primary"} size="sm" icon={<Plus />} onClick={() => openAdd("root")}>
+                <Button variant={hasPending ? "outline" : "primary"} icon={<Plus />} onClick={() => openAdd("root")}>
                   Add
                 </Button>
               </>
@@ -267,7 +265,7 @@ export function ProjectPage({
           </ContextMenu>
         ) : null}
         {notice ? (
-          <div role="status" className="anim-pop absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-lg border border-border bg-card px-3 py-2 text-sm shadow-modal">
+          <div role="status" className="anim-pop absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-xl border border-border bg-popover px-4 py-2.5 text-sm shadow-menu">
             {notice}
           </div>
         ) : null}
@@ -285,7 +283,7 @@ export function ProjectPage({
         {p && services.length === 0 ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div className="pointer-events-auto flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-card px-10 py-8 text-center">
-              <div className="text-base font-semibold">Add your first service</div>
+              <div className="text-base font-bold">Add your first service</div>
               <p className="max-w-xs text-sm text-muted-foreground">Deploy from a GitHub repository or a Docker image, or add a database.</p>
               {atLeast(role, "member") ? (
                 <Button variant="outline" icon={<Plus />} onClick={() => openAdd("root")}>

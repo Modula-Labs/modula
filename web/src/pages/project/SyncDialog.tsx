@@ -81,7 +81,7 @@ export function SyncDialog({
             <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" variant="secondary" loading={sync.isPending} disabled={!from}>
+            <Button type="submit" variant="primary" loading={sync.isPending} disabled={!from}>
               Sync
             </Button>
           </div>

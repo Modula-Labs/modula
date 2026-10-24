@@ -110,23 +110,23 @@ export function PendingBar({
   return (
     <>
       <div className="anim-pop absolute top-3 left-1/2 z-10 flex max-w-[calc(100%-24px)] -translate-x-1/2 flex-col items-center gap-2">
-        <div role="region" aria-label="Pending changes" className="flex items-center gap-1 rounded-xl border border-border bg-card p-1 pl-3 shadow-modal">
+        <div role="region" aria-label="Pending changes" className="flex items-center gap-1 rounded-xl border border-border bg-popover p-1 pl-3 shadow-menu">
           {n > 0 ? (
             <>
-              <span className="mr-1 text-sm font-medium whitespace-nowrap">Apply {plural(n, "change")}</span>
-              <Button size="sm" variant="ghost" onClick={() => setDetails(true)}>
+              <span className="mr-1 text-sm font-bold whitespace-nowrap">Apply {plural(n, "change")}</span>
+              <Button variant="ghost" onClick={() => setDetails(true)}>
                 Details
               </Button>
-              <Button size="sm" variant="primary" loading={deploy.isPending} onClick={() => deploy.mutate()} title="Deploy (Shift+Enter)">
+              <Button variant="primary" loading={deploy.isPending} onClick={() => deploy.mutate()} title="Deploy (Shift+Enter)">
                 Deploy
-                <kbd className="ml-0.5 rounded bg-black/15 px-1 font-sans text-[11px] leading-4 font-medium">⇧+Enter</kbd>
+                <kbd className="ml-0.5 rounded-xs2 bg-black/15 px-1 font-sans text-xs leading-4 font-normal">⇧+Enter</kbd>
               </Button>
               {canDiscard ? (
                 <Menu
                   trigger={
-                    <button aria-label="More actions" className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground">
-                      <Dots className="size-4" />
-                    </button>
+                    <Button variant="ghost" size="icon" aria-label="More actions" className="text-muted-foreground">
+                      <Dots />
+                    </Button>
                   }
                 >
                   <MenuItem
@@ -227,8 +227,8 @@ function DetailsModal({
           }
         }}
       >
-        <label className="flex items-center gap-3 rounded-lg border border-border px-3 py-2 focus-within:border-ring">
-          <span aria-hidden className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold">
+        <label className="flex items-center gap-3 rounded-lg border border-input px-3 py-1 focus-within:border-ring">
+          <span aria-hidden className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-bold">
             {me ? initials(me.user.name) : <Pencil className="size-3.5" />}
           </span>
           <span className="sr-only">Deploy message</span>
@@ -277,17 +277,17 @@ function ServiceChanges({
   const summary = [vars ? plural(vars, "Variable") : null, settings ? plural(settings, "Setting") : null].filter(Boolean).join(" · ");
   const discardable = canDiscard && service.changes.some((c) => c.discardable);
   return (
-    <section aria-label={service.serviceName} className="rounded-lg border border-border">
+    <section aria-label={service.serviceName} className="rounded-xl border border-border">
       <header className="flex items-center gap-2 px-3 py-2.5">
-        <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+        <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex min-w-0 cursor-pointer flex-1 items-center gap-2 text-left">
           {open ? <ChevronDown className="size-4 shrink-0 text-muted-foreground" /> : <ChevronRight className="size-4 shrink-0 text-muted-foreground" />}
           <span className="min-w-0 truncate text-sm">
-            <span className="font-semibold">{service.serviceName}</span> will be updated
+            <span className="font-bold">{service.serviceName}</span> will be updated
           </span>
           <span className="shrink-0 text-xs text-muted-foreground">{summary}</span>
         </button>
         {discardable ? (
-          <Button size="sm" variant="ghost" disabled={discarding} onClick={() => onDiscard(service.serviceId)}>
+          <Button variant="ghost" disabled={discarding} onClick={() => onDiscard(service.serviceId)}>
             Discard
           </Button>
         ) : null}
@@ -296,9 +296,9 @@ function ServiceChanges({
         <table className="w-full table-fixed border-t border-border text-sm">
           <thead>
             <tr className="text-left text-xs text-muted-foreground">
-              <th className="w-[34%] py-2 pl-3 font-medium">Change</th>
-              <th className="py-2 pl-3 font-medium">Current Value</th>
-              <th className="py-2 pl-3 font-medium">New Value</th>
+              <th className="w-[34%] py-2 pl-3 font-normal">Change</th>
+              <th className="py-2 pl-3 font-normal">Current Value</th>
+              <th className="py-2 pl-3 font-normal">New Value</th>
               <th className="w-10" aria-label="Discard" />
             </tr>
           </thead>
@@ -328,7 +328,7 @@ function ChangeRow({ change: c, canDiscard, onDiscard }: { change: PendingChange
   const op = opIcon[c.op as keyof typeof opIcon] ?? opIcon.updated;
   const name = c.kind === "variable" ? (c.shared ? `shared.${c.key}` : c.key) : c.kind === "config" ? words(c.key ?? "settings") : `service ${c.op}`;
   return (
-    <tr className="border-t border-border/60 align-top">
+    <tr className="border-t border-border align-top">
       <td className="py-2 pl-3">
         <span className="flex min-w-0 items-center gap-2">
           <span aria-label={op.label} title={op.label} className={clsx("shrink-0 [&_svg]:size-3.5", op.tone)}>
@@ -348,14 +348,16 @@ function ChangeRow({ change: c, canDiscard, onDiscard }: { change: PendingChange
       </td>
       <td className="py-1.5 pr-2 text-right">
         {canDiscard ? (
-          <button
+          <Button
+            variant="ghost"
+            size="icon-xs"
             onClick={onDiscard}
             aria-label={`Discard change to ${c.key}`}
             title="Discard this change"
-            className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+            className="text-muted-foreground"
           >
-            <X className="size-3.5" />
-          </button>
+            <X />
+          </Button>
         ) : null}
       </td>
     </tr>

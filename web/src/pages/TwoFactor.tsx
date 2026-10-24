@@ -61,17 +61,17 @@ export function TwoFactorPage() {
           <OtpInput value={code} onChange={setCode} onComplete={(v) => void submit(v)} autoFocus disabled={busy || expired} invalid={!!error} />
         )}
         {expired ? (
-          <Button type="button" variant="primary" size="lg" onClick={() => void navigate({ to: "/login" })}>
+          <Button type="button" variant="primary" onClick={() => void navigate({ to: "/login" })}>
             Sign in again
           </Button>
         ) : (
-          <Button type="submit" variant="primary" size="lg" loading={busy} disabled={recovery ? code.length < 10 : code.length !== 6}>
+          <Button type="submit" variant="primary" loading={busy} disabled={recovery ? code.length < 10 : code.length !== 6}>
             Verify
           </Button>
         )}
         <button
           type="button"
-          className="self-start text-sm text-brand-text hover:underline"
+          className="cursor-pointer self-start text-sm text-foreground underline-offset-4 hover:underline"
           onClick={() => {
             setRecovery(!recovery);
             setCode("");

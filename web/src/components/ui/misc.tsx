@@ -1,18 +1,35 @@
+import { IconAlertCircle, IconAlertTriangle, IconCircleCheck, IconInfoCircle } from "@tabler/icons-react";
 import { clsx } from "clsx";
-import type { ReactNode } from "react";
+import type { ComponentType, ReactNode } from "react";
 
-export function Kbd({ children }: { children: ReactNode }) {
+/** Kobra keycap: 16/20/24/28px tall, 1px border on the muted fill, 10–14px text.
+ *  `bare` drops the border and sits on a 10% wash (inside tooltips and menus). */
+const kbdSizes = {
+  sm: "h-4 min-w-4 rounded-sm px-1 text-[10px] leading-4",
+  md: "h-5 min-w-5 rounded-sm px-1 text-xs leading-4",
+  lg: "h-6 min-w-6 rounded-md px-1.5 text-[13px] leading-5",
+  xl: "h-7 min-w-7 rounded-lg px-2 text-sm leading-5",
+} as const;
+
+export function Kbd({ children, size = "md", bare }: { children: ReactNode; size?: keyof typeof kbdSizes; bare?: boolean }) {
   return (
-    <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-xs border border-border bg-muted px-1 font-mono text-[11px] text-muted-foreground">
+    <kbd
+      className={clsx(
+        "inline-flex shrink-0 items-center justify-center gap-1 font-sans font-normal text-foreground select-none",
+        kbdSizes[size],
+        bare ? "bg-foreground/10" : "border border-border bg-muted",
+      )}
+    >
       {children}
     </kbd>
   );
 }
 
-/** Kobra pill badges. Colour carries status only; emphasis stays neutral. */
+/** Kobra pill badges: 24px, 8px sides, 14/20 regular, sentence case. Colour carries
+ *  status only; emphasis stays neutral. */
 export type Tone = "neutral" | "success" | "warn" | "danger" | "info" | "strong";
 const tones: Record<Tone, string> = {
-  neutral: "bg-badge-neutral-bg text-badge-neutral-fg",
+  neutral: "bg-foreground/10 text-muted-foreground",
   success: "bg-badge-green-bg text-badge-green-fg",
   warn: "bg-badge-amber-bg text-badge-amber-fg",
   danger: "bg-badge-red-bg text-badge-red-fg",
@@ -20,30 +37,53 @@ const tones: Record<Tone, string> = {
   strong: "bg-badge-violet-bg text-badge-violet-fg",
 };
 
-export function Badge({ tone = "neutral", children }: { tone?: Tone; children: ReactNode }) {
+export function Badge({ tone = "neutral", icon, children }: { tone?: Tone; icon?: ReactNode; children: ReactNode }) {
   return (
-    <span className={clsx("text-caps inline-flex h-5 shrink-0 items-center rounded-full px-2 whitespace-nowrap", tones[tone])}>{children}</span>
+    <span
+      className={clsx(
+        "inline-flex h-6 shrink-0 items-center gap-1 rounded-full px-2 text-sm leading-5 font-normal whitespace-nowrap [&_svg]:size-3",
+        tones[tone],
+      )}
+    >
+      {icon}
+      {children}
+    </span>
   );
 }
 
+/** Kobra Alert: radius lg, the tone at 10% under tone-coloured text, a 32px tile in
+ *  the tone with a 20px mark, bold title over a regular description. */
+const alertTones: Record<Tone, { wash: string; tile: string; Icon: ComponentType<{ className?: string; stroke?: number }> }> = {
+  danger: { wash: "bg-error/10 text-error", tile: "bg-error", Icon: IconAlertCircle },
+  warn: { wash: "bg-warning/10 text-warning", tile: "bg-warning", Icon: IconAlertTriangle },
+  success: { wash: "bg-success/10 text-success", tile: "bg-success", Icon: IconCircleCheck },
+  info: { wash: "bg-info/10 text-info", tile: "bg-info", Icon: IconInfoCircle },
+  // Not Kobra tones: kept for existing callers, drawn neutral.
+  neutral: { wash: "bg-muted text-foreground", tile: "bg-muted-foreground", Icon: IconInfoCircle },
+  strong: { wash: "bg-muted text-foreground", tile: "bg-foreground", Icon: IconInfoCircle },
+};
+
 export function Alert({ tone = "danger", title, children }: { tone?: Tone; title?: string; children?: ReactNode }) {
+  const t = alertTones[tone];
   return (
-    <div role="alert" className={clsx("rounded-lg border px-3 py-2.5 text-sm", alertTones[tone])}>
-      {title ? <div className="font-semibold">{title}</div> : null}
-      {children}
+    <div role="alert" className={clsx("flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm", t.wash)}>
+      <span
+        aria-hidden
+        // White mark on the tone in light; in dark the tones are light, so the mark takes the page colour.
+        className={clsx("flex size-8 shrink-0 items-center justify-center self-start rounded-md text-white dark:text-background", t.tile)}
+      >
+        <t.Icon className="size-5" stroke={1.8} />
+      </span>
+      <div className="flex min-h-8 min-w-0 flex-1 flex-col justify-center">
+        {title ? <div className="font-bold">{title}</div> : null}
+        {children ? <div className="font-normal">{children}</div> : null}
+      </div>
     </div>
   );
 }
 
-const alertTones: Record<Tone, string> = {
-  danger: "border-destructive/40 bg-badge-red-bg text-badge-red-fg",
-  warn: "border-warning/40 bg-badge-amber-bg text-badge-amber-fg",
-  info: "border-info/40 bg-badge-blue-bg text-badge-blue-fg",
-  success: "border-success/40 bg-badge-green-bg text-badge-green-fg",
-  neutral: "border-border bg-muted text-foreground",
-  strong: "border-border bg-muted text-foreground",
-};
-
+/** Kobra Empty: up to 448px, a radius xl dashed region with 24px inset; a 40px muted
+ *  tile with a 24px icon over a bold title and relaxed muted description. */
 export function EmptyState({
   icon,
   title,
@@ -56,17 +96,20 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-border px-6 py-12 text-center">
-      <div className="text-muted-foreground [&>svg]:size-6">{icon}</div>
-      <div className="text-base font-semibold">{title}</div>
-      <div className="max-w-sm text-sm text-muted-foreground">{body}</div>
-      {action ? <div className="mt-3">{action}</div> : null}
+    <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 rounded-xl border border-dashed border-border p-6 text-center">
+      <div className="flex flex-col items-center gap-1">
+        <div className="mb-4 flex size-10 items-center justify-center rounded-lg bg-muted text-foreground [&>svg]:size-6">{icon}</div>
+        <div className="text-base leading-6 font-bold">{title}</div>
+        <div className="text-sm leading-[22px] text-muted-foreground">{body}</div>
+      </div>
+      {action ? <div className="flex flex-wrap items-center justify-center gap-2.5">{action}</div> : null}
     </div>
   );
 }
 
+/** Kobra Skeleton: radius md; neutral-200 in light (the border grey), muted in dark. */
 export function Skeleton({ className }: { className?: string }) {
-  return <div className={clsx("animate-pulse rounded-md bg-muted", className)} />;
+  return <div className={clsx("animate-pulse rounded-md bg-border dark:bg-muted", className)} />;
 }
 
 /** A small status dot + label, e.g. ● Online. */

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { Checkbox } from "@/components/ui/Controls";
 import { Archive, DotsVertical, History, Trash } from "@/components/ui/icons";
 import { Field, Input, Select } from "@/components/ui/Input";
 import { Menu, MenuItem } from "@/components/ui/Menu";
@@ -88,26 +89,22 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
       <section className="flex flex-col gap-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="text-base font-semibold">Schedule</h3>
+            <h3 className="text-base leading-6 font-bold">Schedule</h3>
             <p className="mt-1 text-sm text-muted-foreground">A daily backup to your storage. Older ones are pruned by the retention below.</p>
           </div>
           {canEdit ? (
-            <Button variant="primary" loading={now.isPending} onClick={() => now.mutate()}>
+            <Button variant="secondary" loading={now.isPending} onClick={() => now.mutate()}>
               Back up now
             </Button>
           ) : null}
         </div>
         {error ? <Alert>{error.message}</Alert> : null}
-        <label className="flex items-center gap-2.5 text-sm">
-          <input
-            type="checkbox"
-            disabled={!canEdit}
-            checked={form.enabled}
-            onChange={(e) => setForm((f) => ({ ...f, enabled: e.target.checked }))}
-            className="size-4 accent-foreground"
-          />
-          <span className="font-medium">Run backups on a schedule</span>
-        </label>
+        <Checkbox
+          disabled={!canEdit}
+          checked={form.enabled}
+          onCheckedChange={(enabled) => setForm((f) => ({ ...f, enabled }))}
+          label="Run backups on a schedule"
+        />
         <div className="grid grid-cols-2 gap-3">
           <Field label="Storage">
             {(p) => (
@@ -153,32 +150,32 @@ export function BackupsTab({ instance, canEdit }: { instance: Instance; canEdit:
       </section>
 
       <section className="flex flex-col gap-3">
-        <h3 className="text-base font-semibold">Backups</h3>
+        <h3 className="text-base leading-6 font-bold">Backups</h3>
         {info.data.backups.length === 0 ? (
           <p className="text-sm text-muted-foreground">No backups yet.</p>
         ) : (
-          <div className="divide-y divide-border rounded-lg border border-border">
+          <div className="divide-y divide-border overflow-hidden rounded-xl border border-border">
             {info.data.backups.map((b) => (
-              <div key={b.id} className="flex min-h-14 items-center gap-3 px-4 py-2.5">
+              <div key={b.id} className="flex min-h-14 items-center gap-3 px-3 py-2.5 transition-colors hover:bg-muted/50">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <Badge tone={statusTone[b.status]}>{statusLabel[b.status]}</Badge>
                     <span className="text-sm">{b.kind === "manual" ? "Manual" : "Scheduled"}</span>
-                    <span className="text-xs text-muted-foreground">to {b.targetName}</span>
+                    <span className="text-[13px] text-muted-foreground">to {b.targetName}</span>
                   </div>
-                  <div className="mt-0.5 text-xs text-muted-foreground">
+                  <div className="mt-0.5 text-[13px] text-muted-foreground">
                     <span title={new Date(b.startedAt).toLocaleString()}>{relativeTime(b.startedAt)}</span>
                     {duration(b) ? ` · took ${duration(b)}` : null}
                   </div>
-                  {b.error ? <div className="mt-1 text-xs break-words text-error">{b.error}</div> : null}
+                  {b.error ? <div className="mt-1 text-[13px] break-words text-error">{b.error}</div> : null}
                 </div>
                 <span className="text-sm text-muted-foreground tabular-nums">{formatBytes(b.sizeBytes)}</span>
                 {canEdit && b.status !== "running" ? (
                   <Menu
                     trigger={
-                      <button aria-label="Backup actions" className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground">
-                        <DotsVertical className="size-4" />
-                      </button>
+                      <Button aria-label="Backup actions" variant="ghost" size="icon-sm" className="text-muted-foreground">
+                        <DotsVertical />
+                      </Button>
                     }
                   >
                     {b.status === "completed" ? (

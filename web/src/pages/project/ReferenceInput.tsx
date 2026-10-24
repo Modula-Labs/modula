@@ -72,12 +72,12 @@ export function ReferenceInput({
         <div
           role="listbox"
           aria-label="Variable references"
-          className="anim-pop absolute top-full left-0 z-50 mt-1 max-h-60 w-full min-w-64 overflow-auto rounded-lg bg-popover p-1 text-popover-foreground shadow-menu"
+          className="anim-pop absolute top-full left-0 z-50 mt-1 max-h-60 w-full min-w-64 overflow-auto rounded-xl bg-popover p-1.5 text-popover-foreground shadow-menu"
         >
           {items.map((o, i) => (
             <div key={o.label}>
               {i === 0 || items[i - 1]!.group !== o.group ? (
-                <div className="text-caps px-2 pt-1.5 pb-1 text-muted-foreground">{o.group}</div>
+                <div className="px-2 pt-1.5 pb-1 text-xs text-muted-foreground">{o.group}</div>
               ) : null}
               <button
                 type="button"
@@ -91,7 +91,7 @@ export function ReferenceInput({
                 }}
                 onMouseEnter={() => setActive(i)}
                 className={clsx(
-                  "flex h-8 w-full items-center justify-between gap-2 rounded-md px-2 text-left font-mono text-[13px]",
+                  "flex h-8 w-full items-center justify-between gap-2 rounded-lg px-2 text-left font-mono text-[13px]",
                   i === active && "bg-accent",
                 )}
               >

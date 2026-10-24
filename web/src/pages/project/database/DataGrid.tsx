@@ -25,9 +25,9 @@ export function DataGrid({
   dim?: boolean;
 }) {
   return (
-    <div className={clsx("max-h-[560px] overflow-auto rounded-lg border border-border transition-opacity", dim && "opacity-60")}>
+    <div className={clsx("max-h-[560px] overflow-auto rounded-xl border border-border transition-opacity", dim && "opacity-60")}>
       <table className="w-max min-w-full border-collapse text-left">
-        <thead className="sticky top-0 z-10 bg-card">
+        <thead className="sticky top-0 z-10 bg-muted">
           <tr className="border-b border-border">
             {columns.map((c) => {
               const active = sort?.column === c.name;
@@ -39,9 +39,9 @@ export function DataGrid({
                 </>
               );
               return (
-                <th key={c.name} className="h-9 px-3 text-xs font-medium whitespace-nowrap text-muted-foreground">
+                <th key={c.name} className="h-9 px-3 text-[13px] font-normal whitespace-nowrap text-muted-foreground">
                   {onSort ? (
-                    <button type="button" onClick={() => onSort(c.name)} className="inline-flex items-center gap-1.5 hover:text-foreground">
+                    <button type="button" onClick={() => onSort(c.name)} className="inline-flex items-center gap-1.5 rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50">
                       {head}
                     </button>
                   ) : (
@@ -65,7 +65,7 @@ export function DataGrid({
                   : undefined
               }
               tabIndex={onRowClick ? 0 : undefined}
-              className={clsx("border-b border-border last:border-b-0 hover:bg-accent/60", onRowClick && "cursor-pointer")}
+              className={clsx("border-b border-border last:border-b-0 hover:bg-muted/50", onRowClick && "cursor-pointer")}
             >
               {row.map((v, ci) => (
                 <td key={ci} className="h-[50px] max-w-[320px] px-3 font-mono text-[13px] whitespace-nowrap">

@@ -52,7 +52,7 @@ export function SectionRail({ items }: { items: RailItem[] }) {
               aria-current={active === i.id ? "location" : undefined}
               className={clsx(
                 "text-left transition-colors hover:text-foreground",
-                active === i.id ? "font-medium text-foreground" : "text-muted-foreground",
+                active === i.id ? "font-bold text-foreground" : "text-muted-foreground",
               )}
             >
               {i.label}
@@ -96,9 +96,9 @@ function LimitSlider({
     <div className="flex flex-col gap-2">
       <div className="flex items-baseline justify-between text-sm">
         <span className="text-muted-foreground">
-          {label}: <span className="font-medium text-foreground">{format(value)}</span>
+          {label}: <span className="font-bold text-foreground">{format(value)}</span>
         </span>
-        <span className="text-xs text-muted-foreground">Server: {server}</span>
+        <span className="text-[13px] text-muted-foreground">Server: {server}</span>
       </div>
       <input
         type="range"
@@ -134,7 +134,7 @@ export function ResourceSliders({
 }) {
   const cap = capacity(node);
   return (
-    <div className="flex flex-col gap-5 rounded-lg border border-border p-4">
+    <div className="flex flex-col gap-5 rounded-xl border border-border p-4">
       <LimitSlider
         label="CPU"
         value={cpuMillis}
@@ -223,7 +223,7 @@ export function ServerPicker({
       </Select>
       {move.error && !target ? <Alert>{move.error.message}</Alert> : null}
       {target ? (
-        <div className="flex flex-col gap-3 rounded-lg border border-border p-4 text-sm">
+        <div className="flex flex-col gap-3 rounded-xl border border-border p-4 text-sm">
           <p className="text-muted-foreground">
             Move <span className="text-foreground">{instance.serviceName}</span> to{" "}
             <span className="text-foreground">{target.name}</span> in {city(target)}? It redeploys there; the old one

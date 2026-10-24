@@ -41,18 +41,14 @@ export function VolumeSection({ instance, canEdit }: { instance: Instance; canEd
     <>
       {attach.error ? <Alert>{attach.error.message}</Alert> : null}
       {volume ? (
-        <div className="flex h-10 items-center gap-2 rounded-md border border-border pr-1 pl-3">
+        <div className="flex min-h-11 items-center gap-2 rounded-xl border border-border py-1 pr-2 pl-3">
           <Disk className="size-4 text-muted-foreground" />
           <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{volume.mountPath}</span>
           <CopyButton value={volume.mountPath} label="Copy mount path" />
           {canEdit ? (
-            <button
-              aria-label="Delete volume"
-              onClick={() => setConfirm(true)}
-              className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-error"
-            >
-              <Trash className="size-4" />
-            </button>
+            <Button aria-label="Delete volume" variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-error" onClick={() => setConfirm(true)}>
+              <Trash />
+            </Button>
           ) : null}
         </div>
       ) : canEdit ? (
@@ -75,7 +71,7 @@ export function VolumeSection({ instance, canEdit }: { instance: Instance; canEd
       ) : (
         <p className="text-sm text-muted-foreground">No volume attached.</p>
       )}
-      <p className="text-xs text-muted-foreground">
+      <p className="text-sm text-muted-foreground">
         A service with a volume redeploys with brief downtime: the old container stops before the new one starts, so two never write to the data at once.
       </p>
 
@@ -128,22 +124,18 @@ export function TcpProxySection({ instance, canEdit }: { instance: Instance; can
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-sm font-medium">TCP proxy</div>
+      <div className="text-sm leading-none font-normal">TCP proxy</div>
       {error ? <Alert>{error.message}</Alert> : null}
       {proxy ? (
-        <div className="flex h-10 items-center gap-2 rounded-md border border-border pr-1 pl-3">
+        <div className="flex min-h-11 items-center gap-2 rounded-xl border border-border py-1 pr-2 pl-3">
           <Plug className="size-4 text-muted-foreground" />
           <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{address}</span>
-          <span className="text-xs text-muted-foreground">→ {proxy.targetPort}</span>
+          <span className="text-[13px] text-muted-foreground">→ {proxy.targetPort}</span>
           <CopyButton value={address} label="Copy address" />
           {canEdit ? (
-            <button
-              aria-label="Remove TCP proxy"
-              onClick={() => remove.mutate()}
-              className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-error"
-            >
-              <Trash className="size-4" />
-            </button>
+            <Button aria-label="Remove TCP proxy" variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-error" onClick={() => remove.mutate()}>
+              <Trash />
+            </Button>
           ) : null}
         </div>
       ) : canEdit ? (

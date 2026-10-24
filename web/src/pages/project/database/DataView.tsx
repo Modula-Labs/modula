@@ -61,10 +61,10 @@ export function DataView({ instance, canEdit }: { instance: Instance; canEdit: b
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between gap-3">
         {table ? (
-          <nav className="flex min-w-0 items-center gap-1.5 text-base font-semibold">
+          <nav className="flex min-w-0 items-center gap-1.5 text-base font-bold">
             <button
               type="button"
-              className="text-muted-foreground hover:text-foreground"
+              className="cursor-pointer text-muted-foreground hover:text-foreground"
               onClick={() => {
                 setTable(null);
                 setResult(null);
@@ -76,20 +76,20 @@ export function DataView({ instance, canEdit }: { instance: Instance; canEdit: b
             <span className="truncate">{table}</span>
           </nav>
         ) : (
-          <h3 className="text-base font-semibold">Tables</h3>
+          <h3 className="text-base font-bold">Tables</h3>
         )}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2">
           <IconButton label="Refresh" disabled={refreshing} onClick={refresh}>
             <Refresh className={refreshing ? "animate-spin" : undefined} />
           </IconButton>
           {canEdit ? (
             table ? (
-              <Button size="sm" variant="outline" icon={<Plus />} onClick={() => setAddColumn(true)}>
+              <Button variant="outline" icon={<Plus />} onClick={() => setAddColumn(true)}>
                 Column
               </Button>
             ) : (
-              <Button size="sm" variant="outline" icon={<Plus />} onClick={() => setNewTable(true)}>
-                New Table
+              <Button variant="outline" icon={<Plus />} onClick={() => setNewTable(true)}>
+                New table
               </Button>
             )
           ) : null}
@@ -144,7 +144,7 @@ function TilesSkeleton() {
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3">
       {Array.from({ length: 6 }, (_, i) => (
-        <Skeleton key={i} className="h-14" />
+        <Skeleton key={i} className="h-14 rounded-xl" />
       ))}
     </div>
   );
@@ -161,11 +161,11 @@ function TileGrid({ tables, onOpen }: { tables: { schema: string; name: string; 
           <Search />
         </IconButton>
         {searching ? <Input autoFocus className="h-8 max-w-xs" placeholder="Search tables…" value={q} onChange={(e) => setQ(e.target.value)} /> : null}
-        <span className="text-xs text-muted-foreground">{formatCount(tables.length)} tables</span>
+        <span className="text-[13px] text-muted-foreground">{formatCount(tables.length)} tables</span>
       </div>
       {tables.length === 0 ? (
         <p className="rounded-xl border border-dashed border-border px-6 py-10 text-center text-sm text-muted-foreground">
-          No tables yet. Create one with New Table or run a CREATE TABLE statement.
+          No tables yet. Create one with New table or run a CREATE TABLE statement.
         </p>
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3">
@@ -175,7 +175,7 @@ function TileGrid({ tables, onOpen }: { tables: { schema: string; name: string; 
               type="button"
               onClick={() => onOpen(t)}
               title={`${t.schema}.${t.name} · ~${formatCount(t.rowEstimate)} rows`}
-              className="flex h-14 items-center gap-2.5 rounded-lg border border-border bg-card px-3 text-left text-sm hover:bg-accent"
+              className="flex h-14 cursor-pointer items-center gap-2.5 rounded-xl border border-border bg-card px-3 text-left text-sm outline-none hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/50"
             >
               <Table className="size-4 shrink-0 text-muted-foreground" />
               <span className="truncate">{t.schema === "public" ? t.name : `${t.schema}.${t.name}`}</span>
@@ -200,7 +200,7 @@ function ResultPanel({ result, onClear }: { result: DbQueryResult; onClear: () =
           </span>
           {result.truncated ? <Badge tone="warn">Truncated</Badge> : null}
         </div>
-        <Button size="sm" variant="ghost" onClick={onClear}>
+        <Button variant="ghost" onClick={onClear}>
           Clear results
         </Button>
       </div>
@@ -269,7 +269,6 @@ function TableView({ instance, table, canEdit }: { instance: Instance; table: st
           <div className="flex items-center justify-between">
             {canEdit ? (
               <Button
-                size="sm"
                 variant="outline"
                 icon={<Plus />}
                 onClick={() => {
@@ -282,7 +281,7 @@ function TableView({ instance, table, canEdit }: { instance: Instance; table: st
             ) : (
               <span />
             )}
-            <span className="text-xs text-muted-foreground">{formatCount(d.total)} rows</span>
+            <span className="text-[13px] text-muted-foreground">{formatCount(d.total)} rows</span>
           </div>
           <div className="flex items-center justify-center gap-1 text-sm">
             <IconButton label="First page" disabled={page <= 1} onClick={() => setPage(1)}>

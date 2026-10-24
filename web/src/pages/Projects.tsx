@@ -27,7 +27,7 @@ function CardPreview({ project: p }: { project: ProjectCard }) {
         ? "bg-success"
         : "bg-warning";
   return (
-    <div className="dotgrid mx-3 mb-3 mt-3 flex flex-1 flex-col rounded-lg border border-border/60">
+    <div className="dotgrid mx-4 mb-4 mt-3 flex flex-1 flex-col rounded-lg border border-border">
       <div className="flex flex-1 flex-wrap items-center justify-center gap-2 px-4">
         {p.services.slice(0, MAX_ICONS).map((s) => (
           <span key={s.id} title={s.name} className="rounded-lg shadow-sm">
@@ -68,24 +68,26 @@ function DomainBanner() {
   const q = useInstanceDomain();
   if (hidden || !q.data || q.data.dashboard) return null;
   return (
-    <div className="mb-6 flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-sm">
+    <div className="mb-6 flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-sm">
       <span className="min-w-0 flex-1">
         The dashboard is served at the server's IP address. Add a domain for a
         proper address and generated service URLs.{" "}
-        <Link to="/settings" hash="domain" className="font-medium underline">
+        <Link to="/settings" hash="domain" className="font-normal underline underline-offset-4">
           Settings → Domain
         </Link>
       </span>
-      <button
+      <Button
+        variant="ghost"
+        size="icon-sm"
         aria-label="Dismiss"
-        className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+        className="text-muted-foreground"
         onClick={() => {
           dismissDomainBanner();
           setHidden(true);
         }}
       >
-        <X className="size-4" />
-      </button>
+        <X />
+      </Button>
     </div>
   );
 }
@@ -110,11 +112,11 @@ export function ProjectsPage() {
     <div>
       {me?.user.isInstanceAdmin ? <DomainBanner /> : null}
       <div className="flex items-center justify-between gap-4">
-        <h1 className="text-[30px] leading-9 font-normal tracking-[-0.01em]">
+        <h1 className="text-2xl leading-8 font-bold">
           Projects
         </h1>
         <div className="flex items-center gap-2">
-          <label className="flex h-9 w-60 items-center gap-2 rounded-md border border-input px-2.5 text-muted-foreground focus-within:border-ring">
+          <label className="flex h-8 w-60 items-center gap-2 rounded-lg border border-input px-2.5 text-muted-foreground focus-within:border-ring dark:bg-input/30">
             <Search className="size-4" />
             <input
               className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
@@ -135,7 +137,7 @@ export function ProjectsPage() {
           ) : null}
         </div>
       </div>
-      <div className="mt-6 flex items-center border-b border-border pb-3 text-xs text-muted-foreground">
+      <div className="mt-6 flex items-center border-b border-border pb-3 text-[13px] text-muted-foreground">
         <span className="flex items-center gap-1.5">
           <LayoutGrid className="size-3.5" /> {projects.data?.length ?? 0}{" "}
           projects
@@ -172,10 +174,10 @@ export function ProjectsPage() {
                 key={p.id}
                 to="/projects/$projectId"
                 params={{ projectId: p.id }}
-                className="group flex h-64 flex-col overflow-hidden rounded-xl border border-border bg-card hover:border-input"
+                className="group flex h-64 flex-col overflow-hidden rounded-xl border border-border bg-card transition-colors hover:border-foreground/25"
               >
-                <div className="px-5 pt-4">
-                  <div className="text-sm font-semibold">{p.name}</div>
+                <div className="px-4 pt-4">
+                  <div className="text-base font-bold">{p.name}</div>
                   {p.description ? (
                     <div className="mt-0.5 truncate text-sm text-muted-foreground">
                       {p.description}

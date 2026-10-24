@@ -31,7 +31,7 @@ export function GeneralSection({ project, canEdit }: { project: ProjectDetail; c
           {(p) => <Input {...p} required maxLength={64} disabled={!canEdit} value={name} onChange={(e) => setName(e.target.value)} />}
         </Field>
         <Field label="Description">
-          {(p) => <Textarea {...p} rows={3} maxLength={280} disabled={!canEdit} value={description} onChange={(e) => setDescription(e.target.value)} />}
+          {(p) => <Textarea {...p} mono={false} rows={3} maxLength={280} disabled={!canEdit} value={description} onChange={(e) => setDescription(e.target.value)} />}
         </Field>
         {canEdit ? (
           <div className="flex items-center gap-3">
@@ -41,10 +41,10 @@ export function GeneralSection({ project, canEdit }: { project: ProjectDetail; c
             {save.isSuccess && !dirty ? <span className="text-sm text-muted-foreground">Saved</span> : null}
           </div>
         ) : (
-          <p className="text-xs text-muted-foreground">Members and admins can edit the project.</p>
+          <p className="text-[13px] text-muted-foreground">Members and admins can edit the project.</p>
         )}
       </form>
-      <div className="flex items-center gap-3 text-sm">
+      <div className="flex items-center gap-3 border-t border-border pt-6 text-sm">
         <span className="w-24 text-muted-foreground">Project ID</span>
         <code className="font-mono text-[13px]">{project.id}</code>
         <CopyButton value={project.id} label="Copy project ID" />

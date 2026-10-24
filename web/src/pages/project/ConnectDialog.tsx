@@ -69,18 +69,18 @@ function GenericConnectDialog({
           ]}
         />
         {tab === "public" && !proxy ? (
-          <div className="flex flex-col gap-3 rounded-lg border border-border p-4">
+          <div className="flex flex-col gap-3 rounded-xl border border-border p-4">
             <p className="text-sm text-muted-foreground">
               Public access goes through a TCP proxy. Anyone with the credentials can reach the database from the internet, so enable it only when you need it.
             </p>
             {enable.error ? <Alert>{enable.error.message}</Alert> : null}
             {canEdit ? (
               <div className="flex items-end gap-2">
-                <label className="flex flex-col gap-1.5 text-sm font-medium">
+                <label className="flex flex-col gap-1.5 text-sm font-bold">
                   Target port
                   <Input className="w-28" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} />
                 </label>
-                <Button variant="secondary" loading={enable.isPending} disabled={!Number(port)} onClick={() => enable.mutate()}>
+                <Button variant="primary" loading={enable.isPending} disabled={!Number(port)} onClick={() => enable.mutate()}>
                   Enable TCP proxy
                 </Button>
               </div>
@@ -91,7 +91,7 @@ function GenericConnectDialog({
         ) : (
           <>
             {tab === "public" && proxy ? (
-              <div className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm">
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2.5 text-sm">
                 <span className="text-muted-foreground">TCP proxy</span>
                 <span className="font-mono text-[13px]">
                   {proxy.host}:{proxy.publicPort}
@@ -105,7 +105,7 @@ function GenericConnectDialog({
             ) : entries.length === 0 ? (
               <p className="text-sm text-muted-foreground">Nothing to show here.</p>
             ) : (
-              <div className="divide-y divide-border rounded-lg border border-border">
+              <div className="divide-y divide-border rounded-xl border border-border">
                 {entries.map((e) => (
                   <ConnectRow
                     key={e.variable}
@@ -145,25 +145,26 @@ export function ConnectRow({ label, variable, reference, info }: { label: string
       setError(e instanceof Error ? e.message : "Something went wrong.");
     }
   };
-  const iconBtn = "rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50 [&_svg]:size-4";
 
   return (
     <div className="flex flex-col gap-1.5 px-3 py-2.5">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-sm font-medium">{label}</span>
+        <span className="text-sm font-bold">{label}</span>
         <span className="truncate font-mono text-xs text-muted-foreground" title={variable}>
           {reference}
         </span>
       </div>
       <div className="flex items-center gap-1">
-        <code className="min-w-0 flex-1 truncate rounded-md bg-background px-2 py-1.5 font-mono text-[12.5px]">
+        <code className="min-w-0 flex-1 truncate rounded-lg bg-muted px-2 py-1.5 font-mono text-[13px]">
           {shown && value !== null ? value : "•".repeat(24)}
         </code>
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="icon"
           aria-label={shown ? `Hide ${label}` : `Reveal ${label}`}
           disabled={!info}
-          className={iconBtn}
+          className="text-muted-foreground"
           onClick={() =>
             run(async () => {
               if (shown) return setShown(false);
@@ -173,12 +174,14 @@ export function ConnectRow({ label, variable, reference, info }: { label: string
           }
         >
           {shown ? <EyeOff /> : <Eye />}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          variant="ghost"
+          size="icon"
           aria-label={`Copy ${label}`}
           disabled={!info}
-          className={iconBtn}
+          className="text-muted-foreground"
           onClick={() =>
             run(async () => {
               await navigator.clipboard.writeText(await fetchValue());
@@ -188,7 +191,7 @@ export function ConnectRow({ label, variable, reference, info }: { label: string
           }
         >
           {copied ? <Check /> : <Copy />}
-        </button>
+        </Button>
       </div>
       {error ? <p className="text-xs text-error">{error}</p> : null}
     </div>

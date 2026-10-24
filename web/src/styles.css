@@ -6,7 +6,9 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
-  --radius-xs: 4px;
+  /* Kobra ships two weights: medium reads as regular, semibold as bold. */
+  --font-weight-medium: 400;
+  --font-weight-semibold: 700;
   --color-badge-blue-bg: var(--badge-blue-bg);
   --color-badge-blue-fg: var(--badge-blue-fg);
   --color-badge-green-bg: var(--badge-green-bg);
@@ -19,10 +21,12 @@
   --color-badge-violet-fg: var(--badge-violet-fg);
   --color-badge-neutral-bg: var(--badge-neutral-bg);
   --color-badge-neutral-fg: var(--badge-neutral-fg);
-  --shadow-menu: 0 0 0 1px var(--border), 0 8px 24px -8px oklch(0 0 0 / 0.35);
-  --shadow-modal: 0 0 0 1px var(--border), 0 24px 48px -12px oklch(0 0 0 / 0.45);
-  /* Kobra's tactile "raise": a light top edge and a soft drop. */
-  --shadow-raise: inset 0 1px 0 oklch(1 0 0 / 0.14), 0 1px 2px oklch(0 0 0 / 0.25);
+  /* Kobra: menus shadow-md, dialogs shadow-2xl, each with a 1px foreground ring at 10%. */
+  --shadow-menu: 0 0 0 1px color-mix(in oklch, var(--foreground) 10%, transparent), 0 4px 6px -1px oklch(0 0 0 / 0.1), 0 2px 4px -2px oklch(0 0 0 / 0.1);
+  --shadow-submenu: 0 0 0 1px color-mix(in oklch, var(--foreground) 10%, transparent), 0 10px 15px -3px oklch(0 0 0 / 0.1), 0 4px 6px -4px oklch(0 0 0 / 0.1);
+  --shadow-modal: 0 0 0 1px color-mix(in oklch, var(--foreground) 10%, transparent), 0 25px 50px -12px oklch(0 0 0 / 0.25);
+  /* Our tactile "raise" for filled buttons: a light top edge and a soft contact shadow. */
+  --shadow-raise: inset 0 1px 0 oklch(1 0 0 / 0.16), 0 1px 2px oklch(0 0 0 / 0.12), 0 0 0 1px oklch(0 0 0 / 0.04);
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
@@ -44,7 +48,7 @@
     border-color: var(--border);
   }
   ::selection {
-    background: var(--brand-soft);
+    background: color-mix(in oklch, var(--foreground) 18%, transparent);
   }
   /* Slim, rounded scrollbars that sit inside their container (Railway-like). */
   * {
@@ -69,9 +73,10 @@
   ::-webkit-scrollbar-corner {
     background: transparent;
   }
+  /* Kobra focus: a 2px ring 1px out (controls with their own ring opt out with outline-none). */
   :focus-visible {
     outline: 2px solid var(--ring);
-    outline-offset: 2px;
+    outline-offset: 1px;
   }
 }
 
@@ -80,12 +85,12 @@
     background-image: radial-gradient(var(--canvas-dot) 1px, transparent 1px);
     background-size: 16px 16px;
   }
+  /* Section eyebrow (Kobra has no caps style; kept small, muted, regular). */
   .text-caps {
-    font-size: 11px;
+    font-size: 12px;
     line-height: 16px;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    font-weight: 600;
+    font-weight: 400;
+    color: var(--muted-foreground);
   }
 }
 

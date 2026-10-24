@@ -47,29 +47,18 @@ export function IconButton({
   className,
   ...rest
 }: { label: string } & React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      {...rest}
-      className={clsx(
-        "inline-flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50 [&_svg]:size-4",
-        className,
-      )}
-    />
-  );
+  return <Button type="button" variant="ghost" size="icon" aria-label={label} title={label} className={clsx("text-muted-foreground hover:text-foreground", className)} {...rest} />;
 }
 
 export function Card({ className, children }: { className?: string; children: ReactNode }) {
-  return <div className={clsx("rounded-lg border border-border bg-card", className)}>{children}</div>;
+  return <div className={clsx("rounded-xl border border-border bg-card", className)}>{children}</div>;
 }
 
 export function SectionTitle({ title, hint, right }: { title: string; hint?: ReactNode; right?: ReactNode }) {
   return (
     <div className="mb-3 flex items-end justify-between gap-3">
       <div>
-        <h3 className="text-base font-semibold">{title}</h3>
+        <h3 className="text-base font-bold">{title}</h3>
         {hint ? <p className="mt-0.5 text-sm text-muted-foreground">{hint}</p> : null}
       </div>
       {right}

@@ -54,7 +54,7 @@ export function LoginPage({ notice }: { notice?: string }) {
         <Field label="Password">
           {(p) => <Input {...p} type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />}
         </Field>
-        <Button type="submit" variant="primary" size="lg" loading={busy}>
+        <Button type="submit" variant="primary" loading={busy}>
           Sign in
         </Button>
       </form>

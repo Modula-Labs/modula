@@ -85,7 +85,7 @@ export function DeploymentsTab({
   };
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-6">
       {error ? <Alert>{error.message}</Alert> : null}
       <StatusBar instance={instance.data} loading={instance.isPending} serving={serving} latest={all[0]} />
       {serving ? (
@@ -99,14 +99,14 @@ export function DeploymentsTab({
             <button
               onClick={toggleHistory}
               aria-expanded={historyOpen}
-              className="text-caps flex items-center gap-1 rounded-md py-1 text-muted-foreground hover:text-foreground"
+              className="flex items-center gap-1 rounded-md py-1 text-sm font-bold text-foreground"
             >
               <ChevronDown className={clsx("size-3.5 transition-transform duration-150", !historyOpen && "-rotate-90")} />
               History
             </button>
             <button
               onClick={toggleSkipped}
-              className={clsx("text-xs text-muted-foreground transition-opacity duration-150 hover:text-foreground", !historyOpen && "pointer-events-none opacity-0")}
+              className={clsx("text-sm text-muted-foreground transition-opacity duration-150 hover:text-foreground", !historyOpen && "pointer-events-none opacity-0")}
               tabIndex={historyOpen ? 0 : -1}
             >
               {hideSkipped ? "Show skipped" : "Hide skipped"}
@@ -121,13 +121,13 @@ export function DeploymentsTab({
           >
             <div className="min-h-0 overflow-hidden">
               {history.length ? (
-                <div className="divide-y divide-border rounded-lg border border-border">
+                <div className="divide-y divide-border overflow-hidden rounded-xl border border-border">
                   {history.map((d) => (
                     <DeploymentRow key={d.id} d={d} selected={selected === d.id} onOpen={onOpen} actions={actions} />
                   ))}
                 </div>
               ) : (
-                <p className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+                <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
                   Only skipped deployments so far.
                 </p>
               )}
@@ -169,7 +169,7 @@ function StatusBar({
   const location = instance?.location;
   const replicas = instance?.config.replicas ?? 1;
   return (
-    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground">
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-sm text-muted-foreground">
       <span className="inline-flex items-center gap-2 [&_svg]:size-4">
         <World />
         <StatusDot tone={state.tone}>{state.label}</StatusDot>
@@ -206,7 +206,7 @@ function EmptyActive({
   const target =
     source?.type === "repo" ? source.repo : source?.type === "image" ? source.image : null;
   return (
-    <div className="flex min-h-20 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-border px-4 py-5 text-center text-sm text-muted-foreground">
+    <div className="flex min-h-20 flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-border px-4 py-5 text-center text-sm text-muted-foreground">
       <p>There is no active deployment for this service.</p>
       {source?.type === "local" ? (
         <p>
@@ -220,7 +220,7 @@ function EmptyActive({
           className="max-w-full truncate rounded-sm text-foreground underline-offset-4 hover:underline disabled:opacity-60"
         >
           {loading ? "Deploying…" : source?.type === "repo" ? "Deploy the repo " : "Deploy "}
-          {loading ? null : <strong className="font-semibold">{target}</strong>}
+          {loading ? null : <strong className="font-bold">{target}</strong>}
         </button>
       ) : null}
     </div>
@@ -252,7 +252,7 @@ function DeploymentRow({
     <div
       className={clsx(
         "group relative flex items-center transition-colors duration-150 hover:bg-accent/60",
-        prominent ? "min-h-20 rounded-lg border bg-card" : "min-h-16",
+        prominent ? "min-h-20 rounded-xl border bg-card" : "min-h-16",
         prominent && (selected ? "border-foreground/50" : "border-border"),
         !prominent && selected && "bg-accent/60",
       )}
@@ -267,11 +267,11 @@ function DeploymentRow({
         </span>
         <SourceAvatar d={d} size={prominent ? 40 : 32} />
         <span className="min-w-0 flex-1">
-          <span className={clsx("block truncate text-[13px]", imageOnly && "font-mono")}>{title}</span>
-          <span className="block truncate text-xs text-muted-foreground">
+          <span className={clsx("block truncate text-sm", imageOnly && "font-mono")}>{title}</span>
+          <span className="block truncate text-[13px] text-muted-foreground">
             {relativeTime(d.createdAt)} {viaLabel(d)}
           </span>
-          {d.error ? <span className="block truncate text-xs text-error">{d.error}</span> : null}
+          {d.error ? <span className="block truncate text-[13px] text-error">{d.error}</span> : null}
         </span>
       </button>
       <div className="flex shrink-0 items-center gap-1 px-2">
@@ -287,12 +287,9 @@ function DeploymentRow({
         </span>
         <Menu
           trigger={
-            <button
-              aria-label="Deployment actions"
-              className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground [&_svg]:size-4"
-            >
+            <Button aria-label="Deployment actions" variant="ghost" size="icon-sm" className="text-muted-foreground">
               <DotsVertical />
-            </button>
+            </Button>
           }
         >
           <MenuItem icon={<FileText />} onSelect={() => onOpen(d.id)}>

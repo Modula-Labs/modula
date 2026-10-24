@@ -5,6 +5,7 @@ import { Refresh } from "@/components/ui/icons";
 import { Alert, Badge } from "@/components/ui/misc";
 import { api, type DbStats, type Instance } from "@/lib/api";
 import { formatBytes, formatCount, formatMs, formatRatio, relativeTime } from "@/lib/format";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/Table";
 import { Card, IconButton, QueryBoundary, SectionTitle, dbQueryOpts } from "./shared";
 
 /** Postgres wraps transaction ids at 2^31; autovacuum starts freezing at 200M. */
@@ -14,9 +15,9 @@ const BLOAT_PCT = 10;
 function StatCard({ label, value, sub, pct }: { label: string; value: ReactNode; sub?: ReactNode; pct?: number }) {
   return (
     <Card className="flex flex-col gap-1 p-4">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-2xl font-semibold tabular-nums">{value}</div>
-      {sub ? <div className="text-xs text-muted-foreground tabular-nums">{sub}</div> : null}
+      <div className="text-[13px] text-muted-foreground">{label}</div>
+      <div className="text-2xl font-bold tabular-nums">{value}</div>
+      {sub ? <div className="text-[13px] text-muted-foreground tabular-nums">{sub}</div> : null}
       {pct !== undefined ? (
         <div className="mt-1 h-1 overflow-hidden rounded-full bg-muted">
           <div className="h-full rounded-full bg-foreground/70" style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
@@ -26,18 +27,13 @@ function StatCard({ label, value, sub, pct }: { label: string; value: ReactNode;
   );
 }
 
-function Th({ children, right }: { children: ReactNode; right?: boolean }) {
-  return <th className={`h-9 px-3 text-xs font-medium whitespace-nowrap text-muted-foreground ${right ? "text-right" : "text-left"}`}>{children}</th>;
+function Th({ children, right }: { children?: ReactNode; right?: boolean }) {
+  return <TableHead className={right ? "text-right text-muted-foreground" : "text-muted-foreground"}>{children}</TableHead>;
 }
 function Td({ children, right, mono }: { children: ReactNode; right?: boolean; mono?: boolean }) {
-  return <td className={`h-10 px-3 text-sm whitespace-nowrap tabular-nums ${right ? "text-right" : ""} ${mono ? "font-mono text-[13px]" : ""}`}>{children}</td>;
+  return <TableCell className={`whitespace-nowrap tabular-nums ${right ? "text-right" : ""} ${mono ? "font-mono text-[13px]" : ""}`}>{children}</TableCell>;
 }
-const TableCard = ({ children }: { children: ReactNode }) => (
-  <Card className="overflow-x-auto">
-    <table className="w-full border-collapse">{children}</table>
-  </Card>
-);
-const rowCls = "border-t border-border first:border-t-0";
+const TableCard = ({ children }: { children: ReactNode }) => <Table>{children}</Table>;
 
 export function StatsView({ instance, canEdit }: { instance: Instance; canEdit: boolean }) {
   const q = useQuery({ queryKey: ["db-stats", instance.id], queryFn: () => api.dbStats(instance.id), refetchInterval: 15_000, ...dbQueryOpts });
@@ -92,17 +88,17 @@ function QueryStatistics({ instance, s, canEdit }: { instance: Instance; s: DbSt
           <p className="text-sm text-muted-foreground">No queries recorded yet.</p>
         ) : (
           <TableCard>
-            <thead>
-              <tr>
+            <TableHeader>
+              <TableRow>
                 <Th>Query</Th>
                 <Th right>Calls</Th>
                 <Th right>Mean</Th>
                 <Th right>Total</Th>
-              </tr>
-            </thead>
-            <tbody>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {s.topQueries.map((r, i) => (
-                <tr key={i} className={rowCls}>
+                <TableRow key={i}>
                   <Td mono>
                     <span className="block max-w-[420px] truncate" title={r.query}>
                       {r.query}
@@ -111,16 +107,16 @@ function QueryStatistics({ instance, s, canEdit }: { instance: Instance; s: DbSt
                   <Td right>{formatCount(r.calls)}</Td>
                   <Td right>{formatMs(r.meanMs)}</Td>
                   <Td right>{formatMs(r.totalMs)}</Td>
-                </tr>
+                </TableRow>
               ))}
-            </tbody>
+            </TableBody>
           </TableCard>
         )
       ) : (
         <Card className="flex items-center justify-between gap-4 p-4">
           <p className="text-sm text-muted-foreground">Install the pg_stat_statements extension to see your slowest and most frequent queries.</p>
           {canEdit ? (
-            <Button variant="secondary" size="sm" loading={enable.isPending} onClick={() => enable.mutate()}>
+            <Button variant="outline" loading={enable.isPending} onClick={() => enable.mutate()}>
               Enable
             </Button>
           ) : null}
@@ -152,39 +148,39 @@ function TablesSection({ s }: { s: DbStats }) {
         <StatCard label="WAL" value={formatBytes(z.wal)} />
       </div>
       <TableCard>
-        <thead>
-          <tr>
+        <TableHeader>
+          <TableRow>
             <Th>Table</Th>
             <Th right>Rows</Th>
             <Th right>Data</Th>
             <Th right>Indexes</Th>
             <Th right>Seq Scans</Th>
             <Th right>Idx Scans</Th>
-          </tr>
-        </thead>
-        <tbody>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {shown.map((t) => (
-            <tr key={t.name} className={rowCls}>
+            <TableRow key={t.name}>
               <Td mono>{t.name}</Td>
               <Td right>{formatCount(t.rows)}</Td>
               <Td right>{formatBytes(t.dataBytes)}</Td>
               <Td right>{formatBytes(t.indexBytes)}</Td>
               <Td right>{formatCount(t.seqScans)}</Td>
               <Td right>{formatCount(t.idxScans)}</Td>
-            </tr>
+            </TableRow>
           ))}
           {sorted.length === 0 ? (
-            <tr>
-              <td colSpan={6} className="h-16 text-center text-sm text-muted-foreground">
+            <TableRow>
+              <TableCell colSpan={6} className="h-16 text-center text-muted-foreground">
                 No tables.
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ) : null}
-        </tbody>
+        </TableBody>
       </TableCard>
       {sorted.length > 10 ? (
         <div className="mt-2">
-          <Button variant="ghost" size="sm" onClick={() => setAll((a) => !a)}>
+          <Button variant="ghost" onClick={() => setAll((a) => !a)}>
             {all ? "Show fewer" : `Show all ${formatCount(sorted.length)} tables`}
           </Button>
         </div>
@@ -228,19 +224,19 @@ function VacuumHealth({ instance, s, canEdit }: { instance: Instance; s: DbStats
         </div>
       ) : null}
       <TableCard>
-        <thead>
-          <tr>
+        <TableHeader>
+          <TableRow>
             <Th>Table</Th>
             <Th right>Dead Rows</Th>
             <Th right>Dead %</Th>
             <Th>Last Vacuum</Th>
             <Th right>XID Age</Th>
             <Th>{null}</Th>
-          </tr>
-        </thead>
-        <tbody>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
           {shown.map((t) => (
-            <tr key={t.name} className={rowCls}>
+            <TableRow key={t.name}>
               <Td mono>{t.name}</Td>
               <Td right>{formatCount(t.deadRows)}</Td>
               <Td right>{t.deadPct >= BLOAT_PCT ? <Badge tone="warn">{t.deadPct.toFixed(1)}%</Badge> : `${t.deadPct.toFixed(1)}%`}</Td>
@@ -248,25 +244,25 @@ function VacuumHealth({ instance, s, canEdit }: { instance: Instance; s: DbStats
               <Td right>{formatCount(t.xidAge)}</Td>
               <Td right>
                 {canEdit ? (
-                  <Button size="sm" variant="ghost" loading={pending === t.name} disabled={pending !== null} onClick={() => vacuum.mutate(t.name)}>
+                  <Button variant="ghost" loading={pending === t.name} disabled={pending !== null} onClick={() => vacuum.mutate(t.name)}>
                     Vacuum
                   </Button>
                 ) : null}
               </Td>
-            </tr>
+            </TableRow>
           ))}
           {sorted.length === 0 ? (
-            <tr>
-              <td colSpan={6} className="h-16 text-center text-sm text-muted-foreground">
+            <TableRow>
+              <TableCell colSpan={6} className="h-16 text-center text-muted-foreground">
                 No tables.
-              </td>
-            </tr>
+              </TableCell>
+            </TableRow>
           ) : null}
-        </tbody>
+        </TableBody>
       </TableCard>
       {sorted.length > 5 ? (
         <div className="mt-2">
-          <Button variant="ghost" size="sm" onClick={() => setAll((a) => !a)}>
+          <Button variant="ghost" onClick={() => setAll((a) => !a)}>
             {all ? "Show fewer" : `Show all ${formatCount(sorted.length)} tables`}
           </Button>
         </div>
@@ -291,24 +287,24 @@ function IndexHealth({ s }: { s: DbStats }) {
         <p className="text-sm text-muted-foreground">Every index has been used.</p>
       ) : (
         <TableCard>
-          <thead>
-            <tr>
+          <TableHeader>
+            <TableRow>
               <Th>Index</Th>
               <Th>Table</Th>
               <Th right>Size</Th>
               <Th right>Scans</Th>
-            </tr>
-          </thead>
-          <tbody>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
             {s.unusedIndexes.map((i) => (
-              <tr key={`${i.table}.${i.name}`} className={rowCls}>
+              <TableRow key={`${i.table}.${i.name}`}>
                 <Td mono>{i.name}</Td>
                 <Td mono>{i.table}</Td>
                 <Td right>{formatBytes(i.bytes)}</Td>
                 <Td right>{formatCount(i.scans)}</Td>
-              </tr>
+              </TableRow>
             ))}
-          </tbody>
+          </TableBody>
         </TableCard>
       )}
     </section>

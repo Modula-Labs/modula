@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Checkbox } from "@/components/ui/Controls";
 import { Button } from "@/components/ui/Button";
 import { Plus, Trash } from "@/components/ui/icons";
 import { Field, Input, Select } from "@/components/ui/Input";
@@ -36,25 +37,13 @@ function ColumnRow({
         onChange={(e) => onChange({ ...c, defaultExpr: e.target.value })}
       />
       {pk ? (
-        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <input type="checkbox" className="size-3.5 accent-foreground" checked={!!c.primaryKey} onChange={(e) => onChange({ ...c, primaryKey: e.target.checked })} />
-          PK
-        </label>
+        <Checkbox label="PK" checked={!!c.primaryKey} onCheckedChange={(v) => onChange({ ...c, primaryKey: v })} />
       ) : null}
-      <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <input
-          type="checkbox"
-          className="size-3.5 accent-foreground"
-          checked={c.nullable && !c.primaryKey}
-          disabled={c.primaryKey}
-          onChange={(e) => onChange({ ...c, nullable: e.target.checked })}
-        />
-        Nullable
-      </label>
+      <Checkbox label="Nullable" checked={c.nullable && !c.primaryKey} disabled={c.primaryKey} onCheckedChange={(v) => onChange({ ...c, nullable: v })} />
       {onRemove ? (
-        <button type="button" aria-label="Remove column" onClick={onRemove} className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-error">
-          <Trash className="size-4" />
-        </button>
+        <Button type="button" variant="ghost" size="icon" aria-label="Remove column" onClick={onRemove} className="text-muted-foreground hover:text-error">
+          <Trash />
+        </Button>
       ) : null}
     </div>
   );
@@ -100,7 +89,7 @@ export function NewTableDialog({
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button variant="secondary" loading={running} disabled={!valid} onClick={submit}>
+          <Button variant="primary" loading={running} disabled={!valid} onClick={submit}>
             Create table
           </Button>
         </>
@@ -116,7 +105,7 @@ export function NewTableDialog({
         {error || localError ? <Alert>{localError ?? error}</Alert> : null}
         <Field label="Name">{(p) => <Input {...p} autoFocus autoComplete="off" value={name} onChange={(e) => setName(e.target.value)} />}</Field>
         <div className="flex flex-col gap-2">
-          <div className="text-sm font-medium">Columns</div>
+          <div className="text-sm font-bold">Columns</div>
           {cols.map((c, i) => (
             <ColumnRow
               key={i}
@@ -127,7 +116,7 @@ export function NewTableDialog({
             />
           ))}
           <div>
-            <Button type="button" size="sm" variant="ghost" icon={<Plus />} onClick={() => setCols((l) => [...l, blank()])}>
+            <Button type="button" variant="ghost" icon={<Plus />} onClick={() => setCols((l) => [...l, blank()])}>
               Add column
             </Button>
           </div>
@@ -175,7 +164,7 @@ export function AddColumnDialog({
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button variant="secondary" loading={running} disabled={!valid} onClick={submit}>
+          <Button variant="primary" loading={running} disabled={!valid} onClick={submit}>
             Add column
           </Button>
         </>
@@ -190,7 +179,7 @@ export function AddColumnDialog({
       >
         {error || localError ? <Alert>{localError ?? error}</Alert> : null}
         <ColumnRow c={c} onChange={setC} />
-        <p className="text-xs text-muted-foreground">A NOT NULL column on a table with rows needs a default.</p>
+        <p className="text-[13px] text-muted-foreground">A NOT NULL column on a table with rows needs a default.</p>
       </form>
     </Modal>
   );

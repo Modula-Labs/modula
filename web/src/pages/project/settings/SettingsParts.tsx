@@ -5,9 +5,9 @@ import { Field, Input } from "@/components/ui/Input";
 /** A settings section: heading, optional explanation, then its content. */
 export function SettingsSection({ title, description, children }: { title: string; description?: ReactNode; children: ReactNode }) {
   return (
-    <section className="flex flex-col gap-4">
+    <section className="flex flex-col gap-6">
       <div>
-        <h2 className="text-lg font-semibold">{title}</h2>
+        <h2 className="text-xl leading-7 font-bold">{title}</h2>
         {description ? <p className="mt-1 text-sm text-muted-foreground">{description}</p> : null}
       </div>
       {children}

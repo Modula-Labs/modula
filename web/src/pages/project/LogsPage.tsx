@@ -136,9 +136,9 @@ export function LogsPage() {
 
   const first = logs.isLoading || !env;
   return (
-    <div className="flex h-full flex-col gap-3 p-4">
+    <div className="flex h-full flex-col gap-4 p-6">
       <div className="flex flex-wrap items-center gap-2">
-        <label className="flex h-9 min-w-56 flex-1 items-center gap-2 rounded-md border border-input px-2.5 text-muted-foreground focus-within:border-ring">
+        <label className="flex h-8 min-w-56 flex-1 items-center gap-2 rounded-lg border border-input px-2.5 text-muted-foreground focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30">
           <Search className="size-4" />
           <input
             className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
@@ -213,7 +213,6 @@ export function LogsPage() {
             {formatLogTime(custom.until).slice(0, 8)}
           </span>
           <Button
-            size="sm"
             variant="ghost"
             onClick={() => setCustom(undefined)}
           >
@@ -234,7 +233,7 @@ export function LogsPage() {
         />
       ) : null}
       {base?.data.truncated ? (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-[13px] text-muted-foreground">
           Showing the newest {base.data.lines.length} lines. Narrow the time
           range or add a filter to see others.
         </p>
@@ -247,7 +246,7 @@ export function LogsPage() {
           pinned.current =
             el.scrollHeight - el.scrollTop - el.clientHeight < 24;
         }}
-        className="min-h-40 flex-1 overflow-auto rounded-lg border border-border bg-background py-2 font-mono text-[12.5px] leading-5"
+        className="min-h-40 flex-1 overflow-auto rounded-xl border border-border bg-background py-2 font-mono text-[12.5px] leading-5"
         role="log"
         aria-live="off"
       >
@@ -255,7 +254,7 @@ export function LogsPage() {
           <div className="px-3 text-muted-foreground">Loading logs…</div>
         ) : lines.length === 0 ? (
           <div className="flex h-full min-h-32 flex-col items-center justify-center gap-1 px-3 font-sans">
-            <div className="text-sm font-medium text-foreground">
+            <div className="text-sm font-bold text-foreground">
               No logs in this time range
             </div>
             <p className="text-sm text-muted-foreground">

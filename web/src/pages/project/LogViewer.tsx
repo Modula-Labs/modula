@@ -82,7 +82,7 @@ export function LogViewer({ url, downloadName = "logs.log" }: { url: string; dow
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex items-center gap-3">
-        <label className="flex h-9 flex-1 items-center gap-2 rounded-md border border-input px-2.5 text-muted-foreground focus-within:border-ring">
+        <label className="flex h-8 flex-1 items-center gap-2 rounded-lg border border-input px-2.5 text-muted-foreground focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 dark:bg-input/30">
           <Search className="size-4" />
           <input
             className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
@@ -94,7 +94,6 @@ export function LogViewer({ url, downloadName = "logs.log" }: { url: string; dow
         </label>
         <Button
           variant="ghost"
-          size="sm"
           role="switch"
           aria-checked={wrap}
           className={clsx(wrap && "bg-accent text-foreground")}
@@ -102,10 +101,10 @@ export function LogViewer({ url, downloadName = "logs.log" }: { url: string; dow
         >
           Wrap
         </Button>
-        <Button variant="ghost" size="sm" icon={<Download />} disabled={lines.length === 0} onClick={download}>
+        <Button variant="ghost" icon={<Download />} disabled={lines.length === 0} onClick={download}>
           Download
         </Button>
-        <span className="text-xs text-muted-foreground">
+        <span className="text-[13px] text-muted-foreground">
           {state === "live" ? "Following" : state === "connecting" ? "Connecting…" : state === "ended" ? "Stream ended" : "Disconnected"}
         </span>
       </div>
@@ -116,7 +115,7 @@ export function LogViewer({ url, downloadName = "logs.log" }: { url: string; dow
           const el = e.currentTarget;
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
         }}
-        className="min-h-64 flex-1 overflow-auto rounded-lg border border-border bg-background py-2 font-mono text-[12.5px] leading-5"
+        className="min-h-64 flex-1 overflow-auto rounded-xl border border-border bg-background py-2 font-mono text-[12.5px] leading-5"
         role="log"
         aria-live="off"
       >

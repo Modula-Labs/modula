@@ -23,7 +23,7 @@ export function ProjectSettingsPage({ projectId, section }: { projectId: string;
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-8 md:flex-row md:gap-10">
         <div className="md:w-48 md:shrink-0">
-          <h1 className="text-xl font-semibold">Project Settings</h1>
+          <h1 className="text-2xl leading-8 font-bold">Project Settings</h1>
           <nav aria-label="Settings sections" className="mt-4 md:sticky md:top-8">
             <ul className="flex gap-1 overflow-x-auto md:flex-col">
               {SETTINGS_SECTIONS.map((s) => (
@@ -35,8 +35,8 @@ export function ProjectSettingsPage({ projectId, section }: { projectId: string;
                     aria-current={active === s.id ? "page" : undefined}
                     className={
                       active === s.id
-                        ? "block rounded-md bg-accent px-2.5 py-1.5 text-sm font-medium whitespace-nowrap text-foreground"
-                        : "block rounded-md px-2.5 py-1.5 text-sm whitespace-nowrap text-muted-foreground hover:bg-accent hover:text-foreground"
+                        ? "block rounded-lg bg-foreground/7 px-2.5 py-1.5 text-sm whitespace-nowrap text-foreground"
+                        : "block rounded-lg px-2.5 py-1.5 text-sm whitespace-nowrap text-muted-foreground hover:bg-foreground/7 hover:text-foreground"
                     }
                   >
                     {s.label}

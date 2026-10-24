@@ -90,13 +90,13 @@ export function ConfigView({ instance, canEdit }: { instance: Instance; canEdit:
           {sections.map((s, i) => (
             <section key={s.id} id={`db-config-${s.id}`} className="relative flex gap-4 pb-8 last:pb-0">
               <div className="flex flex-col items-center">
-                <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-card text-muted-foreground [&_svg]:size-4">
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-card text-foreground [&_svg]:size-4">
                   {s.icon}
                 </div>
                 {i < sections.length - 1 ? <div className="mt-1 w-px flex-1 bg-border" /> : null}
               </div>
               <div className="min-w-0 flex-1">
-                <h3 className="mb-3 flex h-8 items-center text-base font-semibold">{s.title}</h3>
+                <h3 className="mb-3 flex h-8 items-center text-base font-bold">{s.title}</h3>
                 {s.body}
               </div>
             </section>
@@ -127,18 +127,19 @@ function ValueField({ label, value, secret }: { label: string; value: string; se
   const [shown, setShown] = useState(false);
   return (
     <div className="flex flex-col gap-1.5">
-      <div className="text-sm font-medium">{label}</div>
-      <div className="flex h-10 items-center gap-1 rounded-md border border-border pr-1 pl-3">
+      <div className="text-sm font-bold">{label}</div>
+      <div className="flex h-8 items-center gap-1 rounded-lg border border-input pr-0.5 pl-2.5 dark:bg-input/30">
         <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{secret && !shown ? "•".repeat(Math.min(24, Math.max(value.length, 8))) : value}</span>
         {secret ? (
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="icon-sm"
             aria-label={shown ? `Hide ${label}` : `Reveal ${label}`}
             onClick={() => setShown((s) => !s)}
-            className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground [&_svg]:size-4"
+            className="text-muted-foreground"
           >
             {shown ? <EyeOff /> : <Eye />}
-          </button>
+          </Button>
         ) : null}
         <CopyButton value={value} label={`Copy ${label}`} />
       </div>
@@ -166,7 +167,7 @@ function Connection({ instance, canEdit }: { instance: Instance; canEdit: boolea
     return (
       <Card className="flex items-center justify-between gap-4 p-4">
         <p className="text-sm text-muted-foreground">Credentials give full access to this database. Viewing them is recorded in the audit log.</p>
-        <Button variant="outline" size="sm" onClick={() => setReveal(true)}>
+        <Button variant="outline" onClick={() => setReveal(true)}>
           Show credentials
         </Button>
       </Card>
@@ -182,11 +183,11 @@ function Connection({ instance, canEdit }: { instance: Instance; canEdit: boolea
           </div>
           <Card className="flex items-center justify-between gap-4 p-4">
             <div>
-              <div className="text-sm font-medium">Regenerate Password</div>
+              <div className="text-sm font-bold">Regenerate password</div>
               <p className="text-sm text-muted-foreground">Breaks existing connections until they use the new password.</p>
             </div>
             {canEdit ? (
-              <Button variant="outline" size="sm" onClick={() => setConfirm(true)}>
+              <Button variant="danger-outline" onClick={() => setConfirm(true)}>
                 Regenerate
               </Button>
             ) : null}
@@ -235,16 +236,16 @@ function Extensions({ instance, canEdit }: { instance: Instance; canEdit: boolea
     },
   });
   const row = (e: DbExtension, action: "install" | "uninstall") => (
-    <li key={e.name} className="flex items-center gap-3 border-t border-border px-3 py-2.5 first:border-t-0">
+    <li key={e.name} className="flex items-center gap-3 border-t border-border px-3 py-2.5 first:border-t-0 hover:bg-muted/50">
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
-          <span className="font-mono text-[13px] font-medium">{e.name}</span>
-          <span className="text-xs text-muted-foreground">{e.version}</span>
+          <span className="font-mono text-[13px] font-bold">{e.name}</span>
+          <span className="text-[13px] text-muted-foreground">{e.version}</span>
         </div>
-        {e.comment ? <div className="truncate text-xs text-muted-foreground">{e.comment}</div> : null}
+        {e.comment ? <div className="truncate text-[13px] text-muted-foreground">{e.comment}</div> : null}
       </div>
       {canEdit ? (
-        <Button size="sm" variant="outline" loading={busy === e.name} disabled={busy !== null} onClick={() => toggle.mutate({ name: e.name, action })}>
+        <Button variant="outline" loading={busy === e.name} disabled={busy !== null} onClick={() => toggle.mutate({ name: e.name, action })}>
           {action === "install" ? "Install" : "Uninstall"}
         </Button>
       ) : null}
@@ -258,14 +259,14 @@ function Extensions({ instance, canEdit }: { instance: Instance; canEdit: boolea
           <div className="flex flex-col gap-5">
             {toggle.error ? <Alert>{toggle.error.message}</Alert> : null}
             <div className="flex flex-col gap-2">
-              <div className="text-sm font-medium">
+              <div className="text-sm font-bold">
                 {d.installed.length} {d.installed.length === 1 ? "Extension" : "Extensions"} installed
               </div>
               {d.installed.length > 0 ? <Card><ul>{d.installed.map((e) => row(e, "uninstall"))}</ul></Card> : null}
             </div>
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-medium">
+                <div className="text-sm font-bold">
                   {d.available.length} {d.available.length === 1 ? "Extension" : "Extensions"} available
                 </div>
                 <Input className="h-8 max-w-56" aria-label="Search extensions" placeholder="Search extensions…" value={search} onChange={(e) => setSearch(e.target.value)} />

@@ -5,8 +5,18 @@ import { CopyButton } from "@/components/ui/CopyButton";
 import { Field, Input, Textarea } from "@/components/ui/Input";
 import { Check, Circle, X } from "@/components/ui/icons";
 import { Alert, Badge, Skeleton, type Tone } from "@/components/ui/misc";
-import { api, ApiError, type PrivateAccessPhase, type PrivateAccessStatus, type PrivateAccessStep } from "@/lib/api";
-import { formatAllowList, isChanging, parseAllowList } from "@/lib/privateAccess";
+import {
+  api,
+  ApiError,
+  type PrivateAccessPhase,
+  type PrivateAccessStatus,
+  type PrivateAccessStep,
+} from "@/lib/api";
+import {
+  formatAllowList,
+  isChanging,
+  parseAllowList,
+} from "@/lib/privateAccess";
 
 const PHASE: Record<PrivateAccessPhase, { label: string; tone: Tone }> = {
   off: { label: "Public", tone: "neutral" },
@@ -15,10 +25,21 @@ const PHASE: Record<PrivateAccessPhase, { label: string; tone: Tone }> = {
   disabling: { label: "Turning off…", tone: "info" },
 };
 
-function StepIcon({ status }: { status: PrivateAccessStep["status"] | boolean }) {
-  if (status === "done" || status === true) return <Check className="size-4 shrink-0 text-success" aria-label="Done" />;
-  if (status === "failed" || status === false) return <X className="size-4 shrink-0 text-error" aria-label="Not ready" />;
-  return <Circle className="size-4 shrink-0 animate-pulse text-muted-foreground" aria-label="Running" />;
+function StepIcon({
+  status,
+}: {
+  status: PrivateAccessStep["status"] | boolean;
+}) {
+  if (status === "done" || status === true)
+    return <Check className="size-4 shrink-0 text-success" aria-label="Done" />;
+  if (status === "failed" || status === false)
+    return <X className="size-4 shrink-0 text-error" aria-label="Not ready" />;
+  return (
+    <Circle
+      className="size-4 shrink-0 animate-pulse text-muted-foreground"
+      aria-label="Running"
+    />
+  );
 }
 
 function Steps({ steps }: { steps: PrivateAccessStep[] }) {
@@ -30,7 +51,11 @@ function Steps({ steps }: { steps: PrivateAccessStep[] }) {
           <StepIcon status={s.status} />
           <span>
             {s.label}
-            {s.detail ? <span className="block text-xs text-muted-foreground">{s.detail}</span> : null}
+            {s.detail ? (
+              <span className="block text-[13px] text-muted-foreground">
+                {s.detail}
+              </span>
+            ) : null}
           </span>
         </li>
       ))}
@@ -44,7 +69,8 @@ export function PrivateAccessSection({ workspaceId }: { workspaceId: string }) {
   const q = useQuery({
     queryKey: ["private-access"],
     queryFn: api.privateAccess,
-    refetchInterval: (query) => (isChanging(query.state.data?.phase) ? 2000 : false),
+    refetchInterval: (query) =>
+      isChanging(query.state.data?.phase) ? 2000 : false,
   });
   const phase = q.data?.phase;
   const check = useQuery({
@@ -59,11 +85,14 @@ export function PrivateAccessSection({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     if (touched) return;
     const s = q.data;
-    if (s && (s.allowedEmails.length || s.allowedDomains.length)) setAllow(formatAllowList(s.allowedEmails, s.allowedDomains));
-    else if (check.data) setAllow(formatAllowList(check.data.suggestedEmails, []));
+    if (s && (s.allowedEmails.length || s.allowedDomains.length))
+      setAllow(formatAllowList(s.allowedEmails, s.allowedDomains));
+    else if (check.data)
+      setAllow(formatAllowList(check.data.suggestedEmails, []));
   }, [q.data, check.data, touched]);
 
-  const set = (s: PrivateAccessStatus) => qc.setQueryData(["private-access"], s);
+  const set = (s: PrivateAccessStatus) =>
+    qc.setQueryData(["private-access"], s);
   const parsed = parseAllowList(allow);
   const enable = useMutation({
     mutationFn: () =>
@@ -76,7 +105,10 @@ export function PrivateAccessSection({ workspaceId }: { workspaceId: string }) {
       }),
     onSuccess: set,
   });
-  const disable = useMutation({ mutationFn: () => api.setPrivateAccess({ enabled: false }), onSuccess: set });
+  const disable = useMutation({
+    mutationFn: () => api.setPrivateAccess({ enabled: false }),
+    onSuccess: set,
+  });
 
   if (q.error instanceof ApiError && q.error.status === 404) return null;
   if (q.isPending) return <Skeleton className="h-40" />;
@@ -85,26 +117,42 @@ export function PrivateAccessSection({ workspaceId }: { workspaceId: string }) {
   const s = q.data;
   const error = enable.error ?? disable.error;
   const busy = isChanging(s.phase);
-  const listError = parsed.invalid.length ? `Not an email or domain: ${parsed.invalid.join(", ")}` : null;
-  const canEnable = !!check.data?.ready && !listError && parsed.emails.length + parsed.domains.length > 0;
+  const listError = parsed.invalid.length
+    ? `Not an email or domain: ${parsed.invalid.join(", ")}`
+    : null;
+  const canEnable =
+    !!check.data?.ready &&
+    !listError &&
+    parsed.emails.length + parsed.domains.length > 0;
 
   return (
     <div className="flex flex-col gap-5">
       <div className="text-sm text-muted-foreground">
-        Hides the dashboard, the API, the CLI endpoint and the servers' connection behind a Cloudflare Tunnel and
-        Cloudflare Access. Only the people below can sign in (at Cloudflare, with an email code or your identity
-        provider); the CLI and CI use a Cloudflare service token. Your apps stay public on their own domains.
+        Hides the dashboard, the API, the CLI endpoint and the servers'
+        connection behind a Cloudflare Tunnel and Cloudflare Access. Only the
+        people below can sign in (at Cloudflare, with an email code or your
+        identity provider); the CLI and CI use a Cloudflare service token. Your
+        apps stay public on their own domains.
       </div>
 
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <Badge tone={PHASE[s.phase].tone}>{PHASE[s.phase].label}</Badge>
-        {s.dashboardHost ? <span className="font-mono">{s.dashboardHost}</span> : null}
-        {s.phase === "on" && s.teamDomain ? <span className="text-muted-foreground">· {s.teamDomain}</span> : null}
+        {s.dashboardHost ? (
+          <span className="font-mono">{s.dashboardHost}</span>
+        ) : null}
+        {s.phase === "on" && s.teamDomain ? (
+          <span className="text-muted-foreground">· {s.teamDomain}</span>
+        ) : null}
       </div>
 
       {error ? <Alert>{error.message}</Alert> : null}
       {s.error && !busy ? (
-        <Alert tone={s.phase === "on" ? "warn" : "danger"} title={s.phase === "off" ? "The last change didn't go through" : undefined}>
+        <Alert
+          tone={s.phase === "on" ? "warn" : "danger"}
+          title={
+            s.phase === "off" ? "The last change didn't go through" : undefined
+          }
+        >
           {s.error}
         </Alert>
       ) : null}
@@ -114,7 +162,7 @@ export function PrivateAccessSection({ workspaceId }: { workspaceId: string }) {
       {s.phase === "off" ? (
         <>
           <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium">Before you start</span>
+            <span className="text-sm font-bold">Before you start</span>
             {check.isPending ? (
               <Skeleton className="h-24" />
             ) : check.error ? (
@@ -126,7 +174,11 @@ export function PrivateAccessSection({ workspaceId }: { workspaceId: string }) {
                     <StepIcon status={i.ok} />
                     <span>
                       {i.label}
-                      {i.detail ? <span className="block text-xs text-muted-foreground">{i.detail}</span> : null}
+                      {i.detail ? (
+                        <span className="block text-[13px] text-muted-foreground">
+                          {i.detail}
+                        </span>
+                      ) : null}
                     </span>
                   </li>
                 ))}
@@ -155,10 +207,22 @@ export function PrivateAccessSection({ workspaceId }: { workspaceId: string }) {
             label="Server hostname"
             hint="Where your servers reach this one through the tunnel. Leave empty for a name next to the dashboard's."
           >
-            {(p) => <Input {...p} placeholder="deploy-nodes.example.com" value={nodeHost} onChange={(e) => setNodeHost(e.target.value)} />}
+            {(p) => (
+              <Input
+                {...p}
+                placeholder="deploy-nodes.example.com"
+                value={nodeHost}
+                onChange={(e) => setNodeHost(e.target.value)}
+              />
+            )}
           </Field>
           <div>
-            <Button variant="primary" loading={enable.isPending} disabled={!canEnable} onClick={() => enable.mutate()}>
+            <Button
+              variant="primary"
+              loading={enable.isPending}
+              disabled={!canEnable}
+              onClick={() => enable.mutate()}
+            >
               Make the dashboard private
             </Button>
           </div>
@@ -168,17 +232,26 @@ export function PrivateAccessSection({ workspaceId }: { workspaceId: string }) {
       {s.phase === "on" ? (
         <div className="flex flex-col gap-3 border-t border-border pt-4 text-sm">
           <div>
-            <span className="font-medium">Signed-in access: </span>
-            <span className="text-muted-foreground">{[...s.allowedEmails, ...s.allowedDomains.map((d) => `@${d}`)].join(", ")}</span>
+            <span className="font-bold">Signed-in access: </span>
+            <span className="text-muted-foreground">
+              {[
+                ...s.allowedEmails,
+                ...s.allowedDomains.map((d) => `@${d}`),
+              ].join(", ")}
+            </span>
           </div>
           {s.nodeHost ? (
             <div>
-              <span className="font-medium">Servers connect through: </span>
+              <span className="font-bold">Servers connect through: </span>
               <span className="font-mono">{s.nodeHost}</span>
             </div>
           ) : null}
           <div>
-            <Button variant="danger-outline" loading={disable.isPending} onClick={() => disable.mutate()}>
+            <Button
+              variant="danger-outline"
+              loading={disable.isPending}
+              onClick={() => disable.mutate()}
+            >
               Make the dashboard public again
             </Button>
           </div>
@@ -186,8 +259,10 @@ export function PrivateAccessSection({ workspaceId }: { workspaceId: string }) {
       ) : null}
 
       <div className="flex flex-col gap-1.5 border-t border-border pt-4 text-sm">
-        <span className="font-medium">If Cloudflare is unreachable</span>
-        <span className="text-muted-foreground">Open the dashboard over SSH, bypassing Cloudflare:</span>
+        <span className="font-bold">If Cloudflare is unreachable</span>
+        <span className="text-muted-foreground">
+          Open the dashboard over SSH, bypassing Cloudflare:
+        </span>
         <div className="flex items-center gap-2">
           <code className="font-mono text-[13px]">{s.breakGlass}</code>
           <CopyButton value={s.breakGlass} label="Copy command" />

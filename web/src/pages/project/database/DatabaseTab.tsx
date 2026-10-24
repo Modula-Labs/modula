@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { clsx } from "clsx";
 import { useState } from "react";
+import { Button } from "@/components/ui/Button";
+import { Segmented } from "@/components/ui/Tabs";
 import { Check, Circle, Database, Power } from "@/components/ui/icons";
 import { Skeleton } from "@/components/ui/misc";
 import { api, type Instance } from "@/lib/api";
@@ -27,27 +28,12 @@ export function DatabaseTab({ instance, canEdit, onConnect }: { instance: Instan
   const ready = online && missing !== null && missing.length === 0;
 
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex items-center justify-between rounded-lg bg-muted px-1.5 py-1">
-        <div role="tablist" aria-label="Database" className="flex gap-0.5">
-          {SUBS.map((s) => (
-            <button
-              key={s.value}
-              role="tab"
-              aria-selected={sub === s.value}
-              onClick={() => setSub(s.value)}
-              className={clsx(
-                "h-7 rounded-md px-3 text-[13px] font-medium",
-                sub === s.value ? "bg-card text-foreground shadow-raise" : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-        <button type="button" onClick={onConnect} className="inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[13px] font-medium text-muted-foreground hover:text-foreground [&_svg]:size-3.5">
-          <Power /> Connect
-        </button>
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between gap-3">
+        <Segmented label="Database" value={sub} onChange={setSub} options={SUBS} />
+        <Button variant="ghost" icon={<Power />} onClick={onConnect}>
+          Connect
+        </Button>
       </div>
       {vars.isPending && !ready ? (
         <Skeleton className="h-48" />
@@ -72,11 +58,11 @@ function Checklist({ online, missing }: { online: boolean; missing: string[] }) 
   return (
     <Card className="mx-auto flex w-full max-w-md flex-col gap-4 p-6">
       <div className="flex items-start gap-3">
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+        <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
           <Database className="size-5" />
         </div>
         <div>
-          <div className="text-base font-semibold">Postgres DB</div>
+          <div className="text-base font-bold">Postgres DB</div>
           <p className="text-sm text-muted-foreground">A custom interface into your database</p>
         </div>
       </div>
@@ -85,8 +71,8 @@ function Checklist({ online, missing }: { online: boolean; missing: string[] }) 
           <li key={i.label} className="flex items-start gap-2.5 text-sm">
             {i.ok ? <Check className="mt-0.5 size-4 text-success" /> : <Circle className="mt-0.5 size-4 text-muted-foreground" />}
             <div>
-              <div className={i.ok ? "text-foreground" : "font-medium"}>{i.label}</div>
-              {i.hint ? <div className="text-xs text-muted-foreground">{i.hint}</div> : null}
+              <div className={i.ok ? "text-foreground" : "font-bold"}>{i.label}</div>
+              {i.hint ? <div className="text-[13px] text-muted-foreground">{i.hint}</div> : null}
             </div>
           </li>
         ))}

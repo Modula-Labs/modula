@@ -72,7 +72,7 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
       >
         <TabPanel value="details">
           {d ? (
-            <div className="flex flex-col gap-5">
+            <div className="flex flex-col gap-6">
               {d.error ? <Alert title="Deployment failed">{d.error}</Alert> : null}
               <dl className="grid grid-cols-[6rem_1fr] items-center gap-x-4 gap-y-2 text-sm">
                 <dt className="text-muted-foreground">Deployment</dt>
@@ -141,7 +141,7 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
                     <span className="w-20 shrink-0 text-muted-foreground tabular-nums">
                       {new Date(e.at).toLocaleTimeString([], { hour12: false })}
                     </span>
-                    <span className="w-24 shrink-0 font-medium">{e.phase}</span>
+                    <span className="w-24 shrink-0 font-bold">{e.phase}</span>
                     <span className="min-w-0 break-words text-muted-foreground">{e.message}</span>
                   </li>
                 ))}

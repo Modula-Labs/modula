@@ -83,18 +83,18 @@ export function SudoDialog() {
           </Field>
         ) : (
           <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium">Authenticator code</span>
+            <span className="text-sm font-normal">Authenticator code</span>
             <OtpInput value={value} onChange={setValue} onComplete={(v) => void submit(v)} autoFocus disabled={busy} invalid={!!error} />
           </div>
         )}
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between pt-2">
           {totp ? (
             <button type="button" className="text-sm text-brand-text hover:underline" onClick={() => { setRecovery(!recovery); setValue(""); }}>
               {recovery ? "Use authenticator app" : "Use a recovery code"}
             </button>
           ) : <span />}
           <div className="flex gap-2">
-            <Button type="button" variant="ghost" onClick={() => finish(false)}>Cancel</Button>
+            <Button type="button" variant="outline" onClick={() => finish(false)}>Cancel</Button>
             <Button type="submit" variant="primary" loading={busy} disabled={!value}>Confirm</Button>
           </div>
         </div>

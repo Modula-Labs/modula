@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { Checkbox } from "@/components/ui/Controls";
 import { CopyButton } from "@/components/ui/CopyButton";
 import { DotsVertical, Eye, EyeOff, FileText, Lock, Plus, Trash, Variable } from "@/components/ui/icons";
 import { Input, Textarea } from "@/components/ui/Input";
@@ -105,7 +106,7 @@ export function VariablesEditor({ scope, canEdit, noun }: { scope: VariablesScop
           </div>
         ) : null}
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-sm text-muted-foreground">
         {noun === "shared" ? "Available to every service in this environment as " : "Changes apply on the next deploy. Reference other variables with "}
         <span className="font-mono">{noun === "shared" ? "${{shared.NAME}}" : "${{service.NAME}}"}</span>
         {noun === "shared" ? ". Changes apply on the next deploy." : "."}
@@ -140,7 +141,7 @@ export function VariablesEditor({ scope, canEdit, noun }: { scope: VariablesScop
           body="Variables are encrypted at rest and injected into the container on deploy."
         />
       ) : (
-        <div className="divide-y divide-border rounded-lg border border-border">
+        <div className="divide-y divide-border overflow-hidden rounded-xl border border-border">
           {vars.data?.map((v) => (
             <VariableRow
               key={v.id}
@@ -185,7 +186,7 @@ function VariableRow({
   };
 
   return (
-    <div className="group flex min-h-12 items-center gap-3 px-4 py-2">
+    <div className="group flex min-h-12 items-center gap-3 px-4 py-2 transition-colors hover:bg-muted/50">
       <div className="flex w-[38%] min-w-0 flex-col gap-1">
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate font-mono text-[13px]">{v.name}</span>
@@ -198,7 +199,7 @@ function VariableRow({
         {v.references?.length ? (
           <div className="flex flex-wrap gap-1" aria-label="References">
             {v.references.map((r) => (
-              <span key={r} title={`Refers to ${r}`} className="rounded-xs bg-muted px-1.5 font-mono text-[11px] leading-[18px] text-muted-foreground">
+              <span key={r} title={`Refers to ${r}`} className="rounded-sm bg-muted px-1.5 font-mono text-xs leading-[18px] text-muted-foreground">
                 {r}
               </span>
             ))}
@@ -229,23 +230,23 @@ function VariableRow({
           <>
             <span className="truncate font-mono text-[13px]">{revealed}</span>
             <CopyButton value={revealed} />
-            <button aria-label="Hide value" onClick={() => setRevealed(null)} className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground">
-              <EyeOff className="size-4" />
-            </button>
+            <Button aria-label="Hide value" variant="ghost" size="icon-sm" className="text-muted-foreground" onClick={() => setRevealed(null)}>
+              <EyeOff />
+            </Button>
           </>
         ) : (
           <span className="font-mono text-[13px] tracking-widest text-muted-foreground">*******</span>
         )}
-        {error ? <span className="text-xs text-error">{error}</span> : null}
+        {error ? <span className="text-[13px] text-error">{error}</span> : null}
       </div>
-      {!editing ? <span className="hidden text-xs text-muted-foreground sm:block">{relativeTime(v.updatedAt)}</span> : null}
+      {!editing ? <span className="hidden text-[13px] text-muted-foreground sm:block">{relativeTime(v.updatedAt)}</span> : null}
       {v.sealed ? <Badge>Sealed</Badge> : null}
       {canEdit && !editing ? (
         <Menu
           trigger={
-            <button aria-label={`Actions for ${v.name}`} className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground">
-              <DotsVertical className="size-4" />
-            </button>
+            <Button aria-label={`Actions for ${v.name}`} variant="ghost" size="icon-sm" className="text-muted-foreground">
+              <DotsVertical />
+            </Button>
           }
         >
           {!v.sealed ? (
@@ -282,7 +283,7 @@ function NewVariableRow({
   const [sealed, setSealed] = useState(false);
   return (
     <form
-      className="flex flex-col gap-3 rounded-lg border border-border p-4"
+      className="flex flex-col gap-3 rounded-xl border border-border p-4"
       onSubmit={(e) => {
         e.preventDefault();
         void onSubmit(name.trim(), value, sealed);
@@ -293,10 +294,12 @@ function NewVariableRow({
         <ReferenceInput mono aria-label="Value" placeholder="value, or ${{service.NAME}}" value={value} onValueChange={setValue} options={options} />
       </div>
       <div className="flex items-center justify-between">
-        <label className="flex items-center gap-2 text-sm text-muted-foreground">
-          <input type="checkbox" className="size-4 accent-foreground" checked={sealed} onChange={(e) => setSealed(e.target.checked)} />
-          Seal: never revealable, even to admins
-        </label>
+        <Checkbox
+          checked={sealed}
+          onCheckedChange={setSealed}
+          label="Seal: never revealable, even to admins"
+          className="text-muted-foreground"
+        />
         <div className="flex gap-2">
           <Button type="button" size="sm" variant="ghost" onClick={onCancel}>
             Cancel
@@ -340,7 +343,7 @@ function RawEditor({
     .filter(Boolean)
     .join(", ");
   return (
-    <div className="flex flex-col gap-3 rounded-lg border border-border p-4">
+    <div className="flex flex-col gap-3 rounded-xl border border-border p-4">
       <p className="text-sm text-muted-foreground">
         Existing values stay hidden. Leave a <span className="font-mono">NAME=</span> line empty to keep its value, type one to replace it, add lines for
         new variables, or delete a line to remove the variable.
@@ -355,7 +358,7 @@ function RawEditor({
         </Alert>
       ) : null}
       <div className="flex items-center justify-end gap-2">
-        <span className="mr-auto text-xs text-muted-foreground">{summary}</span>
+        <span className="mr-auto text-[13px] text-muted-foreground">{summary}</span>
         <Button size="sm" variant="ghost" onClick={onCancel}>
           Cancel
         </Button>

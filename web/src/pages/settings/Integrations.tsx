@@ -2,11 +2,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { Check, Plug, World } from "@/components/ui/icons";
+import { Card, CardContent } from "@/components/ui/Card";
 import { Field, Input, Select } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import { ApiError } from "@/lib/api";
-import { cloudflare, type CloudflarePreview, type CloudflareStatus } from "@/lib/integrations";
+import {
+  cloudflare,
+  type CloudflarePreview,
+  type CloudflareStatus,
+} from "@/lib/integrations";
 import { GithubIntegration } from "./IntegrationsGithub";
 import { HetznerIntegration } from "./IntegrationsHetzner";
 
@@ -19,34 +24,52 @@ export function useCloudflare(workspaceId: string) {
     queryFn: () => cloudflare.status(workspaceId),
     staleTime: 60_000,
     // Viewers can't read it, and older servers don't have it.
-    retry: (n, e) => !(e instanceof ApiError && (e.status === 404 || e.status === 403)) && n < 2,
+    retry: (n, e) =>
+      !(e instanceof ApiError && (e.status === 404 || e.status === 403)) &&
+      n < 2,
   });
 }
 
 /** Workspace Settings → Integrations. */
-export function IntegrationsSection({ workspaceId, isAdmin }: { workspaceId: string; isAdmin: boolean }) {
+export function IntegrationsSection({
+  workspaceId,
+  isAdmin,
+}: {
+  workspaceId: string;
+  isAdmin: boolean;
+}) {
   const status = useCloudflare(workspaceId);
   const [connecting, setConnecting] = useState(false);
 
   if (status.error instanceof ApiError && status.error.status === 404) {
-    return <Alert tone="warn">This server doesn't support integrations yet.</Alert>;
+    return (
+      <Alert tone="warn">This server doesn't support integrations yet.</Alert>
+    );
   }
   return (
     <>
-      <div className="divide-y divide-border rounded-lg border border-border">
+      <div className="flex flex-col gap-3">
         {status.isPending ? (
-          <div className="p-4">
-            <Skeleton className="h-10" />
-          </div>
+          <Card size="sm">
+            <CardContent>
+              <Skeleton className="h-10" />
+            </CardContent>
+          </Card>
         ) : status.error instanceof ApiError && status.error.status === 403 ? (
-          <div className="flex min-h-16 items-center gap-3 px-4 py-3">
-            <Plug className="size-5 text-muted-foreground" />
-            <div className="text-sm text-muted-foreground">Cloudflare: visible to workspace members and admins.</div>
-          </div>
+          <Card size="sm">
+            <CardContent className="flex min-h-10 items-center gap-3">
+              <Plug className="size-5 text-muted-foreground" />
+              <div className="text-sm text-muted-foreground">
+                Cloudflare: visible to workspace members and admins.
+              </div>
+            </CardContent>
+          </Card>
         ) : status.error ? (
-          <div className="p-4">
-            <Alert>{status.error.message}</Alert>
-          </div>
+          <Card size="sm">
+            <CardContent>
+              <Alert>{status.error.message}</Alert>
+            </CardContent>
+          </Card>
         ) : (
           <CloudflareRow
             workspaceId={workspaceId}
@@ -92,63 +115,79 @@ function CloudflareRow({
   });
   const connected = !!status?.connected;
   return (
-    <div className="flex flex-col gap-3 px-4 py-3">
-      <div className="flex min-h-10 flex-wrap items-center gap-3">
-        <Plug className="size-5 text-muted-foreground" />
-        <div className="min-w-[14rem] flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium">Cloudflare</span>
-            {connected ? <Badge tone="success">Connected</Badge> : null}
-          </div>
-          <div className="text-sm text-muted-foreground">
-            {connected ? (
-              <>
-                {status?.accountName ?? "No account"} · token <span className="font-mono">{status?.tokenHint}</span>
-                {status?.connectedBy ? ` · by ${status.connectedBy}` : ""}
-              </>
-            ) : (
-              "Manage DNS for custom domains, proxy them through Cloudflare, and back up to R2."
-            )}
-          </div>
-        </div>
-        {isAdmin ? (
-          connected ? (
-            <div className="ml-auto flex shrink-0 gap-2">
-              <Button size="sm" variant="secondary" onClick={onConnect}>
-                Replace token
-              </Button>
-              <Button size="sm" variant="ghost" loading={disconnect.isPending} onClick={() => disconnect.mutate()}>
-                Disconnect
-              </Button>
+    <Card size="sm">
+      <CardContent className="flex flex-col gap-3">
+        <div className="flex min-h-10 flex-wrap items-center gap-3">
+          <Plug className="size-5 text-muted-foreground" />
+          <div className="min-w-[14rem] flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-bold">Cloudflare</span>
+              {connected ? <Badge tone="success">Connected</Badge> : null}
             </div>
+            <div className="text-sm text-muted-foreground">
+              {connected ? (
+                <>
+                  {status?.accountName ?? "No account"} · token{" "}
+                  <span className="font-mono">{status?.tokenHint}</span>
+                  {status?.connectedBy ? ` · by ${status.connectedBy}` : ""}
+                </>
+              ) : (
+                "Manage DNS for custom domains, proxy them through Cloudflare, and back up to R2."
+              )}
+            </div>
+          </div>
+          {isAdmin ? (
+            connected ? (
+              <div className="ml-auto flex shrink-0 gap-2">
+                <Button variant="secondary" onClick={onConnect}>
+                  Replace token
+                </Button>
+                <Button
+                  variant="ghost"
+                  loading={disconnect.isPending}
+                  onClick={() => disconnect.mutate()}
+                >
+                  Disconnect
+                </Button>
+              </div>
+            ) : (
+              <Button
+                className="ml-auto shrink-0"
+                variant="secondary"
+                onClick={onConnect}
+              >
+                Connect
+              </Button>
+            )
+          ) : null}
+        </div>
+        {disconnect.error ? <Alert>{disconnect.error.message}</Alert> : null}
+        {connected ? (
+          zones.isPending ? (
+            <Skeleton className="h-6" />
+          ) : zones.error ? (
+            <Alert tone="warn">{zones.error.message}</Alert>
           ) : (
-            <Button className="ml-auto shrink-0" size="sm" variant="secondary" onClick={onConnect}>
-              Connect
-            </Button>
+            <div className="flex flex-wrap gap-1.5 pl-8">
+              {zones.data.length === 0 ? (
+                <span className="text-sm text-muted-foreground">
+                  The token can't see any zones.
+                </span>
+              ) : null}
+              {zones.data.map((z) => (
+                <Badge
+                  key={z.id}
+                  tone={z.status === "active" ? "neutral" : "warn"}
+                >
+                  {z.name}
+                  {z.status === "active" ? "" : ` · ${z.status}`}
+                </Badge>
+              ))}
+            </div>
           )
         ) : null}
-      </div>
-      {disconnect.error ? <Alert>{disconnect.error.message}</Alert> : null}
-      {connected ? (
-        zones.isPending ? (
-          <Skeleton className="h-6" />
-        ) : zones.error ? (
-          <Alert tone="warn">{zones.error.message}</Alert>
-        ) : (
-          <div className="flex flex-wrap gap-1.5 pl-8">
-            {zones.data.length === 0 ? (
-              <span className="text-sm text-muted-foreground">The token can't see any zones.</span>
-            ) : null}
-            {zones.data.map((z) => (
-              <Badge key={z.id} tone={z.status === "active" ? "neutral" : "warn"}>
-                {z.name}
-                {z.status === "active" ? "" : ` · ${z.status}`}
-              </Badge>
-            ))}
-          </div>
-        )
-      ) : null}
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -176,10 +215,13 @@ function ConnectCloudflareDialog({
     },
   });
   const connect = useMutation({
-    mutationFn: () => cloudflare.connect(workspaceId, token, accountId || undefined),
+    mutationFn: () =>
+      cloudflare.connect(workspaceId, token, accountId || undefined),
     onSuccess: async (s) => {
       qc.setQueryData(statusKey(workspaceId), s);
-      await qc.invalidateQueries({ queryKey: ["cloudflare-zones", workspaceId] });
+      await qc.invalidateQueries({
+        queryKey: ["cloudflare-zones", workspaceId],
+      });
       onOpenChange(false);
     },
   });
@@ -215,18 +257,18 @@ function ConnectCloudflareDialog({
       >
         {/* How-to on the left, paste and verify on the right; stacked when narrow. */}
         <div className="grid gap-6 md:grid-cols-2 md:gap-8">
-          <div className="rounded-lg bg-muted/40 p-4">
+          <div className="rounded-xl bg-muted/50 p-4">
             <Step n={1} title="Create a token">
               <p className="text-sm text-muted-foreground">
-                Open Cloudflare with the permissions pre-filled, optionally narrow it to some zones, and create the
-                token.
+                Open Cloudflare with the permissions pre-filled, optionally
+                narrow it to some zones, and create the token.
               </p>
               <ul className="flex flex-col gap-1 text-sm">
                 {s?.permissions.map((p) => (
                   <li key={p.name} className="flex gap-2">
                     <Check className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                     <span>
-                      <span className="font-medium">{p.name}</span>
+                      <span className="font-bold">{p.name}</span>
                       <span className="text-muted-foreground"> to {p.why}</span>
                     </span>
                   </li>
@@ -238,7 +280,7 @@ function ConnectCloudflareDialog({
                     href={s.tokenTemplateUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-sm font-medium underline underline-offset-4"
+                    className="text-sm underline underline-offset-4"
                   >
                     Create token in Cloudflare
                   </a>
@@ -269,9 +311,16 @@ function ConnectCloudflareDialog({
               {preview ? (
                 <div className="flex flex-col gap-3">
                   {preview.accounts.length > 1 ? (
-                    <Field label="Account" hint="R2 buckets are created in this account.">
+                    <Field
+                      label="Account"
+                      hint="R2 buckets are created in this account."
+                    >
                       {(p) => (
-                        <Select {...p} value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+                        <Select
+                          {...p}
+                          value={accountId}
+                          onChange={(e) => setAccountId(e.target.value)}
+                        >
                           {preview.accounts.map((a) => (
                             <option key={a.id} value={a.id}>
                               {a.name || a.id}
@@ -283,14 +332,16 @@ function ConnectCloudflareDialog({
                   ) : (
                     <p className="text-sm">
                       Account:{" "}
-                      <span className="font-medium">
-                        {preview.accounts[0]?.name ?? "none visible (R2 unavailable)"}
+                      <span className="font-bold">
+                        {preview.accounts[0]?.name ??
+                          "none visible (R2 unavailable)"}
                       </span>
                     </p>
                   )}
                   <div>
                     <div className="text-sm">
-                      {preview.zones.length} zone{preview.zones.length === 1 ? "" : "s"}
+                      {preview.zones.length} zone
+                      {preview.zones.length === 1 ? "" : "s"}
                     </div>
                     <div className="mt-1.5 flex flex-wrap gap-1.5">
                       {preview.zones.map((z) => (
@@ -304,7 +355,12 @@ function ConnectCloudflareDialog({
                 </div>
               ) : (
                 <div>
-                  <Button type="submit" variant="secondary" loading={verify.isPending} disabled={!token.trim()}>
+                  <Button
+                    type="submit"
+                    variant="secondary"
+                    loading={verify.isPending}
+                    disabled={!token.trim()}
+                  >
                     Verify token
                   </Button>
                 </div>
@@ -314,10 +370,19 @@ function ConnectCloudflareDialog({
         </div>
         {connect.error ? <Alert>{connect.error.message}</Alert> : null}
         <div className="flex justify-end gap-2">
-          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+          >
             Cancel
           </Button>
-          <Button type="submit" variant="primary" loading={connect.isPending} disabled={!preview}>
+          <Button
+            type="submit"
+            variant="primary"
+            loading={connect.isPending}
+            disabled={!preview}
+          >
             {replacing ? "Replace token" : "Connect"}
           </Button>
         </div>
@@ -326,14 +391,22 @@ function ConnectCloudflareDialog({
   );
 }
 
-function Step({ n, title, children }: { n: number; title: string; children: ReactNode }) {
+function Step({
+  n,
+  title,
+  children,
+}: {
+  n: number;
+  title: string;
+  children: ReactNode;
+}) {
   return (
     <div className="flex gap-3">
-      <span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-border text-xs font-medium text-muted-foreground">
+      <span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-border text-xs text-muted-foreground">
         {n}
       </span>
       <div className="flex min-w-0 flex-1 flex-col gap-2">
-        <div className="text-sm font-semibold">{title}</div>
+        <div className="text-sm font-bold">{title}</div>
         {children}
       </div>
     </div>
@@ -349,7 +422,7 @@ export function UseR2Button({ workspaceId }: { workspaceId: string }) {
   if (!status.data?.connected || !status.data.accountId) return null;
   return (
     <>
-      <Button variant="secondary" size="sm" onClick={() => setOpen(true)}>
+      <Button variant="secondary" onClick={() => setOpen(true)}>
         Use Cloudflare R2
       </Button>
       <R2Dialog workspaceId={workspaceId} open={open} onOpenChange={setOpen} />
@@ -372,7 +445,13 @@ function R2Dialog({
     queryFn: () => cloudflare.r2(workspaceId),
     enabled: open,
   });
-  const blank = { name: "Cloudflare R2", bucket: "modula-backups", prefix: "", accessKeyId: "", secretAccessKey: "" };
+  const blank = {
+    name: "Cloudflare R2",
+    bucket: "modula-backups",
+    prefix: "",
+    accessKeyId: "",
+    secretAccessKey: "",
+  };
   const [f, setF] = useState(blank);
   const set = (k: keyof typeof blank) => (e: { target: { value: string } }) =>
     setF((x) => ({ ...x, [k]: e.target.value }));
@@ -397,7 +476,11 @@ function R2Dialog({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
-  const valid = f.name.trim() && f.bucket.trim() && f.accessKeyId.trim() && f.secretAccessKey;
+  const valid =
+    f.name.trim() &&
+    f.bucket.trim() &&
+    f.accessKeyId.trim() &&
+    f.secretAccessKey;
 
   return (
     <Modal
@@ -417,18 +500,30 @@ function R2Dialog({
         {info.error ? <Alert>{info.error.message}</Alert> : null}
         {info.data && !info.data.canCreateBuckets ? (
           <Alert tone="warn">
-            The token can't create R2 buckets. Add the Workers R2 Storage · Edit permission, or create the bucket in the
-            dashboard first.
+            The token can't create R2 buckets. Add the Workers R2 Storage · Edit
+            permission, or create the bucket in the dashboard first.
           </Alert>
         ) : null}
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Name">{(p) => <Input {...p} value={f.name} onChange={set("name")} />}</Field>
+          <Field label="Name">
+            {(p) => <Input {...p} value={f.name} onChange={set("name")} />}
+          </Field>
           <Field label="Bucket" hint="Created if it doesn't exist.">
-            {(p) => <Input {...p} mono value={f.bucket} onChange={set("bucket")} />}
+            {(p) => (
+              <Input {...p} mono value={f.bucket} onChange={set("bucket")} />
+            )}
           </Field>
         </div>
         <Field label="Endpoint">
-          {(p) => <Input {...p} mono readOnly value={info.data?.endpoint ?? ""} placeholder="Loading…" />}
+          {(p) => (
+            <Input
+              {...p}
+              mono
+              readOnly
+              value={info.data?.endpoint ?? ""}
+              placeholder="Loading…"
+            />
+          )}
         </Field>
         <p className="text-sm text-muted-foreground">
           Cloudflare's API can't create S3 credentials.{" "}
@@ -437,19 +532,31 @@ function R2Dialog({
               href={info.data.apiTokensUrl}
               target="_blank"
               rel="noreferrer"
-              className="font-medium text-foreground underline underline-offset-4"
+              className="text-foreground underline underline-offset-4"
             >
               Create an R2 API token
             </a>
           ) : (
             "Create an R2 API token"
           )}{" "}
-          with Object Read & Write on this bucket, then paste its S3 credentials.
+          with Object Read & Write on this bucket, then paste its S3
+          credentials.
         </p>
         <Field label="Access key ID">
-          {(p) => <Input {...p} mono autoComplete="off" value={f.accessKeyId} onChange={set("accessKeyId")} />}
+          {(p) => (
+            <Input
+              {...p}
+              mono
+              autoComplete="off"
+              value={f.accessKeyId}
+              onChange={set("accessKeyId")}
+            />
+          )}
         </Field>
-        <Field label="Secret access key" hint="Stored encrypted. It's never shown again.">
+        <Field
+          label="Secret access key"
+          hint="Stored encrypted. It's never shown again."
+        >
           {(p) => (
             <Input
               {...p}
@@ -463,10 +570,19 @@ function R2Dialog({
         </Field>
         {create.error ? <Alert>{create.error.message}</Alert> : null}
         <div className="flex justify-end gap-2">
-          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+          >
             Cancel
           </Button>
-          <Button type="submit" variant="primary" loading={create.isPending} disabled={!valid}>
+          <Button
+            type="submit"
+            variant="primary"
+            loading={create.isPending}
+            disabled={!valid}
+          >
             Add R2 storage
           </Button>
         </div>

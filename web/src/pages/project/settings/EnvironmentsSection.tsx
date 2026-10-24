@@ -39,17 +39,17 @@ export function EnvironmentsSection({
       {remove.error ? <Alert>{remove.error.message}</Alert> : null}
       <ul className="flex max-w-2xl flex-col gap-2">
         {project.environments.map((e, i) => (
-          <li key={e.id} className="rounded-md border border-border">
-            <div className="flex h-11 items-center gap-2 pr-2 pl-3">
+          <li key={e.id} className="rounded-lg border border-border">
+            <div className="flex min-h-11 items-center gap-2 py-1.5 pr-2 pl-3">
               <span className="min-w-0 flex-1 truncate text-sm">{e.name}</span>
               {e.id === current?.id ? <Badge>Current</Badge> : null}
               {canEdit && project.environments.length > 1 ? (
-                <Button size="sm" variant="ghost" onClick={() => setSyncing(e)}>
+                <Button variant="ghost" onClick={() => setSyncing(e)}>
                   Sync from…
                 </Button>
               ) : null}
               {i > 0 && canDelete && deleting !== e.id ? (
-                <Button size="sm" variant="danger-outline" onClick={() => setDeleting(e.id)}>
+                <Button variant="danger-outline" onClick={() => setDeleting(e.id)}>
                   Delete
                 </Button>
               ) : null}
@@ -73,7 +73,7 @@ export function EnvironmentsSection({
       </ul>
       {canEdit ? (
         <div>
-          <Button icon={<Plus />} onClick={() => setCreating(true)}>
+          <Button variant="primary" icon={<Plus />} onClick={() => setCreating(true)}>
             New environment
           </Button>
         </div>
