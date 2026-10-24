@@ -22,6 +22,9 @@ const PUBLIC_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/releases"),
     ("POST", "/api/auth/setup"),
     ("POST", "/api/auth/login"),
+    // Authenticated by the single-use invite token in the body; rate-limited.
+    ("POST", "/api/invites/lookup"),
+    ("POST", "/api/invites/signup"),
     // Authenticated by an HMAC signature under the GitHub App's webhook secret.
     ("POST", "/api/github/webhook"),
     // Nodes downloading an upload they build: a signed token bound to a
@@ -90,6 +93,28 @@ async fn fixture(
             )
             .bind(id)
             .bind(chain.project)
+            .execute(app.db())
+            .await
+            .unwrap();
+            id
+        }
+        ResourceKind::Member => {
+            sqlx::query_scalar("SELECT id FROM workspace_members WHERE workspace_id = $1 LIMIT 1")
+                .bind(workspace)
+                .fetch_one(app.db())
+                .await
+                .unwrap()
+        }
+        ResourceKind::Invite => {
+            let id = Id::new();
+            let t = modula_crypto::token::generate(modula_crypto::token::prefix::INVITE).unwrap();
+            sqlx::query(
+                "INSERT INTO workspace_invites (id, workspace_id, role, token_hash, expires_at)
+                 VALUES ($1, $2, 'member', $3, now() + interval '1 day')",
+            )
+            .bind(id)
+            .bind(workspace)
+            .bind(t.hash.as_bytes())
             .execute(app.db())
             .await
             .unwrap();
