@@ -49,8 +49,9 @@ pub struct Instance {
     pub node_id: Option<Id>,
     #[sqlx(json)]
     pub config: ServiceConfig,
-    /// `online`, `sleeping` (serverless, scaled to zero), `deploying`,
-    /// `crashed` or `offline`, from its deployments.
+    /// `online`, `degraded` (a replica of the serving deployment isn't running),
+    /// `sleeping` (serverless, scaled to zero), `deploying`, `crashed` or
+    /// `offline`, from its deployments.
     pub status: String,
     #[serde(skip)]
     pub location_id: Option<String>,
@@ -77,7 +78,7 @@ pub struct Instance {
 }
 
 pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
-    let mut i: Instance = sqlx::query_as(
+    let mut i: Instance = sqlx::query_as(concat!(
         "SELECT i.id, i.service_id, s.name AS service_name, i.environment_id, e.name AS environment_name,
                 s.project_id, i.node_id, i.config, i.stack, i.updated_at, n.location AS location_id,
                 s.template,
@@ -97,6 +98,10 @@ pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
                       WHERE d.service_instance_id = i.id AND d.status IN ('active', 'sleeping', 'crashed')
                       ORDER BY a) AS edge_unsupported,
                 CASE
+                  WHEN EXISTS (SELECT 1 FROM deployments d WHERE d.service_instance_id = i.id AND ",
+        crate::degraded_sql!(),
+        ")
+                    THEN 'degraded'
                   WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id AND status = 'active')
                     THEN 'online'
                   WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id AND status = 'sleeping')
@@ -112,8 +117,8 @@ pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
          JOIN services s ON s.id = i.service_id
          JOIN environments e ON e.id = i.environment_id
          LEFT JOIN nodes n ON n.id = i.node_id
-         WHERE i.id = $1",
-    )
+         WHERE i.id = $1"
+    ))
     .bind(id)
     .fetch_optional(&state.db)
     .await?

@@ -94,6 +94,8 @@ pub struct InstanceSummary {
     pub cron_schedule: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub cron_next_at: Option<time::OffsetDateTime>,
+    /// The latest deployment is active but a replica of it isn't running.
+    pub degraded: Option<bool>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -296,7 +298,7 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
     .bind(id)
     .fetch_all(&state.db)
     .await?;
-    let instances = sqlx::query_as(
+    let instances = sqlx::query_as(concat!(
         "SELECT i.id, i.service_id, i.environment_id, i.node_id,
                 d.id AS latest_deployment_id, d.status AS latest_deployment_status,
                 (SELECT hostname FROM domains WHERE service_instance_id = i.id AND status = 'verified'
@@ -325,16 +327,19 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
                 (SELECT r.bucket FROM r2_buckets r WHERE r.service_instance_id = i.id) AS bucket,
                 i.config->>'cronSchedule' AS cron_schedule,
                 (SELECT c.next_run_at FROM cron_schedules c WHERE c.service_instance_id = i.id)
-                    AS cron_next_at
+                    AS cron_next_at,
+                d.degraded
          FROM service_instances i
          JOIN services s ON s.id = i.service_id
          LEFT JOIN LATERAL (
-             SELECT id, status FROM deployments WHERE service_instance_id = i.id
-             ORDER BY created_at DESC LIMIT 1
+             SELECT d.id, d.status, ",
+        crate::degraded_sql!(),
+        " AS degraded FROM deployments d WHERE d.service_instance_id = i.id
+             ORDER BY d.created_at DESC LIMIT 1
          ) d ON true
          WHERE s.project_id = $1
-         ORDER BY s.created_at, i.created_at",
-    )
+         ORDER BY s.created_at, i.created_at"
+    ))
     .bind(id)
     .fetch_all(&state.db)
     .await?;

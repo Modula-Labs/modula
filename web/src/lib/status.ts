@@ -15,14 +15,22 @@ export const deploymentBadge: Record<DeploymentStatus, { label: string; tone: To
   cancelled: { label: "Cancelled", tone: "neutral" },
 };
 
+/** A deployment's badge: its status, or Degraded while it is active with a replica down. */
+export function badgeOf(d: { status: DeploymentStatus; degraded?: boolean | null }): { label: string; tone: Tone } {
+  return d.status === "active" && d.degraded ? { label: "Degraded", tone: "warn" } : deploymentBadge[d.status];
+}
+
 /** The one-line service state shown on canvas cards. */
-export function serviceState(status: DeploymentStatus | null): {
+export function serviceState(
+  status: DeploymentStatus | null,
+  degraded?: boolean | null,
+): {
   label: string;
   tone: "success" | "warn" | "danger" | "neutral";
 } {
   switch (status) {
     case "active":
-      return { label: "Online", tone: "success" };
+      return degraded ? { label: "Degraded", tone: "warn" } : { label: "Online", tone: "success" };
     case "sleeping":
       return { label: "Sleeping", tone: "neutral" };
     case "building":

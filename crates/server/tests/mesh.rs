@@ -158,6 +158,27 @@ fn event(dep: Id, phase: pb::DeploymentPhase) -> pb::DeploymentEvent {
     }
 }
 
+async fn degraded(app: &TestApp, dep: Id) -> bool {
+    sqlx::query_scalar(concat!(
+        "SELECT ",
+        modula_server::degraded_sql!(),
+        " FROM deployments d WHERE d.id = $1"
+    ))
+    .bind(dep)
+    .fetch_one(app.db())
+    .await
+    .unwrap()
+}
+
+async fn degraded_webhooks(app: &TestApp) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE kind = 'webhooks.dispatch' AND payload->>'event' = 'deployment.degraded'",
+    )
+    .fetch_one(app.db())
+    .await
+    .unwrap()
+}
+
 async fn status(app: &TestApp, dep: Id) -> String {
     sqlx::query_scalar("SELECT status FROM deployments WHERE id = $1")
         .bind(dep)
@@ -238,6 +259,7 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(status(&app, started.id).await, "active");
+    assert!(!degraded(&app, started.id).await);
     assert!(kick.contains(&a) && kick.contains(&b));
     assert_eq!(
         status(&app, chain.deployment).await,
@@ -277,6 +299,8 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(status(&app, started.id).await, "active");
+    assert!(degraded(&app, started.id).await);
+    assert_eq!(degraded_webhooks(&app).await, 1);
     let ds = deploy::desired::build(&app.state, a).await.unwrap();
     let route = ds
         .routes
@@ -295,11 +319,18 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(status(&app, started.id).await, "crashed");
-    // Back up: active again.
+    // One back up: active again, still degraded until the other is.
     deploy::state::apply_event(app.db(), b, &event(started.id, active))
         .await
         .unwrap();
     assert_eq!(status(&app, started.id).await, "active");
+    assert!(degraded(&app, started.id).await);
+    deploy::state::apply_event(app.db(), a, &event(started.id, active))
+        .await
+        .unwrap();
+    assert!(!degraded(&app, started.id).await);
+    // Only a crash while others serve is a degraded event.
+    assert_eq!(degraded_webhooks(&app).await, 1);
 
     // A new deployment gets fresh addresses next to the serving one's, and
     // stays on the same two servers.

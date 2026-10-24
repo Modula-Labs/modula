@@ -38,6 +38,8 @@ export interface CanvasService {
   /** Docker image for image-based services. */
   image?: string | null;
   status: DeploymentStatus | null;
+  /** The latest deployment is active with a replica down. */
+  degraded?: boolean | null;
   /** Detected framework/runtime, if known. */
   stack?: string | null;
   /** Ids of the services this one references; drawn as edges pointing at them. */
@@ -66,7 +68,7 @@ function ServiceCard({ data }: NodeProps<ServiceNode>) {
     ? service.r2.bucket
       ? { label: "Cloudflare R2", tone: "success" as const }
       : { label: "No bucket in this environment", tone: "neutral" as const }
-    : serviceState(service.status);
+    : serviceState(service.status, service.degraded);
   const pending = service.pendingChanges ?? 0;
   return (
     <div

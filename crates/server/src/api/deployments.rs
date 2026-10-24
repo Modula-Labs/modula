@@ -73,6 +73,8 @@ pub struct Deployment {
     #[serde(with = "time::serde::rfc3339::option")]
     pub woke_at: Option<OffsetDateTime>,
     pub cold_start_ms: Option<i32>,
+    /// Active, but a replica of it crashed and isn't running again yet.
+    pub degraded: bool,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -110,7 +112,9 @@ macro_rules! select_deployments {
                     d.source_deployment_id,
                     d.error, d.config->'hosting'->>'type' AS hosting, d.url,
                     d.created_by, d.created_at, d.updated_at, d.finished_at,
-                    d.build_started_at, d.build_finished_at, d.woke_at, d.cold_start_ms
+                    d.build_started_at, d.build_finished_at, d.woke_at, d.cold_start_ms, ",
+            $crate::degraded_sql!(),
+            " AS degraded
              FROM deployments d LEFT JOIN source_uploads u ON u.id = d.upload_id ",
             $rest
         )

@@ -10,7 +10,7 @@ import { api, type Deployment, type DeploymentDetail, type Instance, type Instan
 import { deploymentTitle, sleepingLine, viaLabel } from "@/lib/deployments";
 import { flagEmoji } from "@/lib/flags";
 import { relativeTime } from "@/lib/format";
-import { deploymentBadge, isLive, isServingStatus } from "@/lib/status";
+import { badgeOf, isLive, isServingStatus } from "@/lib/status";
 import { load, save } from "@/lib/storage";
 
 const HIDE_SKIPPED_KEY = "modula.hideSkipped";
@@ -142,13 +142,21 @@ export function DeploymentsTab({
 /** What the service is doing now, from the instance when the server reports it. */
 function stateOf(instance: Instance | undefined, serving: Deployment | undefined, latest: Deployment | undefined): InstanceState {
   if (instance?.status) return instance.status;
-  if (serving) return serving.status === "crashed" ? "crashed" : serving.status === "sleeping" ? "sleeping" : "online";
+  if (serving)
+    return serving.status === "crashed"
+      ? "crashed"
+      : serving.status === "sleeping"
+        ? "sleeping"
+        : serving.degraded
+          ? "degraded"
+          : "online";
   return latest && isLive(latest.status) ? "deploying" : "offline";
 }
 
 const stateView: Record<InstanceState, { label: string; tone: "success" | "warn" | "danger" | "neutral" }> = {
   online: { label: "Online", tone: "success" },
   sleeping: { label: "Sleeping", tone: "neutral" },
+  degraded: { label: "Degraded: a replica is down", tone: "warn" },
   offline: { label: "Service offline", tone: "neutral" },
   deploying: { label: "Deploying…", tone: "warn" },
   crashed: { label: "Crashed", tone: "danger" },
@@ -241,7 +249,7 @@ function DeploymentRow({
   onOpen: (id: string) => void;
   actions: RowActions;
 }) {
-  const badge = deploymentBadge[d.status];
+  const badge = badgeOf(d);
   const serving = isServing(d);
   const live = isLive(d.status);
   const title = deploymentTitle(d);

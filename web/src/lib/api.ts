@@ -238,6 +238,8 @@ export interface InstanceSummary {
   cronSchedule: string | null;
   /** The next due time (RFC3339) of the deployed schedule. */
   cronNextAt: string | null;
+  /** The latest deployment is active but a replica of it isn't running. */
+  degraded?: boolean | null;
 }
 /** Pull request previews: an environment per open pull request. */
 export interface PrPreviews {
@@ -358,7 +360,7 @@ export interface Location {
 export interface LocationOption extends Location {
   city: string;
 }
-export type InstanceState = "online" | "sleeping" | "offline" | "deploying" | "crashed";
+export type InstanceState = "online" | "degraded" | "sleeping" | "offline" | "deploying" | "crashed";
 export interface CronPreview {
   valid: boolean;
   error: string | null;
@@ -781,6 +783,8 @@ export interface Deployment {
   source: string;
   buildStartedAt: string | null;
   buildFinishedAt: string | null;
+  /** Active, but a replica of it crashed and isn't running again yet. */
+  degraded?: boolean;
   sourceKind?: "github" | "image" | "upload";
   /** Uploads (`modula up`): the local branch, whether uncommitted changes were included,
    * and whether the files are still kept (so it can be redeployed or rolled back to). */
@@ -1094,7 +1098,7 @@ export interface EnvironmentLogsQuery {
 }
 
 export type WebhookEvent =
-  "deployment.succeeded" | "deployment.failed" | "deployment.crashed";
+  "deployment.succeeded" | "deployment.failed" | "deployment.crashed" | "deployment.degraded";
 export interface Webhook {
   id: string;
   url: string;

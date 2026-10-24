@@ -18,7 +18,11 @@
 //! nodes (`deployment_replicas`). Each node reports on its own; the build of
 //! replica 0 (the deployment's node) is the one recorded. The deployment is
 //! active once every replica is, failed when any fails, and crashed when no
-//! replica is running any more. Replica changes re-push the environment's
+//! replica is running any more. An active deployment with a replica that
+//! isn't running (its node reported it crashed) reads as degraded
+//! ([`degraded_sql!`](crate::degraded_sql)): still `active` in the table,
+//! serving from the others; the crash fires `deployment.degraded` webhooks.
+//! Replica changes re-push the environment's
 //! address book to every node running something of it.
 //!
 //! Repository deployments report `pending` / `success` / `failure` on their
@@ -47,6 +51,17 @@ use crate::error::AppResult;
 use crate::jobs::{self, NewJob};
 
 pub const LIVE: &[&str] = &["building", "deploying", "active", "sleeping", "crashed"];
+
+/// SQL (a boolean) for "deployment `d` is active but a replica of it isn't
+/// running" (its node reported it crashed, or it hasn't come back yet).
+#[macro_export]
+macro_rules! degraded_sql {
+    () => {
+        "(d.status = 'active' AND EXISTS (
+             SELECT 1 FROM deployment_replicas dr
+             WHERE dr.deployment_id = d.id AND dr.status <> 'active'))"
+    };
+}
 
 pub fn phase_name(p: DeploymentPhase) -> &'static str {
     match p {
@@ -149,7 +164,11 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
         (DeploymentPhase::Building | DeploymentPhase::Built, _) if !primary => {}
         // Not live until every replica is.
         (DeploymentPhase::Active, "deploying") if running < replicas => {}
-        // Others still run: the deployment keeps serving.
+        // Others still run: the deployment keeps serving, degraded.
+        (DeploymentPhase::Crashed, "active") if running > 0 && replica_status == "active" => {
+            crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentDegraded)
+                .await?;
+        }
         (DeploymentPhase::Crashed, "active") if running > 0 => {}
         (DeploymentPhase::Building, "building") => {
             commit_status = Some("pending");

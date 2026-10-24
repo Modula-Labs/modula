@@ -4,6 +4,7 @@ export const WEBHOOK_EVENTS: { value: WebhookEvent; label: string; hint: string 
   { value: "deployment.succeeded", label: "Deployment succeeded", hint: "A deployment became active." },
   { value: "deployment.failed", label: "Deployment failed", hint: "A build or start failed." },
   { value: "deployment.crashed", label: "Deployment crashed", hint: "A running deployment exited unexpectedly." },
+  { value: "deployment.degraded", label: "Deployment degraded", hint: "A replica crashed while the others keep serving." },
 ];
 
 /** True for an http(s) URL; the server checks it again. */
