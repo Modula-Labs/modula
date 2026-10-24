@@ -81,7 +81,7 @@ export function NewEnvironmentDialog({
           hint={
             choice === EMPTY
               ? "Services get the default environment's settings, without variables."
-              : "Copies every service's settings and variables; sealed ones stay sealed. Databases start empty, with new credentials."
+              : "Copies every service's settings and variables; sealed ones stay sealed. Databases start empty, with new credentials; buckets aren't copied."
           }
         >
           {(p) => (
