@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.."
 ARCHES=${ARCHES:-"amd64 arm64"}
 OUT=${OUT:-dist/release}
 KEY=${RELEASE_SIGNING_KEY:-.dev/release-signing/release.key}
-CADDY_VERSION=${CADDY_VERSION:-v2.10.2}
+CADDY_VERSION=${CADDY_VERSION:-v2.11.1}
 XCADDY_VERSION=${XCADDY_VERSION:-v0.4.5}
 # DNS-01 for wildcard certificates on generated domains.
 CADDY_PLUGINS=(github.com/caddy-dns/cloudflare)
