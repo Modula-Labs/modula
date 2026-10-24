@@ -65,6 +65,17 @@ impl Api {
             .await
     }
 
+    pub async fn rename_environment(&self, id: &str, name: &str) -> anyhow::Result<Environment> {
+        self.patch(&format!("/api/environments/{id}"), &json!({ "name": name }))
+            .await
+    }
+
+    /// Needs a re-authenticated dashboard session (sudo): API tokens get
+    /// `sudo_required`.
+    pub async fn delete_environment(&self, id: &str) -> anyhow::Result<Value> {
+        self.delete(&format!("/api/environments/{id}")).await
+    }
+
     /// Returns `{ id, name, instances: [...] }`.
     pub async fn create_service(&self, project: &str, req: &NewService) -> anyhow::Result<Value> {
         self.post(&format!("/api/projects/{project}/services"), req)

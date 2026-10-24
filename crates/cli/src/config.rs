@@ -9,6 +9,8 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::api::Environment;
+
 pub const LINK_DIR: &str = ".modula";
 pub const LINK_FILE: &str = "project.toml";
 /// A login for one directory (`login --local`): the same format as the
@@ -137,8 +139,12 @@ pub struct Link {
     /// For humans reading the file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
+    /// Environment id (names may change).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    /// For humans reading the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_name: Option<String>,
     /// Default service id (`modula service <name>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
@@ -147,11 +153,12 @@ pub struct Link {
 }
 
 impl Link {
-    pub fn new(project: &str, project_name: &str, environment: &str) -> Self {
+    pub fn new(project: &str, project_name: &str, environment: &Environment) -> Self {
         Self {
             project: project.to_owned(),
             project_name: Some(project_name.to_owned()),
-            environment: Some(environment.to_owned()),
+            environment: Some(environment.id.clone()),
+            environment_name: Some(environment.name.clone()),
             service: None,
             service_name: None,
         }
@@ -523,7 +530,8 @@ mod tests {
         let link = Link {
             project: "0123456789abcdef".into(),
             project_name: Some("shop".into()),
-            environment: Some("staging".into()),
+            environment: Some("2123456789abcdef".into()),
+            environment_name: Some("staging".into()),
             service: Some("1123456789abcdef".into()),
             service_name: Some("api".into()),
         };

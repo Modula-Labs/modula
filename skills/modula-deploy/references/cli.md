@@ -67,8 +67,10 @@ Services:
 - `variables [--shared] [--kv]` (`variable`, `vars`): names, sealed, references, updated. **Values never come back** (masked `********`; `--kv` = `NAME=********`).
 - `variables set KEY=VALUE… [--stdin] [--sealed] [--deploy] [--shared]`: split at the first `=`. `--stdin` reads dotenv lines (keeps secrets off the command line). Pending until deployed; `--deploy` deploys now (the service, or with `--shared` every service with pending changes); with `--json` only the deploy result prints. `--skip-deploys` accepted (no-op).
 - `variables delete KEY… [--deploy] [--shared]` (`rm`).
-- `environment [NAME]` (`env`): link that environment; no name = list.
-- `environment new NAME [--copy ENV] [--copy-variables]`: create (settings from `--copy`, default the first env; volumes empty; no domains/proxies) and link it. Not deployed.
+- `environment [NAME]` (`env`): link that environment (stored by id); no name = list (marks selected and default).
+- `environment new NAME [--duplicate ENV] [--branch SERVICE=BRANCH]…`: create and link it. `--duplicate` copies settings and all variables (sealed stay sealed); without it: empty (default env's settings, no variables). Databases: empty volume, fresh credentials; no domains/proxies. Not deployed.
+- `environment rename ENV NAME`.
+- `environment delete ENV` (**always fails with a token**: sudo; prints the dashboard link). The default env can't be deleted.
 - `domain [--port P]`: generate `<service>[-<env>]-xxxx.<apps domain>`; prints the URL.
 - `domain add HOST [--port P]`: custom domain; prints a `TYPE NAME VALUE` table of DNS records to create.
 - `domain list` (`ls`) / `domain check HOST` (≥5 s apart) / `domain delete HOST` (`rm`).

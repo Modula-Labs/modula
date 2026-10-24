@@ -41,9 +41,13 @@ pub struct ProjectDetail {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Environment {
     pub id: String,
     pub name: String,
+    /// The project's first environment (production): never deleted.
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,9 +313,13 @@ pub struct NewService {
 #[serde(rename_all = "camelCase")]
 pub struct NewEnvironment {
     pub name: String,
+    /// Environment id to duplicate (services, settings, all variables);
+    /// none: an empty environment.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub clone_from: Option<String>,
-    pub copy_variables: bool,
+    pub duplicate_from: Option<String>,
+    /// Service id → branch, for repo services.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub branches: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

@@ -57,7 +57,7 @@ pub async fn init(ctx: &mut Ctx, name: &str, workspace: Option<&str>) -> anyhow:
     let env = resolve::pick_environment(&p.environments, None)?;
     // Link here, not in a parent's linked directory.
     ctx.link = None;
-    let file = ctx.save_link(Link::new(&p.id, &p.name, &env.name))?;
+    let file = ctx.save_link(Link::new(&p.id, &p.name, env))?;
     ctx.out.either(&p, |o| {
         o.line(format!(
             "Created {} in {} and linked it ({})",
@@ -71,7 +71,7 @@ pub async fn link(ctx: &mut Ctx) -> anyhow::Result<()> {
     let api = ctx.api()?;
     let p = resolve::project(api, ctx.global.project.as_deref()).await?;
     let env = resolve::pick_environment(&p.environments, ctx.global.environment.as_deref())?;
-    let mut link = Link::new(&p.id, &p.name, &env.name);
+    let mut link = Link::new(&p.id, &p.name, env);
     if let Some(s) = ctx.global.service.as_deref() {
         let s = resolve::pick_service(&p.services, Some(s))?;
         link.service = Some(s.id.clone());
@@ -327,7 +327,7 @@ pub async fn service(ctx: &mut Ctx, name: Option<&str>) -> anyhow::Result<()> {
         });
     };
     let s = resolve::pick_service(&p.services, Some(name))?.clone();
-    let env = ctx.environment(&p)?.name.clone();
+    let env = ctx.environment(&p)?.clone();
     let mut link = match ctx.linked() {
         Some(l) if l.project == p.id => l.clone(),
         _ => Link::new(&p.id, &p.name, &env),
@@ -350,6 +350,7 @@ mod tests {
         let env = |id: &str| Environment {
             id: id.into(),
             name: id.into(),
+            is_default: id == "prod",
         };
         let p = ProjectDetail {
             id: "p".into(),

@@ -476,16 +476,34 @@ pub struct EnvironmentArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum EnvironmentCommand {
-    /// Create an environment (services are copied; domains are not) and link it.
+    /// Create an environment and link it. Every service gets a copy there:
+    /// databases with an empty volume and new credentials; no domains.
     New {
         /// The new environment's name.
         name: String,
-        /// Copy service settings from this environment (default: the first).
-        #[arg(long, value_name = "ENVIRONMENT")]
-        copy: Option<String>,
-        /// Also copy its variables (sealed ones excepted).
-        #[arg(long)]
-        copy_variables: bool,
+        /// Duplicate this environment: its service settings and all its
+        /// variables (sealed ones stay sealed). Without it, the environment is
+        /// empty: the default environment's settings, no variables.
+        #[arg(short, long, value_name = "ENVIRONMENT")]
+        duplicate: Option<String>,
+        /// The branch a repo service deploys from there (default: the same
+        /// branch). Repeatable.
+        #[arg(long = "branch", value_name = "SERVICE=BRANCH")]
+        branches: Vec<String>,
+    },
+    /// Rename an environment.
+    Rename {
+        /// The environment (name or id).
+        environment: String,
+        /// Its new name.
+        name: String,
+    },
+    /// Delete an environment with its deployments, variables and volume data
+    /// (not the default one). Needs a re-authenticated dashboard session, so
+    /// API tokens are refused: use Project Settings → Environments.
+    Delete {
+        /// The environment (name or id).
+        environment: String,
     },
 }
 
@@ -800,14 +818,36 @@ mod tests {
         assert_eq!(e.name.as_deref(), Some("staging"));
         assert!(e.command.is_none());
 
-        let cli = parse(&["env", "new", "preview", "--copy", "staging"]).unwrap();
+        let cli = parse(&[
+            "env",
+            "new",
+            "preview",
+            "--duplicate",
+            "staging",
+            "--branch",
+            "api=dev",
+            "--branch",
+            "web=dev",
+        ])
+        .unwrap();
         let Command::Environment(e) = cli.command else {
             panic!()
         };
         assert!(matches!(
             e.command,
-            Some(EnvironmentCommand::New { ref name, ref copy, copy_variables: false })
-                if name == "preview" && copy.as_deref() == Some("staging")
+            Some(EnvironmentCommand::New { ref name, ref duplicate, ref branches })
+                if name == "preview" && duplicate.as_deref() == Some("staging")
+                    && branches == &["api=dev", "web=dev"]
+        ));
+
+        let cli = parse(&["env", "rename", "staging", "preview"]).unwrap();
+        let Command::Environment(e) = cli.command else {
+            panic!()
+        };
+        assert!(matches!(
+            e.command,
+            Some(EnvironmentCommand::Rename { ref environment, ref name })
+                if environment == "staging" && name == "preview"
         ));
     }
 

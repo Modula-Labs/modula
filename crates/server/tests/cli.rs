@@ -193,7 +193,7 @@ async fn add_database_set_variables_deploy_status_and_query(pool: PgPool) {
     let p = s.json(&["init", "shop", "--workspace", "team"]).await;
     assert_eq!(p["name"], "shop");
     let link = std::fs::read_to_string(s.dir.join(".modula/project.toml")).unwrap();
-    assert!(link.contains("environment = \"production\""), "{link}");
+    assert!(link.contains("environment_name = \"production\""), "{link}");
     let listed = s.json(&["list"]).await;
     assert_eq!(listed[0]["name"], "shop");
     assert_eq!(listed[0]["linked"], true);
@@ -308,15 +308,24 @@ async fn add_database_set_variables_deploy_status_and_query(pool: PgPool) {
     let tables = s.ok(&["db", "tables"]).await;
     assert!(tables.contains("public  orders  3"), "{tables}");
 
-    // Environments: create one copying production, then the link follows.
-    s.ok(&["environment", "new", "staging", "--copy", "production"])
+    // Environments: duplicate production, then the link follows, by id:
+    // renaming keeps it.
+    s.ok(&["environment", "new", "staging", "--duplicate", "production"])
         .await;
     let status = s.json(&["status"]).await;
     assert_eq!(status["environment"]["name"], "staging");
     assert!(status["services"][0]["status"].is_null());
+    s.ok(&["environment", "rename", "staging", "preview"]).await;
+    let status = s.json(&["status"]).await;
+    assert_eq!(status["environment"]["name"], "preview");
+    // Deleting needs sudo, which API tokens never have.
+    let (r, _) = s.run(&["environment", "delete", "preview", "--yes"]).await;
+    let e = format!("{:#}", r.unwrap_err());
+    assert!(e.contains("/settings/environments?env="), "{e}");
     s.ok(&["environment", "production"]).await;
     let envs = s.json(&["environment"]).await;
     assert_eq!(envs.as_array().unwrap().len(), 2);
+    assert_eq!(envs[0]["default"], true);
 
     // --deploy --json prints one document: the deploy result.
     let redeployed = s

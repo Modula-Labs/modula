@@ -97,12 +97,9 @@ async fn pull_file(ctx: &mut Ctx, force: bool, file: Option<PathBuf>) -> anyhow:
     }
     let api = ctx.api()?;
     let project = ctx.project().await?;
-    // The base comes from production (else the first environment).
+    // The base comes from the default environment (production).
     let mut order: Vec<&Environment> = project.environments.iter().collect();
-    if let Some(i) = order
-        .iter()
-        .position(|e| e.name == resolve::DEFAULT_ENVIRONMENT)
-    {
+    if let Some(i) = order.iter().position(|e| e.is_default) {
         let prod = order.remove(i);
         order.insert(0, prod);
     }
@@ -482,8 +479,8 @@ async fn apply(ctx: &Ctx, args: &ConfigPlanArgs, deploy: bool) -> anyhow::Result
                 &p.id,
                 &NewEnvironment {
                     name: x.plan.environment.clone(),
-                    clone_from: None,
-                    copy_variables: false,
+                    duplicate_from: None,
+                    branches: Default::default(),
                 },
             )
             .await?;
