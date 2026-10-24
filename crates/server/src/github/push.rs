@@ -190,7 +190,7 @@ pub async fn handle_push(
          JOIN github_installations g ON g.workspace_id = p.workspace_id
          WHERE g.id = $1 AND g.app_id = $5 AND lower(g.account_login) = lower($2)
            AND NOT e.ephemeral
-           AND i.config->'source'->>'type' = 'repo'
+           AND i.config->'source'->>'type' IN ('repo', 'function')
            AND lower(i.config->'source'->>'repo') = lower($3)
            AND i.config->'source'->>'branch' = $4
            AND coalesce((i.config->>'autoDeploy')::boolean, true)

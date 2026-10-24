@@ -20,7 +20,7 @@ use super::Commit;
 use super::app::{self, TokenScope};
 use super::push::{InstallationRef, deploy, is_sha, should_deploy};
 use crate::api::projects::{self, NewEnvironment, PrRef};
-use crate::deploy::config::{ServiceConfig, Source, validate_branch, validate_repo};
+use crate::deploy::config::{ServiceConfig, validate_branch, validate_repo};
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
 use crate::jobs::{self, Job, NewJob};
@@ -153,7 +153,7 @@ async fn open(
                AND lower(g.account_login) = lower($3))
          SELECT p.id, p.workspace_id, p.base FROM p
          WHERE EXISTS (SELECT 1 FROM service_instances i WHERE i.environment_id = p.base
-                         AND i.config->'source'->>'type' = 'repo'
+                         AND i.config->'source'->>'type' IN ('repo', 'function')
                          AND lower(i.config->'source'->>'repo') = lower($4))
          ORDER BY p.id",
     )
@@ -240,12 +240,7 @@ async fn open(
                 Some(commit.clone())
             } else if !created {
                 continue;
-            } else if let Source::Repo {
-                repo: other,
-                branch,
-                ..
-            } = &cfg.source
-            {
+            } else if let Some((other, branch, _)) = cfg.repo() {
                 match app::branch_head(state, workspace, other, branch).await {
                     Ok(c) => Some(c),
                     Err(AppError::Internal(e)) => return Err(AppError::Internal(e)),
@@ -302,7 +297,7 @@ async fn create(
     }
     let services: Vec<Id> = sqlx::query_scalar(
         "SELECT service_id FROM service_instances
-         WHERE environment_id = $1 AND config->'source'->>'type' = 'repo'
+         WHERE environment_id = $1 AND config->'source'->>'type' IN ('repo', 'function')
            AND lower(config->'source'->>'repo') = lower($2)",
     )
     .bind(base)

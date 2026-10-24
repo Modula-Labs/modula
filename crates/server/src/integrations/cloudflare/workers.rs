@@ -1,5 +1,5 @@
-//! Workers static assets, uploaded directly (no Wrangler): the calls that
-//! publish a static site as a Worker.
+//! Workers, uploaded directly (no Wrangler): the calls that publish a
+//! function, or a static site with static assets, as a Worker.
 //!
 //! 1. `POST …/workers/scripts/{name}/assets-upload-session` with a manifest
 //!    (`/path` → hash and size) answers with a JWT and the buckets of hashes
@@ -26,6 +26,8 @@ pub const WORKER_MODULE: &str =
     "export default { fetch(request, env) { return env.ASSETS.fetch(request); } };\n";
 pub const WORKER_MODULE_NAME: &str = "worker.js";
 pub const COMPATIBILITY_DATE: &str = "2025-01-01";
+/// A function Worker's one module.
+pub const FUNCTION_MODULE_NAME: &str = modula_proto::node::v1::FUNCTION_MODULE;
 
 /// One file in an upload manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +168,46 @@ impl Client {
             Some(WORKER_MODULE_NAME),
             "application/javascript+module",
             WORKER_MODULE.as_bytes(),
+        );
+        let form = form.finish();
+        self.request::<Value>(
+            Method::PUT,
+            &format!("accounts/{account}/workers/scripts/{script}"),
+            &[],
+            Payload::Multipart(&form),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// A function: `code` as the Worker's only module (module syntax), with
+    /// `bindings` as its whole set (Modula is the source of truth).
+    pub async fn put_module_worker(
+        &self,
+        account: &str,
+        script: &str,
+        code: &str,
+        compatibility_date: &str,
+        bindings: &[Binding],
+    ) -> Result<()> {
+        let metadata = json!({
+            "main_module": FUNCTION_MODULE_NAME,
+            "compatibility_date": compatibility_date,
+            "bindings": bindings.iter().map(Binding::to_json).collect::<Vec<_>>(),
+        });
+        let mut form = Multipart::new();
+        form.part(
+            "metadata",
+            None,
+            "application/json",
+            metadata.to_string().as_bytes(),
+        );
+        form.part(
+            FUNCTION_MODULE_NAME,
+            Some(FUNCTION_MODULE_NAME),
+            "application/javascript+module",
+            code.as_bytes(),
         );
         let form = form.finish();
         self.request::<Value>(

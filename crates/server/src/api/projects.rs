@@ -605,7 +605,7 @@ pub async fn insert_environment(
     for (service, branch) in &ne.branches {
         let set = sqlx::query(
             "UPDATE service_instances SET config = jsonb_set(config, '{source,branch}', to_jsonb($3::text))
-             WHERE environment_id = $1 AND service_id = $2 AND config->'source'->>'type' = 'repo'",
+             WHERE environment_id = $1 AND service_id = $2 AND config->'source' ? 'repo'",
         )
         .bind(id)
         .bind(service)

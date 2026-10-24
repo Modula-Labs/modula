@@ -42,6 +42,46 @@ pub enum Source {
     /// A Cloudflare R2 bucket (see `api::buckets`): nothing runs or deploys,
     /// the service only carries the bucket's credentials as variables.
     R2,
+    /// A JavaScript function: a module worker (`export default { fetch }`)
+    /// that workerd runs on the servers, or Cloudflare Workers runs with
+    /// `hosting` set. Its code is written in the dashboard (`code`, plain
+    /// JavaScript) or bundled from a repository (`repo`, `branch`,
+    /// `root_dir`, `entry`; TypeScript and npm dependencies welcome).
+    Function {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root_dir: Option<String>,
+        /// The entry module, relative to the root directory (default
+        /// [`DEFAULT_FUNCTION_ENTRY`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<String>,
+        /// The Workers runtime version the code is written for (YYYY-MM-DD).
+        compatibility_date: String,
+    },
+}
+
+/// Inline function code is at most this big.
+pub const MAX_FUNCTION_CODE_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_FUNCTION_ENTRY: &str = "index.ts";
+/// The newest compatibility date the workerd that nodes run supports (its
+/// release date; see `scripts/fetch-build-tools.sh`).
+pub const WORKERD_COMPATIBILITY_DATE: &str = "2026-10-14";
+/// Cloudflare's first compatibility date.
+const FIRST_COMPATIBILITY_DATE: &str = "2021-11-02";
+
+/// [`Source::Function`], borrowed.
+#[derive(Debug, Clone, Copy)]
+pub struct FunctionSource<'a> {
+    /// Inline code; None = bundled from the repository.
+    pub code: Option<&'a str>,
+    /// The entry module of a repository function.
+    pub entry: &'a str,
+    pub compatibility_date: &'a str,
 }
 
 /// How a repository source is turned into an image.
@@ -120,8 +160,8 @@ pub struct ServiceConfig {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wait_for_ci: bool,
 
-    /// Where a built static site is served from; None = this instance's own
-    /// servers (the built image runs behind the edge).
+    /// Where a built static site or a function is served from; None = this
+    /// instance's own servers (behind the edge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosting: Option<Hosting>,
 
@@ -173,10 +213,13 @@ pub const MAX_CRON_TIMEOUT_SECS: u32 = 24 * 3600;
     deny_unknown_fields
 )]
 pub enum Hosting {
-    /// Built on a server, then uploaded as Cloudflare Workers static assets
-    /// with the workspace's Cloudflare connection.
+    /// Uploaded to Cloudflare Workers with the workspace's Cloudflare
+    /// connection: a static site's build output as static assets (built on
+    /// a server), or a function as the Worker's script.
     Cloudflare {
-        /// The build output, relative to the root directory (e.g. `dist`).
+        /// Static sites: the build output, relative to the root directory
+        /// (e.g. `dist`). Empty for functions.
+        #[serde(default)]
         output_dir: String,
         /// Serve `/index.html` for paths that match no file (client-side routing).
         #[serde(default)]
@@ -257,6 +300,12 @@ impl ServiceConfig {
             Source::Upload { .. } => "Uploaded via CLI".into(),
             Source::Local { .. } => "Local files (modula up)".into(),
             Source::R2 => "Cloudflare R2".into(),
+            Source::Function {
+                repo: Some(repo),
+                branch: Some(branch),
+                ..
+            } => format!("{repo}@{branch}"),
+            Source::Function { .. } => "Function".into(),
         }
     }
 
@@ -266,10 +315,35 @@ impl ServiceConfig {
                 repo,
                 branch,
                 root_dir,
-            } => Some((repo, branch, root_dir.as_deref())),
-            Source::Image { .. } | Source::Upload { .. } | Source::Local { .. } | Source::R2 => {
-                None
             }
+            | Source::Function {
+                repo: Some(repo),
+                branch: Some(branch),
+                root_dir,
+                ..
+            } => Some((repo, branch, root_dir.as_deref())),
+            Source::Image { .. }
+            | Source::Upload { .. }
+            | Source::Local { .. }
+            | Source::R2
+            | Source::Function { .. } => None,
+        }
+    }
+
+    /// The function's code settings, for function sources.
+    pub fn function(&self) -> Option<FunctionSource<'_>> {
+        match &self.source {
+            Source::Function {
+                code,
+                entry,
+                compatibility_date,
+                ..
+            } => Some(FunctionSource {
+                code: code.as_deref(),
+                entry: entry.as_deref().unwrap_or(DEFAULT_FUNCTION_ENTRY),
+                compatibility_date,
+            }),
+            _ => None,
         }
     }
 
@@ -281,9 +355,14 @@ impl ServiceConfig {
         }
     }
 
-    /// Whether deployments build an image on the node (repository or upload).
+    /// Whether deployments build on the node (repository or upload, or a
+    /// function's repository).
     pub fn builds_from_source(&self) -> bool {
-        !matches!(self.source, Source::Image { .. } | Source::R2)
+        match &self.source {
+            Source::Image { .. } | Source::R2 => false,
+            Source::Function { code, .. } => code.is_none(),
+            Source::Repo { .. } | Source::Upload { .. } | Source::Local { .. } => true,
+        }
     }
 
     /// Whether anything runs: an R2 bucket has no container to deploy.
@@ -296,7 +375,8 @@ impl ServiceConfig {
         match &self.source {
             Source::Repo { root_dir, .. }
             | Source::Upload { root_dir, .. }
-            | Source::Local { root_dir } => root_dir.as_deref(),
+            | Source::Local { root_dir }
+            | Source::Function { root_dir, .. } => root_dir.as_deref(),
             Source::Image { .. } | Source::R2 => None,
         }
     }
@@ -334,6 +414,66 @@ impl ServiceConfig {
 
     pub fn validate(&self) -> AppResult<()> {
         match &self.source {
+            Source::Function {
+                code,
+                repo,
+                branch,
+                root_dir,
+                entry,
+                compatibility_date,
+            } => {
+                match (code, repo, branch) {
+                    (Some(code), None, None) => {
+                        if code.trim().is_empty() {
+                            return Err(AppError::bad_request("the function has no code"));
+                        }
+                        if code.len() > MAX_FUNCTION_CODE_BYTES || code.contains('\0') {
+                            return Err(AppError::bad_request(
+                                "function code must be at most 1 MB, without NUL bytes: deploy bigger functions from a repository",
+                            ));
+                        }
+                        if entry.is_some() || root_dir.is_some() {
+                            return Err(AppError::bad_request(
+                                "an entry file and root directory only apply to a function from a repository",
+                            ));
+                        }
+                    }
+                    (None, Some(repo), Some(branch)) => {
+                        validate_repo(repo)?;
+                        validate_branch(branch)?;
+                        if let Some(d) = root_dir {
+                            validate_rel_path(d, "root directory")?;
+                        }
+                        if let Some(e) = entry {
+                            validate_function_entry(e)?;
+                        }
+                    }
+                    _ => {
+                        return Err(AppError::bad_request(
+                            "a function has either code or a repository and branch",
+                        ));
+                    }
+                }
+                validate_compatibility_date(compatibility_date, self.hosting.is_some())?;
+                if self.cron_schedule.is_some() {
+                    return Err(AppError::bad_request(
+                        "a function answers requests: it can't run on a cron schedule",
+                    ));
+                }
+                if self.start_command.is_some() || self.pre_deploy_command.is_some() {
+                    return Err(AppError::bad_request(
+                        "a function has no start or pre-deploy command",
+                    ));
+                }
+                if self
+                    .cloudflare()
+                    .is_some_and(|cf| !cf.output_dir.is_empty() || cf.spa)
+                {
+                    return Err(AppError::bad_request(
+                        "a function on Cloudflare has no output directory or single-page app setting",
+                    ));
+                }
+            }
             Source::Image { image } => validate_image_ref(image)?,
             Source::R2 => {}
             Source::Upload { root_dir, .. } | Source::Local { root_dir } => {
@@ -356,7 +496,9 @@ impl ServiceConfig {
         if let Some(p) = &self.dockerfile_path {
             validate_rel_path(p, "Dockerfile path")?;
         }
-        if let Some(cf) = self.cloudflare() {
+        if let Some(cf) = self.cloudflare()
+            && self.function().is_none()
+        {
             if !self.builds_from_source() {
                 return Err(AppError::bad_request(
                     "Cloudflare hosting serves a build's output: use a repository or local files as the source",
@@ -368,12 +510,14 @@ impl ServiceConfig {
                     "output directory is required (e.g. dist)",
                 ));
             }
+        }
+        if let Some(cf) = self.cloudflare() {
             if let Some(n) = cf.script_name {
                 validate_script_name(n)?;
             }
             if self.replicas != 1 {
                 return Err(AppError::bad_request(
-                    "a site hosted on Cloudflare is built once: set replicas to 1",
+                    "a service hosted on Cloudflare is published once: set replicas to 1",
                 ));
             }
         }
@@ -540,10 +684,74 @@ pub fn validate_branch(b: &str) -> AppResult<()> {
     }
 }
 
+/// A repository function's entry module: a JavaScript or TypeScript file
+/// inside the repository, named plainly (it reaches the bundler's argv).
+pub fn validate_function_entry(e: &str) -> AppResult<()> {
+    let plain = e.len() <= 256
+        && !e.starts_with(['-', '/'])
+        && e.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b));
+    let script = [".js", ".mjs", ".ts", ".mts", ".jsx", ".tsx"]
+        .iter()
+        .any(|x| e.ends_with(x));
+    if plain && script && validate_rel_path(e, "entry file").is_ok() {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(
+            "entry file must be a .js, .mjs, .ts, .mts, .jsx or .tsx file inside the repository",
+        ))
+    }
+}
+
+/// `YYYY-MM-DD`, from Cloudflare's first compatibility date to the newest
+/// the runtime supports: the servers' workerd, or today on Cloudflare.
+pub fn validate_compatibility_date(d: &str, on_cloudflare: bool) -> AppResult<()> {
+    let Some(date) = parse_date(d) else {
+        return Err(AppError::bad_request(
+            "compatibility date must be a date like 2026-10-01",
+        ));
+    };
+    let newest = if on_cloudflare {
+        time::OffsetDateTime::now_utc().date()
+    } else {
+        parse_date(WORKERD_COMPATIBILITY_DATE).expect("a valid date")
+    };
+    let first = parse_date(FIRST_COMPATIBILITY_DATE).expect("a valid date");
+    if date < first {
+        return Err(AppError::bad_request(format!(
+            "compatibility date must be {FIRST_COMPATIBILITY_DATE} or later"
+        )));
+    }
+    if date > newest {
+        return Err(AppError::bad_request(if on_cloudflare {
+            "compatibility date can't be in the future".to_owned()
+        } else {
+            format!(
+                "compatibility date must be {WORKERD_COMPATIBILITY_DATE} or earlier (the newest the servers' runtime supports)"
+            )
+        }));
+    }
+    Ok(())
+}
+
+/// `YYYY-MM-DD` exactly.
+fn parse_date(d: &str) -> Option<time::Date> {
+    let b = d.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' || !digits(0..4) || !digits(5..7) {
+        return None;
+    }
+    if !digits(8..10) {
+        return None;
+    }
+    let month = time::Month::try_from(d[5..7].parse::<u8>().ok()?).ok()?;
+    time::Date::from_calendar_date(d[..4].parse().ok()?, month, d[8..].parse().ok()?).ok()
+}
+
 /// [`Hosting::Cloudflare`], borrowed.
 #[derive(Debug, Clone, Copy)]
 pub struct CloudflareHosting<'a> {
-    /// Without leading or trailing slashes.
+    /// Without leading or trailing slashes; empty for a function.
     pub output_dir: &'a str,
     pub spa: bool,
     pub script_name: Option<&'a str>,
@@ -812,5 +1020,168 @@ mod tests {
             .is_err(),
             "unknown (privileged) fields are rejected"
         );
+    }
+
+    fn function(v: serde_json::Value) -> AppResult<ServiceConfig> {
+        let c: ServiceConfig =
+            serde_json::from_value(v).map_err(|e| AppError::bad_request(e.to_string()))?;
+        c.validate_for_instance()?;
+        Ok(c)
+    }
+
+    #[test]
+    fn functions_have_inline_code_or_a_repository() {
+        let inline = function(serde_json::json!({
+            "source": { "type": "function", "code": "export default {}", "compatibilityDate": "2026-10-01" }
+        }))
+        .unwrap();
+        assert!(!inline.builds_from_source(), "inline code isn't built");
+        assert!(inline.repo().is_none());
+        assert_eq!(inline.source_label(), "Function");
+        let f = inline.function().unwrap();
+        assert_eq!(
+            (f.code, f.compatibility_date),
+            (Some("export default {}"), "2026-10-01")
+        );
+
+        let repo = function(serde_json::json!({
+            "source": { "type": "function", "repo": "acme/fns", "branch": "main",
+                        "rootDir": "hello", "entry": "src/index.ts", "compatibilityDate": "2025-01-01" },
+            "hosting": { "type": "cloudflare" }
+        }))
+        .unwrap();
+        assert!(repo.builds_from_source());
+        assert_eq!(repo.repo(), Some(("acme/fns", "main", Some("hello"))));
+        assert_eq!(repo.function().unwrap().entry, "src/index.ts");
+        assert_eq!(repo.source_label(), "acme/fns@main");
+        assert!(repo.cloudflare().is_some(), "functionTarget cloudflare");
+        let default_entry = function(serde_json::json!({
+            "source": { "type": "function", "repo": "acme/fns", "branch": "main", "compatibilityDate": "2025-01-01" }
+        }))
+        .unwrap();
+        assert_eq!(
+            default_entry.function().unwrap().entry,
+            DEFAULT_FUNCTION_ENTRY
+        );
+
+        let big = "x".repeat(MAX_FUNCTION_CODE_BYTES + 1);
+        for (bad, why) in [
+            (
+                serde_json::json!({ "type": "function", "compatibilityDate": "2026-10-01" }),
+                "no code",
+            ),
+            (
+                serde_json::json!({ "type": "function", "code": "  ", "compatibilityDate": "2026-10-01" }),
+                "blank",
+            ),
+            (
+                serde_json::json!({ "type": "function", "code": big, "compatibilityDate": "2026-10-01" }),
+                "too big",
+            ),
+            (
+                serde_json::json!({ "type": "function", "code": "a\u{0}", "compatibilityDate": "2026-10-01" }),
+                "NUL",
+            ),
+            (
+                serde_json::json!({ "type": "function", "code": "x", "repo": "a/b", "branch": "main", "compatibilityDate": "2026-10-01" }),
+                "both",
+            ),
+            (
+                serde_json::json!({ "type": "function", "repo": "a/b", "compatibilityDate": "2026-10-01" }),
+                "no branch",
+            ),
+            (
+                serde_json::json!({ "type": "function", "code": "x", "entry": "a.ts", "compatibilityDate": "2026-10-01" }),
+                "entry inline",
+            ),
+            (
+                serde_json::json!({ "type": "function", "repo": "a/b", "branch": "main", "entry": "../x.ts", "compatibilityDate": "2026-10-01" }),
+                "entry outside",
+            ),
+            (
+                serde_json::json!({ "type": "function", "repo": "a/b", "branch": "main", "entry": "-x.ts", "compatibilityDate": "2026-10-01" }),
+                "entry flag",
+            ),
+            (
+                serde_json::json!({ "type": "function", "repo": "a/b", "branch": "main", "entry": "x.py", "compatibilityDate": "2026-10-01" }),
+                "not js",
+            ),
+            (
+                serde_json::json!({ "type": "function", "code": "x", "compatibilityDate": "2026-13-01" }),
+                "no such month",
+            ),
+            (
+                serde_json::json!({ "type": "function", "code": "x", "compatibilityDate": "26-10-01" }),
+                "format",
+            ),
+            (
+                serde_json::json!({ "type": "function", "code": "x", "compatibilityDate": "2020-01-01" }),
+                "too old",
+            ),
+            (
+                serde_json::json!({ "type": "function", "code": "x", "compatibilityDate": "2099-01-01" }),
+                "newer than workerd",
+            ),
+        ] {
+            assert!(
+                function(serde_json::json!({ "source": bad })).is_err(),
+                "{why}"
+            );
+        }
+        let src = serde_json::json!({ "type": "function", "code": "x", "compatibilityDate": "2026-10-01" });
+        for (extra, why) in [
+            (serde_json::json!({ "cronSchedule": "@daily" }), "cron"),
+            (
+                serde_json::json!({ "startCommand": ["node"] }),
+                "start command",
+            ),
+            (
+                serde_json::json!({ "preDeployCommand": ["x"] }),
+                "pre-deploy",
+            ),
+            (
+                serde_json::json!({ "hosting": { "type": "cloudflare", "outputDir": "dist" } }),
+                "output dir",
+            ),
+            (
+                serde_json::json!({ "hosting": { "type": "cloudflare", "spa": true } }),
+                "spa",
+            ),
+            (
+                serde_json::json!({ "hosting": { "type": "cloudflare" }, "replicas": 2 }),
+                "replicas on Cloudflare",
+            ),
+        ] {
+            let mut v = extra.clone();
+            v["source"] = src.clone();
+            assert!(function(v).is_err(), "{why}");
+        }
+        // Replicas on the servers are fine: each runs it in its workerd.
+        function(serde_json::json!({ "source": src, "replicas": 3 })).unwrap();
+        // A static site still needs its output directory.
+        assert!(
+            function(serde_json::json!({
+                "source": { "type": "repo", "repo": "a/b", "branch": "main" },
+                "hosting": { "type": "cloudflare" }
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn compatibility_dates() {
+        validate_compatibility_date(WORKERD_COMPATIBILITY_DATE, false).unwrap();
+        validate_compatibility_date("2021-11-02", false).unwrap();
+        assert!(validate_compatibility_date("2021-11-01", false).is_err());
+        assert!(validate_compatibility_date("2099-12-31", true).is_err());
+        assert!(validate_compatibility_date("2026-02-30", false).is_err());
+        let today = time::OffsetDateTime::now_utc().date();
+        let today = format!(
+            "{:04}-{:02}-{:02}",
+            today.year(),
+            u8::from(today.month()),
+            today.day()
+        );
+        validate_compatibility_date(&today, true).unwrap();
     }
 }

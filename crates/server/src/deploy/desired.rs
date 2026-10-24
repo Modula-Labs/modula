@@ -300,10 +300,15 @@ async fn workload(state: &AppState, node: Id, r: Row) -> AppResult<pb::Workload>
         )),
         _ => None,
     };
-    // A static site hosted elsewhere: the node uploads the output here.
+    // Output hosted elsewhere (a static site, or a function's bundle): the
+    // node uploads it here.
     let (output_dir, output_url, output_auth) = match cfg.cloudflare() {
         Some(cf) => (
-            cf.output_dir.to_owned(),
+            if cfg.function().is_some() {
+                pb::FUNCTION_OUTPUT_DIR.to_owned()
+            } else {
+                cf.output_dir.to_owned()
+            },
             output_url(state),
             format!(
                 "Bearer {}",
@@ -325,10 +330,15 @@ async fn workload(state: &AppState, node: Id, r: Row) -> AppResult<pb::Workload>
                 .unwrap_or_default()
                 .trim_matches('/')
                 .to_owned(),
-            builder: match cfg.builder {
-                Builder::Railpack => pb::Builder::Railpack,
-                Builder::Dockerfile => pb::Builder::Dockerfile,
+            builder: match (cfg.function(), cfg.builder) {
+                (Some(_), _) => pb::Builder::Function,
+                (None, Builder::Railpack) => pb::Builder::Railpack,
+                (None, Builder::Dockerfile) => pb::Builder::Dockerfile,
             } as i32,
+            function_entry: cfg
+                .function()
+                .map(|f| f.entry.to_owned())
+                .unwrap_or_default(),
             dockerfile_path: cfg.dockerfile_path.clone().unwrap_or_default(),
             build_command: cfg.build_command.clone().unwrap_or_default(),
             start_command: match (&cfg.start_command, railpack) {
@@ -384,6 +394,14 @@ async fn workload(state: &AppState, node: Id, r: Row) -> AppResult<pb::Workload>
         serverless: cfg.serverless.map(|s| pb::Serverless {
             idle_secs: s.idle_minutes * 60,
         }),
+        // On Cloudflare, a function's node only builds it.
+        function: cfg
+            .function()
+            .filter(|_| cfg.hosting.is_none())
+            .map(|f| pb::Function {
+                code: f.code.unwrap_or_default().to_owned(),
+                compatibility_date: f.compatibility_date.to_owned(),
+            }),
     })
 }
 
@@ -417,15 +435,18 @@ async fn routes(state: &AppState, node: Id) -> AppResult<Vec<pb::Route>> {
             .target_port
             .and_then(|p| u32::try_from(p).ok())
             .unwrap_or(u32::from(cfg.port));
+        // A function's replicas each serve from their own node's workerd,
+        // which isn't on the private network.
+        let remote_ips = if cfg.function().is_some() {
+            &[][..]
+        } else {
+            &r.remote_ips[..]
+        };
         pb_routes.push(pb::Route {
             hostname: r.hostname,
             deployment_id: r.deployment_id.to_string(),
             port,
-            remote_upstreams: r
-                .remote_ips
-                .iter()
-                .map(|ip| format!("{ip}:{port}"))
-                .collect(),
+            remote_upstreams: remote_ips.iter().map(|ip| format!("{ip}:{port}")).collect(),
             // The rules the deployment was made with (staged like the rest).
             rules: super::edge::to_pb(&cfg.edge_rules),
             proxied: r.proxied,

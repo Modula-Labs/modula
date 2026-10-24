@@ -7,10 +7,12 @@
 //!    failed              failed             removed
 //!
 //! Image deployments start at `deploying`; repository deployments at `building`.
-//! A static site hosted elsewhere (`config.hosting`) leaves its node at
-//! BUILT: the node has uploaded the output (see `deploy::output`), and the
-//! server publishes it while the deployment is `deploying`, then makes it
-//! active or failed itself (see `integrations::cloudflare::publish`).
+//! A static site or function hosted elsewhere (`config.hosting`) leaves its
+//! node at BUILT: the node has uploaded the output (see `deploy::output`),
+//! and the server publishes it while the deployment is `deploying`, then
+//! makes it active or failed itself (see `integrations::cloudflare::publish`).
+//! A function hosted elsewhere with its code inline never reaches a node:
+//! it is published from `deploying` right away.
 //!
 //! A node may only report on deployments placed on it; anything else is ignored.
 //!
@@ -209,18 +211,7 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
                     .execute(&mut *tx)
                     .await?;
             }
-            let key = format!("publish:{dep}");
-            jobs::enqueue(
-                &mut *tx,
-                NewJob {
-                    kind: crate::integrations::cloudflare::publish::JOB,
-                    payload: serde_json::json!({ "deploymentId": dep, "sha256": sha256 }),
-                    max_attempts: Some(3),
-                    dedupe_key: Some(&key),
-                    ..Default::default()
-                },
-            )
-            .await?;
+            crate::integrations::cloudflare::publish::enqueue(&mut tx, *dep, &sha256).await?;
             // The build is off the node's desired state now.
             kick.push(node);
         }

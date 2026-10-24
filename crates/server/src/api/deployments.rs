@@ -103,8 +103,11 @@ macro_rules! select_deployments {
                     CASE d.config->'source'->>'type'
                          WHEN 'repo' THEN (d.config->'source'->>'repo') || '@' || (d.config->'source'->>'branch')
                          WHEN 'upload' THEN 'Uploaded via CLI'
+                         WHEN 'function' THEN coalesce((d.config->'source'->>'repo') || '@' || (d.config->'source'->>'branch'), 'Function code')
                          ELSE d.config->'source'->>'image' END AS source,
-                    CASE d.config->'source'->>'type' WHEN 'repo' THEN 'github' WHEN 'upload' THEN 'upload'
+                    CASE WHEN d.config->'source' ? 'repo' THEN 'github'
+                         WHEN d.config->'source'->>'type' = 'upload' THEN 'upload'
+                         WHEN d.config->'source'->>'type' = 'function' THEN 'function'
                          ELSE 'image' END AS source_kind,
                     d.source_branch, d.source_dirty,
                     CASE WHEN d.config->'source'->>'type' = 'upload'
