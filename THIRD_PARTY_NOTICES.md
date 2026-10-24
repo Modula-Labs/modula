@@ -16,6 +16,8 @@ SHA-256 sums.
 | --- | --- | --- | --- |
 | [Caddy](https://github.com/caddyserver/caddy) (`caddy-linux-*`) | v2.11.1 | Apache-2.0 | Matthew Holt and the Caddy authors |
 | [caddy-dns/cloudflare](https://github.com/caddy-dns/cloudflare) (compiled into our Caddy build with xcaddy) | module at build time | Apache-2.0 | The caddy-dns/cloudflare authors |
+| [caddy-ratelimit](https://github.com/mholt/caddy-ratelimit) (compiled into our Caddy build with xcaddy) | module at build time | Apache-2.0 | Matthew Holt |
+| [cache-handler](https://github.com/caddyserver/cache-handler) (compiled into our Caddy build with xcaddy) | module at build time | Apache-2.0 | The Caddy authors |
 | [BuildKit](https://github.com/moby/buildkit) `buildctl` (`buildctl-linux-*`) | v0.34.1 | Apache-2.0 | The BuildKit authors (Moby project) |
 | [Railpack](https://github.com/railwayapp/railpack) (`railpack-linux-*`) | v0.43.0 | MIT | Copyright (c) 2025 Railway Corp. |
 
@@ -25,7 +27,7 @@ at the tagged version, under their own (permissive) licenses.
 
 Apache-2.0 section 4(d): if an upstream Apache-2.0 component ships a `NOTICE` file,
 its attribution notices must be kept with any redistribution. At the versions above,
-neither Caddy, caddy-dns/cloudflare nor BuildKit has a `NOTICE` file, so only the
+none of Caddy, caddy-dns/cloudflare, caddy-ratelimit, cache-handler or BuildKit has a `NOTICE` file, so only the
 license text (below) applies.
 
 ## Bundled in the web UI
@@ -227,7 +229,7 @@ FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
 
-### Apache License 2.0 (Caddy, caddy-dns/cloudflare, BuildKit)
+### Apache License 2.0 (Caddy, caddy-dns/cloudflare, caddy-ratelimit, cache-handler, BuildKit)
 
 ```
 

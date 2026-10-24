@@ -37,8 +37,14 @@ OUT=${OUT:-dist/release}
 KEY=${RELEASE_SIGNING_KEY:-$HOME/.config/modula/release-signing/release.key}
 CADDY_VERSION=${CADDY_VERSION:-v2.11.1}
 XCADDY_VERSION=${XCADDY_VERSION:-v0.4.5}
-# DNS-01 for wildcard certificates on generated domains.
-CADDY_PLUGINS=(github.com/caddy-dns/cloudflare@v0.2.4)
+# DNS-01 for wildcard certificates on generated domains; rate limit and
+# cache edge rules. Keep in sync with deploy/dev/node.Dockerfile.
+# cache-handler v0.17.0 needs Caddy v2.11.4; v0.16.0 builds with v2.11.1.
+CADDY_PLUGINS=(
+  github.com/caddy-dns/cloudflare@v0.2.4
+  github.com/mholt/caddy-ratelimit@v0.1.1-0.20260612195517-5625512f24f6
+  github.com/caddyserver/cache-handler@v0.16.0
+)
 # Build images, pinned by digest (multi-arch index, so --platform still picks).
 RUST_IMAGE=rust:1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87 # rust:1-alpine, rustc 1.99.1
 GO_IMAGE=golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 # golang:1.25-alpine
