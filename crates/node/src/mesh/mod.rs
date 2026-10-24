@@ -13,9 +13,12 @@
 //!     environment talk across the mesh, on every node ([`nft`]); checked
 //!     every minute and reloaded when what the host has differs (an
 //!     external `nft flush ruleset`, a Docker restart dropping its rules);
+//!   * a virtual IP per service (`10.80.255.0/24`, per environment), local to
+//!     every node, whose new connections nftables DNATs to a random healthy
+//!     replica on any server;
 //!   * a resolver on the `.1` that answers `<service>.modula.internal` with
-//!     the healthy replicas on other servers and forwards everything else
-//!     ([`dns`]).
+//!     that virtual IP, the bare `<service>` with the healthy replicas on
+//!     other servers, and forwards everything else ([`dns`]).
 //!
 //! Nothing here is fatal: without WireGuard or nftables the node warns and
 //! keeps running workloads as a single server does.
@@ -38,6 +41,9 @@ use modula_proto::node::v1 as pb;
 pub const INTERFACE: &str = "modula0";
 /// The Docker network (and its bridge) containers join for the mesh.
 pub const BRIDGE: &str = "modula-mesh";
+/// Services' virtual IPs (no node has /24 number 255). Local to every node
+/// (it answers ARP for them on the bridge), DNATed to a replica.
+pub const VIP_RANGE: &str = "10.80.255.0/24";
 pub const DEFAULT_PORT: u16 = 51820;
 pub const KEEPALIVE_SECS: u16 = 25;
 /// WireGuard's overhead on IPv4.
@@ -204,6 +210,8 @@ struct Current {
     host_firewall: Option<String>,
     /// Environments' members (the firewall's sets), from the server.
     environments: Vec<(String, Vec<Ipv4Addr>)>,
+    /// Services' virtual IPs and their healthy replicas (DNAT).
+    vips: Vec<nft::Vip>,
     peers: Vec<Peer>,
     /// Forward between peers (this node is the relay hub).
     relay_hub: bool,
@@ -327,6 +335,7 @@ impl Mesh {
             peers: tunnel_peers,
         };
         let environments = members_by_environment(spec);
+        let vips = vips_by_environment(spec);
         let changed = {
             let c = self.current.lock().expect("mesh lock");
             c.tunnels.as_ref() != Some(&tunnels)
@@ -356,6 +365,7 @@ impl Mesh {
             c.subnet = Some(subnet);
             c.tunnels = tunnels;
             c.environments = environments;
+            c.vips = vips;
             c.peers = peers.clone();
             c.relay_hub = spec.relay_hub;
             !std::mem::replace(&mut c.dns_started, true)
@@ -429,6 +439,7 @@ impl Mesh {
                 peers: c.peers.iter().map(|p| p.subnet.gateway()).collect(),
                 environments: envs,
                 relay_hub: c.relay_hub,
+                vips: c.vips.clone(),
             };
             let ruleset = nft::render(&spec);
             if c.ruleset.as_deref() == Some(ruleset.as_str()) {
@@ -526,17 +537,55 @@ fn members_by_environment(spec: &pb::Mesh) -> Vec<(String, Vec<Ipv4Addr>)> {
         .iter()
         .filter(|e| nft::valid_set_id(&e.environment_id))
         .map(|e| {
-            let mut ips: Vec<Ipv4Addr> = e
-                .members
-                .iter()
-                .filter_map(|m| m.ip.parse::<Ipv4Addr>().ok())
-                .filter(|ip| matches!(ip.octets(), [10, 80, 1..=254, 2..=254]))
-                .collect();
+            let mut ips: Vec<Ipv4Addr> =
+                e.members.iter().filter_map(|m| member_ip(&m.ip)).collect();
             ips.sort();
             ips.dedup();
             (e.environment_id.clone(), ips)
         })
         .collect()
+}
+
+/// A member address the server may assign (a node's container range).
+fn member_ip(s: &str) -> Option<Ipv4Addr> {
+    let ip: Ipv4Addr = s.parse().ok()?;
+    matches!(ip.octets(), [10, 80, 1..=254, 2..=254]).then_some(ip)
+}
+
+/// Services' virtual IPs: `10.80.255.<1–254>` ([`VIP_RANGE`]).
+pub fn parse_vip(s: &str) -> Option<Ipv4Addr> {
+    let ip: Ipv4Addr = s.parse().ok()?;
+    matches!(ip.octets(), [10, 80, 255, 1..=254]).then_some(ip)
+}
+
+/// Every service's virtual IP with its healthy replicas, for the DNAT map.
+fn vips_by_environment(spec: &pb::Mesh) -> Vec<nft::Vip> {
+    let mut out = Vec::new();
+    for e in spec
+        .environments
+        .iter()
+        .filter(|e| nft::valid_set_id(&e.environment_id))
+    {
+        for s in &e.services {
+            let Some(vip) = parse_vip(&s.vip) else {
+                continue;
+            };
+            let mut backends: Vec<Ipv4Addr> = e
+                .members
+                .iter()
+                .filter(|m| m.healthy && m.service_name == s.name)
+                .filter_map(|m| member_ip(&m.ip))
+                .collect();
+            backends.sort();
+            backends.dedup();
+            out.push(nft::Vip {
+                environment: e.environment_id.clone(),
+                vip,
+                backends,
+            });
+        }
+    }
+    out
 }
 
 /// A WireGuard key: 32 bytes, standard base64.
@@ -581,6 +630,17 @@ mod tests {
                     healthy: true,
                     ..Default::default()
                 }],
+                services: vec![
+                    pb::MeshService {
+                        name: "db".into(),
+                        vip: "10.80.255.1".into(),
+                    },
+                    // Not a VIP address: ignored.
+                    pb::MeshService {
+                        name: "api".into(),
+                        vip: "10.80.2.9".into(),
+                    },
+                ],
             }],
             ..Default::default()
         }
@@ -632,6 +692,15 @@ mod tests {
             rules[0]
         );
         assert!(rules[0].contains("set env_0000000000000env"));
+        // db's virtual IP goes to its healthy replica.
+        assert!(
+            rules[0].contains(
+                "ip saddr @env_0000000000000env ip daddr 10.80.255.1 dnat ip to numgen random mod 1 map { 0 : 10.80.2.2 }"
+            ),
+            "{}",
+            rules[0]
+        );
+        assert!(!rules[0].contains("10.80.2.9"));
 
         // The same state again changes nothing.
         mesh.apply(&spec()).await.unwrap();

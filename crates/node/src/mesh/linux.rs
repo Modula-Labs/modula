@@ -18,7 +18,7 @@ use defguard_wireguard_rs::peer::Peer;
 use defguard_wireguard_rs::{InterfaceConfiguration, Kernel, WGApi, WireguardInterfaceApi};
 use tokio::io::AsyncWriteExt;
 
-use super::{BRIDGE, INTERFACE, KEEPALIVE_SECS, MeshSystem, PeerStat, Subnet, Tunnels};
+use super::{BRIDGE, INTERFACE, KEEPALIVE_SECS, MeshSystem, PeerStat, Subnet, Tunnels, VIP_RANGE};
 use crate::access::run;
 
 const KEY_FILE: &str = "wg.key";
@@ -173,6 +173,9 @@ impl MeshSystem for LinuxMesh {
         // on-link in the /16); the host answers for those it routes.
         std::fs::write(format!("/proc/sys/net/ipv4/conf/{BRIDGE}/proxy_arp"), "1")
             .context("cannot enable proxy ARP on the mesh bridge")?;
+        // Our table first: Docker's firewall only lets the mesh through
+        // once the table that isolates it is in place.
+        nft_load(ruleset).await?;
         for (i, o) in DOCKER_USER {
             if !docker_user_has(i, o).await {
                 run(
@@ -183,7 +186,16 @@ impl MeshSystem for LinuxMesh {
                 .context("cannot let mesh traffic through Docker's firewall")?;
             }
         }
-        nft_load(ruleset).await?;
+        // Services' virtual IPs are local, so the host answers ARP for them
+        // on the bridge and the nat chain sees the packets.
+        run(
+            "ip",
+            &[
+                "route", "replace", "local", VIP_RANGE, "dev", "lo", "table", "local",
+            ],
+        )
+        .await
+        .context("cannot route the services' virtual IPs")?;
         open_ufw(subnet).await;
         Ok(())
     }
@@ -200,6 +212,10 @@ impl MeshSystem for LinuxMesh {
         let arp = std::fs::read_to_string(format!("/proc/sys/net/ipv4/conf/{BRIDGE}/proxy_arp"))
             .unwrap_or_default();
         state.push_str(&format!("\nproxy_arp {}", arp.trim()));
+        let vips = run("ip", &["route", "show", "table", "local", VIP_RANGE])
+            .await
+            .unwrap_or_default();
+        state.push_str(&format!("\nvip route {}", vips.trim()));
         Ok(Some(state))
     }
 
@@ -229,11 +245,14 @@ impl MeshSystem for LinuxMesh {
 
 /// Docker's FORWARD chain drops traffic into its networks and, with its
 /// policy, anything it forwards; these let the mesh through, tunnel to
-/// tunnel for the relay hub (`table inet modula` decides what may pass).
-const DOCKER_USER: [(&str, &str); 3] = [
+/// tunnel for the relay hub, bridge to bridge for a virtual IP whose replica
+/// is on this node (the mesh network has inter-container traffic off;
+/// `table inet modula` decides what may pass).
+const DOCKER_USER: [(&str, &str); 4] = [
     (INTERFACE, BRIDGE),
     (BRIDGE, INTERFACE),
     (INTERFACE, INTERFACE),
+    (BRIDGE, BRIDGE),
 ];
 
 async fn docker_user_has(i: &str, o: &str) -> bool {

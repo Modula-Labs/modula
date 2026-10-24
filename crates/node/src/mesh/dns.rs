@@ -1,12 +1,14 @@
 //! The node's resolver for its containers, on its mesh address (`.1:53`).
 //!
-//! Containers keep Docker's embedded DNS, which answers names of services
-//! running on this server itself (aliases on the environment's bridge) and
-//! sends every other query here. This resolver then:
+//! Containers keep Docker's embedded DNS, which answers the bare names of
+//! services running on this server itself (aliases on the environment's
+//! bridge) and sends every other query here. This resolver then:
 //!   * finds the asking container's environment by its source address (its
 //!     mesh address: the query comes over the mesh network) and answers
-//!     `<service>.modula.internal` (and `<service>`) with the healthy
-//!     replicas of that service on other servers, shuffled, with a short TTL;
+//!     `<service>.modula.internal` with the service's virtual IP while any
+//!     replica of it is healthy (nftables balances the VIP over them, see
+//!     [`super::nft`]), and `<service>` with its healthy replicas on other
+//!     servers, shuffled; both with a short TTL;
 //!   * forwards anything else to the host's own resolvers;
 //!   * refuses everybody else (peers' latency probes get a quick REFUSED).
 
@@ -35,6 +37,8 @@ pub struct BookData {
     pub local: HashMap<Ipv4Addr, String>,
     /// (environment, service) → healthy addresses on other nodes.
     pub names: HashMap<(String, String), Vec<Ipv4Addr>>,
+    /// (environment, service) → its virtual IP, while a replica is healthy.
+    pub vips: HashMap<(String, String), Ipv4Addr>,
     /// Peer nodes' host addresses.
     pub peers: HashSet<Ipv4Addr>,
 }
@@ -65,6 +69,16 @@ impl BookData {
                         .entry((env.environment_id.clone(), m.service_name.clone()))
                         .or_default()
                         .push(ip);
+                }
+            }
+            for s in &env.services {
+                let healthy = env
+                    .members
+                    .iter()
+                    .any(|m| m.healthy && m.service_name == s.name);
+                if let (true, Some(vip)) = (healthy, super::parse_vip(&s.vip)) {
+                    b.vips
+                        .insert((env.environment_id.clone(), s.name.clone()), vip);
                 }
             }
         }
@@ -117,7 +131,15 @@ impl Book {
         if !internal && service.contains('.') {
             return Answer::Forward;
         }
-        match data.names.get(&(env.clone(), service.to_owned())) {
+        let key = (env.clone(), service.to_owned());
+        if internal && let Some(vip) = data.vips.get(&key) {
+            return Answer::Records(if qtype == RecordType::A {
+                vec![*vip]
+            } else {
+                Vec::new()
+            });
+        }
+        match data.names.get(&key) {
             Some(ips) if !ips.is_empty() => {
                 if qtype != RecordType::A {
                     return Answer::Records(Vec::new());
@@ -336,6 +358,15 @@ mod tests {
     }
 
     fn book() -> Book {
+        book_with(false)
+    }
+
+    /// With `vips`: prod's db, cache and api have virtual IPs.
+    fn book_with(vips: bool) -> Book {
+        let service = |name: &str, vip: &str| pb::MeshService {
+            name: name.into(),
+            vip: vip.into(),
+        };
         let member = |ip: &str, svc: &str, healthy| pb::MeshMember {
             ip: ip.into(),
             service_name: svc.into(),
@@ -354,6 +385,15 @@ mod tests {
                         // A local replica of db: Docker's to answer.
                         member("10.80.1.3", "db", true),
                     ],
+                    services: if vips {
+                        vec![
+                            service("db", "10.80.255.1"),
+                            service("cache", "10.80.255.2"),
+                            service("api", "10.80.255.3"),
+                        ]
+                    } else {
+                        vec![]
+                    },
                 },
                 pb::MeshEnvironment {
                     environment_id: "staging".into(),
@@ -361,6 +401,7 @@ mod tests {
                         member("10.80.1.4", "api", true),
                         member("10.80.2.9", "db", true),
                     ],
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -427,6 +468,40 @@ mod tests {
                 "{src}"
             );
         }
+    }
+
+    #[test]
+    fn internal_names_are_the_services_virtual_ip() {
+        let b = book_with(true);
+        let prod = ip("10.80.1.2");
+        assert_eq!(
+            b.answer(prod, "db.modula.internal", RecordType::A),
+            Answer::Records(vec![ip("10.80.255.1")])
+        );
+        // Only local replicas: the VIP still (nftables balances to them).
+        assert_eq!(
+            b.answer(ip("10.80.1.3"), "api.modula.internal", RecordType::A),
+            Answer::Records(vec![ip("10.80.255.3")])
+        );
+        // No healthy replica: no name.
+        assert_eq!(
+            b.answer(prod, "cache.modula.internal", RecordType::A),
+            Answer::NxDomain
+        );
+        assert_eq!(
+            b.answer(prod, "db.modula.internal", RecordType::AAAA),
+            Answer::Records(vec![])
+        );
+        // The bare name keeps answering with the replicas elsewhere.
+        assert_eq!(
+            sorted(b.answer(prod, "db", RecordType::A)),
+            Answer::Records(vec![ip("10.80.2.2"), ip("10.80.3.2")])
+        );
+        // Another environment has no VIP for db here: its replicas.
+        assert_eq!(
+            b.answer(ip("10.80.1.4"), "db.modula.internal", RecordType::A),
+            Answer::Records(vec![ip("10.80.2.9")])
+        );
     }
 
     #[tokio::test]

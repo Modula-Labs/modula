@@ -364,6 +364,17 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .map(|m| (m.ip.as_str(), m.healthy))
         .collect();
     assert_eq!(members, [("10.80.1.2", true), ("10.80.2.2", true)]);
+    // The service's virtual IP, the first of the environment's, kept by
+    // later deployments.
+    let vips: Vec<(&str, &str)> = env
+        .services
+        .iter()
+        .map(|s| (s.name.as_str(), s.vip.as_str()))
+        .collect();
+    assert_eq!(
+        vips,
+        [(env.members[0].service_name.as_str(), "10.80.255.1")]
+    );
 
     // One replica crashes: the other keeps serving, and leaves the balancer.
     let crashed = pb::DeploymentPhase::Crashed;

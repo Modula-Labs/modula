@@ -6,7 +6,9 @@
 //! addresses are assigned here too (`.2`–`.191`; the node keeps `.192/26` for
 //! one-off containers), so every node knows which address belongs to which
 //! environment: that drives the nodes' nftables isolation and their
-//! `<service>.modula.internal` resolvers.
+//! `<service>.modula.internal` resolvers. Each service also gets a virtual IP
+//! in its environment (`10.80.255.<n>`, [`ensure_vip`]) that every node
+//! balances over the service's healthy replicas.
 //!
 //! Path per pair of nodes: an address both have in one private subnet (a
 //! Hetzner Cloud Network, a VPC) if there is one, else the peer's public IP.
@@ -36,6 +38,8 @@ pub const DEFAULT_WG_PORT: u16 = 51820;
 /// Node /24s are 10.80.1.0/24 … 10.80.254.0/24.
 const FIRST_INDEX: i16 = 1;
 const LAST_INDEX: i16 = 254;
+/// Services' virtual IPs are `10.80.255.0/24` (no node has index 255).
+const VIP_INDEX: i16 = 255;
 /// Container addresses the server assigns within a node's /24.
 const FIRST_HOST: i16 = 2;
 const LAST_HOST: i16 = 191;
@@ -316,6 +320,44 @@ pub async fn allocate_ip(tx: &mut PgConnection, node: Id) -> AppResult<Option<St
     Ok(Some(format!("10.80.{index}.{host}")))
 }
 
+/// Gives `instance` a virtual IP (`10.80.255.<1–254>`, unique within its
+/// environment) unless it has one. Serialized per environment.
+pub async fn ensure_vip(tx: &mut PgConnection, instance: Id) -> AppResult<()> {
+    let (environment, vip): (Id, Option<String>) =
+        sqlx::query_as("SELECT environment_id, mesh_vip FROM service_instances WHERE id = $1")
+            .bind(instance)
+            .fetch_one(&mut *tx)
+            .await?;
+    if vip.is_some() {
+        return Ok(());
+    }
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('modula.mesh_vip:' || $1))")
+        .bind(environment)
+        .execute(&mut *tx)
+        .await?;
+    let taken: Vec<String> = sqlx::query_scalar(
+        "SELECT mesh_vip FROM service_instances WHERE environment_id = $1 AND mesh_vip IS NOT NULL",
+    )
+    .bind(environment)
+    .fetch_all(&mut *tx)
+    .await?;
+    let used: Vec<i16> = taken
+        .iter()
+        .filter_map(|ip| host_of(ip, VIP_INDEX))
+        .collect();
+    let host = lowest_free(&used, 1, 254).ok_or_else(|| {
+        AppError::Conflict(
+            "this environment has no private service addresses left (254 services)".into(),
+        )
+    })?;
+    sqlx::query("UPDATE service_instances SET mesh_vip = $2 WHERE id = $1 AND mesh_vip IS NULL")
+        .bind(instance)
+        .bind(format!("10.80.{VIP_INDEX}.{host}"))
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
 #[derive(sqlx::FromRow)]
 struct NodeRow {
     id: Id,
@@ -395,13 +437,16 @@ pub struct Member {
     pub deployment_id: Id,
     pub node_id: Id,
     pub healthy: bool,
+    /// Its service's virtual IP.
+    pub vip: Option<String>,
 }
 
 /// Every mesh address of the environments `node` runs something of.
 pub async fn members(db: &PgPool, node: Id) -> AppResult<Vec<Member>> {
     Ok(sqlx::query_as(
         "SELECT i.environment_id, r.mesh_ip AS ip, s.name AS service_name, d.id AS deployment_id,
-                r.node_id, (d.status IN ('active', 'crashed') AND r.status = 'active') AS healthy
+                r.node_id, (d.status IN ('active', 'crashed') AND r.status = 'active') AS healthy,
+                i.mesh_vip AS vip
          FROM deployment_replicas r
          JOIN deployments d ON d.id = r.deployment_id
          JOIN service_instances i ON i.id = d.service_instance_id
@@ -429,9 +474,18 @@ pub fn render(me: &NodeNet, peers: &[NodeNet], members: &[Member]) -> pb::Mesh {
             environments.push(pb::MeshEnvironment {
                 environment_id: env,
                 members: Vec::new(),
+                services: Vec::new(),
             });
         }
         if let Some(e) = environments.last_mut() {
+            if let Some(vip) = &m.vip
+                && !e.services.iter().any(|s| s.name == m.service_name)
+            {
+                e.services.push(pb::MeshService {
+                    name: m.service_name.clone(),
+                    vip: vip.clone(),
+                });
+            }
             e.members.push(pb::MeshMember {
                 ip: m.ip.clone(),
                 service_name: m.service_name.clone(),
@@ -704,11 +758,16 @@ mod tests {
             deployment_id: Id::new(),
             node_id: b.id,
             healthy,
+            vip: Some(format!("10.80.255.{}", svc.len())),
         };
         let mesh = render(
             &a,
             std::slice::from_ref(&b),
-            &[m("10.80.2.2", "db", true), m("10.80.2.3", "api", false)],
+            &[
+                m("10.80.2.2", "db", true),
+                m("10.80.2.3", "api", false),
+                m("10.80.2.4", "db", true),
+            ],
         );
         assert_eq!(mesh.subnet, "10.80.1.0/24");
         assert_eq!(mesh.listen_port, 51820);
@@ -725,7 +784,21 @@ mod tests {
             .iter()
             .map(|m| (m.ip.as_str(), m.healthy))
             .collect();
-        assert_eq!(ips, [("10.80.2.2", true), ("10.80.2.3", false)]);
+        assert_eq!(
+            ips,
+            [
+                ("10.80.2.2", true),
+                ("10.80.2.3", false),
+                ("10.80.2.4", true)
+            ]
+        );
+        // One virtual IP per service.
+        let vips: Vec<(&str, &str)> = mesh.environments[0]
+            .services
+            .iter()
+            .map(|s| (s.name.as_str(), s.vip.as_str()))
+            .collect();
+        assert_eq!(vips, [("db", "10.80.255.2"), ("api", "10.80.255.3")]);
     }
 
     #[test]

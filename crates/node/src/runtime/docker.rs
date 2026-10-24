@@ -386,10 +386,17 @@ impl Runtime for DockerRuntime {
                 endpoints_config: Some(HashMap::from([(
                     net,
                     EndpointSettings {
-                        aliases: Some(vec![
-                            w.service_name.clone(),
-                            format!("{}.modula.internal", w.service_name),
-                        ]),
+                        // In a mesh `<service>.modula.internal` is the mesh
+                        // resolver's (the service's virtual IP, balanced
+                        // over every server); the bare name stays local.
+                        aliases: Some(if mesh.is_some() {
+                            vec![w.service_name.clone()]
+                        } else {
+                            vec![
+                                w.service_name.clone(),
+                                format!("{}.modula.internal", w.service_name),
+                            ]
+                        }),
                         ..Default::default()
                     },
                 )])),

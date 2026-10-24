@@ -324,6 +324,15 @@ message MeshPeer {
 message MeshEnvironment {
   string environment_id = 1;
   repeated MeshMember members = 2;
+  // Its services' virtual IPs (10.80.255.0/24, per environment): the
+  // resolver answers `<name>.modula.internal` with the VIP, and every node
+  // DNATs new connections from the environment to a healthy member.
+  repeated MeshService services = 3;
+}
+
+message MeshService {
+  string name = 1;
+  string vip = 2;
 }
 
 message MeshMember {

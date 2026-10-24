@@ -315,9 +315,14 @@ CREATE TABLE service_instances (
     config          jsonb NOT NULL,
     -- The app's stack (e.g. "nextjs") detected by the last build; drives the icon.
     stack           text,
+    -- The service's virtual IP on the private network (10.80.255.1–254,
+    -- unique within the environment): `<service>.modula.internal`, balanced
+    -- over its healthy replicas by every node.
+    mesh_vip        text CHECK (mesh_vip ~ '^10\.80\.255\.[0-9]{1,3}$'),
     created_at      timestamptz NOT NULL DEFAULT now(),
     updated_at      timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (service_id, environment_id)
+    UNIQUE (service_id, environment_id),
+    UNIQUE (environment_id, mesh_vip)
 );
 CREATE INDEX service_instances_env_idx ON service_instances (environment_id);
 CREATE INDEX service_instances_node_idx ON service_instances (node_id);
