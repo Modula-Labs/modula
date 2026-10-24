@@ -150,10 +150,7 @@ async fn put_part(http: &reqwest::Client, url: &str, body: Bytes) -> anyhow::Res
         .map_err(reqwest::Error::without_url)?;
     let status = res.status();
     if !status.is_success() {
-        bail!(
-            "the storage answered {status}: {}",
-            storage_error(res).await
-        );
+        bail!("the storage answered {}", storage_error(res).await);
     }
     res.headers()
         .get(reqwest::header::ETAG)
@@ -162,16 +159,32 @@ async fn put_part(http: &reqwest::Client, url: &str, body: Bytes) -> anyhow::Res
         .context("the storage answered without an ETag")
 }
 
-/// A short, printable summary of an error response body (S3 sends XML).
-pub async fn storage_error(res: reqwest::Response) -> String {
-    let text = res.text().await.unwrap_or_default();
-    let code = text
-        .split_once("<Code>")
+/// The S3 error code in an XML error body (`<Code>AccessDenied</Code>`), if
+/// it looks like one. Nothing else of a body is ever repeated: endpoints are
+/// user input, and an error page may be some internal service's content.
+pub fn s3_error_code(xml: &str) -> Option<&str> {
+    xml.split_once("<Code>")
         .and_then(|(_, rest)| rest.split_once("</Code>"))
-        .map(|(code, _)| code);
-    match code {
-        Some(code) => code.chars().take(100).collect(),
-        None => text.chars().filter(|c| !c.is_control()).take(200).collect(),
+        .map(|(code, _)| code.trim())
+        .filter(|c| {
+            (1..=64).contains(&c.len())
+                && c.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+        })
+}
+
+/// `AccessDenied (HTTP 403)`, or `unexpected response (HTTP 502)` when the
+/// body has no S3 error code.
+pub async fn storage_error(res: reqwest::Response) -> String {
+    let status = res.status().as_u16();
+    // Error bodies are small; don't read an endless one.
+    let text = match tokio::time::timeout(std::time::Duration::from_secs(10), res.text()).await {
+        Ok(Ok(t)) => t,
+        _ => String::new(),
+    };
+    match s3_error_code(&text) {
+        Some(code) => format!("{code} (HTTP {status})"),
+        None => format!("unexpected response (HTTP {status})"),
     }
 }
 
@@ -191,7 +204,7 @@ pub async fn download_and_decrypt(
     let status = res.status();
     if !status.is_success() {
         bail!(
-            "cannot download the backup: the storage answered {status}: {}",
+            "cannot download the backup: the storage answered {}",
             storage_error(res).await
         );
     }
@@ -226,6 +239,18 @@ pub fn decrypt_reader<R: Read>(input: R, identity: &Identity) -> anyhow::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_s3_error_codes_are_repeated() {
+        let xml = "<?xml version=\"1.0\"?><Error><Code>AccessDenied</Code><Message>secret</Message></Error>";
+        assert_eq!(s3_error_code(xml), Some("AccessDenied"));
+        assert_eq!(s3_error_code("<html>internal admin page</html>"), None);
+        assert_eq!(s3_error_code("<Code>root:x:0:0:root</Code>"), None);
+        assert_eq!(
+            s3_error_code(&format!("<Code>{}</Code>", "A".repeat(65))),
+            None
+        );
+    }
 
     #[test]
     fn spool_hands_out_exact_parts() {

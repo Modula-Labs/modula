@@ -253,10 +253,10 @@ pub struct RunQuery {
     pub read_only: bool,
 }
 
-/// The route is authorized for [`Action::DatabaseRead`]; anything else a query
-/// can do (writes, DDL) needs what [`Action::DatabaseWrite`] needs.
-fn require_write(actor: &Actor, grant: &Grant) -> AppResult<()> {
-    let action = Action::DatabaseWrite;
+/// For routes authorized for [`Action::DatabaseRead`] that can do more: a
+/// query that writes (DML, DDL) needs what [`Action::DatabaseWrite`] needs.
+/// Role before sudo, like the router.
+fn require(actor: &Actor, grant: &Grant, action: Action) -> AppResult<()> {
     match grant.scope {
         Scope::Workspace { role, .. } if role >= action.min_role() => {}
         _ => return Err(AppError::Forbidden),
@@ -286,7 +286,7 @@ pub async fn query(
         ));
     }
     if !req.read_only {
-        require_write(&actor, &grant)?;
+        require(&actor, &grant, Action::DatabaseWrite)?;
     }
     let sql: String = req.sql.chars().take(AUDIT_SQL_CHARS).collect();
     audited_call(
@@ -661,7 +661,7 @@ async fn resolve_credentials(state: &AppState, instance: Id) -> AppResult<Creden
 }
 
 /// The connection details of any database service (for the CLI's `connect`
-/// and the Config view). Member+, audited; no sudo, so API tokens work.
+/// and the Config view). Member+, no sudo (API tokens use it), audited.
 pub async fn credentials(
     State(state): State<AppState>,
     actor: Actor,

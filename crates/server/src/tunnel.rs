@@ -138,7 +138,7 @@ struct Reserved {
 
 impl Tunnels {
     fn reserve(&self, node: Id, user: Id) -> AppResult<Reserved> {
-        let mut open = self.open.lock().expect("tunnels lock");
+        let mut open = crate::sync::lock(&self.open);
         if open.values().filter(|t| t.node == node).count() >= MAX_PER_NODE {
             return Err(AppError::Conflict(
                 "too many tunnels are open to this server; try again later".into(),
@@ -172,7 +172,7 @@ impl Tunnels {
     }
 
     fn remove(&self, id: &str) -> bool {
-        self.open.lock().expect("tunnels lock").remove(id).is_some()
+        crate::sync::lock(&self.open).remove(id).is_some()
     }
 
     /// How often open tunnels re-check their deployment (tests shorten it).
@@ -183,7 +183,7 @@ impl Tunnels {
 
     /// Number of open tunnels (tests, metrics).
     pub fn len(&self) -> usize {
-        self.open.lock().expect("tunnels lock").len()
+        crate::sync::lock(&self.open).len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -192,7 +192,7 @@ impl Tunnels {
 
     /// The node's stream ended: every tunnel through it is gone.
     pub fn node_gone(&self, node: Id) {
-        let mut open = self.open.lock().expect("tunnels lock");
+        let mut open = crate::sync::lock(&self.open);
         open.retain(|_, t| {
             if t.node == node {
                 let _ = t
@@ -216,7 +216,7 @@ impl Tunnels {
                 })),
             })
         };
-        let mut open = self.open.lock().expect("tunnels lock");
+        let mut open = crate::sync::lock(&self.open);
         match msg {
             In::TunnelOpened(m) => {
                 let t = open.get(&m.tunnel_id).filter(|t| t.node == node)?;
@@ -587,7 +587,7 @@ impl Session {
         up.abort();
         if !down.is_finished() {
             // Give the client its close frame with the reason.
-            if let Some(t) = state.tunnels.open.lock().expect("tunnels lock").get(&id) {
+            if let Some(t) = crate::sync::lock(&state.tunnels.open).get(&id) {
                 let _ = t.events.send(Event::Closed(reason.clone()));
             }
             let _ = tokio::time::timeout(Duration::from_secs(2), &mut down).await;

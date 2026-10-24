@@ -1,0 +1,7 @@
+# Same exceptions as deny.toml (keep the two in sync).
+[advisories]
+ignore = [
+    # crypto-bigint timing: only reachable through age's p256/hpke plugin
+    # recipients; backups use x25519 recipients and identities only.
+    "RUSTSEC-2026-0387",
+]

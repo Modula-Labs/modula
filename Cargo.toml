@@ -101,3 +101,10 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+# Password hashing (argon2id, 64 MiB) is far too slow unoptimized: every
+# test sign-in would take seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

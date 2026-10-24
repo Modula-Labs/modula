@@ -13,7 +13,7 @@ use axum::http::{Method, StatusCode};
 use common::*;
 use modula_id::Id;
 use modula_node::db::fake::FakeDb;
-use modula_node::db::{DbError, Op, Target};
+use modula_node::db::{DbError, Executor, Op, Target};
 use modula_node::join::{JoinArgs, join};
 use modula_node::runtime::fake::FakeRuntime;
 use serde_json::{Value, json};
@@ -522,7 +522,9 @@ fn psql(container: &str, password: &str, sql: &str) -> std::process::Output {
 
 async fn run(target: &Target, op: &str, args: Value) -> Result<Value, DbError> {
     let op = Op::parse(op, &args.to_string()).unwrap();
-    modula_node::db::pg::run(target, op, Duration::from_secs(30)).await
+    modula_node::db::pg::Postgres::owner_only()
+        .run(target, op, Duration::from_secs(30))
+        .await
 }
 
 async fn ok(target: &Target, op: &str, args: Value) -> Value {
@@ -610,6 +612,8 @@ async fn real_postgres_operations_and_template_tls() {
     let port = docker(&["port", &name, "5432"]);
     let addr: SocketAddr = port.lines().next().unwrap().parse().unwrap();
     let mut t = Target {
+        container_id: name.clone(),
+        service_id: String::new(),
         addr,
         user: "postgres".into(),
         password: PASSWORD.into(),

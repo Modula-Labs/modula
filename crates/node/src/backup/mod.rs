@@ -11,11 +11,13 @@
 
 pub mod engines;
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::Context;
+use modula_backup::net::{self, GuardedResolver};
 use modula_proto::node::v1 as pb;
 use tokio::sync::mpsc;
 
@@ -37,43 +39,34 @@ fn http() -> anyhow::Result<&'static reqwest::Client> {
         // (e.g. building an index); TIME_LIMIT bounds the whole transfer.
         .tcp_keepalive(Duration::from_secs(60))
         .redirect(reqwest::redirect::Policy::none())
-        .dns_resolver(Arc::new(GuardedResolver))
+        .dns_resolver(Arc::new(GuardedResolver::new(
+            reachable,
+            "address backups may use",
+        )))
+        .no_proxy()
         .build()?;
     Ok(CLIENT.get_or_init(|| client))
 }
 
-/// Storage hosts are user input (validated by the control plane, but DNS
-/// answers can differ here): never let them reach this server's link-local
-/// addresses, where cloud metadata services live.
+/// Storage hosts are user input, validated by the control plane (which
+/// allows private endpoints only on the operator's opt-in), but DNS answers
+/// can differ here: never let them reach this server's link-local addresses,
+/// where cloud metadata services live, nor its loopback services unless this
+/// node opts in too (`MODULA_BACKUP_ALLOW_PRIVATE_ENDPOINTS=1`).
 fn reachable(ip: IpAddr) -> bool {
-    let ip = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
-        v4 => v4,
-    };
-    match ip {
-        IpAddr::V4(a) => !(a.is_link_local() || a.is_unspecified() || a.is_multicast()),
-        IpAddr::V6(a) => {
-            !(a.is_unspecified() || a.is_multicast() || (a.segments()[0] & 0xffc0) == 0xfe80)
-        }
-    }
+    static LOOPBACK_OK: OnceLock<bool> = OnceLock::new();
+    net::backup_ip(ip, true)
+        && (!net::loopback(ip)
+            || ALLOW_LOOPBACK.load(Ordering::Relaxed)
+            || *LOOPBACK_OK.get_or_init(net::private_endpoints_from_env))
 }
 
-struct GuardedResolver;
+static ALLOW_LOOPBACK: AtomicBool = AtomicBool::new(false);
 
-impl reqwest::dns::Resolve for GuardedResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_owned();
-        Box::pin(async move {
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await?
-                .filter(|a| reachable(a.ip()))
-                .collect();
-            if addrs.is_empty() {
-                return Err(format!("{host} has no address backups may use").into());
-            }
-            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
+/// Allow loopback storage endpoints (tests, which run their storage on
+/// 127.0.0.1; operators set `MODULA_BACKUP_ALLOW_PRIVATE_ENDPOINTS=1`).
+pub fn allow_loopback_endpoints(allow: bool) {
+    ALLOW_LOOPBACK.store(allow, Ordering::Relaxed);
 }
 
 /// Literal IP hosts skip the resolver, so they are checked up front.
@@ -88,7 +81,7 @@ fn check_url(raw: &str) -> anyhow::Result<()> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         anyhow::ensure!(
             reachable(ip),
-            "the storage URL points at a link-local address"
+            "the storage URL points at a link-local or loopback address"
         );
     }
     Ok(())
@@ -131,7 +124,8 @@ fn result(
             id,
             restore,
             ok: false,
-            error: format!("{e:#}").chars().take(2000).collect(),
+            // Stored on the backup row and shown in the dashboard.
+            error: format!("{e:#}").chars().take(500).collect(),
             ..Default::default()
         },
     };
@@ -226,6 +220,9 @@ mod tests {
             "http://[fe80::1]/x",
             "http://[::ffff:169.254.169.254]/x",
             "http://0.0.0.0:9000/b",
+            "http://[fd00:ec2::254]/latest",
+            "http://[64:ff9b::a9fe:a9fe]/latest",
+            "http://127.0.0.1:2375/containers/json",
             "file:///etc/passwd",
             "not a url",
         ] {

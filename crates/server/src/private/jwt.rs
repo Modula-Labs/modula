@@ -120,18 +120,11 @@ impl Verifier {
     }
 
     fn key(&self, kid: &str) -> Option<DecodingKey> {
-        self.keys
-            .read()
-            .expect("keys lock")
-            .by_kid
-            .get(kid)
-            .cloned()
+        crate::sync::read(&self.keys).by_kid.get(kid).cloned()
     }
 
     fn age(&self) -> Option<Duration> {
-        self.keys
-            .read()
-            .expect("keys lock")
+        crate::sync::read(&self.keys)
             .fetched_at
             .map(|t| t.elapsed())
     }
@@ -147,7 +140,7 @@ impl Verifier {
             Err(e) => {
                 tracing::warn!(error = format!("{e:#}"), team = %self.team_domain, "cannot fetch Access signing keys");
                 // Don't hammer Cloudflare: count the attempt as a fetch.
-                self.keys.write().expect("keys lock").fetched_at = Some(Instant::now());
+                crate::sync::write(&self.keys).fetched_at = Some(Instant::now());
                 return Err(JwtError::KeysUnavailable);
             }
         };
@@ -159,7 +152,7 @@ impl Verifier {
                 DecodingKey::from_jwk(k).ok().map(|d| (kid, d))
             })
             .collect();
-        *self.keys.write().expect("keys lock") = Keys {
+        *crate::sync::write(&self.keys) = Keys {
             by_kid,
             fetched_at: Some(Instant::now()),
         };

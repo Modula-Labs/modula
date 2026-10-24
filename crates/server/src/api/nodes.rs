@@ -12,7 +12,6 @@ use time::OffsetDateTime;
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
-use crate::deploy::{self, LiveFilter};
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
 use crate::locations::{self, Location};
@@ -142,8 +141,10 @@ pub async fn create_join_token(
     actor: Actor,
     meta: RequestMeta,
 ) -> AppResult<Json<JoinToken>> {
-    let (token, expires_at) =
-        crate::nodes::create_join_token(&state.db, Some(actor.user_id), JOIN_TOKEN_TTL).await?;
+    // Instance admin: the server is shared by every workspace.
+    let (_, token, expires_at) =
+        crate::nodes::create_join_token(&state.db, Some(actor.user_id), None, JOIN_TOKEN_TTL)
+            .await?;
     let fingerprint = state.pki().await?.fingerprint();
     let server = state.cfg.node_url.as_str().trim_end_matches('/').to_owned();
     Entry::new("node.join_token.create", &meta)
@@ -177,20 +178,14 @@ pub async fn revoke(
 ) -> AppResult<Json<serde_json::Value>> {
     let id = grant.id();
     let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE nodes SET status = 'revoked', revoked_at = now() WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    deploy::remove_live(&mut tx, LiveFilter::Node, id).await?;
-    sqlx::query("UPDATE service_instances SET node_id = NULL WHERE node_id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    Entry::new("node.revoke", &meta)
-        .actor(&actor)
-        .target("node", id)
-        .record(&mut *tx)
-        .await?;
+    // Already revoked: nothing to do (and nothing to audit).
+    if crate::nodes::revoke(&mut tx, id).await? {
+        Entry::new("node.revoke", &meta)
+            .actor(&actor)
+            .target("node", id)
+            .record(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
     state.hub.disconnect(id);
     Ok(Json(json!({ "ok": true })))

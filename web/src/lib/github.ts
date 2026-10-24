@@ -3,6 +3,7 @@
 
 import { get, post, type Role } from "./api";
 import { atLeast } from "./roles";
+import { safeHttpUrl } from "./url";
 
 export interface GithubApp {
   configured: boolean;
@@ -62,9 +63,11 @@ export const github = {
 
 /** Send the browser to GitHub with the App manifest (GitHub only takes it as a form POST). */
 export function submitManifest(start: ManifestStart) {
+  const action = safeHttpUrl(start.url, true);
+  if (!action) throw new Error("unexpected GitHub URL");
   const form = document.createElement("form");
   form.method = "post";
-  form.action = start.url;
+  form.action = action;
   const input = document.createElement("input");
   input.type = "hidden";
   input.name = "manifest";
@@ -96,7 +99,9 @@ export const connectHelp: Record<Exclude<ConnectMode, "connect">, string> = {
 export async function connectGithub(o: { workspaceId: string; returnTo: string; appConfigured: boolean; org?: string }) {
   if (o.appConfigured) {
     const { url } = await github.installUrl(o.workspaceId, o.returnTo);
-    window.location.assign(url);
+    const safe = safeHttpUrl(url, true);
+    if (!safe) throw new Error("unexpected GitHub URL");
+    window.location.assign(safe);
   } else {
     submitManifest(await github.manifest({ org: o.org, workspaceId: o.workspaceId, returnTo: o.returnTo }));
   }

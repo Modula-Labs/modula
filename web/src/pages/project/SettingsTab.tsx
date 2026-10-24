@@ -637,7 +637,7 @@ export function SettingsTab({
 
       <Section
         title="Resources"
-        description="Hard limits for the container. All the way right means no limit."
+        description="Hard limits for the container. Unset, a service gets 1 vCPU and 512 MB."
       >
         <ResourceSliders
           node={node}

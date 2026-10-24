@@ -5,6 +5,9 @@ export const CPU_STEP = 250; // millicores
 export const MEM_STEP = 256; // MB
 export const FALLBACK_CPUS = 8;
 export const FALLBACK_MEMORY_MB = 16 * 1024;
+/** What the server applies when a service sets no limit (deploy/desired.rs). */
+export const DEFAULT_CPU_MILLIS = 1000;
+export const DEFAULT_MEMORY_MB = 512;
 
 const trim = (n: number, digits = 2) => String(Number(n.toFixed(digits)));
 
@@ -18,32 +21,35 @@ export function capacity(node: NodeInfo | undefined | null): { cpuMillis: number
   };
 }
 
-/** Number of slider stops; the last one means "no limit". */
-export const stepsFor = (maxValue: number, step: number) => Math.max(2, Math.floor(maxValue / step));
+/** Number of slider stops (`step` each); the last one is the whole server. */
+export const stepsFor = (maxValue: number, step: number) => Math.max(1, Math.floor(maxValue / step));
 
-/** Slider position for a stored limit (empty = no limit = all the way right). */
-export function toSlider(value: string, maxValue: number, step: number): number {
+/** Slider position for a stored limit (empty = the default, `fallback`). */
+export function toSlider(value: string, maxValue: number, step: number, fallback = step): number {
   const steps = stepsFor(maxValue, step);
   const n = Number(value);
-  if (!value.trim() || !Number.isFinite(n) || n <= 0) return steps;
-  return Math.min(steps - 1, Math.max(1, Math.round(n / step)));
+  const v = !value.trim() || !Number.isFinite(n) || n <= 0 ? fallback : n;
+  return Math.min(steps, Math.max(1, Math.round(v / step)));
 }
 
-/** The form string for a slider position: empty (no limit) at the right end. */
+/** The form string for a slider position: always an explicit limit. */
 export function fromSlider(pos: number, maxValue: number, step: number): string {
   const steps = stepsFor(maxValue, step);
-  return pos >= steps ? "" : String(Math.max(1, Math.round(pos)) * step);
+  return String(Math.min(steps, Math.max(1, Math.round(pos))) * step);
 }
 
-export function formatCpu(millis: string | number | undefined, noLimit = "No limit"): string {
+const DEFAULT_CPU_LABEL = `${trim(DEFAULT_CPU_MILLIS / 1000)} vCPU (default)`;
+const DEFAULT_MEMORY_LABEL = `${DEFAULT_MEMORY_MB} MB (default)`;
+
+export function formatCpu(millis: string | number | undefined, unset = DEFAULT_CPU_LABEL): string {
   const n = Number(millis);
-  if (millis === undefined || millis === "" || !n) return noLimit;
+  if (millis === undefined || millis === "" || !n) return unset;
   return `${trim(n / 1000)} vCPU`;
 }
 
-export function formatMemory(mb: string | number | undefined, noLimit = "No limit"): string {
+export function formatMemory(mb: string | number | undefined, unset = DEFAULT_MEMORY_LABEL): string {
   const n = Number(mb);
-  if (mb === undefined || mb === "" || !n) return noLimit;
+  if (mb === undefined || mb === "" || !n) return unset;
   return n >= 1024 ? `${trim(n / 1024)} GB` : `${n} MB`;
 }
 

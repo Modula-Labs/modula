@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/Input";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import { ApiError } from "@/lib/api";
 import { SETTINGS_RETURN_PATH, connectGithub, connectHelp, connectMode, github, githubReturnNotice } from "@/lib/github";
+import { safeHttpUrl } from "@/lib/url";
 import { useMe } from "@/lib/workspace";
 
 /** The instance's GitHub App and this workspace's installations of it. */
@@ -167,9 +168,9 @@ export function GithubIntegration({ workspaceId, isAdmin }: { workspaceId: strin
               <span className="text-xs text-muted-foreground">
                 {i.accountType === "Organization" ? "Organization" : "Personal account"}
               </span>
-              {isAdmin ? (
+              {isAdmin && safeHttpUrl(i.configureUrl, true) ? (
                 <a
-                  href={i.configureUrl}
+                  href={safeHttpUrl(i.configureUrl, true)}
                   target="_blank"
                   rel="noreferrer"
                   className="ml-auto text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
@@ -181,10 +182,10 @@ export function GithubIntegration({ workspaceId, isAdmin }: { workspaceId: strin
           ))}
         </ul>
       ) : null}
-      {a.configured && a.htmlUrl && isInstanceAdmin ? (
+      {a.configured && safeHttpUrl(a.htmlUrl, true) && isInstanceAdmin ? (
         <div className="pl-8 text-xs text-muted-foreground">
           App{" "}
-          <a href={a.htmlUrl} target="_blank" rel="noreferrer" className="underline underline-offset-4">
+          <a href={safeHttpUrl(a.htmlUrl, true)} target="_blank" rel="noreferrer" className="underline underline-offset-4">
             {a.slug}
           </a>
           {a.ownerLogin ? ` owned by ${a.ownerLogin}` : ""} · webhooks to <span className="font-mono">{a.webhookUrl}</span>

@@ -13,6 +13,7 @@ use crate::auth::session::Actor;
 use crate::authz::Grant;
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
+use crate::ratelimit::Limit;
 use crate::state::AppState;
 use crate::webhooks::{self, Delivery, Event};
 
@@ -149,7 +150,18 @@ pub async fn delete(
 }
 
 /// Sends a `test` event right away and returns what the endpoint answered.
-pub async fn test(State(state): State<AppState>, grant: Grant) -> AppResult<Json<Delivery>> {
+/// Test deliveries per user: each one is an outbound request we make.
+const TEST_PER_USER: Limit = Limit::per_minute(10);
+
+pub async fn test(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+) -> AppResult<Json<Delivery>> {
+    state
+        .limiter
+        .check("webhook-test", &actor.user_id.to_string(), TEST_PER_USER)
+        .await?;
     let id = grant.id();
     let body = json!({
         "type": "test",

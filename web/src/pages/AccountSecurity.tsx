@@ -170,6 +170,7 @@ export function AccountSecurityPage() {
   const [disable, setDisable] = useState(false);
   const [newCodes, setNewCodes] = useState<string[] | null>(null);
   const [pw, setPw] = useState("");
+  const [revokeTokens, setRevokeTokens] = useState(true);
   const [pwMsg, setPwMsg] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
 
   const disableMut = useMutation({
@@ -185,11 +186,13 @@ export function AccountSecurityPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["sessions"] }),
   });
   const changePw = useMutation({
-    mutationFn: api.changePassword,
+    mutationFn: (v: { pw: string; keepTokens: boolean }) => api.changePassword(v.pw, v.keepTokens),
     onSuccess: async (r) => {
       setPw("");
-      setPwMsg({ tone: "success", text: `Password changed. ${r.sessionsRevoked} other session(s) signed out.` });
+      const tokens = r.tokensRevoked ? ` ${r.tokensRevoked} API token(s) revoked.` : "";
+      setPwMsg({ tone: "success", text: `Password changed. ${r.sessionsRevoked} other session(s) signed out.${tokens}` });
       await qc.invalidateQueries({ queryKey: ["sessions"] });
+      await qc.invalidateQueries({ queryKey: ["api-tokens"] });
     },
     onError: (e) => setPwMsg({ tone: "danger", text: e instanceof Error ? e.message : "Could not change the password." }),
   });
@@ -233,19 +236,28 @@ export function AccountSecurityPage() {
           )}
         </Section>
 
-        <Section title="Password" description="Changing your password signs out every other session.">
+        <Section title="Password" description="Changing your password signs out every other session and, unless you untick it, revokes your API tokens.">
           <form
             className="flex max-w-md flex-col gap-3"
             onSubmit={(e) => {
               e.preventDefault();
               setPwMsg(null);
-              changePw.mutate(pw);
+              changePw.mutate({ pw, keepTokens: !revokeTokens });
             }}
           >
             {pwMsg ? <Alert tone={pwMsg.tone}>{pwMsg.text}</Alert> : null}
             <Field label="New password" hint="At least 10 characters.">
               {(p) => <Input {...p} type="password" autoComplete="new-password" minLength={10} value={pw} onChange={(e) => setPw(e.target.value)} />}
             </Field>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={revokeTokens}
+                onChange={(e) => setRevokeTokens(e.target.checked)}
+                className="size-4 accent-[hsl(var(--accent))]"
+              />
+              Also revoke API tokens
+            </label>
             <div>
               <Button type="submit" variant="primary" loading={changePw.isPending} disabled={pw.length < 10}>Update password</Button>
             </div>

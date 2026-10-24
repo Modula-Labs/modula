@@ -292,16 +292,14 @@ async fn add_database_set_variables_deploy_status_and_query(pool: PgPool) {
     let e = r.unwrap_err();
     assert!(e.downcast_ref::<UsageError>().is_some(), "{e:#}");
     assert_eq!(s.db.calls().len(), calls, "nothing ran");
-    s.ok(&["db", "query", "delete from t", "--write", "--yes"])
+    // Confirmed, it still needs Admin + sudo, which API tokens never have:
+    // the CLI says to use the dashboard, and nothing reaches the database.
+    let (r, _) = s
+        .run(&["db", "query", "delete from t", "--write", "--yes"])
         .await;
-    let (_, op) = s.db.calls().pop().unwrap();
-    assert!(matches!(
-        op,
-        Op::Query(QueryArgs {
-            read_only: false,
-            ..
-        })
-    ));
+    let e = format!("{:#}", r.unwrap_err());
+    assert!(e.contains("do it in the dashboard"), "{e}");
+    assert_eq!(s.db.calls().len(), calls, "nothing ran");
 
     s.db.answer(
         "tables",

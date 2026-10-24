@@ -224,7 +224,7 @@ pub async fn fail(state: &AppState, backup: Id, error: &str) -> anyhow::Result<(
          RETURNING target_id, object_key, upload_id",
     )
     .bind(backup)
-    .bind(error.chars().take(2000).collect::<String>())
+    .bind(error.chars().take(500).collect::<String>())
     .fetch_optional(&state.db)
     .await?;
     tracing::warn!(%backup, error, "backup failed");

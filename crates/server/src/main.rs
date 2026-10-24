@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
             let keys = modula_server::keyring::Keyring::new(cfg.load_master_key()?);
             let pki = modula_server::pki::Pki::load_or_init(&db, &keys).await?;
             let ttl = time::Duration::minutes(i64::from(ttl_minutes));
-            let (token, expires) = modula_server::nodes::create_join_token(&db, None, ttl)
+            let (_, token, expires) = modula_server::nodes::create_join_token(&db, None, None, ttl)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;
             eprintln!("Run this on the new server (expires {expires}):");

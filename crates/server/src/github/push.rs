@@ -235,6 +235,20 @@ pub async fn handle_push(
         if !cfg.auto_deploy || !should_deploy(&cfg.watch_paths, changed.as_deref()) {
             continue;
         }
+        // A replayed (or re-sent) push for a commit this instance already
+        // deployed starts nothing: delivery ids aren't signed, commits are.
+        let seen: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM deployments
+                            WHERE service_instance_id = $1 AND commit_sha = $2)",
+        )
+        .bind(instance)
+        .bind(&commit.sha)
+        .fetch_one(&state.db)
+        .await?;
+        if seen {
+            tracing::info!(%instance, commit = %commit.sha, delivery, "commit already deployed; push ignored");
+            continue;
+        }
         let source = cfg.source_label();
         let mut tx = state.db.begin().await?;
         let new = NewDeployment {

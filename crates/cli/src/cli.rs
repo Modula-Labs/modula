@@ -556,6 +556,8 @@ pub enum DbCommand {
         /// The SQL to run.
         sql: String,
         /// Allow writes and several statements (asks for confirmation).
+        /// Writes need Admin and a recent sign-in, which API tokens never
+        /// have: run them from the dashboard's SQL editor instead.
         #[arg(long)]
         write: bool,
     },

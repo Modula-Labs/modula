@@ -1,10 +1,12 @@
-//! Password hashing with argon2id (OWASP defaults: m=19 MiB, t=2, p=1).
+//! Password hashing with argon2id: m=64 MiB, t=3, p=1 for new hashes (above
+//! OWASP's 19 MiB/t=2 floor). The parameters are recorded in each PHC string,
+//! so hashes made with older parameters still verify.
 
 use std::sync::LazyLock;
 
-use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
+use argon2::{Algorithm, Argon2, Params, Version};
 
 use crate::{Error, Result};
 
@@ -16,8 +18,18 @@ static DUMMY_HASH: LazyLock<String> = LazyLock::new(|| {
     hash("modula-dummy-password-for-timing").expect("hashing a constant cannot fail")
 });
 
+/// Memory cost of new hashes, in KiB.
+const M_COST: u32 = 64 * 1024;
+const T_COST: u32 = 3;
+const P_COST: u32 = 1;
+
+fn hasher() -> Argon2<'static> {
+    let params = Params::new(M_COST, T_COST, P_COST, None).expect("valid argon2 parameters");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
 pub fn hash(password: &str) -> Result<String> {
-    Argon2::default()
+    hasher()
         .hash_password(password.as_bytes())
         .map(|h| h.to_string())
         .map_err(|_| Error::PasswordHash)
@@ -58,11 +70,18 @@ mod tests {
     #[test]
     fn hash_and_verify() {
         let h = hash("correct horse battery").unwrap();
-        assert!(h.starts_with("$argon2id$"));
+        assert!(h.starts_with("$argon2id$v=19$m=65536,t=3,p=1$"), "{h}");
         assert!(verify("correct horse battery", &h));
         assert!(!verify("wrong horse battery", &h));
         assert!(!verify("anything", "not-a-phc-string"));
         assert!(!verify_dummy("anything"));
+        // Hashes made with the previous defaults (m=19 MiB, t=2) still verify.
+        let old = Argon2::default()
+            .hash_password(b"correct horse battery")
+            .unwrap()
+            .to_string();
+        assert!(old.contains("m=19456,t=2,p=1"), "{old}");
+        assert!(verify("correct horse battery", &old));
     }
 
     #[test]

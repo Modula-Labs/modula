@@ -7,11 +7,12 @@
 //! loopback, link-local (cloud metadata), private and shared ranges are all
 //! refused, after DNS resolution too, and redirects aren't followed.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
+use modula_backup::net::GuardedResolver;
 use modula_crypto::envelope::FieldAad;
 use modula_id::Id;
 use serde::{Deserialize, Serialize};
@@ -91,54 +92,8 @@ pub fn validate_url(raw: &str) -> AppResult<Url> {
     Ok(url)
 }
 
-/// Only globally routable addresses.
-pub fn public_ip(ip: IpAddr) -> bool {
-    let ip = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
-        v4 => v4,
-    };
-    match ip {
-        IpAddr::V4(a) => {
-            let [o0, o1, ..] = a.octets();
-            !(a.is_loopback()
-                || a.is_private()
-                || a.is_link_local()
-                || a.is_unspecified()
-                || a.is_broadcast()
-                || a.is_multicast()
-                || a.is_documentation()
-                || o0 == 0
-                || (o0 == 100 && (64..128).contains(&o1))
-                || o0 >= 240)
-        }
-        IpAddr::V6(a) => {
-            let s0 = a.segments()[0];
-            !(a.is_loopback()
-                || a.is_unspecified()
-                || a.is_multicast()
-                || (s0 & 0xffc0) == 0xfe80
-                || (s0 & 0xfe00) == 0xfc00)
-        }
-    }
-}
-
-struct GuardedResolver;
-
-impl reqwest::dns::Resolve for GuardedResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_owned();
-        Box::pin(async move {
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await?
-                .filter(|a| public_ip(a.ip()))
-                .collect();
-            if addrs.is_empty() {
-                return Err(format!("{host} has no public address").into());
-            }
-            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
-}
+/// Only globally routable addresses (the shared policy, see `modula_backup::net`).
+pub use modula_backup::net::public_ip;
 
 fn http() -> anyhow::Result<&'static reqwest::Client> {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -154,7 +109,11 @@ fn http() -> anyhow::Result<&'static reqwest::Client> {
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
-        .dns_resolver(std::sync::Arc::new(GuardedResolver))
+        .dns_resolver(std::sync::Arc::new(GuardedResolver::new(
+            public_ip,
+            "public address",
+        )))
+        .no_proxy()
         .build()?;
     Ok(CLIENT.get_or_init(|| client))
 }

@@ -14,9 +14,13 @@ use crate::state::AppState;
 const SCRIPT: &str = include_str!("../../../../deploy/install.sh");
 
 /// Release files a joining server may fetch. Never a path: a fixed set of names.
+/// All of them are listed in the signed SHA256SUMS, which the installer checks
+/// (`install.sh` here is the release's own, unfilled: what `upgrade` verifies).
 const FILES: &[&str] = &[
     "SHA256SUMS",
     "SHA256SUMS.sig",
+    "VERSION",
+    "install.sh",
     "modula-node-linux-amd64",
     "modula-node-linux-arm64",
     "caddy-linux-amd64",

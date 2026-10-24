@@ -14,9 +14,10 @@ use crate::integrations::hetzner::{self, Caps};
 use crate::locations;
 use crate::state::AppState;
 
-/// What a service without limits is assumed to need.
-pub const DEFAULT_CPU_MILLIS: i64 = 250;
-pub const DEFAULT_MEMORY_MB: i64 = 256;
+/// What a service without limits is assumed to need: the limits it runs
+/// with (see [`crate::deploy::desired`]).
+pub const DEFAULT_CPU_MILLIS: i64 = crate::deploy::desired::DEFAULT_CPU_MILLIS as i64;
+pub const DEFAULT_MEMORY_MB: i64 = crate::deploy::desired::DEFAULT_MEMORY_MB as i64;
 /// Kept free on every server for the OS, Docker, Caddy and modula-node.
 pub const SYSTEM_MEMORY_MB: i64 = 512;
 /// Where to suggest a server when no location is given.
@@ -62,8 +63,13 @@ pub struct Answer {
 }
 
 /// Free room per usable server: capacity from what the node reports, minus
-/// the limits of every service instance placed on it.
-pub async fn room(db: &sqlx::PgPool, location: Option<&str>) -> AppResult<Vec<NodeRoom>> {
+/// the limits of every service instance placed on it. Only servers
+/// `workspace` may place on: shared ones and its own.
+pub async fn room(
+    db: &sqlx::PgPool,
+    workspace: Id,
+    location: Option<&str>,
+) -> AppResult<Vec<NodeRoom>> {
     let rows: Vec<NodeRoom> = sqlx::query_as::<_, (Id, String, i64, i64)>(
         "SELECT n.id, n.name,
                 (COALESCE((n.info->>'cpus')::bigint, 0) * 1000
@@ -73,6 +79,7 @@ pub async fn room(db: &sqlx::PgPool, location: Option<&str>) -> AppResult<Vec<No
          FROM nodes n
          LEFT JOIN service_instances i ON i.node_id = n.id
          WHERE n.status <> 'revoked' AND ($1::text IS NULL OR n.location = $1)
+           AND (n.workspace_id IS NULL OR n.workspace_id = $5)
          GROUP BY n.id
          ORDER BY n.created_at",
     )
@@ -80,6 +87,7 @@ pub async fn room(db: &sqlx::PgPool, location: Option<&str>) -> AppResult<Vec<No
     .bind(DEFAULT_CPU_MILLIS)
     .bind(DEFAULT_MEMORY_MB)
     .bind(SYSTEM_MEMORY_MB)
+    .bind(workspace)
     .fetch_all(db)
     .await?
     .into_iter()
@@ -130,7 +138,7 @@ pub async fn suggest(
         None => None,
     };
 
-    let mut fits: Vec<NodeRoom> = room(&state.db, location)
+    let mut fits: Vec<NodeRoom> = room(&state.db, workspace, location)
         .await?
         .into_iter()
         .filter(|r| r.free_cpu_millis >= cpu && r.free_memory_mb >= mem)

@@ -738,9 +738,11 @@ export const api = {
   totpDisable: () => del<{ ok: true }>("/api/account/totp"),
   backupCodes: () =>
     post<{ backupCodes: string[] }>("/api/account/backup-codes"),
-  changePassword: (newPassword: string) =>
-    post<{ ok: true; sessionsRevoked: number }>("/api/account/password", {
+  /** Signs out other sessions and, unless `keepTokens`, revokes every API token. */
+  changePassword: (newPassword: string, keepTokens = false) =>
+    post<{ ok: true; sessionsRevoked: number; tokensRevoked: number }>("/api/account/password", {
       newPassword,
+      keepTokens,
     }),
   sessions: () => get<SessionInfo[]>("/api/account/sessions"),
   revokeSession: (id: string) =>

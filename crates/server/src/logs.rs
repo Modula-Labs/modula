@@ -12,6 +12,40 @@ pub const RETENTION_DAYS: i32 = 7;
 pub const MAX_LIMIT: i64 = 5000;
 /// Histogram buckets per query.
 const BUCKETS: i64 = 60;
+/// Longer lines are cut (a node could otherwise ship megabyte "lines").
+pub const MAX_LINE_BYTES: usize = 16 * 1024;
+/// Lines past this many bytes of one batch are dropped.
+pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
+const MAX_BATCH_LINES: usize = 10_000;
+
+/// `s` cut to at most `max` bytes, on a char boundary.
+pub fn truncate_line(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// The lines of a batch that are kept: at most [`MAX_BATCH_LINES`] and
+/// [`MAX_BATCH_BYTES`], each cut to [`MAX_LINE_BYTES`] and without NULs
+/// (Postgres text can't hold them).
+pub fn clamp(b: &pb::LogBatch) -> Vec<(&pb::ShippedLine, String)> {
+    let mut total = 0;
+    let mut out = Vec::new();
+    for l in b.lines.iter().take(MAX_BATCH_LINES) {
+        let text = truncate_line(&l.text, MAX_LINE_BYTES).replace('\0', "");
+        total += text.len();
+        if total > MAX_BATCH_BYTES {
+            break;
+        }
+        out.push((l, text));
+    }
+    out
+}
 
 /// Store a node's lines. Only deployments placed on that node count (a node
 /// can't write another node's logs); unknown ones are dropped.
@@ -19,7 +53,7 @@ pub async fn record(db: &PgPool, node: Id, b: &pb::LogBatch) -> anyhow::Result<(
     if b.dropped > 0 {
         tracing::warn!(%node, dropped = b.dropped, "a node dropped log lines (buffer full)");
     }
-    let lines = &b.lines[..b.lines.len().min(10_000)];
+    let lines = clamp(b);
     if lines.is_empty() {
         return Ok(());
     }
@@ -31,11 +65,10 @@ pub async fn record(db: &PgPool, node: Id, b: &pb::LogBatch) -> anyhow::Result<(
          JOIN service_instances i ON i.id = d.service_instance_id",
     )
     .bind(node)
-    .bind(lines.iter().map(|l| l.deployment_id.clone()).collect::<Vec<_>>())
-    .bind(lines.iter().map(|l| l.at_unix_ms).collect::<Vec<_>>())
-    .bind(lines.iter().map(|l| l.stderr).collect::<Vec<_>>())
-    // Postgres text can't hold NUL.
-    .bind(lines.iter().map(|l| l.text.replace('\0', "")).collect::<Vec<_>>())
+    .bind(lines.iter().map(|(l, _)| l.deployment_id.clone()).collect::<Vec<_>>())
+    .bind(lines.iter().map(|(l, _)| l.at_unix_ms).collect::<Vec<_>>())
+    .bind(lines.iter().map(|(l, _)| l.stderr).collect::<Vec<_>>())
+    .bind(lines.into_iter().map(|(_, t)| t).collect::<Vec<_>>())
     .execute(db)
     .await?;
     Ok(())

@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::{Query, State};
-use modula_crypto::token::{self, prefix};
 use modula_id::Id;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -16,7 +15,6 @@ use super::{JOIN_TOKEN_TTL, NewServer, ServerProvider, track, valid_server_name}
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
-use crate::deploy::{self, LiveFilter};
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
 use crate::integrations::hetzner::{self, Caps, Usage};
@@ -167,8 +165,6 @@ pub async fn provision(
     }
 
     let id = Id::new();
-    let join = token::generate(prefix::NODE_JOIN)?;
-    let join_id = Id::new();
     let mut tx = state.db.begin().await?;
     let metadata: serde_json::Value = sqlx::query_scalar(
         "SELECT metadata FROM integrations WHERE workspace_id = $1 AND kind = 'hetzner' FOR UPDATE",
@@ -203,15 +199,14 @@ pub async fn provision(
         return Err(AppError::Conflict("a server with that name exists".into()));
     }
     // A join token like the ones `Add server → Manual join` mints, but
-    // 30 minutes long and tied to this row.
-    sqlx::query(
-        "INSERT INTO node_join_tokens (id, token_hash, created_by, expires_at) VALUES ($1, $2, $3, $4)",
+    // 30 minutes long, tied to this row and to the workspace: the server it
+    // enrolls is private to it.
+    let (join_id, join_token, _) = crate::nodes::create_join_token(
+        &mut *tx,
+        Some(actor.user_id),
+        Some(workspace),
+        JOIN_TOKEN_TTL,
     )
-    .bind(join_id)
-    .bind(join.hash.as_bytes())
-    .bind(actor.user_id)
-    .bind(OffsetDateTime::now_utc() + JOIN_TOKEN_TTL)
-    .execute(&mut *tx)
     .await?;
     sqlx::query(
         "INSERT INTO provisioned_servers
@@ -246,8 +241,7 @@ pub async fn provision(
         .await?;
     tx.commit().await?;
 
-    let user_data =
-        Bootstrap::new(&state.cfg, join.plaintext.expose_secret(), &ca, &req.name).render();
+    let user_data = Bootstrap::new(&state.cfg, join_token.expose_secret(), &ca, &req.name).render();
     let labels = BTreeMap::from([
         ("modula".to_owned(), "1".to_owned()),
         ("workspace".to_owned(), workspace.to_string()),
@@ -398,17 +392,7 @@ pub async fn delete(
     }
     if let Some(node) = node_id {
         // Same as revoking a server (api::nodes::revoke).
-        sqlx::query(
-            "UPDATE nodes SET status = 'revoked', revoked_at = now() WHERE id = $1 AND status <> 'revoked'",
-        )
-        .bind(node)
-        .execute(&mut *tx)
-        .await?;
-        deploy::remove_live(&mut tx, LiveFilter::Node, node).await?;
-        sqlx::query("UPDATE service_instances SET node_id = NULL WHERE node_id = $1")
-            .bind(node)
-            .execute(&mut *tx)
-            .await?;
+        crate::nodes::revoke(&mut tx, node).await?;
     }
     sqlx::query("DELETE FROM provisioned_servers WHERE id = $1")
         .bind(id)

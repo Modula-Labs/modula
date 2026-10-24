@@ -2,18 +2,19 @@
 //! requests the control plane makes itself. Nodes only ever get presigned
 //! URLs for single objects, never the target's credentials.
 //!
-//! Endpoints are user input, so requests to them are SSRF-guarded: loopback,
-//! link-local (cloud metadata) and other non-routable addresses are refused,
-//! both as literal hosts and after DNS resolution. Private ranges stay
-//! allowed, for MinIO on a LAN.
+//! Endpoints are user input, so requests to them are SSRF-guarded: anything
+//! but public addresses is refused, both as literal hosts and after DNS
+//! resolution. Private and loopback ranges (MinIO on a LAN) need the
+//! operator's opt-in; link-local (cloud metadata) is refused regardless.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
-use modula_backup::stream::storage_error;
+use modula_backup::net::{self, GuardedResolver};
+use modula_backup::stream::{s3_error_code, storage_error};
 use rusty_s3::actions::{
     AbortMultipartUpload, CompleteMultipartUpload, CreateMultipartUpload, DeleteObject, GetObject,
     PutObject, S3Action, UploadPart,
@@ -147,7 +148,7 @@ impl Target {
         if body.contains("<Error>") {
             bail!(
                 "the storage could not assemble the upload: {}",
-                error_code(&body)
+                s3_error_code(&body).unwrap_or("unknown error")
             );
         }
         Ok(())
@@ -172,10 +173,7 @@ impl Target {
             .map_err(reqwest::Error::without_url)?;
         let status = res.status();
         if !status.is_success() && status != reqwest::StatusCode::NOT_FOUND {
-            bail!(
-                "the storage answered {status}: {}",
-                storage_error(res).await
-            );
+            bail!("the storage answered {}", storage_error(res).await);
         }
         Ok(())
     }
@@ -204,18 +202,9 @@ async fn send(req: reqwest::RequestBuilder) -> anyhow::Result<reqwest::Response>
     let res = req.send().await.map_err(reqwest::Error::without_url)?;
     let status = res.status();
     if !status.is_success() {
-        bail!(
-            "the storage answered {status}: {}",
-            storage_error(res).await
-        );
+        bail!("the storage answered {}", storage_error(res).await);
     }
     Ok(res)
-}
-
-fn error_code(xml: &str) -> &str {
-    xml.split_once("<Code>")
-        .and_then(|(_, rest)| rest.split_once("</Code>"))
-        .map_or("unknown error", |(code, _)| code)
 }
 
 /// The upload id from an `InitiateMultipartUploadResult`, which (like every
@@ -230,64 +219,22 @@ fn upload_id(xml: &str) -> anyhow::Result<String> {
 
 static ALLOW_LOCAL: AtomicBool = AtomicBool::new(false);
 
-/// Allow loopback endpoints (tests, or MinIO on the control plane's host in
-/// development via `MODULA_BACKUP_ALLOW_LOCAL_ENDPOINTS=1`).
+/// Allow private and loopback endpoints (tests; operators set
+/// `MODULA_BACKUP_ALLOW_PRIVATE_ENDPOINTS=1`, see [`net::ALLOW_PRIVATE_ENV`]).
 pub fn allow_local_endpoints(allow: bool) {
     ALLOW_LOCAL.store(allow, Ordering::Relaxed);
 }
 
 fn local_allowed() -> bool {
     static FROM_ENV: OnceLock<bool> = OnceLock::new();
-    ALLOW_LOCAL.load(Ordering::Relaxed)
-        || *FROM_ENV.get_or_init(|| {
-            std::env::var("MODULA_BACKUP_ALLOW_LOCAL_ENDPOINTS").is_ok_and(|v| v == "1")
-        })
+    ALLOW_LOCAL.load(Ordering::Relaxed) || *FROM_ENV.get_or_init(net::private_endpoints_from_env)
 }
 
-/// Whether the control plane may connect to `ip` on a user's behalf.
+/// Whether the control plane may connect to `ip` on a user's behalf: public
+/// addresses; private and loopback ones only with the opt-in; link-local
+/// and cloud metadata never.
 pub fn allowed_ip(ip: IpAddr) -> bool {
-    if local_allowed() {
-        return true;
-    }
-    let ip = match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
-        v4 => v4,
-    };
-    match ip {
-        IpAddr::V4(a) => {
-            !(a.is_loopback()
-                || a.is_link_local()
-                || a.is_unspecified()
-                || a.is_broadcast()
-                || a.is_multicast())
-        }
-        IpAddr::V6(a) => {
-            !(a.is_loopback()
-                || a.is_unspecified()
-                || a.is_multicast()
-                || (a.segments()[0] & 0xffc0) == 0xfe80)
-        }
-    }
-}
-
-/// Resolves like the system resolver, minus disallowed addresses (so a DNS
-/// name cannot point the control plane at its own loopback or metadata).
-struct GuardedResolver;
-
-impl reqwest::dns::Resolve for GuardedResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_owned();
-        Box::pin(async move {
-            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
-                .await?
-                .filter(|a| allowed_ip(a.ip()))
-                .collect();
-            if addrs.is_empty() {
-                return Err(format!("{host} has no address backups may use").into());
-            }
-            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
+    net::backup_ip(ip, local_allowed())
 }
 
 pub fn http() -> anyhow::Result<&'static reqwest::Client> {
@@ -301,7 +248,11 @@ pub fn http() -> anyhow::Result<&'static reqwest::Client> {
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(120))
         .redirect(reqwest::redirect::Policy::none())
-        .dns_resolver(std::sync::Arc::new(GuardedResolver))
+        .dns_resolver(std::sync::Arc::new(GuardedResolver::new(
+            allowed_ip,
+            "address backups may use",
+        )))
+        .no_proxy()
         .build()?;
     Ok(CLIENT.get_or_init(|| client))
 }
@@ -344,7 +295,8 @@ pub fn endpoint(provider: Provider, raw: &str, region: &str) -> AppResult<Url> {
         None => false,
     };
     if !ok {
-        return Err(bad("endpoint must not be a local or link-local address"));
+        return Err(bad("endpoint must be a public address (private ones need \
+             MODULA_BACKUP_ALLOW_PRIVATE_ENDPOINTS=1 on the server)"));
     }
     Ok(url)
 }
@@ -464,8 +416,8 @@ mod tests {
         );
         assert!(upload_id("<Error><Code>AccessDenied</Code></Error>").is_err());
         assert_eq!(
-            error_code("<Error><Code>AccessDenied</Code></Error>"),
-            "AccessDenied"
+            s3_error_code("<Error><Code>AccessDenied</Code></Error>"),
+            Some("AccessDenied")
         );
     }
 
@@ -473,8 +425,10 @@ mod tests {
     fn endpoints_are_validated() {
         let ok = |raw: &str| endpoint(Provider::Minio, raw, "us-east-1").is_ok();
         assert!(ok("https://abc.r2.cloudflarestorage.com"));
-        assert!(ok("http://10.0.0.5:9000"));
+        // Private addresses only with the operator's opt-in (off here).
+        assert!(net::backup_ip("10.0.0.5".parse().unwrap(), true));
         for bad in [
+            "http://10.0.0.5:9000",
             "http://127.0.0.1:9000",
             "http://169.254.169.254",
             "http://[::1]:9000",

@@ -19,6 +19,10 @@ const SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";
 const TEST_KEY: &str = include_str!("fixtures/github-app-test-key.pem");
 const TEST_PUB: &str = include_str!("fixtures/github-app-test-key.pub.pem");
 const INSTALL_TOKEN: &str = "ghs_testinstallationtoken";
+/// The OAuth code GitHub hands back after installation (OAuth on install),
+/// and the user token it exchanges for.
+const USER_CODE: &str = "usercode";
+const USER_TOKEN: &str = "ghu_testusertoken";
 
 /// Requests carrying a valid App JWT (RS256 under the test key, iss = app id).
 fn app_jwt_ok(h: &axum::http::HeaderMap) -> bool {
@@ -118,6 +122,31 @@ async fn mock_github_counted() -> (url::Url, Counter) {
                 }
                 let account = json!({ "login": "acme", "type": "Organization" });
                 (StatusCode::OK, axum::Json(json!({ "id": id, "account": account })))
+            }),
+        )
+        // OAuth on install: the code becomes a user token (client id and
+        // secret from the manifest conversion)...
+        .route(
+            "/login/oauth/access_token",
+            post(|h: axum::http::HeaderMap, axum::Json(b): axum::Json<Value>| async move {
+                let json = h.get(header::ACCEPT).and_then(|v| v.to_str().ok()) == Some("application/json");
+                if json && b == json!({ "client_id": "Iv1.abc", "client_secret": "cs", "code": USER_CODE }) {
+                    axum::Json(json!({ "access_token": USER_TOKEN, "token_type": "bearer", "scope": "" }))
+                } else {
+                    axum::Json(json!({ "error": "bad_verification_code" }))
+                }
+            }),
+        )
+        // ...which lists the installations that user can access.
+        .route(
+            "/user/installations",
+            get(|h: axum::http::HeaderMap| async move {
+                let auth = h.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+                if auth != Some(&format!("Bearer {USER_TOKEN}")) {
+                    return (StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+                }
+                let one = json!({ "id": INSTALLATION, "account": { "login": "acme", "type": "Organization" } });
+                (StatusCode::OK, axum::Json(json!({ "total_count": 1, "installations": [one] })))
             }),
         )
         .route(
@@ -342,6 +371,12 @@ async fn connect_creates_installs_and_returns(pool: PgPool) {
         json!({ "contents": "read", "metadata": "read", "statuses": "write" })
     );
     assert_eq!(m["default_events"], json!(["push"]));
+    // The installing user authorizes on the way back (see install_callback).
+    assert_eq!(m["request_oauth_on_install"], true);
+    assert_eq!(
+        m["callback_urls"],
+        json!([format!("{ORIGIN}/api/github/install/callback")])
+    );
     let name = m["name"].as_str().unwrap();
     let suffix = name.strip_prefix("Modula Deploy (cloud.test) ").unwrap();
     assert!(suffix.len() == 4 && suffix.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -359,7 +394,7 @@ async fn connect_creates_installs_and_returns(pool: PgPool) {
     let r = install_callback(
         &app,
         &admin,
-        &format!("installation_id={INSTALLATION}&setup_action=install&state={st}"),
+        &format!("installation_id={INSTALLATION}&setup_action=install&state={st}&code={USER_CODE}"),
     )
     .await;
     assert_eq!(location(&r), format!("{back}&github=installed"));
@@ -481,7 +516,7 @@ async fn connect_states_and_permissions(pool: PgPool) {
     let r = install_callback(
         &app,
         &admin,
-        &format!("installation_id={INSTALLATION}&setup_action=install&state={st}"),
+        &format!("installation_id={INSTALLATION}&setup_action=install&state={st}&code={USER_CODE}"),
     )
     .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
@@ -745,7 +780,9 @@ async fn installation_binds_to_the_workspace_that_started_it(pool: PgPool) {
 
     // The callback verifies the installation with an App JWT (checked by the mock).
     let cb = |id: i64, st: &str| {
-        format!("/api/github/install/callback?installation_id={id}&setup_action=install&state={st}")
+        format!(
+            "/api/github/install/callback?installation_id={id}&setup_action=install&state={st}&code={USER_CODE}"
+        )
     };
     let r = app
         .call(Method::GET, &cb(INSTALLATION, &st), Some(&admin), None)
@@ -1029,4 +1066,88 @@ async fn each_environment_deploys_its_own_branch(pool: PgPool) {
     let mut want = vec![production, staging];
     want.sort();
     assert_eq!(deployed, want);
+}
+
+/// The callback's `installation_id` is only a query parameter: it binds only
+/// when the GitHub user coming back (OAuth on install) can access it.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn install_callback_requires_the_users_own_installation(pool: PgPool) {
+    let (app, admin) = app_with_github(pool).await;
+    create_app(&app, &admin).await;
+    let ws = app.create_workspace(&admin, "team").await;
+    let fresh_state = || async {
+        let r = app
+            .call(
+                Method::POST,
+                &format!("/api/workspaces/{ws}/github/install"),
+                Some(&admin),
+                Some(json!({})),
+            )
+            .await;
+        state_param(r.json["url"].as_str().unwrap())
+    };
+    let installs = || async {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM github_installations")
+            .fetch_one(app.db())
+            .await
+            .unwrap()
+    };
+
+    // Someone else's installation id (even a real one of this App's), a
+    // missing code, and a code GitHub rejects all bind nothing.
+    let st = fresh_state().await;
+    let r = install_callback(
+        &app,
+        &admin,
+        &format!("installation_id=5555&setup_action=install&state={st}&code={USER_CODE}"),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+    assert_eq!(r.json["error"]["message"], "installation not found");
+    let st = fresh_state().await;
+    let r = install_callback(
+        &app,
+        &admin,
+        &format!("installation_id={INSTALLATION}&setup_action=install&state={st}"),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+    let st = fresh_state().await;
+    let r = install_callback(
+        &app,
+        &admin,
+        &format!("installation_id={INSTALLATION}&setup_action=install&state={st}&code=stolen"),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+    assert_eq!(installs().await, 0);
+
+    // The user's own installation binds.
+    let st = fresh_state().await;
+    let r = install_callback(
+        &app,
+        &admin,
+        &format!("installation_id={INSTALLATION}&setup_action=install&state={st}&code={USER_CODE}"),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::SEE_OTHER, "{:?}", r.json);
+    assert_eq!(installs().await, 1);
+}
+
+/// A replayed push (new delivery id, same signed body) starts no second
+/// deployment of a commit the instance already has.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn replayed_push_deploys_a_commit_once(pool: PgPool) {
+    let (app, admin) = app_with_github(pool).await;
+    create_app(&app, &admin).await;
+    let repo = json!({ "type": "repo", "repo": "acme/app", "branch": "main" });
+    seed(&app, &admin, &[("api", json!({ "source": repo }))]).await;
+    let body = push("refs/heads/main", INSTALLATION, &["src/main.rs"]);
+    let r = signed(&app, "push", body.clone()).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["deployments"].as_array().unwrap().len(), 1);
+    let r = signed(&app, "push", body).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["deployments"], json!([]));
+    assert_eq!(deployments(&app).await.len(), 1);
 }

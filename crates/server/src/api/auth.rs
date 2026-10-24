@@ -20,7 +20,11 @@ use crate::state::AppState;
 use crate::validate;
 
 const LOGIN_PER_IP: Limit = Limit::per_minute(20);
-const LOGIN_PER_EMAIL: Limit = Limit::per(10, std::time::Duration::from_secs(15 * 60));
+/// Failed logins per (email, IP): guessing from one place stops quickly...
+const LOGIN_FAIL_PER_EMAIL_IP: Limit = Limit::per(10, std::time::Duration::from_secs(15 * 60));
+/// ...and per email from anywhere, much higher, so a stranger's failures
+/// can't lock the owner out from their own address. Successes never count.
+const LOGIN_FAIL_PER_EMAIL: Limit = Limit::per(100, std::time::Duration::from_secs(15 * 60));
 const SETUP_PER_IP: Limit = Limit::per(10, std::time::Duration::from_secs(15 * 60));
 
 #[derive(Serialize)]
@@ -204,11 +208,16 @@ pub async fn login(
         .limiter
         .check("login-ip", &meta.ip_string(), LOGIN_PER_IP)
         .await?;
-    // Malformed emails still count against the per-email bucket under their raw form.
+    // Malformed emails still count against the per-email buckets under their raw form.
     let email = validate::email(&req.email).unwrap_or_else(|_| req.email.trim().to_lowercase());
+    let email_ip = format!("{email}|{}", meta.ip_string());
     state
         .limiter
-        .check("login-email", &email, LOGIN_PER_EMAIL)
+        .peek("login-fail", &email_ip, LOGIN_FAIL_PER_EMAIL_IP)
+        .await?;
+    state
+        .limiter
+        .peek("login-fail-email", &email, LOGIN_FAIL_PER_EMAIL)
         .await?;
 
     let user: Option<(Id, Option<String>)> =
@@ -232,6 +241,15 @@ pub async fn login(
         }
     };
     let Some(user_id) = user_id.filter(|_| ok) else {
+        // Unknown emails count too, so the limits don't reveal which exist.
+        state
+            .limiter
+            .hit("login-fail", &email_ip, LOGIN_FAIL_PER_EMAIL_IP)
+            .await?;
+        state
+            .limiter
+            .hit("login-fail-email", &email, LOGIN_FAIL_PER_EMAIL)
+            .await?;
         let mut e = Entry::new("auth.login_failed", &meta).metadata(json!({ "email": email }));
         if let Some(id) = user_id {
             e = e.user(id);

@@ -81,6 +81,15 @@ pub fn parse_custom(
         Some(rest) => (true, rest),
         None => (false, h.as_str()),
     };
+    // The edge doesn't route wildcard names yet (they'd need DNS-01
+    // certificates through a DNS provider); refuse rather than half-work.
+    if wildcard {
+        return Err(
+            "wildcard domains aren't supported yet (they need a DNS provider for \
+             certificates); add each name separately"
+                .into(),
+        );
+    }
     let labels: Vec<&str> = base.split('.').collect();
     if labels.len() < 2 {
         return Err("enter a full domain like app.example.com".into());
@@ -337,7 +346,7 @@ pub async fn resync_job(state: AppState, job: crate::jobs::Job) -> anyhow::Resul
 
 /// The resolver verification uses (swappable for tests).
 pub fn resolver(state: &AppState) -> Arc<dyn dns::Resolver> {
-    state.dns.read().expect("dns lock").clone()
+    crate::sync::read(&state.dns).clone()
 }
 
 /// Outcome of one ownership check.
@@ -567,14 +576,14 @@ mod tests {
         assert_eq!(ok(" WWW.Shop.com. ").unwrap(), "www.shop.com");
         assert_eq!(ok("https://shop.com/").unwrap(), "shop.com");
         assert_eq!(ok("xn--bcher-kva.de").unwrap(), "xn--bcher-kva.de");
+        // Wildcards aren't routed by the edge yet.
         let wc = parse_custom(
             "*.shop.com",
             &c,
             &crate::instance_domain::Hosts::from_config(&c),
         )
-        .unwrap();
-        assert!(wc.wildcard);
-        assert_eq!(wc.base(), "shop.com");
+        .unwrap_err();
+        assert!(wc.contains("wildcard"), "{wc}");
         // The dashboard's parent is fine; the dashboard itself is not.
         assert_eq!(ok("example.com").unwrap(), "example.com");
         for bad in [

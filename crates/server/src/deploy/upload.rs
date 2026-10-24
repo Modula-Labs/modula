@@ -85,7 +85,7 @@ pub struct Slot {
 impl Slot {
     /// `None` when the workspace already has the maximum uploads in flight.
     pub fn acquire(state: &AppState, workspace: Id) -> Option<Self> {
-        let mut map = state.uploads_in_flight.lock().expect("uploads lock");
+        let mut map = crate::sync::lock(&state.uploads_in_flight);
         let n = map.entry(workspace).or_insert(0);
         if *n >= MAX_CONCURRENT_PER_WORKSPACE {
             return None;
@@ -100,7 +100,7 @@ impl Slot {
 
 impl Drop for Slot {
     fn drop(&mut self) {
-        let mut map = self.state.uploads_in_flight.lock().expect("uploads lock");
+        let mut map = crate::sync::lock(&self.state.uploads_in_flight);
         if let Some(n) = map.get_mut(&self.workspace) {
             *n = n.saturating_sub(1);
             if *n == 0 {

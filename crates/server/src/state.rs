@@ -66,7 +66,7 @@ impl AppState {
 
     /// Replaces the DNS resolver used to verify custom domains (tests).
     pub fn set_dns_resolver(&self, r: Arc<dyn crate::domains::dns::Resolver>) {
-        *self.0.dns.write().expect("dns lock") = r;
+        *crate::sync::write(&self.0.dns) = r;
     }
 
     pub(crate) fn hosts_lock(&self) -> &std::sync::RwLock<crate::instance_domain::Hosts> {

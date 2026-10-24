@@ -167,9 +167,14 @@ pub async fn session_revoke(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PasswordChange {
     pub new_password: SecretString,
+    /// Keep the account's API tokens working (they're revoked by default).
+    #[serde(default)]
+    pub keep_tokens: bool,
 }
 
-/// Requires sudo; signs out every other session.
+/// Requires sudo. In one transaction: the new hash, every other session
+/// signed out and, unless `keepTokens`, every API token revoked, so a
+/// password change locks out whoever else had the account.
 pub async fn change_password(
     State(state): State<AppState>,
     actor: Actor,
@@ -181,16 +186,36 @@ pub async fn change_password(
     let hash = tokio::task::spawn_blocking(move || password::hash(pw.expose_secret()))
         .await
         .map_err(|e| AppError::Internal(e.into()))??;
+    let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")
         .bind(actor.user_id)
         .bind(hash)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
-    let revoked = session::revoke_others(&state.db, actor.user_id, actor.session_id).await?;
+    let revoked = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
+        .bind(actor.user_id)
+        .bind(actor.session_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    let tokens_revoked = if req.keep_tokens {
+        0
+    } else {
+        sqlx::query("DELETE FROM api_tokens WHERE user_id = $1")
+            .bind(actor.user_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    };
     Entry::new("account.password_changed", &meta)
         .actor(&actor)
-        .metadata(json!({ "sessionsRevoked": revoked }))
-        .record(&state.db)
+        .metadata(json!({ "sessionsRevoked": revoked, "tokensRevoked": tokens_revoked }))
+        .record(&mut *tx)
         .await?;
-    Ok(Json(json!({ "ok": true, "sessionsRevoked": revoked })))
+    tx.commit().await?;
+    Ok(Json(json!({
+        "ok": true,
+        "sessionsRevoked": revoked,
+        "tokensRevoked": tokens_revoked,
+    })))
 }
