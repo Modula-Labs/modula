@@ -189,9 +189,17 @@ export function NewServiceDialog({
         environmentId,
         namePrefix: namePrefix.trim() || undefined,
       });
-      // Databases first: they come first in the response.
-      for (const s of created.services) await deployNew({ instances: [{ id: s.instanceId, environmentId }] });
-      return created;
+      // Databases first: they come first in the response. The services exist
+      // now, so a failed deploy is reported, never retried by creating them again.
+      const warnings = [...created.warnings];
+      for (const s of created.services) {
+        try {
+          await api.deploy(s.instanceId);
+        } catch (e) {
+          warnings.push(`${s.name}: ${e instanceof Error ? e.message : "not deployed"}`);
+        }
+      }
+      return { ...created, warnings };
     },
     onSuccess: async (created) => {
       await qc.invalidateQueries({ queryKey: ["project", projectId] });
