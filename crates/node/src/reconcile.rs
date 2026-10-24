@@ -568,7 +568,7 @@ impl Reconciler {
         let port = u16::try_from(w.port).unwrap_or(0);
         if health.path.is_empty() {
             tokio::time::sleep(SETTLE).await;
-            self.ensure_running(&container).await?;
+            self.ensure_running(&container, w).await?;
         } else {
             self.set_phase(
                 id,
@@ -578,7 +578,7 @@ impl Reconciler {
             let deadline = tokio::time::Instant::now()
                 + Duration::from_secs(u64::from(health.timeout_secs.max(1)));
             loop {
-                self.ensure_running(&container).await?;
+                self.ensure_running(&container, w).await?;
                 if self
                     .runtime
                     .probe(&container, &w.environment_id, port, &health.path)
@@ -588,16 +588,45 @@ impl Reconciler {
                     break;
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    return Err(format!(
+                    let outcome = format!(
                         "Health check {} did not pass within {}s",
                         health.path, health.timeout_secs
-                    ));
+                    );
+                    return Err(self.with_output(outcome, &container, w).await);
                 }
                 tokio::time::sleep(PROBE_EVERY).await;
             }
         }
         self.set_phase(id, Phase::Active, "Deployment is live");
         Ok(())
+    }
+
+    /// `outcome`, followed by the container's last output (redacted): the
+    /// container is removed after a failed start, and with it its logs.
+    async fn with_output(&self, outcome: String, container: &str, w: &pb::Workload) -> String {
+        use futures::StreamExt as _;
+        let lines = tokio::time::timeout(Duration::from_secs(3), async {
+            match self.runtime.logs(container, 20, false).await {
+                Ok(stream) => {
+                    stream
+                        .filter_map(|l| async move { l.ok().map(|l| l.text) })
+                        .collect::<Vec<_>>()
+                        .await
+                }
+                Err(_) => Vec::new(),
+            }
+        })
+        .await
+        .unwrap_or_default();
+        let output = redact(lines.join("\n").trim_end(), &w.env);
+        let cut = output.len().saturating_sub(PRE_DEPLOY_TAIL);
+        let cut = (cut..=output.len())
+            .find(|i| output.is_char_boundary(*i))
+            .unwrap_or(output.len());
+        match &output[cut..] {
+            "" => outcome,
+            out => format!("{outcome}:\n{out}"),
+        }
     }
 
     /// Run the pre-deploy command to completion. Its output goes to the
@@ -685,7 +714,7 @@ impl Reconciler {
         }
     }
 
-    async fn ensure_running(&self, container: &str) -> Result<(), String> {
+    async fn ensure_running(&self, container: &str, w: &pb::Workload) -> Result<(), String> {
         let cs = self
             .runtime
             .containers()
@@ -693,10 +722,10 @@ impl Reconciler {
             .map_err(|e| format!("{e:#}"))?;
         match cs.iter().find(|c| c.id == container) {
             Some(c) if c.running => Ok(()),
-            Some(c) => Err(format!(
-                "The container exited during startup (code {})",
-                c.exit_code
-            )),
+            Some(c) => {
+                let outcome = format!("The container exited during startup (code {})", c.exit_code);
+                Err(self.with_output(outcome, container, w).await)
+            }
             None => Err("The container disappeared during startup".into()),
         }
     }
