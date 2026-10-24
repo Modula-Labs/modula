@@ -66,6 +66,9 @@ pub struct Instance {
     pub r2: Option<serde_json::Value>,
     #[serde(skip)]
     pub tcp_node_ip: Option<String>,
+    /// Edge rule actions ("rateLimit", "cache") a server serving its live
+    /// deployment can't apply (its Caddy lacks the module).
+    pub edge_unsupported: Vec<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
@@ -84,6 +87,12 @@ pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
                  FROM r2_buckets r WHERE r.service_instance_id = i.id) AS r2,
                 (SELECT tn.public_ip FROM tcp_proxies t JOIN nodes tn ON tn.id = t.node_id
                  WHERE t.service_instance_id = i.id) AS tcp_node_ip,
+                ARRAY(SELECT DISTINCT a FROM deployments d
+                      JOIN deployment_replicas r ON r.deployment_id = d.id
+                      JOIN nodes rn ON rn.id = r.node_id
+                      CROSS JOIN unnest(rn.edge_unsupported) AS a
+                      WHERE d.service_instance_id = i.id AND d.status IN ('active', 'crashed')
+                      ORDER BY a) AS edge_unsupported,
                 CASE
                   WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id AND status = 'active')
                     THEN 'online'

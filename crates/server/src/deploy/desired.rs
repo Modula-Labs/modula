@@ -54,6 +54,7 @@ struct RouteRow {
     config: serde_json::Value,
     target_port: Option<i32>,
     remote_ips: Vec<String>,
+    proxied: bool,
 }
 
 /// SQL: one [`Row`] per deployment replica (`r`), up to the WHERE clause.
@@ -358,7 +359,7 @@ async fn routes(state: &AppState, node: Id) -> AppResult<Vec<pb::Route>> {
     // node's `ask` allowlist (no certificate). Every node running a replica
     // serves them, balancing over its own and the other healthy replicas.
     let routes: Vec<RouteRow> = sqlx::query_as(
-        "SELECT m.hostname, d.id AS deployment_id, d.config, m.target_port,
+        "SELECT m.hostname, d.id AS deployment_id, d.config, m.target_port, m.proxied,
                 ARRAY(SELECT o.mesh_ip FROM deployment_replicas o
                       WHERE o.deployment_id = d.id AND o.node_id <> $1 AND o.mesh_ip IS NOT NULL
                         AND o.status = 'active'
@@ -389,6 +390,9 @@ async fn routes(state: &AppState, node: Id) -> AppResult<Vec<pb::Route>> {
                 .iter()
                 .map(|ip| format!("{ip}:{port}"))
                 .collect(),
+            // The rules the deployment was made with (staged like the rest).
+            rules: super::edge::to_pb(&cfg.edge_rules),
+            proxied: r.proxied,
         });
     }
     Ok(pb_routes)
