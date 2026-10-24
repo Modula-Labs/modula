@@ -278,14 +278,30 @@ impl Mesh {
             let c = self.current.lock().expect("mesh lock");
             c.tunnels.as_ref() != Some(&tunnels)
         };
-        if changed {
-            self.sys.apply_tunnels(&tunnels).await?;
-            tracing::info!(subnet = %subnet, peers = tunnels.peers.len(), "mesh tunnels configured");
-        }
+        // Without tunnels (no WireGuard here) the firewall and resolver still
+        // come up: containers already use the resolver, which lives on the
+        // bridge. Tunnels are retried on the next apply.
+        let tunnels = if !changed {
+            Some(tunnels)
+        } else {
+            match self.sys.apply_tunnels(&tunnels).await {
+                Ok(()) => {
+                    tracing::info!(subnet = %subnet, peers = tunnels.peers.len(), "mesh tunnels configured");
+                    Some(tunnels)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = format!("{e:#}"),
+                        "cannot configure the mesh tunnels; will retry"
+                    );
+                    None
+                }
+            }
+        };
         let start_dns = {
             let mut c = self.current.lock().expect("mesh lock");
             c.subnet = Some(subnet);
-            c.tunnels = Some(tunnels);
+            c.tunnels = tunnels;
             c.environments = environments;
             c.peers = peers.clone();
             !std::mem::replace(&mut c.dns_started, true)
@@ -531,5 +547,32 @@ mod tests {
         }
         let after = sys.rulesets.lock().unwrap().last().unwrap().clone();
         assert!(!after.contains("10.80.1.192"), "{after}");
+    }
+
+    /// No WireGuard on this host.
+    #[derive(Default)]
+    struct NoTunnels(RecordingSystem);
+
+    #[async_trait]
+    impl MeshSystem for NoTunnels {
+        async fn apply_tunnels(&self, _t: &Tunnels) -> anyhow::Result<()> {
+            anyhow::bail!("no wireguard module")
+        }
+        async fn apply_firewall(&self, subnet: Subnet, ruleset: &str) -> anyhow::Result<()> {
+            self.0.apply_firewall(subnet, ruleset).await
+        }
+        async fn peer_stats(&self) -> anyhow::Result<Vec<PeerStat>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn without_wireguard_the_firewall_and_resolver_still_come_up() {
+        let sys = Arc::new(NoTunnels::default());
+        let mesh = Mesh::new(sys.clone(), KEY.into(), 51820);
+        assert_eq!(mesh.apply(&spec()).await.unwrap().index, 1);
+        assert_eq!(sys.0.rulesets.lock().unwrap().len(), 1);
+        // Tunnels are retried, not remembered as applied.
+        assert!(mesh.current.lock().unwrap().tunnels.is_none());
     }
 }

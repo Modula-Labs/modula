@@ -324,6 +324,19 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .unwrap();
     assert_eq!(status(&app, next.id).await, "failed");
     assert!(kick.contains(&a) && kick.contains(&b));
+    // Its containers may still be stopping: the next deployment doesn't
+    // reuse the failed one's addresses (.3) right away.
+    let third = deploy(&app, chain.environment, chain.instance, 2)
+        .await
+        .unwrap();
+    let ip: String = sqlx::query_scalar(
+        "SELECT mesh_ip FROM deployment_replicas WHERE deployment_id = $1 AND ordinal = 0",
+    )
+    .bind(third.id)
+    .fetch_one(app.db())
+    .await
+    .unwrap();
+    assert_eq!(ip, "10.80.1.4");
 
     // With a volume, one replica only.
     sqlx::query(
