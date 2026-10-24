@@ -6,11 +6,62 @@ import { LayoutGrid, Plus, Search, X } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
 import { Alert, EmptyState, Skeleton } from "@/components/ui/misc";
 import { Modal } from "@/components/ui/Modal";
-import { api } from "@/lib/api";
+import { ServiceIcon } from "@/components/ui/ServiceIcon";
+import { api, type ProjectCard } from "@/lib/api";
 import { dismissDomainBanner, domainBannerDismissed } from "@/lib/domain";
 import { relativeTime } from "@/lib/format";
 import { useCurrentWorkspace, useMe } from "@/lib/workspace";
 import { useInstanceDomain } from "./settings/Domain";
+
+/** At most this many service icons; the rest are a "+N". */
+const MAX_ICONS = 6;
+
+/** The services as icon tiles on the dot grid, and how many are online. */
+function CardPreview({ project: p }: { project: ProjectCard }) {
+  const online = p.services.filter((s) => s.online).length;
+  const total = p.services.length;
+  const dot =
+    total === 0 || online === 0
+      ? "bg-muted-foreground"
+      : online === total
+        ? "bg-success"
+        : "bg-warning";
+  return (
+    <div className="dotgrid mx-3 mb-3 mt-3 flex flex-1 flex-col rounded-lg border border-border/60">
+      <div className="flex flex-1 flex-wrap items-center justify-center gap-2 px-4">
+        {p.services.slice(0, MAX_ICONS).map((s) => (
+          <span key={s.id} title={s.name} className="rounded-lg shadow-sm">
+            <ServiceIcon
+              stack={s.stack}
+              image={s.image}
+              repo={s.repo}
+              size="lg"
+            />
+          </span>
+        ))}
+        {total > MAX_ICONS ? (
+          <span className="flex size-10 items-center justify-center rounded-lg border border-border bg-card text-xs text-muted-foreground">
+            +{total - MAX_ICONS}
+          </span>
+        ) : null}
+      </div>
+      <div className="flex items-center gap-2 px-3 pb-2.5 text-xs text-muted-foreground">
+        {total === 0 ? (
+          <span>No services yet · created {relativeTime(p.createdAt)}</span>
+        ) : (
+          <>
+            <span className={`size-1.5 rounded-full ${dot}`} />
+            {p.environment ? <span>{p.environment}</span> : null}
+            <span aria-hidden>·</span>
+            <span>
+              {online}/{total} services online
+            </span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function DomainBanner() {
   const [hidden, setHidden] = useState(domainBannerDismissed);
@@ -19,7 +70,8 @@ function DomainBanner() {
   return (
     <div className="mb-6 flex items-center gap-3 rounded-lg border border-border bg-card px-4 py-3 text-sm">
       <span className="min-w-0 flex-1">
-        The dashboard is served at the server's IP address. Add a domain for a proper address and generated service URLs.{" "}
+        The dashboard is served at the server's IP address. Add a domain for a
+        proper address and generated service URLs.{" "}
         <Link to="/settings" hash="domain" className="font-medium underline">
           Settings → Domain
         </Link>
@@ -48,14 +100,19 @@ export function ProjectsPage() {
     queryFn: () => api.projects(workspace!.id),
     enabled: !!workspace,
   });
-  const canCreate = workspace && workspace.role !== "viewer" && workspace.role !== "deployer";
-  const shown = (projects.data ?? []).filter((p) => p.name.toLowerCase().includes(query.trim().toLowerCase()));
+  const canCreate =
+    workspace && workspace.role !== "viewer" && workspace.role !== "deployer";
+  const shown = (projects.data ?? []).filter((p) =>
+    p.name.toLowerCase().includes(query.trim().toLowerCase()),
+  );
 
   return (
     <div>
       {me?.user.isInstanceAdmin ? <DomainBanner /> : null}
       <div className="flex items-center justify-between gap-4">
-        <h1 className="text-[30px] leading-9 font-normal tracking-[-0.01em]">Projects</h1>
+        <h1 className="text-[30px] leading-9 font-normal tracking-[-0.01em]">
+          Projects
+        </h1>
         <div className="flex items-center gap-2">
           <label className="flex h-9 w-60 items-center gap-2 rounded-md border border-input px-2.5 text-muted-foreground focus-within:border-ring">
             <Search className="size-4" />
@@ -68,7 +125,11 @@ export function ProjectsPage() {
             />
           </label>
           {canCreate ? (
-            <Button variant="primary" icon={<Plus />} onClick={() => setCreating(true)}>
+            <Button
+              variant="primary"
+              icon={<Plus />}
+              onClick={() => setCreating(true)}
+            >
               New
             </Button>
           ) : null}
@@ -76,7 +137,8 @@ export function ProjectsPage() {
       </div>
       <div className="mt-6 flex items-center border-b border-border pb-3 text-xs text-muted-foreground">
         <span className="flex items-center gap-1.5">
-          <LayoutGrid className="size-3.5" /> {projects.data?.length ?? 0} projects
+          <LayoutGrid className="size-3.5" /> {projects.data?.length ?? 0}{" "}
+          projects
         </span>
       </div>
 
@@ -93,7 +155,11 @@ export function ProjectsPage() {
             body="Projects group the services, databases and environments of one app."
             action={
               canCreate ? (
-                <Button variant="outline" icon={<Plus />} onClick={() => setCreating(true)}>
+                <Button
+                  variant="outline"
+                  icon={<Plus />}
+                  onClick={() => setCreating(true)}
+                >
                   New project
                 </Button>
               ) : undefined
@@ -106,22 +172,29 @@ export function ProjectsPage() {
                 key={p.id}
                 to="/projects/$projectId"
                 params={{ projectId: p.id }}
-                className="group flex h-48 flex-col overflow-hidden rounded-xl border border-border bg-card hover:border-input"
+                className="group flex h-64 flex-col overflow-hidden rounded-xl border border-border bg-card hover:border-input"
               >
                 <div className="px-5 pt-4">
                   <div className="text-sm font-semibold">{p.name}</div>
                   {p.description ? (
-                    <div className="mt-0.5 truncate text-sm text-muted-foreground">{p.description}</div>
+                    <div className="mt-0.5 truncate text-sm text-muted-foreground">
+                      {p.description}
+                    </div>
                   ) : null}
                 </div>
-                <div className="dotgrid mx-5 my-3 flex-1 rounded-lg" />
-                <div className="px-5 pb-4 text-xs text-muted-foreground">Created {relativeTime(p.createdAt)}</div>
+                <CardPreview project={p} />
               </Link>
             ))}
           </div>
         )}
       </div>
-      {workspace ? <NewProjectDialog open={creating} onOpenChange={setCreating} workspace={workspace.id} /> : null}
+      {workspace ? (
+        <NewProjectDialog
+          open={creating}
+          onOpenChange={setCreating}
+          workspace={workspace.id}
+        />
+      ) : null}
     </div>
   );
 }
@@ -144,11 +217,19 @@ function NewProjectDialog({
       await qc.invalidateQueries({ queryKey: ["projects", workspace] });
       onOpenChange(false);
       setName("");
-      await navigate({ to: "/projects/$projectId", params: { projectId: p.id } });
+      await navigate({
+        to: "/projects/$projectId",
+        params: { projectId: p.id },
+      });
     },
   });
   return (
-    <Modal open={open} onOpenChange={onOpenChange} title="New project" description="It starts with a production environment.">
+    <Modal
+      open={open}
+      onOpenChange={onOpenChange}
+      title="New project"
+      description="It starts with a production environment."
+    >
       <form
         className="flex flex-col gap-4"
         onSubmit={(e) => {
@@ -158,13 +239,31 @@ function NewProjectDialog({
       >
         {create.error ? <Alert>{create.error.message}</Alert> : null}
         <Field label="Name">
-          {(p) => <Input {...p} autoFocus required maxLength={64} value={name} onChange={(e) => setName(e.target.value)} />}
+          {(p) => (
+            <Input
+              {...p}
+              autoFocus
+              required
+              maxLength={64}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          )}
         </Field>
         <div className="flex justify-end gap-2">
-          <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+          >
             Cancel
           </Button>
-          <Button type="submit" variant="primary" loading={create.isPending} disabled={!name.trim()}>
+          <Button
+            type="submit"
+            variant="primary"
+            loading={create.isPending}
+            disabled={!name.trim()}
+          >
             Create project
           </Button>
         </div>

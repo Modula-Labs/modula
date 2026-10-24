@@ -15,7 +15,9 @@ export async function parseError(res: Response): Promise<ApiError> {
   let code = "http_" + res.status;
   let message = res.statusText || "Request failed";
   try {
-    const body = (await res.json()) as { error?: { code?: string; message?: string } };
+    const body = (await res.json()) as {
+      error?: { code?: string; message?: string };
+    };
     if (body.error?.code) code = body.error.code;
     if (body.error?.message) message = body.error.message;
   } catch {
@@ -33,16 +35,27 @@ export function setSudoHandler(h: SudoHandler | null) {
   sudoHandler = h;
 }
 
-export async function request<T>(method: string, path: string, body?: unknown, retried = false): Promise<T> {
+export async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  retried = false,
+): Promise<T> {
   const res = await fetch(path, {
     method,
     credentials: "same-origin",
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    headers:
+      body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) {
     const err = await parseError(res);
-    if (err.code === "sudo_required" && !retried && sudoHandler && (await sudoHandler())) {
+    if (
+      err.code === "sudo_required" &&
+      !retried &&
+      sudoHandler &&
+      (await sudoHandler())
+    ) {
       return request<T>(method, path, body, true);
     }
     throw err;
@@ -52,7 +65,8 @@ export async function request<T>(method: string, path: string, body?: unknown, r
 }
 
 export const get = <T>(p: string) => request<T>("GET", p);
-export const post = <T>(p: string, b?: unknown) => request<T>("POST", p, b ?? {});
+export const post = <T>(p: string, b?: unknown) =>
+  request<T>("POST", p, b ?? {});
 export const patch = <T>(p: string, b: unknown) => request<T>("PATCH", p, b);
 export const del = <T>(p: string) => request<T>("DELETE", p);
 
@@ -108,6 +122,18 @@ export interface Project {
   description: string;
   createdAt: string;
 }
+/** A project on the projects page: its first environment's services. */
+export interface ProjectCard extends Project {
+  environment: string | null;
+  services: {
+    id: string;
+    name: string;
+    stack: string | null;
+    image: string | null;
+    repo: string | null;
+    online: boolean;
+  }[];
+}
 export interface Environment {
   id: string;
   name: string;
@@ -120,7 +146,15 @@ export interface ServiceSummary {
   /** Database template the service was created from, if any. */
   template?: string | null;
 }
-export type DeploymentStatus = "queued" | "building" | "deploying" | "active" | "failed" | "crashed" | "removed" | "cancelled";
+export type DeploymentStatus =
+  | "queued"
+  | "building"
+  | "deploying"
+  | "active"
+  | "failed"
+  | "crashed"
+  | "removed"
+  | "cancelled";
 export interface InstanceSummary {
   id: string;
   serviceId: string;
@@ -381,7 +415,12 @@ export interface VariablePatch {
 /** Names only, for `${{` autocomplete. */
 export interface VariableNames {
   shared: string[];
-  services: { serviceId: string; serviceName: string; names: string[]; platform: string[] }[];
+  services: {
+    serviceId: string;
+    serviceName: string;
+    names: string[];
+    platform: string[];
+  }[];
 }
 /** A variable or setting that differs from the service's last deployment. */
 export interface PendingChange extends ActivityChange {
@@ -474,7 +513,13 @@ export interface NodeInfo {
   status: "online" | "offline" | "revoked";
   nodeVersion: string | null;
   runtime: string | null;
-  info: { hostname?: string; os?: string; arch?: string; cpus?: number; memoryBytes?: number };
+  info: {
+    hostname?: string;
+    os?: string;
+    arch?: string;
+    cpus?: number;
+    memoryBytes?: number;
+  };
   desiredGeneration: number;
   appliedGeneration: number;
   lastSeenAt: string | null;
@@ -542,13 +587,36 @@ export interface DbTableStats {
   xidAge: number;
 }
 export interface DbStats {
-  connections: { used: number; max: number; active: number; idle: number; idleInTransaction: number };
+  connections: {
+    used: number;
+    max: number;
+    active: number;
+    idle: number;
+    idleInTransaction: number;
+  };
   cacheHitRatio: number;
-  sizes: { database: number; tables: number; indexes: number; system: number; other: number; wal: number };
+  sizes: {
+    database: number;
+    tables: number;
+    indexes: number;
+    system: number;
+    other: number;
+    wal: number;
+  };
   tables: DbTableStats[];
-  unusedIndexes: { name: string; table: string; bytes: number; scans: number }[];
+  unusedIndexes: {
+    name: string;
+    table: string;
+    bytes: number;
+    scans: number;
+  }[];
   pgStatStatements: boolean;
-  topQueries: { query: string; calls: number; meanMs: number; totalMs: number }[];
+  topQueries: {
+    query: string;
+    calls: number;
+    meanMs: number;
+    totalMs: number;
+  }[];
 }
 export interface DbExtension {
   name: string;
@@ -619,7 +687,8 @@ export interface EnvironmentLogsQuery {
   limit?: number;
 }
 
-export type WebhookEvent = "deployment.succeeded" | "deployment.failed" | "deployment.crashed";
+export type WebhookEvent =
+  "deployment.succeeded" | "deployment.failed" | "deployment.crashed";
 export interface Webhook {
   id: string;
   url: string;
@@ -638,182 +707,361 @@ export interface InstanceDomain {
   appsDomainFromEnv: boolean;
 }
 
-export const isNotAvailable = (e: unknown) => e instanceof ApiError && (e.status === 404 || e.status === 501);
+export const isNotAvailable = (e: unknown) =>
+  e instanceof ApiError && (e.status === 404 || e.status === 501);
 
 const enc = encodeURIComponent;
 
 export const api = {
   instance: () => get<InstanceStatus>("/api/instance"),
   me: () => get<Me>("/api/auth/me"),
-  setup: (b: { setupToken: string; email: string; name: string; password: string; workspaceName?: string }) =>
-    post<Me>("/api/auth/setup", b),
-  login: (b: { email: string; password: string }) => post<LoginResponse>("/api/auth/login", b),
-  mfa: (b: { totpCode: string } | { backupCode: string }) => post<Me>("/api/auth/mfa", b),
-  sudo: (b: { password: string } | { totpCode: string } | { backupCode: string }) =>
-    post<{ sudoUntil: string }>("/api/auth/sudo", b),
+  setup: (b: {
+    setupToken: string;
+    email: string;
+    name: string;
+    password: string;
+    workspaceName?: string;
+  }) => post<Me>("/api/auth/setup", b),
+  login: (b: { email: string; password: string }) =>
+    post<LoginResponse>("/api/auth/login", b),
+  mfa: (b: { totpCode: string } | { backupCode: string }) =>
+    post<Me>("/api/auth/mfa", b),
+  sudo: (
+    b: { password: string } | { totpCode: string } | { backupCode: string },
+  ) => post<{ sudoUntil: string }>("/api/auth/sudo", b),
   logout: () => post<{ ok: true }>("/api/auth/logout"),
   security: () => get<Security>("/api/account/security"),
-  totpBegin: () => post<{ otpauthUrl: string; secret: string }>("/api/account/totp"),
-  totpConfirm: (code: string) => post<{ backupCodes: string[] }>("/api/account/totp/confirm", { code }),
+  totpBegin: () =>
+    post<{ otpauthUrl: string; secret: string }>("/api/account/totp"),
+  totpConfirm: (code: string) =>
+    post<{ backupCodes: string[] }>("/api/account/totp/confirm", { code }),
   totpDisable: () => del<{ ok: true }>("/api/account/totp"),
-  backupCodes: () => post<{ backupCodes: string[] }>("/api/account/backup-codes"),
+  backupCodes: () =>
+    post<{ backupCodes: string[] }>("/api/account/backup-codes"),
   changePassword: (newPassword: string) =>
-    post<{ ok: true; sessionsRevoked: number }>("/api/account/password", { newPassword }),
+    post<{ ok: true; sessionsRevoked: number }>("/api/account/password", {
+      newPassword,
+    }),
   sessions: () => get<SessionInfo[]>("/api/account/sessions"),
-  revokeSession: (id: string) => del<{ ok: true }>(`/api/account/sessions/${encodeURIComponent(id)}`),
+  revokeSession: (id: string) =>
+    del<{ ok: true }>(`/api/account/sessions/${encodeURIComponent(id)}`),
   apiTokens: () => get<ApiToken[]>("/api/account/tokens"),
   /** Needs sudo (the request layer asks). The token is returned only here. */
-  createApiToken: (b: { name: string; workspaceId?: string; expiresInDays?: number }) =>
-    post<ApiToken & { token: string }>("/api/account/tokens", b),
-  revokeApiToken: (id: string) => del<{ ok: true }>(`/api/account/tokens/${encodeURIComponent(id)}`),
-  createWorkspace: (name: string) => post<{ id: string; name: string }>("/api/workspaces", { name }),
-  updateWorkspace: (id: string, name: string) => patch<{ id: string; name: string }>(`/api/workspaces/${enc(id)}`, { name }),
-  deleteWorkspace: (id: string) => del<{ ok: true }>(`/api/workspaces/${enc(id)}`),
+  createApiToken: (b: {
+    name: string;
+    workspaceId?: string;
+    expiresInDays?: number;
+  }) => post<ApiToken & { token: string }>("/api/account/tokens", b),
+  revokeApiToken: (id: string) =>
+    del<{ ok: true }>(`/api/account/tokens/${encodeURIComponent(id)}`),
+  createWorkspace: (name: string) =>
+    post<{ id: string; name: string }>("/api/workspaces", { name }),
+  updateWorkspace: (id: string, name: string) =>
+    patch<{ id: string; name: string }>(`/api/workspaces/${enc(id)}`, { name }),
+  deleteWorkspace: (id: string) =>
+    del<{ ok: true }>(`/api/workspaces/${enc(id)}`),
 
-  projects: (workspace: string) => get<Project[]>(`/api/workspaces/${enc(workspace)}/projects`),
-  createProject: (workspace: string, b: { name: string; description?: string }) =>
-    post<ProjectDetail>(`/api/workspaces/${enc(workspace)}/projects`, b),
+  projects: (workspace: string) =>
+    get<ProjectCard[]>(`/api/workspaces/${enc(workspace)}/projects`),
+  createProject: (
+    workspace: string,
+    b: { name: string; description?: string },
+  ) => post<ProjectDetail>(`/api/workspaces/${enc(workspace)}/projects`, b),
   project: (id: string) => get<ProjectDetail>(`/api/projects/${enc(id)}`),
-  updateProject: (id: string, b: { name?: string; description?: string }) => patch<Project>(`/api/projects/${enc(id)}`, b),
+  updateProject: (id: string, b: { name?: string; description?: string }) =>
+    patch<Project>(`/api/projects/${enc(id)}`, b),
   deleteProject: (id: string) => del<{ ok: true }>(`/api/projects/${enc(id)}`),
-  createEnvironment: (project: string, b: { name: string; cloneFrom?: string; copyVariables?: boolean }) =>
-    post<Environment>(`/api/projects/${enc(project)}/environments`, b),
+  createEnvironment: (
+    project: string,
+    b: { name: string; cloneFrom?: string; copyVariables?: boolean },
+  ) => post<Environment>(`/api/projects/${enc(project)}/environments`, b),
   syncEnvironment: (target: string, fromEnvironmentId: string) =>
-    post<SyncResult>(`/api/environments/${enc(target)}/sync`, { fromEnvironmentId }),
-  activity: (project: string, q: { environmentId?: string; serviceId?: string; kind?: ActivityKind }) => {
+    post<SyncResult>(`/api/environments/${enc(target)}/sync`, {
+      fromEnvironmentId,
+    }),
+  activity: (
+    project: string,
+    q: { environmentId?: string; serviceId?: string; kind?: ActivityKind },
+  ) => {
     const params = new URLSearchParams();
     if (q.environmentId) params.set("environmentId", q.environmentId);
     if (q.serviceId) params.set("serviceId", q.serviceId);
     if (q.kind) params.set("kind", q.kind);
-    return get<{ items: ActivityGroup[] }>(`/api/projects/${enc(project)}/activity?${params}`);
+    return get<{ items: ActivityGroup[] }>(
+      `/api/projects/${enc(project)}/activity?${params}`,
+    );
   },
-  deleteEnvironment: (id: string) => del<{ ok: true }>(`/api/environments/${enc(id)}`),
+  deleteEnvironment: (id: string) =>
+    del<{ ok: true }>(`/api/environments/${enc(id)}`),
 
   createService: (
     project: string,
-    b: { name: string; config: Partial<ServiceConfig> & { source: ServiceConfig["source"] } } | { name: string; template: TemplateId },
+    b:
+      | {
+          name: string;
+          config: Partial<ServiceConfig> & { source: ServiceConfig["source"] };
+        }
+      | { name: string; template: TemplateId },
   ) =>
-    post<{ id: string; name: string; instances: Instance[] }>(`/api/projects/${enc(project)}/services`, b),
-  deleteService: (id: string) => del<{ ok: true }>(`/api/services/${enc(id)}`),
-  serviceInstance: (id: string) => get<Instance>(`/api/service-instances/${enc(id)}`),
-  moveInstance: (id: string, nodeId: string) =>
-    patch<{ nodeId: string; deploymentId: string | null }>(`/api/service-instances/${enc(id)}/server`, { nodeId }),
-  updateInstance: (id: string, config: ServiceConfig) => patch<Instance>(`/api/service-instances/${enc(id)}`, { config }),
-
-  variables: (instance: string) => get<VariableInfo[]>(`/api/service-instances/${enc(instance)}/variables`),
-  updateVariables: (instance: string, b: VariablePatch) =>
-    patch<VariableInfo[]>(`/api/service-instances/${enc(instance)}/variables`, b),
-  sharedVariables: (environment: string) => get<VariableInfo[]>(`/api/environments/${enc(environment)}/variables`),
-  updateSharedVariables: (environment: string, b: VariablePatch) =>
-    patch<VariableInfo[]>(`/api/environments/${enc(environment)}/variables`, b),
-  variableNames: (environment: string) => get<VariableNames>(`/api/environments/${enc(environment)}/variable-names`),
-  pending: (environment: string, opts?: { values?: boolean }) =>
-    get<PendingChanges>(`/api/environments/${enc(environment)}/pending${opts?.values ? "?values=true" : ""}`),
-  deployPending: (environment: string, b: { serviceIds?: string[]; message?: string } = {}) =>
-    post<{ deployments: { serviceId: string; deploymentId: string | null; error: string | null }[] }>(
-      `/api/environments/${enc(environment)}/deploy`,
+    post<{ id: string; name: string; instances: Instance[] }>(
+      `/api/projects/${enc(project)}/services`,
       b,
     ),
-  /** Revert a service's pending changes (all, or the given ones) to its last deployment. */
-  discardPending: (environment: string, serviceId: string, changes?: { kind: "variable" | "config"; key: string }[]) =>
-    post<PendingChanges>(`/api/environments/${enc(environment)}/discard`, { serviceId, changes }),
-  revealVariable: (id: string) => post<{ name: string; value: string }>(`/api/variables/${enc(id)}/reveal`),
+  deleteService: (id: string) => del<{ ok: true }>(`/api/services/${enc(id)}`),
+  serviceInstance: (id: string) =>
+    get<Instance>(`/api/service-instances/${enc(id)}`),
+  moveInstance: (id: string, nodeId: string) =>
+    patch<{ nodeId: string; deploymentId: string | null }>(
+      `/api/service-instances/${enc(id)}/server`,
+      { nodeId },
+    ),
+  updateInstance: (id: string, config: ServiceConfig) =>
+    patch<Instance>(`/api/service-instances/${enc(id)}`, { config }),
 
-  deployments: (instance: string) => get<Deployment[]>(`/api/service-instances/${enc(instance)}/deployments`),
+  variables: (instance: string) =>
+    get<VariableInfo[]>(`/api/service-instances/${enc(instance)}/variables`),
+  updateVariables: (instance: string, b: VariablePatch) =>
+    patch<VariableInfo[]>(
+      `/api/service-instances/${enc(instance)}/variables`,
+      b,
+    ),
+  sharedVariables: (environment: string) =>
+    get<VariableInfo[]>(`/api/environments/${enc(environment)}/variables`),
+  updateSharedVariables: (environment: string, b: VariablePatch) =>
+    patch<VariableInfo[]>(`/api/environments/${enc(environment)}/variables`, b),
+  variableNames: (environment: string) =>
+    get<VariableNames>(`/api/environments/${enc(environment)}/variable-names`),
+  pending: (environment: string, opts?: { values?: boolean }) =>
+    get<PendingChanges>(
+      `/api/environments/${enc(environment)}/pending${opts?.values ? "?values=true" : ""}`,
+    ),
+  deployPending: (
+    environment: string,
+    b: { serviceIds?: string[]; message?: string } = {},
+  ) =>
+    post<{
+      deployments: {
+        serviceId: string;
+        deploymentId: string | null;
+        error: string | null;
+      }[];
+    }>(`/api/environments/${enc(environment)}/deploy`, b),
+  /** Revert a service's pending changes (all, or the given ones) to its last deployment. */
+  discardPending: (
+    environment: string,
+    serviceId: string,
+    changes?: { kind: "variable" | "config"; key: string }[],
+  ) =>
+    post<PendingChanges>(`/api/environments/${enc(environment)}/discard`, {
+      serviceId,
+      changes,
+    }),
+  revealVariable: (id: string) =>
+    post<{ name: string; value: string }>(`/api/variables/${enc(id)}/reveal`),
+
+  deployments: (instance: string) =>
+    get<Deployment[]>(`/api/service-instances/${enc(instance)}/deployments`),
   instanceMetrics: (instance: string, range: MetricsRange) =>
-    get<InstanceMetrics>(`/api/service-instances/${enc(instance)}/metrics?range=${range}`),
+    get<InstanceMetrics>(
+      `/api/service-instances/${enc(instance)}/metrics?range=${range}`,
+    ),
   projectMetrics: (project: string, environment: string, range: MetricsRange) =>
-    get<InstanceMetrics>(`/api/projects/${enc(project)}/metrics?environment=${enc(environment)}&range=${range}`),
+    get<InstanceMetrics>(
+      `/api/projects/${enc(project)}/metrics?environment=${enc(environment)}&range=${range}`,
+    ),
   environmentLogs: (environment: string, q: EnvironmentLogsQuery) => {
     const params = new URLSearchParams({ since: String(q.since) });
     if (q.until !== undefined) params.set("until", String(q.until));
     if (q.q) params.set("q", q.q);
     if (q.service) params.set("service", q.service);
     if (q.limit !== undefined) params.set("limit", String(q.limit));
-    return get<EnvironmentLogs>(`/api/environments/${enc(environment)}/logs?${params}`);
+    return get<EnvironmentLogs>(
+      `/api/environments/${enc(environment)}/logs?${params}`,
+    );
   },
-  webhooks: (project: string) => get<Webhook[]>(`/api/projects/${enc(project)}/webhooks`),
+  webhooks: (project: string) =>
+    get<Webhook[]>(`/api/projects/${enc(project)}/webhooks`),
   /** The signing secret is returned only here. */
-  createWebhook: (project: string, b: { url: string; events: WebhookEvent[] }) =>
-    post<Webhook & { secret: string }>(`/api/projects/${enc(project)}/webhooks`, b),
+  createWebhook: (
+    project: string,
+    b: { url: string; events: WebhookEvent[] },
+  ) =>
+    post<Webhook & { secret: string }>(
+      `/api/projects/${enc(project)}/webhooks`,
+      b,
+    ),
   deleteWebhook: (id: string) => del<void>(`/api/webhooks/${enc(id)}`),
-  testWebhook: (id: string) => post<{ status: number | null; error: string | null }>(`/api/webhooks/${enc(id)}/test`),
-  deploy: (instance: string) => post<DeploymentDetail>(`/api/service-instances/${enc(instance)}/deployments`),
-  deployment: (id: string) => get<DeploymentDetail>(`/api/deployments/${enc(id)}`),
-  redeployDeployment: (id: string) => post<DeploymentDetail>(`/api/deployments/${enc(id)}/redeploy`),
-  rollbackDeployment: (id: string) => post<DeploymentDetail>(`/api/deployments/${enc(id)}/rollback`),
-  restartDeployment: (id: string) => post<DeploymentDetail>(`/api/deployments/${enc(id)}/restart`),
-  removeDeployment: (id: string) => del<DeploymentDetail>(`/api/deployments/${enc(id)}`),
-  deploymentLogsUrl: (id: string, tail = 500, kind: "deploy" | "build" = "deploy") =>
+  testWebhook: (id: string) =>
+    post<{ status: number | null; error: string | null }>(
+      `/api/webhooks/${enc(id)}/test`,
+    ),
+  deploy: (instance: string) =>
+    post<DeploymentDetail>(
+      `/api/service-instances/${enc(instance)}/deployments`,
+    ),
+  deployment: (id: string) =>
+    get<DeploymentDetail>(`/api/deployments/${enc(id)}`),
+  redeployDeployment: (id: string) =>
+    post<DeploymentDetail>(`/api/deployments/${enc(id)}/redeploy`),
+  rollbackDeployment: (id: string) =>
+    post<DeploymentDetail>(`/api/deployments/${enc(id)}/rollback`),
+  restartDeployment: (id: string) =>
+    post<DeploymentDetail>(`/api/deployments/${enc(id)}/restart`),
+  removeDeployment: (id: string) =>
+    del<DeploymentDetail>(`/api/deployments/${enc(id)}`),
+  deploymentLogsUrl: (
+    id: string,
+    tail = 500,
+    kind: "deploy" | "build" = "deploy",
+  ) =>
     `/api/deployments/${enc(id)}/logs?${kind === "build" ? "kind=build&" : ""}tail=${tail}&follow=true`,
 
-  domains: (instance: string) => get<Domain[]>(`/api/service-instances/${enc(instance)}/domains`),
-  generateDomain: (instance: string) => post<Domain>(`/api/service-instances/${enc(instance)}/domains`),
-  addCustomDomain: (instance: string, body: { hostname: string; targetPort: number | null }) =>
-    post<Domain>(`/api/service-instances/${enc(instance)}/custom-domains`, body),
+  domains: (instance: string) =>
+    get<Domain[]>(`/api/service-instances/${enc(instance)}/domains`),
+  generateDomain: (instance: string) =>
+    post<Domain>(`/api/service-instances/${enc(instance)}/domains`),
+  addCustomDomain: (
+    instance: string,
+    body: { hostname: string; targetPort: number | null },
+  ) =>
+    post<Domain>(
+      `/api/service-instances/${enc(instance)}/custom-domains`,
+      body,
+    ),
   checkDomain: (id: string) => post<Domain>(`/api/domains/${enc(id)}/check`),
-  updateDomain: (id: string, body: { targetPort: number | null; rateLimitPerMinute: number | null }) =>
-    patch<Domain>(`/api/domains/${enc(id)}`, body),
+  updateDomain: (
+    id: string,
+    body: { targetPort: number | null; rateLimitPerMinute: number | null },
+  ) => patch<Domain>(`/api/domains/${enc(id)}`, body),
   deleteDomain: (id: string) => del<{ ok: true }>(`/api/domains/${enc(id)}`),
 
   templates: () => get<Template[]>("/api/templates"),
-  createVolume: (instance: string, mountPath: string) => post<Instance>(`/api/service-instances/${enc(instance)}/volume`, { mountPath }),
+  createVolume: (instance: string, mountPath: string) =>
+    post<Instance>(`/api/service-instances/${enc(instance)}/volume`, {
+      mountPath,
+    }),
   deleteVolume: (id: string) => del<{ ok: true }>(`/api/volumes/${enc(id)}`),
   createTcpProxy: (instance: string, targetPort: number) =>
-    post<Instance>(`/api/service-instances/${enc(instance)}/tcp-proxy`, { targetPort }),
-  deleteTcpProxy: (id: string) => del<{ ok: true }>(`/api/tcp-proxies/${enc(id)}`),
+    post<Instance>(`/api/service-instances/${enc(instance)}/tcp-proxy`, {
+      targetPort,
+    }),
+  deleteTcpProxy: (id: string) =>
+    del<{ ok: true }>(`/api/tcp-proxies/${enc(id)}`),
 
-  backupTargets: (workspace: string) => get<BackupTarget[]>(`/api/workspaces/${enc(workspace)}/backup-targets`),
+  backupTargets: (workspace: string) =>
+    get<BackupTarget[]>(`/api/workspaces/${enc(workspace)}/backup-targets`),
   createBackupTarget: (workspace: string, b: BackupTargetInput) =>
     post<BackupTarget>(`/api/workspaces/${enc(workspace)}/backup-targets`, b),
-  deleteBackupTarget: (id: string) => del<{ ok: true }>(`/api/backup-targets/${enc(id)}`),
-  backups: (instance: string) => get<BackupsInfo>(`/api/service-instances/${enc(instance)}/backups`),
+  deleteBackupTarget: (id: string) =>
+    del<{ ok: true }>(`/api/backup-targets/${enc(id)}`),
+  backups: (instance: string) =>
+    get<BackupsInfo>(`/api/service-instances/${enc(instance)}/backups`),
   saveBackupSchedule: (instance: string, b: BackupSchedule) =>
-    request<BackupsInfo>("PUT", `/api/service-instances/${enc(instance)}/backup-schedule`, b),
-  backupNow: (instance: string) => post<Backup>(`/api/service-instances/${enc(instance)}/backups`),
-  restoreBackup: (id: string) => post<{ ok: true }>(`/api/backups/${enc(id)}/restore`),
+    request<BackupsInfo>(
+      "PUT",
+      `/api/service-instances/${enc(instance)}/backup-schedule`,
+      b,
+    ),
+  backupNow: (instance: string) =>
+    post<Backup>(`/api/service-instances/${enc(instance)}/backups`),
+  restoreBackup: (id: string) =>
+    post<{ ok: true }>(`/api/backups/${enc(id)}/restore`),
   deleteBackup: (id: string) => del<{ ok: true }>(`/api/backups/${enc(id)}`),
   selfBackup: () => get<SelfBackup>("/api/instance/self-backup"),
-  saveSelfBackup: (b: SelfBackup) => request<SelfBackup>("PUT", "/api/instance/self-backup", b),
+  saveSelfBackup: (b: SelfBackup) =>
+    request<SelfBackup>("PUT", "/api/instance/self-backup", b),
   updates: () => get<UpdateStatus>("/api/instance/updates"),
-  saveUpdates: (b: { mode: UpdateMode; channel: "stable"; window: UpdateWindow }) => request<UpdateStatus>("PUT", "/api/instance/updates", b),
-  runUpdate: () => request<UpdateStatus>("POST", "/api/instance/updates/run", {}),
-  checkUpdates: () => request<UpdateStatus>("POST", "/api/instance/updates/check", {}),
+  saveUpdates: (b: {
+    mode: UpdateMode;
+    channel: "stable";
+    window: UpdateWindow;
+  }) => request<UpdateStatus>("PUT", "/api/instance/updates", b),
+  runUpdate: () =>
+    request<UpdateStatus>("POST", "/api/instance/updates/run", {}),
+  checkUpdates: () =>
+    request<UpdateStatus>("POST", "/api/instance/updates/check", {}),
   instanceDomain: () => get<InstanceDomain>("/api/instance/domain"),
-  saveInstanceDomain: (b: { dashboard: string | null; appsDomain: string | null; skipDnsCheck?: boolean }) =>
-    request<InstanceDomain>("PUT", "/api/instance/domain", b),
+  saveInstanceDomain: (b: {
+    dashboard: string | null;
+    appsDomain: string | null;
+    skipDnsCheck?: boolean;
+  }) => request<InstanceDomain>("PUT", "/api/instance/domain", b),
   privateAccess: () => get<PrivateAccessStatus>("/api/instance/private-access"),
   privateAccessCheck: (workspaceId: string) =>
-    get<PrivateAccessCheck>(`/api/instance/private-access/check?workspaceId=${encodeURIComponent(workspaceId)}`),
-  setPrivateAccess: (b: PrivateAccessUpdate) => request<PrivateAccessStatus>("PUT", "/api/instance/private-access", b),
+    get<PrivateAccessCheck>(
+      `/api/instance/private-access/check?workspaceId=${encodeURIComponent(workspaceId)}`,
+    ),
+  setPrivateAccess: (b: PrivateAccessUpdate) =>
+    request<PrivateAccessStatus>("PUT", "/api/instance/private-access", b),
 
-  dbTables: (i: string) => get<{ tables: DbTable[] }>(`/api/service-instances/${enc(i)}/database/tables`),
+  dbTables: (i: string) =>
+    get<{ tables: DbTable[] }>(
+      `/api/service-instances/${enc(i)}/database/tables`,
+    ),
   dbRows: (i: string, q: DbRowsQuery) => {
-    const p = new URLSearchParams({ table: q.table, page: String(q.page), pageSize: String(q.pageSize) });
+    const p = new URLSearchParams({
+      table: q.table,
+      page: String(q.page),
+      pageSize: String(q.pageSize),
+    });
     if (q.orderBy) {
       p.set("orderBy", q.orderBy);
       p.set("dir", q.dir ?? "asc");
     }
     return get<DbRows>(`/api/service-instances/${enc(i)}/database/rows?${p}`);
   },
-  dbQuery: (i: string, sql: string) => post<DbQueryResult>(`/api/service-instances/${enc(i)}/database/query`, { sql }),
-  dbInsertRow: (i: string, table: string, values: Record<string, string | null>) =>
-    post<unknown>(`/api/service-instances/${enc(i)}/database/rows`, { table, values }),
-  dbUpdateRow: (i: string, table: string, key: Record<string, string | null>, values: Record<string, string | null>) =>
-    patch<unknown>(`/api/service-instances/${enc(i)}/database/rows`, { table, key, values }),
+  dbQuery: (i: string, sql: string) =>
+    post<DbQueryResult>(`/api/service-instances/${enc(i)}/database/query`, {
+      sql,
+    }),
+  dbInsertRow: (
+    i: string,
+    table: string,
+    values: Record<string, string | null>,
+  ) =>
+    post<unknown>(`/api/service-instances/${enc(i)}/database/rows`, {
+      table,
+      values,
+    }),
+  dbUpdateRow: (
+    i: string,
+    table: string,
+    key: Record<string, string | null>,
+    values: Record<string, string | null>,
+  ) =>
+    patch<unknown>(`/api/service-instances/${enc(i)}/database/rows`, {
+      table,
+      key,
+      values,
+    }),
   dbDeleteRow: (i: string, table: string, key: Record<string, string | null>) =>
-    request<unknown>("DELETE", `/api/service-instances/${enc(i)}/database/rows`, { table, key }),
-  dbStats: (i: string) => get<DbStats>(`/api/service-instances/${enc(i)}/database/stats`),
-  dbVacuum: (i: string, table: string) => post<unknown>(`/api/service-instances/${enc(i)}/database/vacuum`, { table }),
-  dbExtensions: (i: string) => get<DbExtensions>(`/api/service-instances/${enc(i)}/database/extensions`),
+    request<unknown>(
+      "DELETE",
+      `/api/service-instances/${enc(i)}/database/rows`,
+      { table, key },
+    ),
+  dbStats: (i: string) =>
+    get<DbStats>(`/api/service-instances/${enc(i)}/database/stats`),
+  dbVacuum: (i: string, table: string) =>
+    post<unknown>(`/api/service-instances/${enc(i)}/database/vacuum`, {
+      table,
+    }),
+  dbExtensions: (i: string) =>
+    get<DbExtensions>(`/api/service-instances/${enc(i)}/database/extensions`),
   dbSetExtension: (i: string, name: string, action: "install" | "uninstall") =>
-    post<unknown>(`/api/service-instances/${enc(i)}/database/extensions`, { name, action }),
-  dbCredentials: (i: string) => get<DbCredentials>(`/api/service-instances/${enc(i)}/database/credentials`),
-  dbRegeneratePassword: (i: string) => post<DbCredentials>(`/api/service-instances/${enc(i)}/database/password`),
+    post<unknown>(`/api/service-instances/${enc(i)}/database/extensions`, {
+      name,
+      action,
+    }),
+  dbCredentials: (i: string) =>
+    get<DbCredentials>(`/api/service-instances/${enc(i)}/database/credentials`),
+  dbRegeneratePassword: (i: string) =>
+    post<DbCredentials>(`/api/service-instances/${enc(i)}/database/password`),
 
   nodes: () => get<NodeInfo[]>("/api/nodes"),
   createJoinToken: () => post<JoinToken>("/api/nodes/join-tokens"),
   locations: () => get<LocationOption[]>("/api/locations"),
-  setNodeLocation: (id: string, location: string | null) => patch<NodeInfo>(`/api/nodes/${enc(id)}`, { location }),
+  setNodeLocation: (id: string, location: string | null) =>
+    patch<NodeInfo>(`/api/nodes/${enc(id)}`, { location }),
   revokeNode: (id: string) => del<{ ok: true }>(`/api/nodes/${enc(id)}`),
 };

@@ -89,16 +89,83 @@ pub struct ProjectDetail {
 
 const PRODUCTION: &str = "production";
 
-pub async fn list(State(state): State<AppState>, grant: Grant) -> AppResult<Json<Vec<Project>>> {
+/// A project on the projects page: its services in its first environment
+/// (production) and how many of them are online.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCard {
+    #[serde(flatten)]
+    pub project: Project,
+    pub environment: Option<String>,
+    pub services: Vec<CardService>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct CardService {
+    #[serde(skip)]
+    project_id: Id,
+    pub id: Id,
+    pub name: String,
+    pub stack: Option<String>,
+    pub image: Option<String>,
+    pub repo: Option<String>,
+    pub online: bool,
+}
+
+pub async fn list(
+    State(state): State<AppState>,
+    grant: Grant,
+) -> AppResult<Json<Vec<ProjectCard>>> {
     let ws = grant.workspace_id()?;
+    let projects: Vec<Project> = sqlx::query_as(
+        "SELECT id, workspace_id, name, description, created_at FROM projects
+         WHERE workspace_id = $1 ORDER BY created_at",
+    )
+    .bind(ws)
+    .fetch_all(&state.db)
+    .await?;
+    let envs: Vec<(Id, String)> = sqlx::query_as(
+        "SELECT DISTINCT ON (e.project_id) e.project_id, e.name FROM environments e
+         JOIN projects p ON p.id = e.project_id
+         WHERE p.workspace_id = $1 ORDER BY e.project_id, e.created_at",
+    )
+    .bind(ws)
+    .fetch_all(&state.db)
+    .await?;
+    let services: Vec<CardService> = sqlx::query_as(
+        "SELECT s.project_id, s.id, s.name, i.stack,
+                i.config->'source'->>'image' AS image, i.config->'source'->>'repo' AS repo,
+                EXISTS (SELECT 1 FROM deployments d
+                        WHERE d.service_instance_id = i.id AND d.status = 'active') AS online
+         FROM services s
+         JOIN projects p ON p.id = s.project_id
+         JOIN LATERAL (
+             SELECT e.id FROM environments e WHERE e.project_id = p.id ORDER BY e.created_at LIMIT 1
+         ) e ON true
+         JOIN service_instances i ON i.service_id = s.id AND i.environment_id = e.id
+         WHERE p.workspace_id = $1
+         ORDER BY s.created_at",
+    )
+    .bind(ws)
+    .fetch_all(&state.db)
+    .await?;
+    let mut by_project: BTreeMap<Id, Vec<CardService>> = BTreeMap::new();
+    for s in services {
+        by_project.entry(s.project_id).or_default().push(s);
+    }
     Ok(Json(
-        sqlx::query_as(
-            "SELECT id, workspace_id, name, description, created_at FROM projects
-             WHERE workspace_id = $1 ORDER BY created_at",
-        )
-        .bind(ws)
-        .fetch_all(&state.db)
-        .await?,
+        projects
+            .into_iter()
+            .map(|project| ProjectCard {
+                environment: envs
+                    .iter()
+                    .find(|(p, _)| *p == project.id)
+                    .map(|(_, n)| n.clone()),
+                services: by_project.remove(&project.id).unwrap_or_default(),
+                project,
+            })
+            .collect(),
     ))
 }
 
