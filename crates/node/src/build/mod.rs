@@ -112,7 +112,8 @@ impl Builder for FakeBuilder {
         })
     }
 
-    /// A tiny site: `index.html` and `assets/app.js`.
+    /// A tiny site: `index.html` and `assets/app.js`; for a function's
+    /// bundle directory, a module worker.
     async fn export(
         &self,
         _w: &pb::Workload,
@@ -122,6 +123,13 @@ impl Builder for FakeBuilder {
     ) -> anyhow::Result<()> {
         let top = dir.trim_matches('/').rsplit('/').next().unwrap_or("out");
         log.line(false, &format!("exporting {dir}"));
+        if dir == pb::FUNCTION_OUTPUT_DIR {
+            return output::pack(
+                dest,
+                top,
+                &[(pb::FUNCTION_MODULE, FAKE_FUNCTION.as_bytes())],
+            );
+        }
         output::pack(
             dest,
             top,
@@ -132,6 +140,10 @@ impl Builder for FakeBuilder {
         )
     }
 }
+
+/// The module worker FakeBuilder bundles.
+pub const FAKE_FUNCTION: &str =
+    "export default { fetch() { return new Response('fake function'); } };\n";
 
 /// Relative paths of the regular files under `dir`, sorted (FakeBuilder logs).
 fn list_files(root: &std::path::Path, dir: &std::path::Path) -> Vec<String> {

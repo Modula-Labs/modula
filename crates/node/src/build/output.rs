@@ -1,8 +1,9 @@
-//! Build output for static sites hosted elsewhere (`Build.output_dir`): the
-//! output directory, packed from the built image as a gzipped tarball, goes
-//! to the control plane, which publishes it. The node never talks to the
-//! hosting provider and holds no credentials for it: only the upload token
-//! bound to this deployment from its desired state.
+//! Build output hosted elsewhere (`Build.output_dir`: a static site, or a
+//! function's bundle): the directory, packed from the built image as a
+//! gzipped tarball, goes to the control plane, which publishes it. The node
+//! never talks to the hosting provider and holds no credentials for it: only
+//! the upload token bound to this deployment from its desired state. A
+//! function run here reads its bundle from the same kind of archive.
 
 use std::path::Path;
 use std::time::Duration;
@@ -59,6 +60,37 @@ pub async fn upload(url: &str, auth: &str, path: &Path) -> anyhow::Result<()> {
         bail!("the control plane refused the build output: HTTP {status} {text}");
     }
     Ok(())
+}
+
+/// The text of file `name` directly inside the archive's top-level
+/// directory (a function's bundle, at most 64 MiB).
+pub fn read_file(archive: &Path, name: &str) -> anyhow::Result<String> {
+    use std::io::Read as _;
+    let f = std::fs::File::open(archive)?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(f));
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        let parts: Vec<_> = path
+            .components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .collect();
+        let found = entry.header().entry_type().is_file()
+            && parts.len() == 2
+            && parts[1].as_os_str() == name;
+        if !found {
+            continue;
+        }
+        if entry.size() > 64 << 20 {
+            bail!("{name} is bigger than 64 MiB");
+        }
+        let mut text = String::new();
+        entry
+            .read_to_string(&mut text)
+            .with_context(|| format!("{name} isn't UTF-8 text"))?;
+        return Ok(text);
+    }
+    bail!("the build made no {name}")
 }
 
 /// Writes a gzipped tarball of `files` (path inside `top`, contents) with one

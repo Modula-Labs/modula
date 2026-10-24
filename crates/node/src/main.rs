@@ -135,6 +135,10 @@ enum Command {
         /// recovery.
         #[arg(long = "wal-g", env = "MODULA_WALG", default_value = "wal-g")]
         walg: PathBuf,
+        /// workerd binary, which runs the JavaScript functions placed here.
+        /// Without it (not found), this server runs no functions.
+        #[arg(long, env = "MODULA_WORKERD", default_value = "workerd")]
+        workerd: PathBuf,
     },
     /// Show this server's identity.
     Status,
@@ -204,6 +208,7 @@ async fn main() -> anyhow::Result<()> {
             wg_port,
             backup_dir,
             walg,
+            workerd,
         } => {
             modula_node::backup::set_dir(backup_dir);
             modula_node::backup::walg::set_bin(walg);
@@ -316,6 +321,19 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 open_mesh(&cli.data_dir, wg_port).await
             };
+            let functions = match which(&workerd) {
+                Some(bin) => {
+                    let launcher = Arc::new(modula_node::functions::Workerd::new(bin).await);
+                    Some(modula_node::functions::Functions::new(
+                        cli.data_dir.join("functions"),
+                        launcher,
+                    )?)
+                }
+                None => {
+                    tracing::warn!(workerd = %workerd.display(), "workerd not found: this server runs no functions");
+                    None
+                }
+            };
             let caps = Capabilities {
                 edge,
                 build,
@@ -324,6 +342,7 @@ async fn main() -> anyhow::Result<()> {
                 mesh,
                 access_log,
                 wake,
+                functions,
             };
             session::run(cli.data_dir, runtime, caps, stop).await?;
         }
@@ -368,6 +387,18 @@ async fn open_mesh(dir: &std::path::Path, port: u16) -> Option<Arc<modula_node::
         tracing::info!("private networking needs Linux; this server stays out of it");
         None
     }
+}
+
+/// `bin` as a path to an existing file: itself, or found on PATH.
+fn which(bin: &std::path::Path) -> Option<PathBuf> {
+    if bin.components().count() > 1 {
+        return bin.is_file().then(|| bin.to_owned());
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|d| d.join(bin))
+            .find(|p| p.is_file())
+    })
 }
 
 async fn shutdown_signal() {
