@@ -8,7 +8,6 @@ import { Alert, Skeleton } from "@/components/ui/misc";
 import { api } from "@/lib/api";
 import type { R2Bucket } from "@/lib/integrations";
 import { uniqueName } from "@/lib/templates";
-import { serviceNameFromImage } from "@/pages/project/NewServiceDialog";
 import { useR2Buckets } from "@/pages/project/BucketFields";
 
 /** The Cloudflare account's R2 buckets, what uses each, and linking one into
@@ -96,7 +95,13 @@ function LinkDialog({
   const [environmentId, setEnvironmentId] = useState("");
   const [name, setName] = useState("");
   const taken = project.data?.services.map((s) => s.name) ?? [];
-  const service = name || uniqueName(serviceNameFromImage(bucket.name), taken);
+  // Bucket names are valid service names once they start with a letter.
+  const service =
+    name ||
+    uniqueName(
+      /^[a-z]/.test(bucket.name) ? bucket.name : `r2-${bucket.name}`,
+      taken,
+    );
   const env = environmentId || project.data?.environments[0]?.id || "";
   const link = useMutation({
     mutationFn: () =>

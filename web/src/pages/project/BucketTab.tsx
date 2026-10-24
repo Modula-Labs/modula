@@ -199,7 +199,7 @@ function R2Section({
             />
             <div>
               <Button
-                variant="primary"
+                variant="secondary"
                 loading={provision.isPending}
                 disabled={!choice}
                 onClick={() => provision.mutate()}

@@ -211,7 +211,11 @@ async fn provision(
             Err(e) => return Err(r2_error(e)),
         },
     };
-    let token_name = format!("Modula Deploy: {bucket} ({service}, {environment})");
+    // Kept short: Cloudflare limits token names.
+    let token_name: String = format!("Modula Deploy: {bucket} ({service}, {environment})")
+        .chars()
+        .take(100)
+        .collect();
     let creds = match conn
         .client
         .create_bucket_token(&account, &bucket, &token_name)
