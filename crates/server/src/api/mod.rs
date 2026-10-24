@@ -179,6 +179,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .post("/api/service-instances/{instance_id}/database/password", Resource(Action::DatabasePassword), database::regenerate_password)
         // Servers (instance admins)
         .get("/api/nodes", Instance(Action::NodeList), nodes::list)
+        .get("/api/nodes/network", Instance(Action::NodeList), nodes::network)
         .post("/api/nodes/join-tokens", Instance(Action::NodeJoinTokenCreate), nodes::create_join_token)
         .patch("/api/nodes/{node_id}", Resource(Action::NodeUpdate), nodes::update)
         .delete("/api/nodes/{node_id}", Resource(Action::NodeRevoke), nodes::revoke)

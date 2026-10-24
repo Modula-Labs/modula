@@ -344,3 +344,41 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
             .is_ok()
     );
 }
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn the_network_tab_shows_paths_and_latency(pool: PgPool) {
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let (a, b) = (node(&app, "a").await, node(&app, "b").await);
+    join_mesh(&app, a, KEYS[0], "10.0.0.2/16").await;
+    join_mesh(&app, b, KEYS[1], "192.168.7.3/24").await;
+    let report = pb::MeshReport {
+        peers: vec![pb::PeerStatus {
+            node_id: b.to_string(),
+            latency_us: 1500,
+            last_handshake_unix: 1_700_000_000,
+            ..Default::default()
+        }],
+    };
+    modula_server::mesh::record_report(app.db(), a, &report)
+        .await
+        .unwrap();
+    let r = app
+        .call(
+            axum::http::Method::GET,
+            "/api/nodes/network",
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, axum::http::StatusCode::OK, "{}", r.json);
+    assert_eq!(r.json["nodes"][0]["subnet"], "10.80.1.0/24");
+    let links = r.json["links"].as_array().unwrap();
+    assert_eq!(links.len(), 2);
+    let ab = links.iter().find(|l| l["from"] == a.to_string()).unwrap();
+    assert_eq!(ab["path"], "public");
+    assert_eq!(ab["latencyMs"], 1.5);
+    assert_eq!(ab["lastHandshake"], 1_700_000_000);
+    let ba = links.iter().find(|l| l["from"] == b.to_string()).unwrap();
+    assert!(ba["latencyMs"].is_null());
+}
