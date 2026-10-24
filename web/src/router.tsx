@@ -102,7 +102,7 @@ const serversRoute = createRoute({ getParentRoute: () => workspaceRoute, path: "
 // The canvas (React Flow) is the heaviest part of the app; load it on demand.
 const ProjectPage = lazy(() => import("./pages/project/ProjectPage").then((m) => ({ default: m.ProjectPage })));
 
-const tabs: ServiceTab[] = ["deployments", "metrics", "database", "bucket", "variables", "backups", "settings"];
+const tabs: ServiceTab[] = ["deployments", "metrics", "database", "bucket", "variables", "shell", "backups", "settings"];
 const str = (v: unknown) => (typeof v === "string" && v.length <= 64 ? v : undefined);
 
 /** A project is full-bleed, outside the workspace sidebar: the shell (top bar + left icon rail)

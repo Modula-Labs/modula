@@ -17,9 +17,10 @@ import { DatabaseTab } from "./database/DatabaseTab";
 import { DeploymentsTab } from "./DeploymentsTab";
 import { MetricsTab } from "./MetricsTab";
 import { SettingsTab } from "./SettingsTab";
+import { ShellTab } from "./ShellTab";
 import { VariablesTab } from "./VariablesTab";
 
-export type ServiceTab = "deployments" | "metrics" | "database" | "bucket" | "variables" | "backups" | "settings";
+export type ServiceTab = "deployments" | "metrics" | "database" | "bucket" | "variables" | "shell" | "backups" | "settings";
 
 export function ServiceSheet({
   instanceId,
@@ -60,7 +61,9 @@ export function ServiceSheet({
   // An R2 bucket runs nothing: no deployments, metrics or settings.
   const r2 = i?.config.source.type === "r2";
   const bucket = isBucketTemplate(i?.template);
-  const shown: ServiceTab = r2 && tab !== "variables" ? "bucket" : tab;
+  // A shell sees the container's secrets: Member+ (and sudo, asked on open).
+  const canShell = !r2 && atLeast(role, "member");
+  const shown: ServiceTab = r2 && tab !== "variables" ? "bucket" : tab === "shell" && !canShell ? "deployments" : tab;
 
   return (
     <Sheet
@@ -113,6 +116,7 @@ export function ServiceSheet({
                 ...(i?.template === "postgres" ? [{ value: "database" as const, label: "Database" }] : []),
                 ...(bucket ? [{ value: "bucket" as const, label: "Bucket" }] : []),
                 { value: "variables", label: "Variables" },
+                ...(canShell ? [{ value: "shell" as const, label: "Shell" }] : []),
                 ...(isDatabaseTemplate(i?.template) ? [{ value: "backups" as const, label: "Backups" }] : []),
                 { value: "settings", label: "Settings" },
               ]
@@ -140,6 +144,9 @@ export function ServiceSheet({
           ) : (
             <Skeleton className="h-32" />
           )}
+        </TabPanel>
+        <TabPanel value="shell" keepMounted>
+          {canShell ? <ShellTab instanceId={instanceId} /> : null}
         </TabPanel>
         <TabPanel value="backups">
           {i ? <BackupsTab instance={i} canEdit={atLeast(role, "member")} /> : <Skeleton className="h-32" />}
