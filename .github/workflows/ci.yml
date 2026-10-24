@@ -30,7 +30,17 @@ jobs:
     env:
       DATABASE_URL: postgres://modula:modula@127.0.0.1:5432/modula
       MODULA_TEST_REDIS_URL: redis://127.0.0.1:6379
+      # ~50 test binaries with full debuginfo and incremental state overflow
+      # the runner's disk; line tables are enough for test backtraces.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
+      # The image ships ~30 GB of SDKs we don't use; reclaim it before building.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       # Actions are pinned to full commit SHAs; Dependabot keeps them current.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
