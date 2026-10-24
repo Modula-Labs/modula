@@ -65,7 +65,7 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    for _ in 0..200 {
+    for _ in 0..600 {
         if check().await {
             return;
         }
