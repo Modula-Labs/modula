@@ -5,6 +5,7 @@ pub mod build_output;
 pub mod config;
 pub mod desired;
 pub mod env;
+pub mod output;
 pub mod placement;
 pub mod refs;
 pub mod start;

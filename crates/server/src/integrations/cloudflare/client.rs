@@ -186,15 +186,38 @@ impl Client {
         query: &[(&str, String)],
         body: Option<&Value>,
     ) -> Result<(Option<T>, ResultInfo)> {
+        let payload = match body {
+            Some(b) => Payload::Json(b),
+            None => Payload::Empty,
+        };
+        self.request(method, path, query, payload, None).await
+    }
+
+    /// [`call`](Self::call) with any body, authorized by `bearer` instead of
+    /// the API token when given (e.g. an assets upload session's JWT).
+    pub(super) async fn request<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Payload<'_>,
+        bearer: Option<&str>,
+    ) -> Result<(Option<T>, ResultInfo)> {
         let url = self.url(path, query)?;
         let mut attempt = 0;
         loop {
             attempt += 1;
             let mut req = http()
                 .request(method.clone(), url.clone())
-                .bearer_auth(self.token.expose_secret());
-            if let Some(b) = body {
-                req = req.json(b);
+                .bearer_auth(bearer.unwrap_or(self.token.expose_secret()));
+            match &body {
+                Payload::Empty => {}
+                Payload::Json(b) => req = req.json(b),
+                Payload::Multipart(m) => {
+                    req = req
+                        .header(reqwest::header::CONTENT_TYPE, m.content_type())
+                        .body(m.body.clone());
+                }
             }
             let res = req.send().await?;
             let status = res.status();
@@ -483,6 +506,70 @@ impl Client {
             Err(e) if e.status() == Some(409) => Ok(Change::Unchanged),
             Err(e) => Err(e),
         }
+    }
+}
+
+/// A request body.
+pub(super) enum Payload<'a> {
+    Empty,
+    Json(&'a Value),
+    Multipart(&'a Multipart),
+}
+
+/// A `multipart/form-data` body, built in memory.
+pub struct Multipart {
+    boundary: String,
+    body: Vec<u8>,
+}
+
+impl Default for Multipart {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Multipart {
+    pub fn new() -> Self {
+        Self {
+            boundary: format!("----modula{}{}", modula_id::Id::new(), modula_id::Id::new()),
+            body: Vec::new(),
+        }
+    }
+
+    /// Adds a part. `filename` makes it a file part.
+    pub fn part(&mut self, name: &str, filename: Option<&str>, content_type: &str, data: &[u8]) {
+        let disposition = match filename {
+            Some(f) => format!("form-data; name=\"{name}\"; filename=\"{f}\""),
+            None => format!("form-data; name=\"{name}\""),
+        };
+        self.body.extend_from_slice(
+            format!(
+                "--{}\r\nContent-Disposition: {disposition}\r\nContent-Type: {content_type}\r\n\r\n",
+                self.boundary
+            )
+            .as_bytes(),
+        );
+        self.body.extend_from_slice(data);
+        self.body.extend_from_slice(b"\r\n");
+    }
+
+    pub fn content_type(&self) -> String {
+        format!("multipart/form-data; boundary={}", self.boundary)
+    }
+
+    /// The finished body (closing boundary included).
+    pub fn finish(mut self) -> Self {
+        self.body
+            .extend_from_slice(format!("--{}--\r\n", self.boundary).as_bytes());
+        self
+    }
+
+    pub fn len(&self) -> usize {
+        self.body.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.body.is_empty()
     }
 }
 

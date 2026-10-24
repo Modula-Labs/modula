@@ -298,6 +298,17 @@ pub async fn resync_job(state: AppState, job: crate::jobs::Job) -> anyhow::Resul
         service_instance_id: Id,
     }
     let p: Payload = serde_json::from_value(job.payload)?;
+    // A site hosted on Cloudflare: its domains belong to the Worker.
+    let elsewhere: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = $1
+                          AND status IN ('active', 'crashed') AND config->'hosting' IS NOT NULL)",
+    )
+    .bind(p.service_instance_id)
+    .fetch_one(&state.db)
+    .await?;
+    if elsewhere {
+        return Ok(());
+    }
     let rows: Vec<(String, String, bool, Id)> = sqlx::query_as(
         "SELECT m.hostname, COALESCE(m.verification_token, ''), m.proxied, p.workspace_id
          FROM domains m

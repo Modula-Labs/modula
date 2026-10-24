@@ -92,6 +92,9 @@ pub async fn start(
             "an R2 bucket runs at Cloudflare: there is nothing to deploy",
         ));
     }
+    if d.config.cloudflare().is_some() {
+        crate::integrations::cloudflare::publish::preflight(state, d.instance).await?;
+    }
     let id = Id::new();
     let resolved = env::resolve_for_deployment(
         &state.keys,
