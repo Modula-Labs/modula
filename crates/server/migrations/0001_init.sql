@@ -94,7 +94,9 @@ CREATE TABLE workspaces (
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- id addresses one membership in routes (/api/members/{member_id}).
 CREATE TABLE workspace_members (
+    id              id NOT NULL UNIQUE DEFAULT new_id(),
     workspace_id    id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     user_id         id NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     role            text NOT NULL CHECK (role IN ('admin', 'member', 'deployer', 'viewer')),
@@ -102,6 +104,23 @@ CREATE TABLE workspace_members (
     PRIMARY KEY (workspace_id, user_id)
 );
 CREATE INDEX workspace_members_user_idx ON workspace_members (user_id);
+
+-- Single-use invite links. Only the token's hash is stored; the link is
+-- shown once, to the admin who created it.
+CREATE TABLE workspace_invites (
+    id              id PRIMARY KEY,
+    workspace_id    id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    role            text NOT NULL CHECK (role IN ('admin', 'member', 'deployer', 'viewer')),
+    token_hash      bytea NOT NULL UNIQUE,
+    created_by      id REFERENCES users (id) ON DELETE SET NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    expires_at      timestamptz NOT NULL,
+    used_at         timestamptz,
+    used_by         id REFERENCES users (id) ON DELETE SET NULL,
+    revoked_at      timestamptz,
+    CONSTRAINT workspace_invites_used_consistent CHECK (used_by IS NULL OR used_at IS NOT NULL)
+);
+CREATE INDEX workspace_invites_workspace_idx ON workspace_invites (workspace_id, created_at);
 
 -- Per-scope data keys wrapped by the master key. scope = workspace or
 -- environment id, or all zeros for instance-level secrets (so no FK).

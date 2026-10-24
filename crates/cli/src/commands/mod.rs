@@ -8,6 +8,7 @@ pub mod domain;
 pub mod environment;
 pub mod instance;
 pub mod logs;
+pub mod members;
 pub mod meta;
 pub mod metrics;
 pub mod project;
@@ -77,6 +78,9 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
         Command::Server { command } => return crate::provision::run(ctx, command).await,
         Command::Config { command } => return config::run(ctx, command).await,
         Command::Instance { command } => instance::run(ctx, command).await?,
+        Command::Members { workspace, command } => {
+            members::run(ctx, workspace.as_deref(), command).await?
+        }
     }
     Ok(0)
 }

@@ -12,6 +12,7 @@ import { useCurrentWorkspace, useMe } from "@/lib/workspace";
 import { BackupStorage } from "./BackupStorage";
 import { DomainSection } from "./settings/Domain";
 import { IntegrationsSection } from "./settings/Integrations";
+import { MembersSection } from "./settings/Members";
 import { PrivateAccessSection } from "./settings/PrivateAccess";
 import { UpdatesSection } from "./settings/Updates";
 
@@ -130,6 +131,15 @@ function Settings({ workspace }: { workspace: Membership }) {
           <CopyButton value={workspace.id} label="Copy workspace ID" />
         </div>
       </Section>
+
+      <div id="members" className="scroll-mt-4">
+        <Section
+          title="Members"
+          description="Who can reach this workspace, and with which role. Invite people with a single-use link."
+        >
+          <MembersSection workspace={workspace} />
+        </Section>
+      </div>
 
       <Section
         title="Backup storage"

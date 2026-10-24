@@ -22,6 +22,8 @@ pub mod prefix {
     /// Personal API tokens for the `modula` CLI and automation.
     pub const API_TOKEN: &str = "mdt";
     pub const NODE_JOIN: &str = "mcj";
+    /// Workspace invite links.
+    pub const INVITE: &str = "mci";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

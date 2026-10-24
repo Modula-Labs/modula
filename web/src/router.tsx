@@ -5,8 +5,10 @@ import { RouteError, Toaster } from "./components/ErrorBoundary";
 import { SudoDialog } from "./components/SudoDialog";
 import { WorkspaceShell } from "./components/shell/WorkspaceShell";
 import { ApiError, api } from "./lib/api";
+import { inviteToken } from "./lib/members";
 import { AccountSecurityPage } from "./pages/AccountSecurity";
 import { DomainOnboardingPage } from "./pages/DomainOnboarding";
+import { InvitePage } from "./pages/Invite";
 import { LoginPage } from "./pages/Login";
 import { ProjectsPage } from "./pages/Projects";
 import { ServersPage } from "./pages/Servers";
@@ -56,20 +58,37 @@ const setupRoute = createRoute({
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
-  validateSearch: (s: Record<string, unknown>): { expired?: boolean } => (s.expired ? { expired: true } : {}),
+  validateSearch: (s: Record<string, unknown>): { expired?: boolean; invite?: string } => ({
+    ...(s.expired ? { expired: true } : {}),
+    ...(inviteToken(s.invite) ? { invite: inviteToken(s.invite) } : {}),
+  }),
   beforeLoad: async ({ context }) => {
     if ((await instance(context.queryClient)).setupRequired) throw redirect({ to: "/setup" });
   },
   component: function Login() {
-    const { expired } = loginRoute.useSearch();
-    return <LoginPage notice={expired ? "Your session ended. Sign in again." : undefined} />;
+    const { expired, invite } = loginRoute.useSearch();
+    return <LoginPage invite={invite} notice={expired ? "Your session ended. Sign in again." : undefined} />;
   },
 });
 
 const twoFactorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login/2fa",
-  component: TwoFactorPage,
+  validateSearch: (s: Record<string, unknown>): { invite?: string } => (inviteToken(s.invite) ? { invite: inviteToken(s.invite) } : {}),
+  component: function TwoFactor() {
+    const { invite } = twoFactorRoute.useSearch();
+    return <TwoFactorPage invite={invite} />;
+  },
+});
+
+/** Public: an invite link, for signed-in and signed-out visitors alike. */
+const inviteRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/invite/$token",
+  component: function Invite() {
+    const { token } = inviteRoute.useParams();
+    return <InvitePage token={token} />;
+  },
 });
 
 /** Everything below requires a full session. */
@@ -167,6 +186,7 @@ const routeTree = rootRoute.addChildren([
   setupRoute,
   loginRoute,
   twoFactorRoute,
+  inviteRoute,
   appRoute.addChildren([domainOnboardingRoute, workspaceRoute.addChildren([projectsRoute, settingsRoute, securityRoute, serversRoute]), projectRoute.addChildren([projectCanvasRoute, projectMetricsRoute, projectLogsRoute, projectSettingsIndexRoute, projectSettingsRoute]),
   ]),
 ]);

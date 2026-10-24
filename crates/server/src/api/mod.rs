@@ -12,6 +12,7 @@ pub mod github;
 pub mod install;
 pub mod instance;
 pub mod logs;
+pub mod members;
 pub mod metrics;
 pub mod nodes;
 pub mod projects;
@@ -68,6 +69,18 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/workspaces/{workspace_id}", Resource(Action::WorkspaceRead), workspaces::get)
         .patch("/api/workspaces/{workspace_id}", Resource(Action::WorkspaceUpdate), workspaces::update)
         .delete("/api/workspaces/{workspace_id}", Resource(Action::WorkspaceDelete), workspaces::delete)
+        // Members and invite links (no email: admins share the link themselves)
+        .get("/api/workspaces/{workspace_id}/members", Resource(Action::MemberList), members::list)
+        .patch("/api/members/{member_id}", Resource(Action::MemberUpdate), members::update)
+        .delete("/api/members/{member_id}", Resource(Action::MemberRemove), members::remove)
+        .post("/api/workspaces/{workspace_id}/leave", Resource(Action::MemberLeave), members::leave)
+        .get("/api/workspaces/{workspace_id}/invites", Resource(Action::MemberInvite), members::list_invites)
+        .post("/api/workspaces/{workspace_id}/invites", Resource(Action::MemberInvite), members::create_invite)
+        .delete("/api/invites/{invite_id}", Resource(Action::InviteRevoke), members::revoke_invite)
+        // The invite token in the body is the credential; rate-limited per IP.
+        .post("/api/invites/lookup", Public, members::lookup)
+        .post("/api/invites/signup", Public, members::signup)
+        .post("/api/invites/accept", Authenticated, members::accept)
         // Projects and environments
         .get("/api/workspaces/{workspace_id}/projects", Resource(Action::WorkspaceRead), projects::list)
         .post("/api/workspaces/{workspace_id}/projects", Resource(Action::ProjectCreate), projects::create)

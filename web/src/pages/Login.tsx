@@ -7,7 +7,8 @@ import { Field, Input } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/misc";
 import { ApiError, api } from "@/lib/api";
 
-export function LoginPage({ notice }: { notice?: string }) {
+/** `invite`: the invite token to return to after signing in. */
+export function LoginPage({ notice, invite }: { notice?: string; invite?: string }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [email, setEmail] = useState("");
@@ -16,7 +17,7 @@ export function LoginPage({ notice }: { notice?: string }) {
   const [busy, setBusy] = useState(false);
 
   return (
-    <AuthCard title="Sign in" subtitle="Welcome back.">
+    <AuthCard title="Sign in" subtitle={invite ? "Sign in to accept your invite." : "Welcome back."}>
       <form
         className="flex flex-col gap-4"
         onSubmit={async (e) => {
@@ -26,10 +27,10 @@ export function LoginPage({ notice }: { notice?: string }) {
           try {
             const r = await api.login({ email, password });
             if (r.mfaRequired) {
-              await navigate({ to: "/login/2fa" });
+              await navigate({ to: "/login/2fa", search: invite ? { invite } : {} });
             } else {
               qc.setQueryData(["me"], r.me);
-              await navigate({ to: "/projects" });
+              await (invite ? navigate({ to: "/invite/$token", params: { token: invite } }) : navigate({ to: "/projects" }));
             }
           } catch (err) {
             const ae = err instanceof ApiError ? err : null;

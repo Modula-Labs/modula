@@ -82,6 +82,35 @@ export interface Me {
   user: { id: string; email: string; name: string; isInstanceAdmin: boolean };
   workspaces: Membership[];
 }
+/** A workspace member (`id` is the membership's, not the user's). */
+export interface Member {
+  id: string;
+  userId: string;
+  name: string;
+  email: string;
+  role: Role;
+  joinedAt: string;
+  twoFactor: boolean;
+}
+/** A pending invite link; the link itself is only returned when created. */
+export interface Invite {
+  id: string;
+  role: Role;
+  createdByName: string | null;
+  createdAt: string;
+  expiresAt: string;
+}
+/** What an invite link offers, shown before joining. */
+export interface InvitePreview {
+  workspaceName: string;
+  role: Role;
+  invitedBy: string | null;
+  expiresAt: string;
+}
+export interface InviteJoined {
+  workspaceId: string;
+  me: Me;
+}
 export interface InstanceStatus {
   setupRequired: boolean;
   version: string;
@@ -840,6 +869,29 @@ export const api = {
     patch<{ id: string; name: string }>(`/api/workspaces/${enc(id)}`, { name }),
   deleteWorkspace: (id: string) =>
     del<{ ok: true }>(`/api/workspaces/${enc(id)}`),
+
+  members: (workspace: string) =>
+    get<Member[]>(`/api/workspaces/${enc(workspace)}/members`),
+  /** Needs sudo (the request layer asks). */
+  updateMember: (id: string, role: Role) =>
+    patch<Member>(`/api/members/${enc(id)}`, { role }),
+  /** Needs sudo (the request layer asks). */
+  removeMember: (id: string) => del<{ ok: true }>(`/api/members/${enc(id)}`),
+  leaveWorkspace: (workspace: string) =>
+    post<{ ok: true }>(`/api/workspaces/${enc(workspace)}/leave`),
+  invites: (workspace: string) =>
+    get<Invite[]>(`/api/workspaces/${enc(workspace)}/invites`),
+  /** The link is returned only here. */
+  createInvite: (workspace: string, b: { role: Role; expiresInDays?: number }) =>
+    post<{ invite: Invite; url: string }>(`/api/workspaces/${enc(workspace)}/invites`, b),
+  revokeInvite: (id: string) => del<{ ok: true }>(`/api/invites/${enc(id)}`),
+  lookupInvite: (token: string) =>
+    post<InvitePreview>("/api/invites/lookup", { token }),
+  acceptInvite: (token: string) =>
+    post<InviteJoined>("/api/invites/accept", { token }),
+  /** Creates the account, joins the workspace and signs in (session cookie). */
+  signupWithInvite: (b: { token: string; name: string; email: string; password: string }) =>
+    post<InviteJoined>("/api/invites/signup", b),
 
   projects: (workspace: string) =>
     get<ProjectCard[]>(`/api/workspaces/${enc(workspace)}/projects`),

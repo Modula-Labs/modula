@@ -196,6 +196,18 @@ pub enum Action {
     WebhookCreate,
     WebhookTest,
     WebhookDelete,
+    /// A workspace's members (name, email, role, 2FA on or off).
+    MemberList,
+    /// Create invite links and list the pending ones.
+    MemberInvite,
+    /// Revoke a pending invite link.
+    InviteRevoke,
+    /// Change a member's role.
+    MemberUpdate,
+    /// Remove a member (and their API tokens limited to the workspace).
+    MemberRemove,
+    /// Leave a workspace yourself.
+    MemberLeave,
 }
 
 impl Action {
@@ -268,6 +280,9 @@ impl Action {
             Self::EnvironmentLogsRead => K::Environment,
             Self::WebhookList | Self::WebhookCreate => K::Project,
             Self::WebhookTest | Self::WebhookDelete => K::Webhook,
+            Self::MemberList | Self::MemberInvite | Self::MemberLeave => K::Workspace,
+            Self::InviteRevoke => K::Invite,
+            Self::MemberUpdate | Self::MemberRemove => K::Member,
         })
     }
 
@@ -358,6 +373,10 @@ impl Action {
             Self::EnvironmentLogsRead => Role::Viewer,
             Self::WebhookList | Self::WebhookCreate | Self::WebhookTest | Self::WebhookDelete => {
                 Role::Member
+            }
+            Self::MemberList | Self::MemberLeave => Role::Viewer,
+            Self::MemberInvite | Self::InviteRevoke | Self::MemberUpdate | Self::MemberRemove => {
+                Role::Admin
             }
         }
     }
@@ -450,6 +469,8 @@ impl Action {
             | Self::WebhookCreate
             | Self::WebhookTest
             | Self::WebhookDelete => false,
+            Self::MemberUpdate | Self::MemberRemove => true,
+            Self::MemberList | Self::MemberInvite | Self::InviteRevoke | Self::MemberLeave => false,
         }
     }
 }
@@ -475,6 +496,9 @@ pub enum ResourceKind {
     ApiToken,
     ProvisionedServer,
     Webhook,
+    /// One workspace membership (`workspace_members.id`).
+    Member,
+    Invite,
 }
 
 impl ResourceKind {
@@ -496,6 +520,8 @@ impl ResourceKind {
         ResourceKind::ApiToken,
         ResourceKind::ProvisionedServer,
         ResourceKind::Webhook,
+        ResourceKind::Member,
+        ResourceKind::Invite,
     ];
 
     pub fn param(self) -> &'static str {
@@ -517,6 +543,8 @@ impl ResourceKind {
             Self::ApiToken => "token_id",
             Self::ProvisionedServer => "server_id",
             Self::Webhook => "webhook_id",
+            Self::Member => "member_id",
+            Self::Invite => "invite_id",
         }
     }
 
@@ -537,7 +565,9 @@ impl ResourceKind {
             | Self::BackupTarget
             | Self::Backup
             | Self::ProvisionedServer
-            | Self::Webhook => OwnerKind::Workspace,
+            | Self::Webhook
+            | Self::Member
+            | Self::Invite => OwnerKind::Workspace,
         }
     }
 
@@ -609,6 +639,8 @@ impl ResourceKind {
                 "SELECT p.workspace_id FROM webhooks w
                  JOIN projects p ON p.id = w.project_id WHERE w.id = $1"
             }
+            Self::Member => "SELECT workspace_id FROM workspace_members WHERE id = $1",
+            Self::Invite => "SELECT workspace_id FROM workspace_invites WHERE id = $1",
         };
         Ok(sqlx::query_scalar(sql).bind(id).fetch_optional(db).await?)
     }
