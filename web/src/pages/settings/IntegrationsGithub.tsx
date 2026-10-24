@@ -120,7 +120,7 @@ export function GithubIntegration({ workspaceId, isAdmin }: { workspaceId: strin
             loading={c.busy}
             onClick={() => c.connect.mutate(useOrg ? org : undefined)}
           >
-            {list.length ? "Add account" : "Connect GitHub"}
+            {list.length ? "Add account or organization" : "Connect GitHub"}
           </Button>
         ) : null}
       </div>
@@ -174,7 +174,7 @@ export function GithubIntegration({ workspaceId, isAdmin }: { workspaceId: strin
                   rel="noreferrer"
                   className="ml-auto text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
                 >
-                  Configure
+                  Configure on GitHub
                 </a>
               ) : null}
             </li>

@@ -41,23 +41,31 @@ export interface ManifestStart {
 }
 
 const ws = (id: string) => `/api/workspaces/${id}/github`;
-const qs = (q: string) => (q.trim() ? `?q=${encodeURIComponent(q.trim())}&perPage=100` : "?perPage=100");
+const qs = (q: string) =>
+  q.trim() ? `?q=${encodeURIComponent(q.trim())}&perPage=100` : "?perPage=100";
 
 export const github = {
   app: () => get<GithubApp>("/api/github/app"),
   /** Instance admins (sudo; the request layer asks). With a workspace, GitHub goes on to
    *  installing the new App there and comes back to `returnTo`. */
-  manifest: (o: { org?: string; workspaceId?: string; returnTo?: string } = {}) =>
+  manifest: (
+    o: { org?: string; workspaceId?: string; returnTo?: string } = {},
+  ) =>
     post<ManifestStart>("/api/github/app/manifest", {
       org: o.org?.trim() || undefined,
       workspaceId: o.workspaceId,
       returnTo: o.returnTo,
     }),
-  installUrl: (workspaceId: string, returnTo?: string) => post<{ url: string }>(`${ws(workspaceId)}/install`, { returnTo }),
-  installations: (workspaceId: string) => get<GithubInstallation[]>(`${ws(workspaceId)}/installations`),
-  repos: (workspaceId: string, q = "") => get<GithubRepo[]>(`${ws(workspaceId)}/repos${qs(q)}`),
+  installUrl: (workspaceId: string, returnTo?: string) =>
+    post<{ url: string }>(`${ws(workspaceId)}/install`, { returnTo }),
+  installations: (workspaceId: string) =>
+    get<GithubInstallation[]>(`${ws(workspaceId)}/installations`),
+  repos: (workspaceId: string, q = "") =>
+    get<GithubRepo[]>(`${ws(workspaceId)}/repos${qs(q)}`),
   branches: (workspaceId: string, repo: string, q = "") =>
-    get<GithubBranch[]>(`${ws(workspaceId)}/branches${qs(q)}&repo=${encodeURIComponent(repo)}`),
+    get<GithubBranch[]>(
+      `${ws(workspaceId)}/branches${qs(q)}&repo=${encodeURIComponent(repo)}`,
+    ),
 };
 
 /** Send the browser to GitHub with the App manifest (GitHub only takes it as a form POST). */
@@ -75,9 +83,14 @@ export function submitManifest(start: ManifestStart) {
 }
 
 /** What "Connect GitHub" does for this user: start the flow, or who to ask. */
-export type ConnectMode = "connect" | "ask-instance-admin" | "ask-workspace-admin";
+export type ConnectMode =
+  "connect" | "ask-instance-admin" | "ask-workspace-admin";
 
-export function connectMode(o: { appConfigured: boolean; isInstanceAdmin: boolean; role: Role | undefined }): ConnectMode {
+export function connectMode(o: {
+  appConfigured: boolean;
+  isInstanceAdmin: boolean;
+  role: Role | undefined;
+}): ConnectMode {
   // Installing binds GitHub to the workspace: its admins only.
   if (!atLeast(o.role, "admin")) return "ask-workspace-admin";
   // Without an App, the flow starts by creating it: instance admins only.
@@ -86,25 +99,40 @@ export function connectMode(o: { appConfigured: boolean; isInstanceAdmin: boolea
 }
 
 export const connectHelp: Record<Exclude<ConnectMode, "connect">, string> = {
-  "ask-instance-admin": "Ask an instance admin to connect GitHub. It's set up once for the whole instance.",
+  "ask-instance-admin":
+    "Ask an instance admin to connect GitHub. It's set up once for the whole instance.",
   "ask-workspace-admin": "Ask a workspace admin to connect GitHub.",
 };
 
 /** One click: create the instance's App first when there is none (it then goes straight on to
  *  installing it), else straight to GitHub's installation page. GitHub sends the browser back
  *  to `returnTo` with `?github=…`. Resolves once the browser is on its way. */
-export async function connectGithub(o: { workspaceId: string; returnTo: string; appConfigured: boolean; org?: string }) {
+export async function connectGithub(o: {
+  workspaceId: string;
+  returnTo: string;
+  appConfigured: boolean;
+  org?: string;
+}) {
   if (o.appConfigured) {
     const { url } = await github.installUrl(o.workspaceId, o.returnTo);
     window.location.assign(url);
   } else {
-    submitManifest(await github.manifest({ org: o.org, workspaceId: o.workspaceId, returnTo: o.returnTo }));
+    submitManifest(
+      await github.manifest({
+        org: o.org,
+        workspaceId: o.workspaceId,
+        returnTo: o.returnTo,
+      }),
+    );
   }
 }
 
 /** Where "Connect GitHub" in the New Service dialog comes back to: the project, with the dialog
  *  reopened on the GitHub step. */
-export function projectReturnPath(projectId: string, environmentId?: string): string {
+export function projectReturnPath(
+  projectId: string,
+  environmentId?: string,
+): string {
   const q = new URLSearchParams();
   if (environmentId) q.set("env", environmentId);
   q.set("add", "repo");
@@ -124,10 +152,15 @@ export function projectReturn(search: { add?: string; github?: string }) {
 }
 
 /** What `?github=` means after a round trip through GitHub. */
-export function githubReturnNotice(param: string | null): { tone: "success" | "info"; text: string } | null {
+export function githubReturnNotice(
+  param: string | null,
+): { tone: "success" | "info"; text: string } | null {
   switch (param) {
     case "created":
-      return { tone: "success", text: "GitHub App created. Install it on the accounts whose repositories you deploy." };
+      return {
+        tone: "success",
+        text: "GitHub App created. Install it on the accounts whose repositories you deploy.",
+      };
     case "installed":
       return { tone: "success", text: "GitHub connected — pick a repo." };
     case "requested":
@@ -145,13 +178,19 @@ export function githubReturnNotice(param: string | null): { tone: "success" | "i
 /** Order picker items for what was typed: names starting with it first (for repositories,
  *  the part after `owner/`, then `owner/name`), then anywhere; within a group the server's order
  *  (most recently pushed) is kept. */
-export function rankItems<T>(items: T[], query: string, key: (t: T) => string, ownerPrefixed = false): T[] {
+export function rankItems<T>(
+  items: T[],
+  query: string,
+  key: (t: T) => string,
+  ownerPrefixed = false,
+): T[] {
   const q = query.trim().toLowerCase();
   // Empty, or exactly what was just picked: offer everything to switch to.
   if (!q || items.some((t) => key(t).toLowerCase() === q)) return items;
   const score = (t: T) => {
     const full = key(t).toLowerCase();
-    if (ownerPrefixed && full.slice(full.indexOf("/") + 1).startsWith(q)) return 0;
+    if (ownerPrefixed && full.slice(full.indexOf("/") + 1).startsWith(q))
+      return 0;
     if (full.startsWith(q)) return 1;
     if (full.includes(q)) return 2;
     return -1;
@@ -163,12 +202,62 @@ export function rankItems<T>(items: T[], query: string, key: (t: T) => string, o
     .map((x) => x.t);
 }
 
-export const rankRepos = (repos: GithubRepo[], query: string) => rankItems(repos, query, (r) => r.fullName, true);
-export const rankBranches = (branches: GithubBranch[], query: string) => rankItems(branches, query, (b) => b.name);
+export const rankRepos = (repos: GithubRepo[], query: string) =>
+  rankItems(repos, query, (r) => r.fullName, true);
+export const rankBranches = (branches: GithubBranch[], query: string) =>
+  rankItems(branches, query, (b) => b.name);
 
 /** Next highlighted index for ↑/↓ in a list of `n` options (wraps; -1 when empty). */
-export function moveHighlight(current: number, n: number, delta: 1 | -1): number {
+export function moveHighlight(
+  current: number,
+  n: number,
+  delta: 1 | -1,
+): number {
   if (n <= 0) return -1;
   if (current < 0) return delta === 1 ? 0 : n - 1;
   return (current + delta + n) % n;
+}
+
+/** The account (login) a repository `owner/name` belongs to. */
+export const repoOwner = (fullName: string) => fullName.split("/")[0] ?? "";
+
+/** Repositories of one installed account (case-insensitive); everything when none is selected. */
+export function filterReposByAccount(
+  repos: GithubRepo[],
+  login: string | null,
+): GithubRepo[] {
+  if (!login) return repos;
+  const l = login.toLowerCase();
+  return repos.filter((r) => repoOwner(r.fullName).toLowerCase() === l);
+}
+
+/** The account to show first: the one owning the most recently pushed repository (repos come
+ *  newest first), else the first installation. */
+export function defaultAccount(
+  installations: GithubInstallation[],
+  repos: GithubRepo[],
+): string | null {
+  const logins = new Map(
+    installations.map((i) => [i.accountLogin.toLowerCase(), i.accountLogin]),
+  );
+  const recent = [...repos]
+    .filter(
+      (r) => r.updatedAt && logins.has(repoOwner(r.fullName).toLowerCase()),
+    )
+    .sort((a, b) => Date.parse(b.updatedAt!) - Date.parse(a.updatedAt!))[0];
+  if (recent)
+    return logins.get(repoOwner(recent.fullName).toLowerCase()) ?? null;
+  return installations[0]?.accountLogin ?? null;
+}
+
+/** The selected account if it is still installed, else the default. */
+export function effectiveAccount(
+  selected: string | null,
+  installations: GithubInstallation[],
+  repos: GithubRepo[],
+): string | null {
+  const hit = installations.find(
+    (i) => i.accountLogin.toLowerCase() === selected?.toLowerCase(),
+  );
+  return hit ? hit.accountLogin : defaultAccount(installations, repos);
 }

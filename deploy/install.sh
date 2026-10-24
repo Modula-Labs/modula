@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Modula Deploy installer for Ubuntu 22.04+/Debian 12+ (amd64, arm64).
 #
-#   Main server (dashboard + the first server for apps); asks for a domain,
-#   an email and a server name, and for sudo when not run as root:
+#   Main server (dashboard + the first server for apps); asks for an email
+#   and a server name, and for sudo when not run as root. The dashboard
+#   starts at https://<public IP>; add a domain there later:
 #     curl -fsSL https://usemodula.org/install.sh | bash
 #
 #   The same without questions (automation, cloud-init):
-#     curl -fsSL https://usemodula.org/install.sh | sudo bash -s -- --domain deploy.example.com --email you@example.com [--name NAME]
+#     curl -fsSL https://usemodula.org/install.sh | sudo bash -s -- --email you@example.com [--name NAME] [--domain deploy.example.com]
 #
 #   Another server, joining an instance (the dashboard prints this line):
 #     curl -fsSL https://deploy.example.com/api/install.sh | sudo bash -s -- join --server … --token … --ca …

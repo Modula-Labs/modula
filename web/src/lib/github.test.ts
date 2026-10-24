@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { serviceNameFromRepo } from "@/pages/project/NewServiceDialog";
 import {
   connectMode,
+  defaultAccount,
+  effectiveAccount,
+  filterReposByAccount,
+  repoOwner,
+  type GithubInstallation,
   githubReturnNotice,
   moveHighlight,
   projectReturn,
@@ -21,7 +26,13 @@ const repo = (fullName: string): GithubRepo => ({
 
 describe("rankRepos", () => {
   // Server order is most recently pushed first.
-  const list = ["acme/api-gateway", "acme/web", "webco/site", "acme/legacy-web-app", "Acme/Webhooks"].map(repo);
+  const list = [
+    "acme/api-gateway",
+    "acme/web",
+    "webco/site",
+    "acme/legacy-web-app",
+    "Acme/Webhooks",
+  ].map(repo);
 
   it("keeps the server order when nothing is typed", () => {
     expect(rankRepos(list, "  ")).toEqual(list);
@@ -37,7 +48,10 @@ describe("rankRepos", () => {
   });
 
   it("matches owner/name and drops what doesn't match", () => {
-    expect(rankRepos(list, "acme/w").map((r) => r.fullName)).toEqual(["acme/web", "Acme/Webhooks"]);
+    expect(rankRepos(list, "acme/w").map((r) => r.fullName)).toEqual([
+      "acme/web",
+      "Acme/Webhooks",
+    ]);
     expect(rankRepos(list, "nothing")).toEqual([]);
   });
 
@@ -48,8 +62,14 @@ describe("rankRepos", () => {
 
 describe("rankBranches", () => {
   it("prefers branches starting with the query", () => {
-    const b = ["feature/release-notes", "main", "release/1.2"].map((name) => ({ name, protected: false }));
-    expect(rankBranches(b, "rel").map((x) => x.name)).toEqual(["release/1.2", "feature/release-notes"]);
+    const b = ["feature/release-notes", "main", "release/1.2"].map((name) => ({
+      name,
+      protected: false,
+    }));
+    expect(rankBranches(b, "rel").map((x) => x.name)).toEqual([
+      "release/1.2",
+      "feature/release-notes",
+    ]);
   });
 });
 
@@ -82,11 +102,41 @@ describe("githubReturnNotice", () => {
 
 describe("connectMode", () => {
   it("lets workspace admins connect, creating the App only as an instance admin", () => {
-    expect(connectMode({ appConfigured: true, isInstanceAdmin: false, role: "admin" })).toBe("connect");
-    expect(connectMode({ appConfigured: false, isInstanceAdmin: true, role: "admin" })).toBe("connect");
-    expect(connectMode({ appConfigured: false, isInstanceAdmin: false, role: "admin" })).toBe("ask-instance-admin");
-    expect(connectMode({ appConfigured: true, isInstanceAdmin: true, role: "member" })).toBe("ask-workspace-admin");
-    expect(connectMode({ appConfigured: true, isInstanceAdmin: false, role: undefined })).toBe("ask-workspace-admin");
+    expect(
+      connectMode({
+        appConfigured: true,
+        isInstanceAdmin: false,
+        role: "admin",
+      }),
+    ).toBe("connect");
+    expect(
+      connectMode({
+        appConfigured: false,
+        isInstanceAdmin: true,
+        role: "admin",
+      }),
+    ).toBe("connect");
+    expect(
+      connectMode({
+        appConfigured: false,
+        isInstanceAdmin: false,
+        role: "admin",
+      }),
+    ).toBe("ask-instance-admin");
+    expect(
+      connectMode({
+        appConfigured: true,
+        isInstanceAdmin: true,
+        role: "member",
+      }),
+    ).toBe("ask-workspace-admin");
+    expect(
+      connectMode({
+        appConfigured: true,
+        isInstanceAdmin: false,
+        role: undefined,
+      }),
+    ).toBe("ask-workspace-admin");
   });
 });
 
@@ -104,9 +154,51 @@ describe("return paths", () => {
       reopen: true,
       notice: { tone: "success", text: "GitHub connected — pick a repo." },
     });
-    expect(projectReturn({ add: "repo", github: "requested" }).notice?.tone).toBe("info");
+    expect(
+      projectReturn({ add: "repo", github: "requested" }).notice?.tone,
+    ).toBe("info");
     expect(projectReturn({ github: "installed" }).reopen).toBe(false);
     expect(projectReturn({ add: "repo", github: "bogus" }).notice).toBeNull();
     expect(projectReturn({})).toEqual({ reopen: false, notice: null });
+  });
+});
+
+describe("accounts", () => {
+  const inst = (accountLogin: string): GithubInstallation => ({
+    id: 1,
+    accountLogin,
+    accountType: "Organization",
+    avatarUrl: "",
+    configureUrl: "",
+    createdAt: "",
+  });
+  const r = (fullName: string, updatedAt: string | null): GithubRepo => ({
+    ...repo(fullName),
+    updatedAt,
+  });
+  const installs = [inst("me"), inst("Acme")];
+  const repos = [
+    r("other/x", "2026-03-01T00:00:00Z"),
+    r("acme/api", "2026-02-01T00:00:00Z"),
+    r("me/blog", "2026-01-01T00:00:00Z"),
+  ];
+
+  it("filters repositories to one account, case-insensitively", () => {
+    expect(repoOwner("acme/api")).toBe("acme");
+    expect(filterReposByAccount(repos, "ACME").map((x) => x.fullName)).toEqual([
+      "acme/api",
+    ]);
+    expect(filterReposByAccount(repos, null)).toEqual(repos);
+  });
+
+  it("defaults to the account with the most recent push, else the first", () => {
+    expect(defaultAccount(installs, repos)).toBe("Acme");
+    expect(defaultAccount(installs, [])).toBe("me");
+    expect(defaultAccount([], repos)).toBeNull();
+  });
+
+  it("keeps a still-installed selection and falls back otherwise", () => {
+    expect(effectiveAccount("me", installs, repos)).toBe("me");
+    expect(effectiveAccount("gone", installs, repos)).toBe("Acme");
   });
 });
