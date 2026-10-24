@@ -10,7 +10,9 @@
 //!     Containers keep their default route and Docker's names for local
 //!     services on the environment bridge; only mesh traffic uses this one;
 //!   * nftables (`table inet modula`) letting only addresses of the same
-//!     environment talk across the mesh, on every node ([`nft`]);
+//!     environment talk across the mesh, on every node ([`nft`]); checked
+//!     every minute and reloaded when what the host has differs (an
+//!     external `nft flush ruleset`, a Docker restart dropping its rules);
 //!   * a resolver on the `.1` that answers `<service>.modula.internal` with
 //!     the healthy replicas on other servers and forwards everything else
 //!     ([`dns`]).
@@ -45,6 +47,8 @@ const WG_OVERHEAD: u32 = 80;
 const LEASE_FIRST: u8 = 192;
 const LEASE_LAST: u8 = 254;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+/// How often the loaded firewall is compared with the host's.
+const FIREWALL_CHECK_EVERY: Duration = Duration::from_secs(60);
 
 /// A node's /24: `10.80.<index>.0/24`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -118,14 +122,21 @@ pub trait MeshSystem: Send + Sync + 'static {
     async fn apply_tunnels(&self, t: &Tunnels) -> anyhow::Result<()>;
     /// Load `ruleset` (see [`nft::render`]) and the host settings it relies on.
     async fn apply_firewall(&self, subnet: Subnet, ruleset: &str) -> anyhow::Result<()>;
+    /// What the host has of the firewall [`MeshSystem::apply_firewall`]
+    /// loads, as text that is the same between two calls unless something
+    /// changed it (counters aside, see [`nft::normalize`]); None when the
+    /// table is gone.
+    async fn firewall_state(&self) -> anyhow::Result<Option<String>>;
     async fn peer_stats(&self) -> anyhow::Result<Vec<PeerStat>>;
 }
 
-/// Records what it was asked to do (tests).
+/// Records what it was asked to do (tests). The host's firewall state is
+/// the last ruleset loaded, until a test changes `host_firewall`.
 #[derive(Default)]
 pub struct RecordingSystem {
     pub tunnels: Mutex<Option<Tunnels>>,
     pub rulesets: Mutex<Vec<String>>,
+    pub host_firewall: Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -136,7 +147,11 @@ impl MeshSystem for RecordingSystem {
     }
     async fn apply_firewall(&self, _subnet: Subnet, ruleset: &str) -> anyhow::Result<()> {
         self.rulesets.lock().expect("lock").push(ruleset.to_owned());
+        *self.host_firewall.lock().expect("lock") = Some(ruleset.to_owned());
         Ok(())
+    }
+    async fn firewall_state(&self) -> anyhow::Result<Option<String>> {
+        Ok(self.host_firewall.lock().expect("lock").clone())
     }
     async fn peer_stats(&self) -> anyhow::Result<Vec<PeerStat>> {
         Ok(Vec::new())
@@ -156,6 +171,8 @@ struct Current {
     subnet: Option<Subnet>,
     tunnels: Option<Tunnels>,
     ruleset: Option<String>,
+    /// The host's firewall state right after `ruleset` loaded (normalized).
+    host_firewall: Option<String>,
     /// Environments' members (the firewall's sets), from the server.
     environments: Vec<(String, Vec<Ipv4Addr>)>,
     peers: Vec<Peer>,
@@ -320,8 +337,41 @@ impl Mesh {
                     tracing::warn!(error = format!("{e:#}"), "the mesh resolver stopped");
                 }
             });
+            let mesh = Arc::downgrade(self);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(FIREWALL_CHECK_EVERY).await;
+                    let Some(mesh) = mesh.upgrade() else { return };
+                    mesh.check_firewall().await;
+                }
+            });
         }
         Ok(subnet)
+    }
+
+    /// Reloads the firewall when the host's differs from what was loaded
+    /// (flushed, or edited by something else). Idempotent.
+    pub async fn check_firewall(&self) {
+        let expected = {
+            let c = self.current.lock().expect("mesh lock");
+            if c.ruleset.is_none() {
+                return;
+            }
+            c.host_firewall.clone()
+        };
+        let now = match self.sys.firewall_state().await {
+            Ok(s) => s.map(|s| nft::normalize(&s)),
+            Err(e) => {
+                tracing::debug!(error = format!("{e:#}"), "cannot read the mesh firewall");
+                return;
+            }
+        };
+        if now.is_some() && now == expected {
+            return;
+        }
+        tracing::warn!("the mesh firewall changed outside Modula; reloading it");
+        self.current.lock().expect("mesh lock").ruleset = None;
+        self.refresh_firewall().await;
     }
 
     /// The firewall for the current state and leases, loaded if it changed.
@@ -349,7 +399,18 @@ impl Mesh {
             (subnet, ruleset)
         };
         match self.sys.apply_firewall(subnet, &ruleset).await {
-            Ok(()) => self.current.lock().expect("mesh lock").ruleset = Some(ruleset),
+            Ok(()) => {
+                let host = self
+                    .sys
+                    .firewall_state()
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|s| nft::normalize(&s));
+                let mut c = self.current.lock().expect("mesh lock");
+                c.ruleset = Some(ruleset);
+                c.host_firewall = host;
+            }
             Err(e) => tracing::warn!(
                 error = format!("{e:#}"),
                 "cannot load the mesh firewall; will retry"
@@ -561,9 +622,38 @@ mod tests {
         async fn apply_firewall(&self, subnet: Subnet, ruleset: &str) -> anyhow::Result<()> {
             self.0.apply_firewall(subnet, ruleset).await
         }
+        async fn firewall_state(&self) -> anyhow::Result<Option<String>> {
+            self.0.firewall_state().await
+        }
         async fn peer_stats(&self) -> anyhow::Result<Vec<PeerStat>> {
             Ok(Vec::new())
         }
+    }
+
+    #[tokio::test]
+    async fn a_firewall_changed_outside_is_reloaded() {
+        let sys = Arc::new(RecordingSystem::default());
+        let mesh = Mesh::new(sys.clone(), KEY.into(), 51820);
+        mesh.apply(&spec()).await.unwrap();
+        let loaded = || sys.rulesets.lock().unwrap().len();
+        assert_eq!(loaded(), 1);
+        // Unchanged (counters moved): nothing to do.
+        let host = sys.host_firewall.lock().unwrap().clone().unwrap();
+        *sys.host_firewall.lock().unwrap() =
+            Some(host.replace("counter drop", "counter packets 12 bytes 960 drop"));
+        mesh.check_firewall().await;
+        assert_eq!(loaded(), 1);
+        // `nft flush ruleset`: the table is gone.
+        *sys.host_firewall.lock().unwrap() = None;
+        mesh.check_firewall().await;
+        assert_eq!(loaded(), 2);
+        assert_eq!(sys.rulesets.lock().unwrap()[1], host);
+        // Edited: a rule removed.
+        *sys.host_firewall.lock().unwrap() = Some(host.replace("\t\tcounter drop\n", ""));
+        mesh.check_firewall().await;
+        assert_eq!(loaded(), 3);
+        mesh.check_firewall().await;
+        assert_eq!(loaded(), 3);
     }
 
     #[tokio::test]

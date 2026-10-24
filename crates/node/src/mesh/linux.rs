@@ -163,23 +163,34 @@ impl MeshSystem for LinuxMesh {
         // on-link in the /16); the host answers for those it routes.
         std::fs::write(format!("/proc/sys/net/ipv4/conf/{BRIDGE}/proxy_arp"), "1")
             .context("cannot enable proxy ARP on the mesh bridge")?;
-        // Docker's FORWARD chain drops traffic into its networks; these two
-        // let the mesh through (our table above decides what may pass).
-        for (i, o) in [(INTERFACE, BRIDGE), (BRIDGE, INTERFACE)] {
-            let rule = ["-i", i, "-o", o, "-j", "ACCEPT"];
-            let mut check = vec!["-w", "-C", "DOCKER-USER"];
-            check.extend(rule);
-            if run("iptables", &check).await.is_err() {
-                let mut insert = vec!["-w", "-I", "DOCKER-USER"];
-                insert.extend(rule);
-                run("iptables", &insert)
-                    .await
-                    .context("cannot let mesh traffic through Docker's firewall")?;
+        for (i, o) in DOCKER_USER {
+            if !docker_user_has(i, o).await {
+                run(
+                    "iptables",
+                    &["-w", "-I", "DOCKER-USER", "-i", i, "-o", o, "-j", "ACCEPT"],
+                )
+                .await
+                .context("cannot let mesh traffic through Docker's firewall")?;
             }
         }
         nft_load(ruleset).await?;
         open_ufw(subnet).await;
         Ok(())
+    }
+
+    async fn firewall_state(&self) -> anyhow::Result<Option<String>> {
+        // A missing table (or nft) reads as gone: the reload says why.
+        let Ok(mut state) = run("nft", &["list", "table", "inet", super::nft::TABLE]).await else {
+            return Ok(None);
+        };
+        for (i, o) in DOCKER_USER {
+            let has = docker_user_has(i, o).await;
+            state.push_str(&format!("\ndocker-user {i} {o} {has}"));
+        }
+        let arp = std::fs::read_to_string(format!("/proc/sys/net/ipv4/conf/{BRIDGE}/proxy_arp"))
+            .unwrap_or_default();
+        state.push_str(&format!("\nproxy_arp {}", arp.trim()));
+        Ok(Some(state))
     }
 
     async fn peer_stats(&self) -> anyhow::Result<Vec<PeerStat>> {
@@ -204,6 +215,19 @@ impl MeshSystem for LinuxMesh {
         })
         .await?
     }
+}
+
+/// Docker's FORWARD chain drops traffic into its networks; these let the
+/// mesh through (`table inet modula` decides what may pass).
+const DOCKER_USER: [(&str, &str); 2] = [(INTERFACE, BRIDGE), (BRIDGE, INTERFACE)];
+
+async fn docker_user_has(i: &str, o: &str) -> bool {
+    run(
+        "iptables",
+        &["-w", "-C", "DOCKER-USER", "-i", i, "-o", o, "-j", "ACCEPT"],
+    )
+    .await
+    .is_ok()
 }
 
 /// `nft -f -` with the script on stdin (one atomic transaction).

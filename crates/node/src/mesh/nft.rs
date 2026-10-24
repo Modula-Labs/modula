@@ -107,9 +107,44 @@ pub fn render(spec: &Spec) -> String {
     out
 }
 
+/// The host's listing without what changes on its own: counters' packets
+/// and bytes, and whitespace.
+pub fn normalize(listing: &str) -> String {
+    let mut out = String::with_capacity(listing.len());
+    for line in listing.lines() {
+        let mut words = line.split_whitespace();
+        let mut kept: Vec<&str> = Vec::new();
+        while let Some(w) = words.next() {
+            if w == "packets" || w == "bytes" {
+                words.next();
+                continue;
+            }
+            kept.push(w);
+        }
+        if !kept.is_empty() {
+            out.push_str(&kept.join(" "));
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizing_drops_counter_values_only() {
+        let a = "table inet modula {\n\tchain forward {\n\t\tcounter packets 3 bytes 180 drop\n\t}\n}\n";
+        let b =
+            "table inet modula {\n  chain forward {\n    counter packets 9001 bytes 5 drop\n  }\n}";
+        assert_eq!(normalize(a), normalize(b));
+        assert_eq!(
+            normalize(a),
+            "table inet modula {\nchain forward {\ncounter drop\n}\n}\n"
+        );
+        assert_ne!(normalize(a), normalize(&a.replace("drop", "accept")));
+    }
 
     fn ip(s: &str) -> Ipv4Addr {
         s.parse().unwrap()
