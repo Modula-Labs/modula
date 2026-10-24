@@ -184,9 +184,13 @@ async fn workspace_admin(state: &AppState, workspace: Id, user: Id) -> AppResult
 
 /// The App's installation page, with a fresh `install` state for `flow`.
 async fn install_url(state: &AppState, html_url: &str, user: Id, flow: &Flow) -> AppResult<String> {
-    let mut url: Url = format!("{}/installations/new", html_url.trim_end_matches('/'))
-        .parse()
-        .map_err(anyhow::Error::from)?;
+    // select_target: GitHub's account picker (personal account or any org).
+    let mut url: Url = format!(
+        "{}/installations/select_target",
+        html_url.trim_end_matches('/')
+    )
+    .parse()
+    .map_err(anyhow::Error::from)?;
     let st = new_state(state, "install", user, flow, INSTALL_STATE_TTL).await?;
     url.query_pairs_mut().append_pair("state", &st);
     Ok(url.into())
@@ -272,7 +276,11 @@ pub async fn manifest(
         "redirect_url": format!("{origin}/api/github/app/callback"),
         "setup_url": format!("{origin}/api/github/install/callback"),
         "setup_on_update": true,
-        "public": false,
+        // Public: installable on any account or organization the admin picks
+        // (a private App only installs on its owner's account). Installs
+        // nobody started from this dashboard are never bound to a workspace:
+        // binding needs the signed state of a flow started here.
+        "public": true,
         "default_permissions": {
             "contents": "read",
             "metadata": "read",

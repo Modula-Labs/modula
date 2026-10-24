@@ -188,7 +188,8 @@ async fn manifest_state(app: &TestApp, admin: &str) -> String {
         r.json["manifest"]["hook_attributes"]["url"],
         format!("{ORIGIN}/api/github/webhook")
     );
-    assert_eq!(r.json["manifest"]["public"], false);
+    // Installable on any account or org (binding still needs a flow started here).
+    assert_eq!(r.json["manifest"]["public"], true);
     r.json["state"].as_str().unwrap().to_owned()
 }
 
@@ -350,7 +351,9 @@ async fn connect_creates_installs_and_returns(pool: PgPool) {
     // The manifest callback goes straight on to GitHub's installation page.
     let to = location(&callback(&app, &admin, "goodcode", &st).await);
     assert!(
-        to.starts_with("https://github.com/apps/modula-deploy-test/installations/new?state=mcgh_"),
+        to.starts_with(
+            "https://github.com/apps/modula-deploy-test/installations/select_target?state=mcgh_"
+        ),
         "{to}"
     );
     let st = state_param(&to);
@@ -735,7 +738,10 @@ async fn installation_binds_to_the_workspace_that_started_it(pool: PgPool) {
         .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     let url: url::Url = r.json["url"].as_str().unwrap().parse().unwrap();
-    assert_eq!(url.path(), "/apps/modula-deploy-test/installations/new");
+    assert_eq!(
+        url.path(),
+        "/apps/modula-deploy-test/installations/select_target"
+    );
     let st = url
         .query_pairs()
         .find(|(k, _)| k == "state")

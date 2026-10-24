@@ -87,6 +87,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let mut inherited = listen::Inherited::from_env()?;
     let state = AppState::new(db, cfg, Keyring::new(kek), RateLimiter::Redis(redis));
     instance_domain::load(&state).await?;
+    github::app::queue_hook_sync(&state.db).await?;
     let stop = state.shutdown.clone();
     let worker = tokio::spawn(jobs::run_worker(
         state.clone(),
@@ -106,6 +107,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
             .on(github::app::STATUS_JOB, github::app::status_job)
             .on(domains::RESYNC_JOB, domains::resync_job)
             .on(webhooks::DISPATCH_JOB, webhooks::dispatch_job)
+            .on(github::app::HOOK_SYNC_JOB, github::app::hook_sync_job)
             .on(provision::track::TRACK_JOB, provision::track::track_job),
         format!("server-{}", modula_id::Id::new()),
         stop.clone(),

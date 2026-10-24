@@ -278,6 +278,7 @@ pub async fn put(
         *state.hosts_lock().write().expect("hosts lock") = h;
     }
     state.hub.kick_all(&nodes);
+    crate::github::app::queue_hook_sync(&state.db).await?;
     settings(&state).await.map(Json)
 }
 

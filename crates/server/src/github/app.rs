@@ -110,6 +110,68 @@ fn repo_name(repo: &str) -> &str {
     repo.split_once('/').map_or(repo, |(_, n)| n)
 }
 
+pub const HOOK_SYNC_JOB: &str = "github.app_hook_sync";
+
+/// Job: points the App's webhook at this dashboard's current address (it
+/// was registered with the address the App was created from; the dashboard
+/// may have moved to a domain since). The setup and callback URLs can't be
+/// changed through the API; they only matter while installing.
+pub async fn hook_sync_job(state: AppState, _job: crate::jobs::Job) -> anyhow::Result<()> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM github_app)")
+        .fetch_one(&state.db)
+        .await?;
+    if !exists {
+        return Ok(());
+    }
+    let want = format!(
+        "{}{}",
+        state.public_origin(),
+        crate::api::github::WEBHOOK_PATH
+    );
+    let jwt = app_jwt(&creds(&state).await?)?;
+    let resp = state
+        .github
+        .request(Method::GET, "/app/hook/config")
+        .bearer_auth(&jwt)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("GitHub unreachable: {e}"))?;
+    #[derive(Deserialize)]
+    struct HookConfig {
+        url: Option<String>,
+    }
+    let current: HookConfig = resp.error_for_status()?.json().await?;
+    if current.url.as_deref() == Some(want.as_str()) {
+        return Ok(());
+    }
+    state
+        .github
+        .request(Method::PATCH, "/app/hook/config")
+        .bearer_auth(&jwt)
+        .json(&json!({ "url": want }))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("GitHub unreachable: {e}"))?
+        .error_for_status()?;
+    tracing::info!(url = %want, previous = ?current.url, "GitHub App webhook URL updated");
+    Ok(())
+}
+
+/// Queue [`hook_sync_job`] (startup, and after the dashboard's domain changes).
+pub async fn queue_hook_sync(db: &sqlx::PgPool) -> AppResult<()> {
+    crate::jobs::enqueue(
+        db,
+        crate::jobs::NewJob {
+            kind: HOOK_SYNC_JOB,
+            payload: json!({}),
+            dedupe_key: Some(HOOK_SYNC_JOB),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(())
+}
+
 /// A token for `installation`, from the cache or freshly minted.
 pub async fn installation_token(
     state: &AppState,
