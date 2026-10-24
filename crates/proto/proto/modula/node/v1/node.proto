@@ -126,7 +126,8 @@ message WorkloadMetrics {
 enum DeploymentPhase {
   PHASE_UNSPECIFIED = 0;
   BUILDING = 9;
-  // The build finished; `message` carries the image id (sha256:…).
+  // The build finished; `message` carries the image id (sha256:…), or for
+  // a build with an output directory, the uploaded archive's hex SHA-256.
   BUILT = 10;
   PULLING = 1;
   CREATING = 2;
@@ -407,6 +408,14 @@ message Build {
   // Hex SHA-256 the downloaded archive must match (uploaded sources); empty =
   // not checked (GitHub tarballs come over TLS from GitHub itself).
   string source_sha256 = 55;
+  // Static sites hosted elsewhere (e.g. Cloudflare): instead of running the
+  // image, the node packs this directory of it (relative to the image's
+  // working directory, or absolute) as a gzipped tarball and PUTs it to
+  // output_url with output_auth as the Authorization header, then reports
+  // BUILT with the archive's hex SHA-256. Empty = run the image as usual.
+  string output_dir = 56;
+  string output_url = 57;
+  string output_auth = 58;
 }
 
 enum Builder {

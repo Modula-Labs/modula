@@ -1,7 +1,10 @@
 //! Converges the runtime to the newest desired state.
 //!
 //! Each new workload gets a rollout task: [build →] pull → create → start →
-//! health check → ACTIVE (or FAILED, after which its container is removed). A periodic
+//! health check → ACTIVE (or FAILED, after which its container is removed).
+//! A build with an output directory (a static site hosted elsewhere) ends at
+//! BUILT instead: the output is uploaded to the control plane and nothing
+//! runs here. A periodic
 //! pass repairs drift and reports crashes and recoveries. Containers whose
 //! deployment is no longer desired are stopped and removed; nothing without
 //! our labels is ever touched.
@@ -119,7 +122,12 @@ impl Reconciler {
         let tracked = self.tracked.lock().expect("tracked lock");
         tracked
             .iter()
-            .filter(|(_, t)| matches!(t.phase, Phase::Active | Phase::Failed | Phase::Crashed))
+            .filter(|(_, t)| {
+                matches!(
+                    t.phase,
+                    Phase::Active | Phase::Failed | Phase::Crashed | Phase::Built
+                )
+            })
             .map(|(id, t)| event(id, t.phase, &t.message, self.applied_generation()))
             .collect()
     }
@@ -512,6 +520,9 @@ impl Reconciler {
         if phase == Some(Phase::Failed) {
             return Ok(()); // the server removes it from the desired state
         }
+        if phase == Some(Phase::Built) && exports_output(w) {
+            return Ok(()); // uploaded; the server takes it from here
+        }
         // Extra containers for one deployment can only come from a crash
         // mid-rollout; keep the first.
         for extra in containers.iter().skip(1) {
@@ -575,6 +586,21 @@ impl Reconciler {
         let id = w.deployment_id.as_str();
         let mut effective;
         let w = match &w.build {
+            Some(spec) if !spec.output_dir.is_empty() => {
+                let built = self.build(w, spec).await?;
+                let sha256 = self.upload_output(w, spec).await?;
+                // The message is the archive's hash: the server checks it.
+                self.set_phase_with(
+                    id,
+                    Phase::Built,
+                    sha256,
+                    Some(pb::BuildOutput {
+                        stack: built.stack,
+                        ..Default::default()
+                    }),
+                );
+                return Ok(());
+            }
             Some(spec) => {
                 let built = self.build(w, spec).await?;
                 // The message is the image id: the server stores it as the digest.
@@ -804,6 +830,44 @@ impl Reconciler {
         }
     }
 
+    /// Packs the build's output directory and uploads it to the control
+    /// plane. Returns the archive's hex SHA-256.
+    async fn upload_output(&self, w: &pb::Workload, spec: &pb::Build) -> Result<String, String> {
+        let id = w.deployment_id.as_str();
+        let Some(b) = &self.build else {
+            return Err("This server can't build images (no builder configured)".into());
+        };
+        let log = b.logs.append(id).ok();
+        let _finish = log.clone().map(FinishOnDrop);
+        let archive = std::env::temp_dir().join(format!("modula-output-{id}.tar.gz"));
+        let result = async {
+            let log = log
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("cannot write the build log"))?;
+            b.builder
+                .export(w, &spec.output_dir, &archive, &log)
+                .await?;
+            let sha256 = crate::build::output::sha256(&archive).await?;
+            let size = tokio::fs::metadata(&archive).await?.len();
+            log.line(
+                false,
+                &format!("Uploading the output ({} KB) for publishing", size / 1024),
+            );
+            crate::build::output::upload(&spec.output_url, &spec.output_auth, &archive).await?;
+            log.line(false, "Output uploaded");
+            anyhow::Ok(sha256)
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&archive).await;
+        result.map_err(|e| {
+            let message = format!("{e:#}");
+            if let Some(l) = &log {
+                l.line(true, &message);
+            }
+            format!("Packing the build output failed: {message}")
+        })
+    }
+
     async fn ensure_running(&self, container: &str, w: &pb::Workload) -> Result<(), String> {
         let cs = self
             .runtime
@@ -860,6 +924,11 @@ fn redact(text: &str, env: &[pb::EnvVar]) -> String {
         out = out.replace(v, "••••••");
     }
     out
+}
+
+/// A static-site build whose output is hosted elsewhere.
+fn exports_output(w: &pb::Workload) -> bool {
+    w.build.as_ref().is_some_and(|b| !b.output_dir.is_empty())
 }
 
 struct FinishOnDrop(BuildLog);

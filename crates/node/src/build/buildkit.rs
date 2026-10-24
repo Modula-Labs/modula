@@ -31,10 +31,11 @@ use bollard::models::{
     ContainerCreateBody, HostConfig, NetworkCreateRequest, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ImportImageOptionsBuilder,
-    ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, DownloadFromContainerOptionsBuilder,
+    ImportImageOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
+    RemoveImageOptions,
 };
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use modula_proto::node::v1 as pb;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
@@ -743,8 +744,91 @@ impl BuildkitBuilder {
     }
 }
 
+impl BuildkitBuilder {
+    async fn run_export(
+        &self,
+        container: &str,
+        image: &str,
+        dir: &str,
+        dest: &Path,
+    ) -> anyhow::Result<()> {
+        use std::io::Write as _;
+        let workdir = self
+            .docker
+            .inspect_image(image)
+            .await?
+            .config
+            .and_then(|c| c.working_dir)
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "/".into());
+        let path = if dir.starts_with('/') {
+            dir.to_owned()
+        } else {
+            format!(
+                "{}/{}",
+                workdir.trim_end_matches('/'),
+                dir.trim_matches('/')
+            )
+        };
+        let body = ContainerCreateBody {
+            image: Some(image.to_owned()),
+            labels: Some(HashMap::from([("dev.modula.role".into(), "export".into())])),
+            ..Default::default()
+        };
+        let opts = CreateContainerOptionsBuilder::new().name(container).build();
+        self.docker.create_container(Some(opts), body).await?;
+        let mut stream = self.docker.download_from_container(
+            container,
+            Some(
+                DownloadFromContainerOptionsBuilder::new()
+                    .path(&path)
+                    .build(),
+            ),
+        );
+        let file = std::fs::File::create(dest)?;
+        let mut gz = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| match e {
+                bollard::errors::Error::DockerResponseServerError {
+                    status_code: 404, ..
+                } => anyhow::anyhow!(
+                    "the build has no {path}: check the output directory (relative to the root directory)"
+                ),
+                e => anyhow::Error::from(e).context("cannot copy the output out of the build"),
+            })?;
+            gz.write_all(&chunk)?;
+        }
+        gz.finish()?.sync_all()?;
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl Builder for BuildkitBuilder {
+    async fn export(
+        &self,
+        w: &pb::Workload,
+        dir: &str,
+        dest: &Path,
+        log: &BuildLog,
+    ) -> anyhow::Result<()> {
+        log.line(false, &format!("Packing the output directory {dir}"));
+        let container = format!("modula-export-{}", w.deployment_id);
+        let result = self.run_export(&container, &w.image, dir, dest).await;
+        let _ = self
+            .docker
+            .remove_container(
+                &container,
+                Some(RemoveContainerOptionsBuilder::new().force(true).build()),
+            )
+            .await;
+        let _ = self
+            .docker
+            .remove_image(&w.image, None::<RemoveImageOptions>, None)
+            .await;
+        result
+    }
+
     async fn build(
         &self,
         w: &pb::Workload,
