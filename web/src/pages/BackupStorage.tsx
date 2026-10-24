@@ -23,6 +23,16 @@ import { UseR2Button } from "./settings/Integrations";
 const providerLabel = (p: BackupProvider) =>
   PROVIDERS.find((x) => x.value === p)?.label ?? p;
 
+const kindLabel = (t: BackupTarget) =>
+  t.kind === "bucket" ? "Bucket service" : t.kind === "local" ? "Server disk" : t.provider ? providerLabel(t.provider) : "";
+
+const targetDetail = (t: BackupTarget) =>
+  t.kind === "bucket"
+    ? `${t.projectName} / ${t.serviceName} (${t.environmentName})`
+    : t.kind === "local"
+      ? (t.nodeName ?? "")
+      : `${t.bucket}${t.prefix ? `/${t.prefix}` : ""} · ${t.endpoint}`;
+
 /** Backup targets (S3-compatible buckets) for a workspace. */
 export function BackupStorage({
   workspaceId,
@@ -105,11 +115,10 @@ function TargetRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm">{t.name}</span>
-          <Badge>{providerLabel(t.provider)}</Badge>
+          <Badge>{kindLabel(t)}</Badge>
         </div>
-        <div className="truncate font-mono text-[13px] text-muted-foreground">
-          {t.bucket}
-          {t.prefix ? `/${t.prefix}` : ""} · {t.endpoint}
+        <div className={`truncate text-[13px] text-muted-foreground${t.kind === "s3" ? " font-mono" : ""}`}>
+          {targetDetail(t)}
         </div>
       </div>
       {canEdit ? (
@@ -347,11 +356,15 @@ export function SelfBackupCard({
     queryKey: ["self-backup"],
     queryFn: api.selfBackup,
   });
-  const targets = useQuery({
+  const allTargets = useQuery({
     queryKey: ["backup-targets", workspaceId],
     queryFn: () => api.backupTargets(workspaceId!),
     enabled: !!workspaceId,
   });
+  const targets = {
+    ...allTargets,
+    data: allTargets.data?.filter((t) => t.kind === "s3"),
+  };
   const [form, setForm] = useState({
     enabled: false,
     targetId: "",

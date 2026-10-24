@@ -48,6 +48,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 modula-id.workspace = true
 x509-parser.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 defguard_wireguard_rs.workspace = true

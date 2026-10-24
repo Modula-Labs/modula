@@ -77,6 +77,14 @@ pub enum Op {
     Extensions,
     Extension(ExtensionArgs),
     Password(PasswordArgs),
+    /// Recovery and WAL archiving state (point-in-time recovery).
+    WalStatus,
+    /// Streaming replication: the standbys of a primary, or a standby's lag.
+    Replication,
+    /// Create (or set the password of) the role read replicas connect as.
+    ReplicationRole(PasswordArgs),
+    /// Turn a standby into a primary.
+    Promote,
 }
 
 impl Op {
@@ -94,7 +102,12 @@ impl Op {
     /// Only reads: runs as the read-only role.
     pub fn is_read(&self) -> bool {
         match self {
-            Self::Tables | Self::Rows(_) | Self::Stats | Self::Extensions => true,
+            Self::Tables
+            | Self::Rows(_)
+            | Self::Stats
+            | Self::Extensions
+            | Self::WalStatus
+            | Self::Replication => true,
             Self::Query(a) => a.read_only,
             _ => false,
         }
@@ -113,6 +126,10 @@ impl Op {
             Self::Extensions => "extensions",
             Self::Extension(_) => "extension",
             Self::Password(_) => "password",
+            Self::WalStatus => "walStatus",
+            Self::Replication => "replication",
+            Self::ReplicationRole(_) => "replicationRole",
+            Self::Promote => "promote",
         }
     }
 }
@@ -347,6 +364,12 @@ mod tests {
         assert!(!format!("{p:?}").contains("hunter2"));
         assert!(!p.is_read());
         assert!(Op::Tables.is_read() && Op::Stats.is_read() && Op::Extensions.is_read());
+        assert_eq!(Op::parse("walStatus", "").unwrap(), Op::WalStatus);
+        assert!(Op::WalStatus.is_read() && Op::Replication.is_read());
+        assert!(!Op::Promote.is_read());
+        let r = Op::parse("replicationRole", r#"{"password":"abcdefghijklmnop"}"#).unwrap();
+        assert!(!r.is_read());
+        assert_eq!(r.name(), "replicationRole");
         let q = |ro| Op::parse("query", &format!(r#"{{"sql":"select 1","readOnly":{ro}}}"#));
         assert!(q(true).unwrap().is_read());
         assert!(!q(false).unwrap().is_read());

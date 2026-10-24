@@ -57,6 +57,8 @@ message NodeMessage {
     MetricsReport metrics = 7;
     LogBatch log_batch = 8;
     BackupResult backup_result = 20;
+    BackupDeleted backup_deleted = 21;
+    WalgResult walg_result = 22;
     DbResponse db_result = 30;
     TunnelOpened tunnel_opened = 31;
     TunnelData tunnel_data = 32;
@@ -214,6 +216,8 @@ message ServerMessage {
     RenewResponse renewed = 5;
     BackupRequest backup = 20;
     RestoreRequest restore = 21;
+    BackupDelete backup_delete = 22;
+    WalgRequest walg = 23;
     DbRequest db = 30;
     TunnelOpen tunnel_open = 31;
     TunnelData tunnel_data = 32;
@@ -381,6 +385,17 @@ message Workload {
   // pulled (and the pre-deploy command ran), with no container started.
   // Runs come as CronRun.
   bool cron = 90;
+  // Point-in-time recovery (Postgres with WAL-G); absent = none.
+  Pitr pitr = 95;
+}
+
+// The node bind-mounts its own WAL-G binary read-only at /usr/local/bin/wal-g
+// (never one the server names). WAL-G's settings (WALG_*) are in the
+// workload's env.
+message Pitr {
+  // WAL-G's file storage on this node: `<workspace>/<instance>/wal-g` under
+  // the backup directory, mounted at /var/lib/modula-wal-g. Empty = none.
+  string local_dir = 1;
 }
 
 message Volume {
@@ -503,9 +518,11 @@ message RenewResponse {
 //
 // Database dumps run on the node that runs the database, inside its container
 // (a fixed command per engine, never one sent by the server). The dump is
-// age-encrypted on the node as it streams and uploaded straight to the
-// workspace's S3-compatible storage through presigned URLs: the node never
-// holds storage credentials and plaintext never leaves it.
+// age-encrypted on the node as it streams and goes straight to storage:
+// S3-compatible storage the control plane reaches through presigned URLs
+// (the node holds no credentials), a self-hosted bucket on the private
+// network (the node gets that bucket's credentials), or this node's disk.
+// Plaintext never leaves the node.
 
 enum DatabaseEngine {
   ENGINE_UNSPECIFIED = 0;
@@ -526,6 +543,28 @@ message BackupRequest {
   // part except the last is exactly part_size bytes (of ciphertext).
   repeated string part_urls = 5;
   uint64 part_size = 6;
+  // Instead of part_urls, a self-hosted bucket this node uploads to itself
+  // (multipart, object_key; aborted on failure).
+  S3Access s3 = 7;
+  string object_key = 8;
+  // Instead of part_urls, a file under this node's backup directory
+  // (`<workspace>/<instance>/<name>`), written whole and then renamed.
+  string local_path = 9;
+}
+
+// A self-hosted bucket service, which only the private network reaches. Sent
+// only to the node that uses it, and never logged.
+message S3Access {
+  // `http://ip:port`; empty = the address of deployment_id's container (on
+  // this node) on environment_id's network, at `port`.
+  string endpoint = 1;
+  string region = 2;
+  string bucket = 3;
+  string access_key_id = 4;
+  string secret_access_key = 5;
+  string deployment_id = 6;
+  string environment_id = 7;
+  uint32 port = 8;
 }
 
 message RestoreRequest {
@@ -537,6 +576,57 @@ message RestoreRequest {
   // The age identity (AGE-SECRET-KEY-1…) that decrypts it. Only ever sent
   // over this stream; never logged or written to disk.
   string age_identity = 5;
+  // Instead of object_url: the object in a self-hosted bucket, or a file
+  // under this node's backup directory.
+  S3Access s3 = 6;
+  string object_key = 7;
+  string local_path = 8;
+}
+
+// Delete one backup from a self-hosted bucket (s3 + object_key) or this
+// node's backup directory (local_path). Answered with BackupDeleted.
+message BackupDelete {
+  string backup_id = 1;
+  S3Access s3 = 2;
+  string object_key = 3;
+  string local_path = 4;
+}
+
+message BackupDeleted {
+  string backup_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+// A WAL-G command run inside a Postgres container with PITR (as the postgres
+// user, with the container's WALG_* settings). Answered with WalgResult.
+message WalgRequest {
+  // backup-push: the backup's id; delete-before: any id, echoed back.
+  string request_id = 1;
+  string deployment_id = 2;
+  WalgOp op = 3;
+  // delete-before: the oldest base backup to keep (WAL-G's name).
+  string backup_name = 4;
+}
+
+enum WalgOp {
+  WALG_UNSPECIFIED = 0;
+  // Take a base backup of PGDATA.
+  WALG_BACKUP_PUSH = 1;
+  // Delete base backups and WAL older than backup_name.
+  WALG_DELETE_BEFORE = 2;
+}
+
+message WalgResult {
+  string request_id = 1;
+  WalgOp op = 2;
+  bool ok = 3;
+  string error = 4;
+  // backup-push: the base backup taken (WAL-G's name, times, compressed size).
+  string backup_name = 5;
+  int64 start_unix = 6;
+  int64 finish_unix = 7;
+  uint64 size_bytes = 8;
 }
 
 // The outcome of a BackupRequest or RestoreRequest.

@@ -2687,7 +2687,10 @@ dependencies = [
  "bytes",
  "futures",
  "reqwest",
+ "rusty-s3",
  "tokio",
+ "tokio-util",
+ "url",
  "zeroize",
 ]
 
@@ -2811,6 +2814,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]

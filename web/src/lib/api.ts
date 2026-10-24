@@ -442,14 +442,27 @@ export interface CreatedApp {
   warnings: string[];
 }
 export type BackupProvider = "s3" | "r2" | "b2" | "minio";
+export type BackupTargetKind = "s3" | "bucket" | "local";
 export interface BackupTarget {
   id: string;
   name: string;
-  provider: BackupProvider;
+  kind: BackupTargetKind;
+  /** Null for local targets. */
+  provider: BackupProvider | null;
+  /** Empty for bucket and local targets. */
   endpoint: string;
   region: string;
   bucket: string;
   prefix: string;
+  accessKeyId: string;
+  /** Bucket targets: the bucket service instance and where it lives. */
+  bucketInstanceId: string | null;
+  serviceName: string | null;
+  environmentName: string | null;
+  projectName: string | null;
+  /** Local targets: the server whose disk holds the backups. */
+  nodeId: string | null;
+  nodeName: string | null;
   createdAt: string;
 }
 export interface BackupTargetInput {
@@ -462,13 +475,53 @@ export interface BackupTargetInput {
   accessKeyId: string;
   secretAccessKey: string;
 }
+export interface BackupRetention {
+  dailyDays: number;
+  weeklyDays: number;
+  monthlyDays: number;
+}
+/** Exactly one of these selects where a backup is written. */
+export type BackupDestinationChoice =
+  | { targetId: string }
+  | { bucketInstanceId: string }
+  | { localDisk: true };
 export interface BackupSchedule {
   enabled: boolean;
   targetId: string;
+  targetName: string;
+  targetKind: BackupTargetKind;
   hourUtc: number;
-  retention: { dailyDays: number; weeklyDays: number; monthlyDays: number };
+  retention: BackupRetention;
 }
-export type BackupStatus = "running" | "completed" | "failed" | "deleted";
+export type BackupScheduleInput = {
+  enabled: boolean;
+  hourUtc: number;
+  retention?: BackupRetention;
+} & BackupDestinationChoice;
+export interface BackupBucketOption {
+  instanceId: string;
+  template: "r2" | "bucket";
+  serviceName: string;
+  environmentName: string;
+  projectName: string;
+  targetId: string | null;
+}
+export interface BackupServerOption {
+  nodeId: string;
+  name: string;
+  targetId: string | null;
+}
+export interface BackupDestinations {
+  targets: BackupTarget[];
+  buckets: BackupBucketOption[];
+  servers: BackupServerOption[];
+}
+export type BackupStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "deleting"
+  | "deleted";
 export interface Backup {
   id: string;
   status: BackupStatus;
@@ -478,6 +531,87 @@ export interface Backup {
   finishedAt: string | null;
   error: string | null;
   targetName: string;
+  targetKind: BackupTargetKind;
+  /** `dump`, or `walg` for a base backup used by point-in-time recovery. */
+  method: "dump" | "walg";
+  walgName: string | null;
+}
+export interface PitrConfig {
+  enabled: boolean;
+  targetId: string;
+  targetName: string;
+  targetKind: BackupTargetKind;
+  windowDays: number;
+  hourUtc: number;
+}
+export interface PitrArchiving {
+  lastArchivedAt: string | null;
+  lastFailedAt: string | null;
+  failedCount: number;
+  inRecovery: boolean;
+}
+export interface PitrRestore {
+  id: string;
+  sourceInstanceId: string;
+  instanceId: string;
+  serviceName: string;
+  targetTime: string;
+  status: "running" | "completed" | "failed";
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+export interface PitrInfo {
+  config: PitrConfig | null;
+  window: { from: string; to: string } | null;
+  archiving: PitrArchiving | null;
+  baseBackups: Backup[];
+  restores: PitrRestore[];
+}
+export type PitrInput = {
+  enabled: boolean;
+  windowDays?: number;
+  hourUtc?: number;
+} & Partial<BackupDestinationChoice>;
+export interface PitrRestoreInput {
+  targetTime: string;
+  into: "new" | "same";
+  name?: string;
+  confirm?: string;
+}
+export interface PitrRestored {
+  restoreId: string;
+  instanceId: string;
+  serviceId: string;
+  serviceName: string;
+}
+export interface ReplicationPeer {
+  serviceId: string;
+  serviceName: string;
+  instanceId: string | null;
+  nodeId: string | null;
+}
+export interface CreatedReplica {
+  serviceId: string;
+  serviceName: string;
+  instanceId: string;
+  nodeId: string;
+}
+export interface Standby {
+  name: string;
+  address: string | null;
+  state: string | null;
+  replayLagSeconds: number | null;
+  lagBytes: number | null;
+}
+export type ReplicationStatus =
+  | { role: "primary"; standbys: Standby[] }
+  | { role: "replica"; replayLagSeconds: number | null; caughtUp: boolean; receiver: string | null };
+export interface Replication {
+  role: "primary" | "replica" | "standalone";
+  primary: ReplicationPeer | null;
+  replicas: ReplicationPeer[];
+  status: ReplicationStatus | null;
 }
 export interface BackupsInfo {
   schedule: BackupSchedule | null;
@@ -1180,17 +1314,35 @@ export const api = {
     del<{ ok: true }>(`/api/backup-targets/${enc(id)}`),
   backups: (instance: string) =>
     get<BackupsInfo>(`/api/service-instances/${enc(instance)}/backups`),
-  saveBackupSchedule: (instance: string, b: BackupSchedule) =>
+  backupDestinations: (instance: string) =>
+    get<BackupDestinations>(
+      `/api/service-instances/${enc(instance)}/backup-destinations`,
+    ),
+  saveBackupSchedule: (instance: string, b: BackupScheduleInput) =>
     request<BackupsInfo>(
       "PUT",
       `/api/service-instances/${enc(instance)}/backup-schedule`,
       b,
     ),
-  backupNow: (instance: string) =>
-    post<Backup>(`/api/service-instances/${enc(instance)}/backups`),
+  backupNow: (instance: string, dest?: BackupDestinationChoice) =>
+    post<Backup>(`/api/service-instances/${enc(instance)}/backups`, dest),
+  pitr: (instance: string) =>
+    get<PitrInfo>(`/api/service-instances/${enc(instance)}/pitr`),
+  savePitr: (instance: string, b: PitrInput) =>
+    request<PitrInfo>("PUT", `/api/service-instances/${enc(instance)}/pitr`, b),
+  pitrBaseBackup: (instance: string) =>
+    post<PitrInfo>(`/api/service-instances/${enc(instance)}/pitr/base-backups`),
+  pitrRestore: (instance: string, b: PitrRestoreInput) =>
+    post<PitrRestored>(`/api/service-instances/${enc(instance)}/pitr/restore`, b),
+  replication: (instance: string) =>
+    get<Replication>(`/api/service-instances/${enc(instance)}/replication`),
+  addReplica: (instance: string, b: { name?: string }) =>
+    post<CreatedReplica>(`/api/service-instances/${enc(instance)}/replicas`, b),
+  promoteReplica: (instance: string, confirm: string) =>
+    post<Replication>(`/api/service-instances/${enc(instance)}/promote`, { confirm }),
   restoreBackup: (id: string) =>
     post<{ ok: true }>(`/api/backups/${enc(id)}/restore`),
-  deleteBackup: (id: string) => del<{ ok: true }>(`/api/backups/${enc(id)}`),
+  deleteBackup: (id: string) => del<Backup>(`/api/backups/${enc(id)}`),
   selfBackup: () => get<SelfBackup>("/api/instance/self-backup"),
   saveSelfBackup: (b: SelfBackup) =>
     request<SelfBackup>("PUT", "/api/instance/self-backup", b),

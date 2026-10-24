@@ -170,6 +170,13 @@ pub enum Action {
     DatabaseCredentials,
     /// Regenerate the database password.
     DatabasePassword,
+    /// Restore a Postgres instance to a point in time (into a new service or
+    /// over its own data).
+    PitrRestore,
+    /// Add a read replica of a Postgres instance (a new service).
+    ReplicaCreate,
+    /// Turn a read replica into a standalone primary.
+    ReplicaPromote,
     /// A workspace's Hetzner connection (never the token), caps and usage.
     HetznerRead,
     /// Verify and store (or replace) the Hetzner token; change the caps.
@@ -276,7 +283,10 @@ impl Action {
             Self::DatabaseRead
             | Self::DatabaseWrite
             | Self::DatabaseCredentials
-            | Self::DatabasePassword => K::ServiceInstance,
+            | Self::DatabasePassword
+            | Self::PitrRestore
+            | Self::ReplicaCreate
+            | Self::ReplicaPromote => K::ServiceInstance,
             Self::HetznerRead
             | Self::HetznerConnect
             | Self::HetznerDisconnect
@@ -373,6 +383,7 @@ impl Action {
             // Changing data bypasses the app's own rules: Admin+ (and sudo).
             Self::DatabaseRead | Self::DatabaseCredentials | Self::DatabasePassword => Role::Member,
             Self::DatabaseWrite => Role::Admin,
+            Self::PitrRestore | Self::ReplicaCreate | Self::ReplicaPromote => Role::Member,
             Self::HetznerRead | Self::ServerList | Self::ServerRead => Role::Viewer,
             Self::ServerSuggest => Role::Member,
             Self::HetznerConnect
@@ -469,6 +480,9 @@ impl Action {
             // every read is audited instead.
             Self::DatabaseRead | Self::DatabaseCredentials => false,
             Self::DatabaseWrite | Self::DatabasePassword => true,
+            // Both replace what the database serves.
+            Self::PitrRestore | Self::ReplicaPromote => true,
+            Self::ReplicaCreate => false,
             Self::HetznerRead
             | Self::HetznerCatalog
             | Self::ServerList

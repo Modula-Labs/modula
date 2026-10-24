@@ -1,5 +1,10 @@
 //! Backups: storage targets per workspace, schedules and backups per
 //! database service instance, and the control plane's own backups.
+//!
+//! A schedule (or "Back up now") points at an S3 target, a bucket service of
+//! the workspace or the disk of the server running the database; the last
+//! two become `bucket` and `local` targets on first use (see
+//! [`crate::backup::store`]).
 
 use axum::Json;
 use axum::extract::State;
@@ -25,29 +30,65 @@ use crate::validate;
 pub struct Target {
     pub id: Id,
     pub name: String,
-    pub provider: String,
+    /// `s3`, `bucket` (a bucket service) or `local` (a server's disk).
+    pub kind: String,
+    pub provider: Option<String>,
     pub endpoint: String,
     pub region: String,
     pub bucket: String,
     pub prefix: String,
     pub access_key_id: String,
+    /// Bucket targets: the bucket service's instance and names.
+    pub bucket_instance_id: Option<Id>,
+    pub service_name: Option<String>,
+    pub environment_name: Option<String>,
+    pub project_name: Option<String>,
+    /// Local targets: the server.
+    pub node_id: Option<Id>,
+    pub node_name: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+}
+
+macro_rules! select_targets {
+    ($rest:literal) => {
+        concat!(
+            "SELECT t.id, t.name, t.kind, t.provider, t.endpoint, t.region, t.bucket, t.prefix,
+                    t.access_key_id, t.bucket_instance_id, s.name AS service_name,
+                    e.name AS environment_name, p.name AS project_name, t.node_id,
+                    n.name AS node_name, t.created_at
+             FROM backup_targets t
+             LEFT JOIN service_instances i ON i.id = t.bucket_instance_id
+             LEFT JOIN services s ON s.id = i.service_id
+             LEFT JOIN environments e ON e.id = i.environment_id
+             LEFT JOIN projects p ON p.id = s.project_id
+             LEFT JOIN nodes n ON n.id = t.node_id ",
+            $rest
+        )
+    };
+}
+
+async fn targets(state: &AppState, workspace: Id) -> AppResult<Vec<Target>> {
+    Ok(
+        sqlx::query_as(select_targets!("WHERE t.workspace_id = $1 ORDER BY t.name"))
+            .bind(workspace)
+            .fetch_all(&state.db)
+            .await?,
+    )
+}
+
+async fn load_target(state: &AppState, id: Id) -> AppResult<Target> {
+    Ok(sqlx::query_as(select_targets!("WHERE t.id = $1"))
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?)
 }
 
 pub async fn list_targets(
     State(state): State<AppState>,
     grant: Grant,
 ) -> AppResult<Json<Vec<Target>>> {
-    Ok(Json(
-        sqlx::query_as(
-            "SELECT id, name, provider, endpoint, region, bucket, prefix, access_key_id, created_at
-             FROM backup_targets WHERE workspace_id = $1 ORDER BY name",
-        )
-        .bind(grant.id())
-        .fetch_all(&state.db)
-        .await?,
-    ))
+    targets(&state, grant.id()).await.map(Json)
 }
 
 #[derive(Deserialize)]
@@ -98,7 +139,7 @@ pub async fn create_target(
         secret: zeroize::Zeroizing::new(credential(&req.secret_access_key, "secret access key")?),
     };
     target
-        .probe()
+        .probe(s3::http()?, &Id::new().to_string())
         .await
         .map_err(|e| AppError::bad_request(format!("the bucket is not usable: {e:#}")))?;
 
@@ -113,13 +154,13 @@ pub async fn create_target(
         )
         .await?;
     let mut tx = state.db.begin().await?;
-    let created: Option<Target> = sqlx::query_as(
+    let created: Option<Id> = sqlx::query_scalar(
         "INSERT INTO backup_targets
            (id, workspace_id, name, provider, endpoint, region, bucket, prefix, access_key_id,
             secret_sealed, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (workspace_id, name) DO NOTHING
-         RETURNING id, name, provider, endpoint, region, bucket, prefix, access_key_id, created_at",
+         RETURNING id",
     )
     .bind(id)
     .bind(workspace)
@@ -134,8 +175,9 @@ pub async fn create_target(
     .bind(actor.user_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let created =
-        created.ok_or_else(|| AppError::Conflict(format!("a target named {name} exists")))?;
+    if created.is_none() {
+        return Err(AppError::Conflict(format!("a target named {name} exists")));
+    }
     Entry::new("backup_target.create", &meta)
         .actor(&actor)
         .workspace(workspace)
@@ -144,7 +186,7 @@ pub async fn create_target(
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(Json(created))
+    load_target(&state, id).await.map(Json)
 }
 
 /// Delete a target that no schedule uses. Its backup records go with it;
@@ -161,7 +203,8 @@ pub async fn delete_target(
     let (schedules, self_backup, running): (i64, bool, bool) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM backup_schedules WHERE target_id = $1),
                 EXISTS (SELECT 1 FROM instance_backup WHERE target_id = $1),
-                EXISTS (SELECT 1 FROM backups WHERE target_id = $1 AND status = 'running')",
+                EXISTS (SELECT 1 FROM backups WHERE target_id = $1
+                        AND status IN ('running', 'deleting'))",
     )
     .bind(id)
     .fetch_one(&mut *tx)
@@ -197,6 +240,244 @@ pub async fn delete_target(
     Ok(Json(json!({ "id": id })))
 }
 
+// ---------------------------------------------------------------- destinations
+
+/// Where a schedule or "Back up now" sends backups: exactly one of an
+/// existing target, a bucket service instance, or the disk of the server
+/// running the database.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Destination {
+    #[serde(default)]
+    pub target_id: Option<Id>,
+    #[serde(default)]
+    pub bucket_instance_id: Option<Id>,
+    #[serde(default)]
+    pub local_disk: bool,
+}
+
+impl Destination {
+    pub(crate) fn given(&self) -> usize {
+        usize::from(self.target_id.is_some())
+            + usize::from(self.bucket_instance_id.is_some())
+            + usize::from(self.local_disk)
+    }
+}
+
+/// A bucket service a database can back up to.
+#[derive(Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct BucketOption {
+    pub instance_id: Id,
+    /// `r2` or `bucket` (self-hosted).
+    pub template: String,
+    pub service_name: String,
+    pub environment_name: String,
+    pub project_name: String,
+    /// Its target, once something backed up to it.
+    pub target_id: Option<Id>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerOption {
+    pub node_id: Id,
+    pub name: String,
+    pub target_id: Option<Id>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Destinations {
+    /// Every target of the workspace (S3, and bucket and disk ones in use).
+    pub targets: Vec<Target>,
+    pub buckets: Vec<BucketOption>,
+    /// The server running the database (its disk), when it has one.
+    pub servers: Vec<ServerOption>,
+}
+
+/// The Storage choices of a database's Backups tab.
+pub async fn destinations(
+    State(state): State<AppState>,
+    grant: Grant,
+) -> AppResult<Json<Destinations>> {
+    let instance = grant.id();
+    let workspace = grant.workspace_id()?;
+    let buckets = sqlx::query_as(
+        "SELECT i.id AS instance_id, s.template, s.name AS service_name,
+                e.name AS environment_name, p.name AS project_name, t.id AS target_id
+         FROM service_instances i
+         JOIN services s ON s.id = i.service_id
+         JOIN environments e ON e.id = i.environment_id
+         JOIN projects p ON p.id = s.project_id
+         LEFT JOIN backup_targets t ON t.bucket_instance_id = i.id
+         WHERE p.workspace_id = $1 AND s.template IN ('r2', 'bucket')
+           AND (s.template <> 'r2' OR EXISTS (SELECT 1 FROM r2_buckets r WHERE r.service_instance_id = i.id))
+         ORDER BY p.name, s.name, e.name",
+    )
+    .bind(workspace)
+    .fetch_all(&state.db)
+    .await?;
+    let servers = sqlx::query_as(
+        "SELECT n.id AS node_id, n.name, t.id AS target_id
+         FROM service_instances i JOIN nodes n ON n.id = i.node_id
+         LEFT JOIN backup_targets t ON t.workspace_id = $2 AND t.node_id = n.id
+         WHERE i.id = $1 AND n.status <> 'revoked'",
+    )
+    .bind(instance)
+    .bind(workspace)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(Destinations {
+        targets: targets(&state, workspace).await?,
+        buckets,
+        servers,
+    }))
+}
+
+/// Insert an implicit target named `name` (or `name · <id>` if taken).
+#[allow(clippy::too_many_arguments)]
+async fn insert_implicit(
+    tx: &mut sqlx::PgConnection,
+    workspace: Id,
+    name: &str,
+    kind: &str,
+    provider: Option<&str>,
+    prefix: &str,
+    bucket_instance: Option<Id>,
+    node: Option<Id>,
+    actor: Id,
+) -> AppResult<(Id, String)> {
+    let id = Id::new();
+    for name in [name.to_owned(), format!("{name} · {id}")] {
+        let created: Option<Id> = sqlx::query_scalar(
+            "INSERT INTO backup_targets
+               (id, workspace_id, name, kind, provider, prefix, bucket_instance_id, node_id, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (workspace_id, name) DO NOTHING RETURNING id",
+        )
+        .bind(id)
+        .bind(workspace)
+        .bind(&name)
+        .bind(kind)
+        .bind(provider)
+        .bind(prefix)
+        .bind(bucket_instance)
+        .bind(node)
+        .bind(actor)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if created.is_some() {
+            return Ok((id, name));
+        }
+    }
+    Err(AppError::Conflict(
+        "could not name the backup target".into(),
+    ))
+}
+
+/// The target a destination stands for, made on first use for bucket
+/// services and disks. `instance` is the database being backed up.
+pub(crate) async fn resolve_destination(
+    state: &AppState,
+    actor: &Actor,
+    meta: &RequestMeta,
+    workspace: Id,
+    instance: Id,
+    dest: &Destination,
+) -> AppResult<Id> {
+    if dest.given() != 1 {
+        return Err(AppError::bad_request(
+            "give one of targetId, bucketInstanceId or localDisk",
+        ));
+    }
+    if let Some(target) = dest.target_id {
+        own_target(state, workspace, target).await?;
+        return Ok(target);
+    }
+    let mut tx = state.db.begin().await?;
+    let made = if let Some(bucket) = dest.bucket_instance_id {
+        // A bucket elsewhere is reported as unknown, like one that does not exist.
+        let row: Option<(String, String, String, Option<Id>)> = sqlx::query_as(
+            "SELECT s.template, s.name, e.name,
+                    (SELECT t.id FROM backup_targets t WHERE t.bucket_instance_id = i.id)
+             FROM service_instances i
+             JOIN services s ON s.id = i.service_id
+             JOIN environments e ON e.id = i.environment_id
+             JOIN projects p ON p.id = s.project_id
+             WHERE i.id = $1 AND p.workspace_id = $2 AND s.template IN ('r2', 'bucket')",
+        )
+        .bind(bucket)
+        .bind(workspace)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let (template, service, env, existing) =
+            row.ok_or_else(|| AppError::bad_request("unknown bucket service"))?;
+        if let Some(t) = existing {
+            return Ok(t);
+        }
+        let provider = if template == "r2" { "r2" } else { "minio" };
+        let (id, name) = insert_implicit(
+            &mut tx,
+            workspace,
+            &format!("{service} ({env})"),
+            "bucket",
+            Some(provider),
+            "modula-backups/",
+            Some(bucket),
+            None,
+            actor.user_id,
+        )
+        .await?;
+        (
+            id,
+            name,
+            json!({ "kind": "bucket", "bucketInstance": bucket }),
+        )
+    } else {
+        let node: Option<(Id, String, Option<Id>)> = sqlx::query_as(
+            "SELECT n.id, n.name,
+                    (SELECT t.id FROM backup_targets t WHERE t.workspace_id = $2 AND t.node_id = n.id)
+             FROM service_instances i JOIN nodes n ON n.id = i.node_id
+             WHERE i.id = $1 AND n.status <> 'revoked'",
+        )
+        .bind(instance)
+        .bind(workspace)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let (node, node_name, existing) = node.ok_or_else(|| {
+            AppError::Conflict("the database runs on no server yet: deploy it first".into())
+        })?;
+        if let Some(t) = existing {
+            return Ok(t);
+        }
+        let (id, name) = insert_implicit(
+            &mut tx,
+            workspace,
+            &format!("Disk of {node_name}"),
+            "local",
+            None,
+            "",
+            None,
+            Some(node),
+            actor.user_id,
+        )
+        .await?;
+        (id, name, json!({ "kind": "local", "node": node }))
+    };
+    let (id, name, mut metadata) = made;
+    metadata["name"] = json!(name);
+    Entry::new("backup_target.create", meta)
+        .actor(actor)
+        .workspace(workspace)
+        .target("backup_target", id)
+        .metadata(metadata)
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
 // ---------------------------------------------------------------- backups
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -212,13 +493,18 @@ pub struct Backup {
     pub finished_at: Option<OffsetDateTime>,
     pub error: Option<String>,
     pub target_name: String,
+    pub target_kind: String,
+    /// `dump`, or `walg` (a base backup for point-in-time recovery).
+    pub method: String,
+    /// WAL-G's name of a base backup.
+    pub walg_name: Option<String>,
 }
 
 macro_rules! select_backups {
     ($rest:literal) => {
         concat!(
             "SELECT b.id, b.status, b.kind, b.size_bytes, b.started_at, b.finished_at, b.error,
-                    t.name AS target_name
+                    t.name AS target_name, t.kind AS target_kind, b.method, b.walg_name
              FROM backups b JOIN backup_targets t ON t.id = b.target_id ",
             $rest
         )
@@ -230,6 +516,8 @@ macro_rules! select_backups {
 pub struct Schedule {
     pub enabled: bool,
     pub target_id: Id,
+    pub target_name: String,
+    pub target_kind: String,
     pub hour_utc: i16,
     pub retention: Policy,
 }
@@ -257,9 +545,12 @@ pub struct InstanceBackups {
 
 pub async fn list(State(state): State<AppState>, grant: Grant) -> AppResult<Json<InstanceBackups>> {
     let instance = grant.id();
-    let schedule: Option<(bool, Id, i16, i32, i32, i32)> = sqlx::query_as(
-        "SELECT enabled, target_id, hour_utc, daily_days, weekly_days, monthly_days
-         FROM backup_schedules WHERE service_instance_id = $1",
+    #[allow(clippy::type_complexity)]
+    let schedule: Option<(bool, Id, String, String, i16, i32, i32, i32)> = sqlx::query_as(
+        "SELECT s.enabled, s.target_id, t.name, t.kind, s.hour_utc, s.daily_days, s.weekly_days,
+                s.monthly_days
+         FROM backup_schedules s JOIN backup_targets t ON t.id = s.target_id
+         WHERE s.service_instance_id = $1",
     )
     .bind(instance)
     .fetch_optional(&state.db)
@@ -278,16 +569,20 @@ pub async fn list(State(state): State<AppState>, grant: Grant) -> AppResult<Json
     .fetch_all(&state.db)
     .await?;
     Ok(Json(InstanceBackups {
-        schedule: schedule.map(|(enabled, target_id, hour_utc, d, w, m)| Schedule {
-            enabled,
-            target_id,
-            hour_utc,
-            retention: Policy {
-                daily_days: d,
-                weekly_days: w,
-                monthly_days: m,
+        schedule: schedule.map(
+            |(enabled, target_id, target_name, target_kind, hour_utc, d, w, m)| Schedule {
+                enabled,
+                target_id,
+                target_name,
+                target_kind,
+                hour_utc,
+                retention: Policy {
+                    daily_days: d,
+                    weekly_days: w,
+                    monthly_days: m,
+                },
             },
-        }),
+        ),
         backups,
         restores,
     }))
@@ -297,7 +592,13 @@ pub async fn list(State(state): State<AppState>, grant: Grant) -> AppResult<Json
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ScheduleBody {
     pub enabled: bool,
-    pub target_id: Id,
+    /// Where backups go (see [`Destination`]).
+    #[serde(default)]
+    pub target_id: Option<Id>,
+    #[serde(default)]
+    pub bucket_instance_id: Option<Id>,
+    #[serde(default)]
+    pub local_disk: bool,
     pub hour_utc: i16,
     pub retention: Option<Policy>,
 }
@@ -337,7 +638,6 @@ pub async fn put_schedule(
     let instance = grant.id();
     let workspace = grant.workspace_id()?;
     backup::run::instance_engine(&state, instance).await?;
-    own_target(&state, workspace, req.target_id).await?;
     let hour_utc = hour(req.hour_utc)?;
     let retention = req.retention.unwrap_or(retention::DEFAULT);
     for days in [
@@ -349,6 +649,12 @@ pub async fn put_schedule(
             return Err(AppError::bad_request("retention days must be 0–3660"));
         }
     }
+    let dest = Destination {
+        target_id: req.target_id,
+        bucket_instance_id: req.bucket_instance_id,
+        local_disk: req.local_disk,
+    };
+    let target = resolve_destination(&state, &actor, &meta, workspace, instance, &dest).await?;
     let mut tx = state.db.begin().await?;
     // A new schedule's first backup is at its next slot, not right away.
     sqlx::query(
@@ -362,7 +668,7 @@ pub async fn put_schedule(
     )
     .bind(instance)
     .bind(req.enabled)
-    .bind(req.target_id)
+    .bind(target)
     .bind(hour_utc)
     .bind(retention.daily_days)
     .bind(retention.weekly_days)
@@ -375,7 +681,7 @@ pub async fn put_schedule(
         .target("service_instance", instance)
         .metadata(json!({
             "enabled": req.enabled,
-            "target": req.target_id,
+            "target": target,
             "hourUtc": hour_utc,
             "retention": retention,
         }))
@@ -392,22 +698,31 @@ async fn load(state: &AppState, id: Id) -> AppResult<Backup> {
         .await?)
 }
 
-/// Back up now, to the schedule's target.
+/// Back up now: to the given destination, else the schedule's target.
 pub async fn create(
     State(state): State<AppState>,
     actor: Actor,
     grant: Grant,
     meta: RequestMeta,
+    body: Option<Json<Destination>>,
 ) -> AppResult<Json<Backup>> {
     let instance = grant.id();
-    let target: Option<Id> =
-        sqlx::query_scalar("SELECT target_id FROM backup_schedules WHERE service_instance_id = $1")
-            .bind(instance)
-            .fetch_optional(&state.db)
-            .await?;
-    let target = target.ok_or_else(|| {
-        AppError::Conflict("choose a backup target first (in the backup schedule)".into())
-    })?;
+    let workspace = grant.workspace_id()?;
+    let dest = body.map(|Json(d)| d).unwrap_or_default();
+    let target = if dest.given() > 0 {
+        backup::run::instance_engine(&state, instance).await?;
+        resolve_destination(&state, &actor, &meta, workspace, instance, &dest).await?
+    } else {
+        let target: Option<Id> = sqlx::query_scalar(
+            "SELECT target_id FROM backup_schedules WHERE service_instance_id = $1",
+        )
+        .bind(instance)
+        .fetch_optional(&state.db)
+        .await?;
+        target.ok_or_else(|| {
+            AppError::Conflict("choose where backups go first (in the backup schedule)".into())
+        })?
+    };
     let id = backup::run::start(
         &state,
         Some(instance),
@@ -418,7 +733,7 @@ pub async fn create(
     .await?;
     Entry::new("backup.create", &meta)
         .actor(&actor)
-        .workspace(grant.workspace_id()?)
+        .workspace(workspace)
         .target("backup", id)
         .metadata(json!({ "serviceInstance": instance, "target": target }))
         .record(&state.db)
@@ -452,7 +767,9 @@ pub async fn restore(
     ))
 }
 
-/// Delete a backup's object from its target and mark it deleted.
+/// Delete a backup's object and mark it deleted. Objects in a self-hosted
+/// bucket or on a server's disk are deleted by that server: the backup is
+/// `deleting` until it reports back.
 pub async fn delete(
     State(state): State<AppState>,
     actor: Actor,
@@ -460,35 +777,32 @@ pub async fn delete(
     meta: RequestMeta,
 ) -> AppResult<Json<Backup>> {
     let id = grant.id();
-    let (status, target, key): (String, Id, String) =
-        sqlx::query_as("SELECT status, target_id, object_key FROM backups WHERE id = $1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await?;
+    let status: String = sqlx::query_scalar("SELECT status FROM backups WHERE id = $1")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
     match status.as_str() {
         "running" => return Err(AppError::Conflict("this backup is still running".into())),
-        "deleted" => return Err(AppError::Conflict("this backup was already deleted".into())),
+        "deleting" | "deleted" => {
+            return Err(AppError::Conflict("this backup was already deleted".into()));
+        }
         // Failed uploads were aborted: there is no object.
-        "failed" => {}
+        "failed" => {
+            sqlx::query("UPDATE backups SET status = 'deleted', deleted_at = now() WHERE id = $1")
+                .bind(id)
+                .execute(&state.db)
+                .await?;
+        }
         _ => {
-            let (_, t) = backup::load_target(&state, target).await?;
-            t.delete(&key)
-                .await
-                .map_err(|e| AppError::Unavailable(format!("cannot delete the backup: {e:#}")))?;
+            backup::run::remove(&state, id).await?;
         }
     }
-    let mut tx = state.db.begin().await?;
-    sqlx::query("UPDATE backups SET status = 'deleted', deleted_at = now() WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
     Entry::new("backup.delete", &meta)
         .actor(&actor)
         .workspace(grant.workspace_id()?)
         .target("backup", id)
-        .record(&mut *tx)
+        .record(&state.db)
         .await?;
-    tx.commit().await?;
     load(&state, id).await.map(Json)
 }
 
@@ -529,9 +843,11 @@ pub struct SelfBackupBody {
     pub hour_utc: i16,
 }
 
-/// Instance admins pick a target from a workspace they administer: the
+/// Instance admins pick an S3 target from a workspace they administer: the
 /// control plane's dumps are encrypted to a key only the master key derives,
-/// so the workspace's members can see the objects but not read them.
+/// so the workspace's members can see the objects but not read them. Bucket
+/// services and server disks are not offered: the control plane must reach
+/// its backups without any of its servers.
 pub async fn put_self_backup(
     State(state): State<AppState>,
     actor: Actor,
@@ -546,7 +862,8 @@ pub async fn put_self_backup(
         let admin: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM backup_targets t
                             JOIN workspace_members m ON m.workspace_id = t.workspace_id
-                            WHERE t.id = $1 AND m.user_id = $2 AND m.role = 'admin')",
+                            WHERE t.id = $1 AND m.user_id = $2 AND m.role = 'admin'
+                              AND t.kind = 's3')",
         )
         .bind(target)
         .bind(actor.user_id)
