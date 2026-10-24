@@ -35,6 +35,22 @@ export function setSudoHandler(h: SudoHandler | null) {
   sudoHandler = h;
 }
 
+/** For WebSockets, whose failed handshake carries no error code: make sure
+ *  the session is in sudo mode first, asking to re-authenticate if not.
+ *  False when the user cancelled. */
+export async function ensureSudo(): Promise<boolean> {
+  const s = await get<Security>("/api/account/security");
+  if (s.sudoUntil && Date.parse(s.sudoUntil) > Date.now() + 5_000) return true;
+  return sudoHandler ? sudoHandler() : false;
+}
+
+/** `wss://<this host>/api/deployments/<id>/exec?…` for an interactive shell. */
+export function execUrl(deploymentId: string, size: { cols: number; rows: number }, loc: { protocol: string; host: string } = window.location): string {
+  const scheme = loc.protocol === "https:" ? "wss" : "ws";
+  const q = new URLSearchParams({ tty: "true", cols: String(size.cols), rows: String(size.rows) });
+  return `${scheme}://${loc.host}/api/deployments/${encodeURIComponent(deploymentId)}/exec?${q}`;
+}
+
 export async function request<T>(
   method: string,
   path: string,

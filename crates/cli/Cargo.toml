@@ -19,6 +19,7 @@ base64.workspace = true
 getrandom.workspace = true
 hickory-resolver.workspace = true
 inquire.workspace = true
+crossterm.workspace = true
 secrecy.workspace = true
 zeroize.workspace = true
 bytes.workspace = true

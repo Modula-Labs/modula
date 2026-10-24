@@ -208,6 +208,11 @@ pub enum Action {
     MemberRemove,
     /// Leave a workspace yourself.
     MemberLeave,
+    /// Open a shell or run a command in a deployment's running container.
+    DeploymentExec,
+    /// A service instance's resolved variables, with values, for running a
+    /// command locally (`modula run`).
+    RunEnvRead,
 }
 
 impl Action {
@@ -283,6 +288,8 @@ impl Action {
             Self::MemberList | Self::MemberInvite | Self::MemberLeave => K::Workspace,
             Self::InviteRevoke => K::Invite,
             Self::MemberUpdate | Self::MemberRemove => K::Member,
+            Self::DeploymentExec => K::Deployment,
+            Self::RunEnvRead => K::ServiceInstance,
         })
     }
 
@@ -378,6 +385,8 @@ impl Action {
             Self::MemberInvite | Self::InviteRevoke | Self::MemberUpdate | Self::MemberRemove => {
                 Role::Admin
             }
+            // A shell sees every secret the container has.
+            Self::DeploymentExec | Self::RunEnvRead => Role::Member,
         }
     }
 
@@ -471,7 +480,16 @@ impl Action {
             | Self::WebhookDelete => false,
             Self::MemberUpdate | Self::MemberRemove => true,
             Self::MemberList | Self::MemberInvite | Self::InviteRevoke | Self::MemberLeave => false,
+            // Sudo for dashboard sessions only: see `session_sudo`.
+            Self::DeploymentExec | Self::RunEnvRead => false,
         }
+    }
+
+    /// Secret-revealing actions the CLI needs: a cookie session must be
+    /// recently re-authenticated, while API tokens (which never have sudo)
+    /// pass and every use is audited instead.
+    pub fn session_sudo(self) -> bool {
+        matches!(self, Self::DeploymentExec | Self::RunEnvRead)
     }
 }
 
@@ -754,6 +772,24 @@ mod tests {
         assert!(Action::DatabaseWrite.requires_sudo());
         assert_eq!(Action::DatabaseCredentials.min_role(), Role::Member);
         assert!(!Action::DatabaseCredentials.requires_sudo());
+    }
+
+    #[test]
+    fn shells_and_run_env_are_member_with_session_sudo() {
+        for a in [Action::DeploymentExec, Action::RunEnvRead] {
+            assert_eq!(a.min_role(), Role::Member);
+            assert!(a.session_sudo());
+            assert!(!a.requires_sudo());
+        }
+        assert_eq!(
+            Action::DeploymentExec.kind(),
+            Some(ResourceKind::Deployment)
+        );
+        assert_eq!(
+            Action::RunEnvRead.kind(),
+            Some(ResourceKind::ServiceInstance)
+        );
+        assert!(!Action::TunnelOpen.session_sudo());
     }
 
     #[test]

@@ -573,3 +573,32 @@ async fn roles_and_removal(pool: PgPool) {
     .unwrap();
     assert_eq!(actions, ["member.update", "member.remove"]);
 }
+
+/// An admin invite grants what promoting to admin does, so it needs sudo too.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn admin_invites_need_sudo(pool: PgPool) {
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    app.drop_sudo().await;
+    let path = format!("/api/workspaces/{ws}/invites");
+    let r = app
+        .call(
+            Method::POST,
+            &path,
+            Some(&admin),
+            Some(json!({ "role": "admin" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{:?}", r.json);
+    assert_eq!(r.json["error"]["code"], "sudo_required", "{:?}", r.json);
+    let r = app
+        .call(
+            Method::POST,
+            &path,
+            Some(&admin),
+            Some(json!({ "role": "member" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+}

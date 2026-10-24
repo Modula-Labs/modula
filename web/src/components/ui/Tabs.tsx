@@ -55,9 +55,15 @@ export function Tabs<V extends string>({
   );
 }
 
-export function TabPanel({ value, children }: { value: string; children: ReactNode }) {
+/** `keepMounted`: stays mounted (hidden) while another tab is shown, so a live
+ *  session in it (the Shell tab) survives switching tabs. */
+export function TabPanel({ value, children, keepMounted }: { value: string; children: ReactNode; keepMounted?: boolean }) {
   return (
-    <T.Content value={value} className="min-h-0 flex-1 overflow-auto px-6 py-6 focus-visible:outline-none md:px-10">
+    <T.Content
+      value={value}
+      forceMount={keepMounted ? true : undefined}
+      className="min-h-0 flex-1 overflow-auto px-6 py-6 focus-visible:outline-none data-[state=inactive]:hidden md:px-10"
+    >
       {children}
     </T.Content>
   );

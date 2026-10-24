@@ -131,6 +131,18 @@ pub struct TcpProxy {
     pub host: String,
 }
 
+/// `GET /api/service-instances/{id}/run-env`. Values are secrets: no `Debug`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunEnv {
+    pub variables: std::collections::BTreeMap<String, String>,
+    /// Sealed variables (and those referencing one), never sent.
+    #[serde(default)]
+    pub withheld: Vec<String>,
+    #[serde(default)]
+    pub missing: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Deployment {

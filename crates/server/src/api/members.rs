@@ -284,6 +284,10 @@ pub async fn create_invite(
 ) -> AppResult<Json<CreatedInvite>> {
     let ws = grant.workspace_id()?;
     let role = parse_role(&req.role)?;
+    // An admin invite grants what promoting a member to admin does.
+    if role == Role::Admin && !actor.sudo_active() {
+        return Err(AppError::SudoRequired);
+    }
     let days = req.expires_in_days.unwrap_or(DEFAULT_INVITE_DAYS);
     if !(1..=MAX_INVITE_DAYS).contains(&days) {
         return Err(AppError::bad_request(format!(

@@ -13,6 +13,7 @@ pub mod meta;
 pub mod metrics;
 pub mod project;
 pub mod service;
+pub mod shell;
 pub mod source;
 pub mod storage;
 pub mod up;
@@ -72,6 +73,12 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
             show_password,
             port,
         } => return db::connect(ctx, service, tunnel_only, show_password, port).await,
+        Command::Ssh {
+            service,
+            replica,
+            command,
+        } => return shell::ssh(ctx, service, replica, command).await,
+        Command::Run { command } => return shell::run(ctx, command).await,
         Command::Completion { shell } => meta::completion(ctx, shell),
         Command::Docs => meta::docs(ctx),
         Command::Guide => meta::guide(ctx),

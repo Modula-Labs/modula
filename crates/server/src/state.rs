@@ -27,6 +27,8 @@ pub struct Inner {
     pub hub: Hub,
     /// Open database tunnels (relayed over the node streams).
     pub tunnels: crate::tunnel::Tunnels,
+    /// Open shells in containers (relayed over the node streams).
+    pub execs: crate::exec::Execs,
     /// Cancelled when the server starts shutting down; long-lived streams
     /// (node sessions, log follows) end on it so shutdown stays fast.
     pub shutdown: CancellationToken,
@@ -54,6 +56,7 @@ impl AppState {
             jobs_notify: Notify::new(),
             hub: Hub::default(),
             tunnels: crate::tunnel::Tunnels::default(),
+            execs: crate::exec::Execs::default(),
             shutdown: CancellationToken::new(),
             github,
             dns: std::sync::RwLock::new(Arc::new(crate::domains::dns::PublicDns)),

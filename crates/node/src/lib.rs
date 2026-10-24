@@ -7,6 +7,7 @@ pub mod backup;
 pub mod build;
 pub mod db;
 pub mod edge;
+pub mod exec;
 pub mod identity;
 pub mod join;
 pub mod location;

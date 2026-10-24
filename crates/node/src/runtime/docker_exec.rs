@@ -1,12 +1,13 @@
-//! `docker exec` with streamed stdout or stdin, for database dumps and
-//! restores. Commands are argv lists chosen by the node, never shell strings.
+//! `docker exec`: streamed stdout or stdin for database dumps and restores
+//! (argv lists chosen by the node, never shell strings), and interactive
+//! commands a user runs (`exec_interactive`, see [`crate::exec`]).
 
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 use bollard::Docker;
 use bollard::container::LogOutput;
-use bollard::exec::{StartExecOptions, StartExecResults};
+use bollard::exec::{ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::ExecConfig;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -15,7 +16,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::Exec;
+use super::{Exec, ExecControl, ExecOutput, ExecSession, ExecSpec};
 
 /// How much of a failing command's output ends up in its error.
 const OUTPUT_TAIL: usize = 1500;
@@ -205,5 +206,97 @@ impl Tail {
         } else {
             text.to_owned()
         }
+    }
+}
+
+pub(super) async fn exec_interactive(
+    docker: &Docker,
+    container_id: &str,
+    spec: ExecSpec,
+) -> anyhow::Result<ExecSession> {
+    let console_size = (spec.tty && spec.cols > 0 && spec.rows > 0)
+        .then(|| vec![usize::from(spec.rows), usize::from(spec.cols)]);
+    let created = docker
+        .create_exec(
+            container_id,
+            ExecConfig {
+                attach_stdin: Some(true),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(spec.tty),
+                console_size,
+                cmd: Some(spec.cmd),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("cannot start the command in the container")?;
+    let opts = StartExecOptions {
+        detach: false,
+        tty: spec.tty,
+        output_capacity: None,
+    };
+    let (output, input) = match docker.start_exec(&created.id, Some(opts)).await? {
+        StartExecResults::Attached { output, input } => (output, input),
+        StartExecResults::Detached => bail!("docker did not attach to the command"),
+    };
+    let output = output
+        .filter_map(|item| async move {
+            match item {
+                Ok(LogOutput::StdErr { message }) => Some(Ok(ExecOutput {
+                    stderr: true,
+                    data: message,
+                })),
+                Ok(LogOutput::StdOut { message } | LogOutput::Console { message }) => {
+                    Some(Ok(ExecOutput {
+                        stderr: false,
+                        data: message,
+                    }))
+                }
+                Ok(LogOutput::StdIn { .. }) => None,
+                Err(e) => Some(Err(e.into())),
+            }
+        })
+        .boxed();
+    Ok(ExecSession {
+        output,
+        input,
+        control: Box::new(Control {
+            docker: docker.clone(),
+            exec_id: created.id,
+        }),
+    })
+}
+
+struct Control {
+    docker: Docker,
+    exec_id: String,
+}
+
+#[async_trait::async_trait]
+impl ExecControl for Control {
+    async fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.docker
+            .resize_exec(
+                &self.exec_id,
+                ResizeExecOptions {
+                    width: cols,
+                    height: rows,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn exit_code(&self) -> anyhow::Result<Option<i64>> {
+        // The output can end a moment before Docker records the exit code.
+        for _ in 0..50 {
+            let info = self.docker.inspect_exec(&self.exec_id).await?;
+            if info.running != Some(true) {
+                return Ok(info.exit_code);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok(None)
     }
 }

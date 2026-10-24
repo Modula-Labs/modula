@@ -157,6 +157,10 @@ pub fn routes(state: AppState) -> ApiRouter {
         .post("/api/service-instances/{instance_id}/r2/delete-bucket", Resource(Action::BucketDelete), buckets::delete_bucket)
         // Private TCP tunnel to the running container (WebSocket; `modula connect`)
         .get("/api/service-instances/{instance_id}/tunnel", Resource(Action::TunnelOpen), crate::tunnel::open)
+        // Shell / command in a running container (WebSocket; `modula ssh`, Shell tab)
+        .get("/api/deployments/{deployment_id}/exec", Resource(Action::DeploymentExec), crate::exec::open)
+        // Resolved variables for a local command (`modula run`)
+        .get("/api/service-instances/{instance_id}/run-env", Resource(Action::RunEnvRead), variables::run_env)
         // Backups: storage targets per workspace, schedules and backups per database
         .get("/api/workspaces/{workspace_id}/backup-targets", Resource(Action::BackupTargetList), backups::list_targets)
         .post("/api/workspaces/{workspace_id}/backup-targets", Resource(Action::BackupTargetCreate), backups::create_target)

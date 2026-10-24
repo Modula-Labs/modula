@@ -20,6 +20,8 @@
     "@tabler/icons-react": "3.49.0",
     "@tanstack/react-query": "5.104.5",
     "@tanstack/react-router": "1.170.45",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
     "@xyflow/react": "12.12.0",
     "clsx": "2.1.1",
     "qrcode": "1.5.4",

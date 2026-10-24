@@ -12,6 +12,7 @@ pub mod db;
 pub mod deploy;
 pub mod domains;
 pub mod error;
+pub mod exec;
 pub mod github;
 pub mod http;
 pub mod instance_domain;

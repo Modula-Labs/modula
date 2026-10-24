@@ -678,6 +678,14 @@ impl Runtime for DockerRuntime {
     ) -> anyhow::Result<()> {
         super::docker_exec::exec_input(&self.docker, container_id, exec, stdin).await
     }
+
+    async fn exec_interactive(
+        &self,
+        container_id: &str,
+        spec: super::ExecSpec,
+    ) -> anyhow::Result<super::ExecSession> {
+        super::docker_exec::exec_interactive(&self.docker, container_id, spec).await
+    }
 }
 
 /// What every container gets: limits, dropped capabilities, no new

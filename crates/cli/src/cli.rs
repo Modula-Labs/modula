@@ -205,6 +205,32 @@ pub enum Command {
         #[arg(short = 'P', long)]
         port: Option<u16>,
     },
+    /// Open a shell in the service's running container, or run a command
+    /// there (`modula ssh api -- ls -la`).
+    Ssh {
+        /// Service name (default: -s, else the linked one).
+        #[arg(id = "ssh_service", value_name = "SERVICE")]
+        service: Option<String>,
+        /// Which replica's container (default: the first running one).
+        #[arg(long)]
+        replica: Option<u16>,
+        /// The command (default: a login shell, bash when the image has it).
+        #[arg(last = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
+    /// Run a command here with the service's variables injected
+    /// (`modula run -- npm run migrate`). They are only held in memory;
+    /// sealed variables are never sent.
+    Run {
+        /// The command and its arguments.
+        #[arg(
+            required = true,
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "COMMAND"
+        )]
+        command: Vec<String>,
+    },
     /// Print a shell completion script.
     Completion {
         /// The shell to complete for.
@@ -958,6 +984,48 @@ mod tests {
             d.command,
             Some(DomainCommand::Add { port: Some(80), .. })
         ));
+    }
+
+    #[test]
+    fn ssh_and_run_take_commands() {
+        let cli = parse(&["ssh"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Ssh { service: None, ref command, .. } if command.is_empty())
+        );
+        let cli = parse(&["ssh", "api", "-e", "staging", "--", "ls", "-la"]).unwrap();
+        let Command::Ssh {
+            service, command, ..
+        } = cli.command
+        else {
+            panic!()
+        };
+        assert_eq!(service.as_deref(), Some("api"));
+        assert_eq!(command, ["ls", "-la"]);
+        assert_eq!(cli.global.environment.as_deref(), Some("staging"));
+        let cli = parse(&["ssh", "-s", "web", "--replica", "1"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Ssh {
+                replica: Some(1),
+                ..
+            }
+        ));
+        assert_eq!(cli.global.service.as_deref(), Some("web"));
+        // Without `--` a second word is not a command.
+        assert!(parse(&["ssh", "api", "ls"]).is_err());
+
+        let cli = parse(&["run", "-s", "api", "--", "npm", "run", "migrate"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Run { ref command } if command == &["npm", "run", "migrate"])
+        );
+        assert_eq!(cli.global.service.as_deref(), Some("api"));
+        // Flags after the command belong to it.
+        let cli = parse(&["run", "node", "-e", "1"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Run { ref command } if command == &["node", "-e", "1"])
+        );
+        assert!(cli.global.environment.is_none());
+        assert!(parse(&["run"]).is_err());
     }
 
     #[test]

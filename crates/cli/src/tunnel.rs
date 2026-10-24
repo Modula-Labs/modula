@@ -20,10 +20,10 @@ use crate::config::Login;
 /// Read size for the local socket; the server relays at most 64 KiB per chunk.
 const CHUNK: usize = 64 * 1024;
 
-trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
-type Ws = WebSocketStream<Box<dyn Io>>;
+pub type Ws = WebSocketStream<Box<dyn Io>>;
 
 /// Where tunnels for one service instance go.
 #[derive(Clone)]
@@ -37,7 +37,16 @@ pub struct Target {
 
 /// `https://host/` → `wss://host/api/service-instances/<id>/tunnel[?port=]`.
 pub fn tunnel_url(base: &Url, instance: &str, port: Option<u16>) -> anyhow::Result<Url> {
-    let mut url = base.join(&format!("api/service-instances/{instance}/tunnel"))?;
+    let mut url = ws_url(base, &format!("api/service-instances/{instance}/tunnel"))?;
+    if let Some(p) = port {
+        url.query_pairs_mut().append_pair("port", &p.to_string());
+    }
+    Ok(url)
+}
+
+/// `https://host/` + `api/…` → `wss://host/api/…` (`ws://` for http).
+pub fn ws_url(base: &Url, path: &str) -> anyhow::Result<Url> {
+    let mut url = base.join(path)?;
     let scheme = match base.scheme() {
         "https" => "wss",
         "http" => "ws",
@@ -45,16 +54,17 @@ pub fn tunnel_url(base: &Url, instance: &str, port: Option<u16>) -> anyhow::Resu
     };
     url.set_scheme(scheme)
         .map_err(|_| anyhow::anyhow!("cannot use {scheme} with {base}"))?;
-    if let Some(p) = port {
-        url.query_pairs_mut().append_pair("port", &p.to_string());
-    }
     Ok(url)
 }
 
 impl Target {
     pub fn new(login: &Login, instance: &str, port: Option<u16>) -> anyhow::Result<Self> {
+        Self::at(login, tunnel_url(&login.url, instance, port)?)
+    }
+
+    /// Any WebSocket endpoint of the API (`ws://` or `wss://`).
+    pub fn at(login: &Login, url: Url) -> anyhow::Result<Self> {
         crate::config::check_transport(&login.url)?;
-        let url = tunnel_url(&login.url, instance, port)?;
         let tls = if url.scheme() == "wss" {
             install_crypto();
             use rustls_platform_verifier::ConfigVerifierExt;
@@ -77,8 +87,8 @@ impl Target {
         })
     }
 
-    /// Open one tunnel (one TCP connection to the service).
-    async fn open(&self) -> anyhow::Result<Ws> {
+    /// Open the WebSocket (for a tunnel: one TCP connection to the service).
+    pub async fn open(&self) -> anyhow::Result<Ws> {
         let host = self.url.host_str().context("URL has no host")?.to_owned();
         let port = self
             .url
@@ -126,7 +136,7 @@ impl Target {
                 let body = res.body().clone().unwrap_or_default();
                 Err(ApiError::from_body(res.status().as_u16(), &body).into())
             }
-            Err(e) => Err(e).context("opening the tunnel failed"),
+            Err(e) => Err(e).context("opening the WebSocket failed"),
         }
     }
 
