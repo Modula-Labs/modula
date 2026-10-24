@@ -7,6 +7,27 @@ may break things).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-25
+
+### Added
+
+- **Buckets:** add an S3-compatible bucket to a project, either on Cloudflare
+  R2 (Modula creates the bucket and a token limited to it) or self-hosted on
+  your servers. Credentials become the service's variables.
+- **Static sites on Cloudflare:** a service's Hosting setting picks your
+  servers or Cloudflare (Workers static assets). Modula builds the site,
+  uploads it, and keeps the Worker's variables, secrets and custom domains in
+  sync.
+- **Environments:** a switcher that remembers your choice; new environments as
+  a duplicate (sealed variables stay sealed, fresh database credentials, a
+  branch per repo service) or empty; rename; the default environment can't be
+  deleted. CLI: `modula environment new --duplicate --branch`, `rename`,
+  `delete`.
+
+### Fixed
+
+- New canvas cards no longer land on top of existing ones.
+
 ## [0.1.0] - 2026-10-24
 
 First public release: a self-hosted PaaS with Railway's project canvas,
@@ -41,5 +62,6 @@ environments and staged deploys, licensed AGPL-3.0-only.
 - **CLI:** `modula` for projects, deployments, logs, variables, metrics,
   `modula.toml` infrastructure as code, and `modula server create`.
 
-[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Modula-Labs/modula/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Modula-Labs/modula/releases/tag/v0.1.0

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GRID, snap, snapPoint } from "./snap";
+import { GRID, snap, snapPoint, freeSpot } from "./snap";
 
 describe("snap", () => {
   it("rounds to the nearest grid point", () => {
@@ -23,5 +23,13 @@ describe("snap", () => {
 describe("snapPoint", () => {
   it("snaps both axes", () => {
     expect(snapPoint({ x: 21, y: -30 }, 16)).toEqual({ x: 16, y: -32 });
+  });
+});
+
+describe("freeSpot", () => {
+  it("keeps a free spot and moves below cards in the way", () => {
+    expect(freeSpot({ x: 0, y: 0 }, [{ x: 400, y: 0 }])).toEqual({ x: 0, y: 0 });
+    expect(freeSpot({ x: 0, y: 0 }, [{ x: 16, y: 32 }])).toEqual({ x: 0, y: 192 });
+    expect(freeSpot({ x: 0, y: 0 }, [{ x: 0, y: 0 }, { x: 0, y: 160 }])).toEqual({ x: 0, y: 320 });
   });
 });

@@ -24,7 +24,7 @@ import { StatusDot } from "@/components/ui/misc";
 import type { DeploymentStatus } from "@/lib/api";
 import { serviceState } from "@/lib/status";
 import { load, save } from "@/lib/storage";
-import { GRID, snapPoint } from "./snap";
+import { freeSpot, GRID, snapPoint } from "./snap";
 import { dependencyPairs, edgeAnchors, layeredLayout, type Rect, type Side } from "./edges";
 
 export interface CanvasService {
@@ -251,10 +251,15 @@ function CanvasInner({
       // A service added from the canvas menu lands where it was asked for.
       const place = placeRef.current;
       let placed = false;
+      const taken = prev.map((n) => n.position);
       const next = services.map((s) => {
         let position = prev.find((n) => n.id === s.id)?.position ?? saved[s.id];
-        if (!position && place && prev.length > 0) {
-          position = snapPoint({ x: place.x - 144, y: place.y - 72 });
+        if (!position && prev.length > 0) {
+          // A new card: where it was asked for (or its default spot), moved
+          // down past the cards already there.
+          const want = place ? { x: place.x - 144, y: place.y - 72 } : (layout[s.id] ?? { x: 0, y: 0 });
+          position = freeSpot(snapPoint(want), taken);
+          taken.push(position);
           saved[s.id] = position;
           placed = true;
         }
