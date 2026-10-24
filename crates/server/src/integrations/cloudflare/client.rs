@@ -392,6 +392,11 @@ impl Client {
         want: &[(&str, &str)],
         proxied: bool,
     ) -> Result<()> {
+        // Nothing to point at (no server address known yet): leave the
+        // records alone rather than delete them.
+        if want.is_empty() {
+            return Ok(());
+        }
         let mut managed = Vec::new();
         for kind in ["A", "AAAA", "CNAME"] {
             managed.extend(

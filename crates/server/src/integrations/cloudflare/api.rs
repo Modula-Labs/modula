@@ -570,6 +570,11 @@ pub async fn set_ingress(
         d.verification_token.as_deref().unwrap_or_default(),
         &target,
     );
+    if !records.iter().any(|r| r.kind != "TXT") {
+        return Err(AppError::Conflict(
+            "no server address is known for this service yet, so there is nothing to point the name at".into(),
+        ));
+    }
     let routing: Vec<(&str, &str)> = records
         .iter()
         .filter(|r| r.kind != "TXT")
