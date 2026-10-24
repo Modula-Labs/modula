@@ -680,7 +680,11 @@ async fn duplicated_environments_get_no_bucket_credentials(pool: PgPool) {
         Some(json!({ "name": "media", "environmentId": c.prod, "bucket": "media-prod" })),
     )
     .await;
-    assert!(!c.variables(c.instance("media", c.prod).await).await.is_empty());
+    assert!(
+        !c.variables(c.instance("media", c.prod).await)
+            .await
+            .is_empty()
+    );
     let r = c
         .ok(
             Method::POST,

@@ -22,6 +22,8 @@ Either way:
   environment (default: the same branch). Pushes to it deploy here only.
 - **Databases** get a new, empty volume at the same path and freshly generated
   credentials; their data is never copied.
+- **R2 buckets** and their credentials are not copied: create or link a bucket
+  in the new environment (the service's Bucket tab).
 - **Domains and TCP proxies** are not copied: generate or add them for the new
   environment. Generated names include the environment
   (`api-staging-x7k2.apps.example.com`); the default environment's don't.
