@@ -45,7 +45,7 @@ export function dependencyPairs(services: { id: string; dependsOn?: string[] }[]
   return out;
 }
 
-const COLUMN_GAP = 340;
+export const COLUMN_GAP = 340;
 const ROW_GAP = 180;
 
 /**

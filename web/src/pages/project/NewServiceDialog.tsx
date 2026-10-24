@@ -1,13 +1,15 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { ArrowLeft, BrandDocker, BrandGithub, Bucket, ChevronRight, Search } from "@/components/ui/icons";
+import { ArrowLeft, BrandDocker, BrandGithub, Bucket, ChevronRight, LayoutGrid, Search } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
-import { Alert } from "@/components/ui/misc";
+import { Alert, Badge } from "@/components/ui/misc";
 import { Segmented } from "@/components/ui/Tabs";
 import { ServiceIcon } from "@/components/ui/ServiceIcon";
-import { ApiError, api, type ProjectDetail, type Template } from "@/lib/api";
+import { ApiError, api, type AppTemplate, type ProjectDetail, type Template } from "@/lib/api";
+import { appMonogram, describeAppService, filterAppTemplates, serviceCount } from "@/lib/appTemplates";
+import { toast } from "@/lib/toast";
 import { useTemplates } from "@/lib/useTemplates";
 import { projectReturnPath } from "@/lib/github";
 import { isDatabaseTemplate, suggestBucketName, templateStack, uniqueName } from "@/lib/templates";
@@ -41,7 +43,7 @@ export function parseRepo(input: string): string | null {
 /** `acme/My_App` → `my-app`, made a valid service name. */
 export const serviceNameFromRepo = (repo: string) => serviceNameFromImage(repo.split("/").pop() ?? "");
 
-export type NewServiceStep = "root" | "image" | "repo" | "database" | "bucket";
+export type NewServiceStep = "root" | "image" | "repo" | "database" | "bucket" | "templates" | "app";
 type Step = NewServiceStep;
 
 /** Command-style picker for adding a service (Docker image or GitHub repo). */
@@ -81,6 +83,9 @@ export function NewServiceDialog({
   // null: follow the service name.
   const [bucketName, setBucketName] = useState<string | null>(null);
   const [existingBucket, setExistingBucket] = useState("");
+  const [appQuery, setAppQuery] = useState("");
+  const [app, setApp] = useState<AppTemplate | null>(null);
+  const [namePrefix, setNamePrefix] = useState("");
 
   const reset = () => {
     setStep("root");
@@ -95,6 +100,9 @@ export function NewServiceDialog({
     setR2Mode("new");
     setBucketName(null);
     setExistingBucket("");
+    setAppQuery("");
+    setApp(null);
+    setNamePrefix("");
   };
 
   const repo = parseRepo(repoInput);
@@ -166,6 +174,36 @@ export function NewServiceDialog({
       reset();
     },
   });
+  const appTemplates = useQuery({
+    queryKey: ["app-templates"],
+    queryFn: api.appTemplates,
+    staleTime: 5 * 60_000,
+    retry: false,
+    enabled: open && (step === "templates" || step === "app"),
+  });
+
+  const deployApp = useMutation({
+    mutationFn: async (a: AppTemplate) => {
+      const created = await api.createApp(projectId, {
+        template: a.id,
+        environmentId,
+        namePrefix: namePrefix.trim() || undefined,
+      });
+      // Databases first: they come first in the response.
+      for (const s of created.services) await deployNew({ instances: [{ id: s.instanceId, environmentId }] });
+      return created;
+    },
+    onSuccess: async (created) => {
+      await qc.invalidateQueries({ queryKey: ["project", projectId] });
+      for (const w of created.warnings) toast(w);
+      const web = created.services.find((s) => s.web) ?? created.services[0];
+      if (web) onCreated(web.id);
+      onOpenChange(false);
+      reset();
+    },
+  });
+  const appsShown = filterAppTemplates(appTemplates.data ?? [], appQuery);
+
   const dbTemplates = templates.data?.filter((t) => isDatabaseTemplate(t.id)) ?? [];
 
   const create = useMutation({
@@ -211,14 +249,20 @@ export function NewServiceDialog({
           onEscapeKeyDown={(e) => {
             if (document.activeElement?.getAttribute("aria-expanded") === "true") e.preventDefault();
           }}
-          className="anim-modal fixed top-[16%] left-1/2 z-50 w-[480px] max-w-[calc(100vw-32px)] -translate-x-1/2 overflow-hidden rounded-2xl bg-popover text-popover-foreground shadow-modal outline-none">
+          className={`anim-modal fixed top-[16%] left-1/2 z-50 ${step === "templates" || step === "app" ? "w-[640px]" : "w-[480px]"} max-w-[calc(100vw-32px)] -translate-x-1/2 overflow-hidden rounded-2xl bg-popover text-popover-foreground shadow-modal outline-none`}>
           <Dialog.Title className="sr-only">Add a service</Dialog.Title>
           <Dialog.Description className="sr-only">Choose where the service comes from.</Dialog.Description>
           <div className="flex h-12 items-center gap-2 border-b border-border px-3 text-muted-foreground">
             {step === "root" ? (
               <Search className="size-4" />
             ) : (
-              <Button variant="ghost" size="icon-sm" aria-label="Back" onClick={() => setStep("root")} className="-ml-1 text-muted-foreground">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Back"
+                onClick={() => setStep(step === "app" ? "templates" : "root")}
+                className="-ml-1 text-muted-foreground"
+              >
                 <ArrowLeft />
               </Button>
             )}
@@ -231,7 +275,11 @@ export function NewServiceDialog({
                     ? "Database"
                     : step === "bucket"
                       ? "Bucket"
-                      : "Docker image"}
+                      : step === "templates"
+                        ? "Templates"
+                        : step === "app"
+                          ? (app?.name ?? "Template")
+                          : "Docker image"}
             </span>
           </div>
 
@@ -242,6 +290,7 @@ export function NewServiceDialog({
                   <PickerRow icon={<BrandGithub />} label="GitHub repo" onClick={() => setStep("repo")} />
                   <PickerRow icon={<BrandDocker />} label="Docker image" onClick={() => setStep("image")} />
                   <PickerRow icon={<Bucket />} label="Bucket" onClick={() => setStep("bucket")} />
+                  <PickerRow icon={<LayoutGrid />} label="Template" onClick={() => setStep("templates")} />
                 </>
               ) : null}
               {dbTemplates.length ? (
@@ -270,6 +319,99 @@ export function NewServiceDialog({
                 </>
               ) : null}
             </div>
+          ) : step === "templates" ? (
+            <div className="flex flex-col gap-3 p-3">
+              <Input
+                autoFocus
+                aria-label="Search templates"
+                placeholder="Search templates"
+                value={appQuery}
+                onChange={(e) => setAppQuery(e.target.value)}
+              />
+              {appTemplates.error ? <Alert>{appTemplates.error.message}</Alert> : null}
+              <div className="grid max-h-[420px] grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2">
+                {appsShown.map((a) => (
+                  <button
+                    key={a.id}
+                    onClick={() => {
+                      setApp(a);
+                      setStep("app");
+                    }}
+                    className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-3 text-left hover:bg-accent"
+                  >
+                    <AppTile name={a.name} />
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="text-sm font-medium">{a.name}</span>
+                      <span className="line-clamp-2 text-xs text-muted-foreground">{a.description}</span>
+                      <span className="pt-1 text-xs text-muted-foreground">
+                        {a.category} · {serviceCount(a)}
+                      </span>
+                    </span>
+                  </button>
+                ))}
+                {appTemplates.isSuccess && !appsShown.length ? (
+                  <p className="col-span-full px-1 py-6 text-center text-sm text-muted-foreground">No templates match.</p>
+                ) : null}
+              </div>
+            </div>
+          ) : step === "app" && app ? (
+            <form
+              className="flex flex-col gap-4 p-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                deployApp.mutate(app);
+              }}
+            >
+              {deployApp.error ? <Alert>{deployApp.error.message}</Alert> : null}
+              {notice ? <Alert tone="warn">{notice}</Alert> : null}
+              <div className="flex items-start gap-3">
+                <AppTile name={app.name} />
+                <div className="flex min-w-0 flex-col gap-0.5">
+                  <p className="text-sm">{app.description}</p>
+                  <a href={app.docsUrl} target="_blank" rel="noreferrer" className="text-xs text-muted-foreground underline">
+                    Documentation
+                  </a>
+                </div>
+              </div>
+              <div className="flex flex-col gap-1">
+                <div className="text-xs text-muted-foreground">Creates {serviceCount(app)}</div>
+                <ul className="flex flex-col divide-y divide-border rounded-xl border border-border">
+                  {app.services.map((s) => (
+                    <li key={s.role} className="flex items-center gap-3 px-3 py-2">
+                      <ServiceIcon stack={templateStack(s.template)} image={s.image} size="sm" />
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span className="text-sm">{namePrefix.trim() ? `${namePrefix.trim()}-${s.role}` : s.role}</span>
+                        <span className="truncate font-mono text-xs text-muted-foreground">{describeAppService(s, templates.data)}</span>
+                      </span>
+                      {s.mountPath ? <Badge>Volume</Badge> : null}
+                      {s.domain ? <Badge>Domain</Badge> : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <Field label="Name prefix" hint="Optional. Services are named <prefix>-<name>; taken names get a number.">
+                {(p) => (
+                  <Input
+                    {...p}
+                    placeholder="none"
+                    value={namePrefix}
+                    onChange={(e) => setNamePrefix(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+                  />
+                )}
+              </Field>
+              <p className="text-xs text-muted-foreground">
+                Passwords and keys are generated. Every environment gets the services; {envName ?? "this environment"} gets the
+                domain and deploys now.
+              </p>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+                  Cancel
+                </Button>
+                <Button type="submit" variant="primary" loading={deployApp.isPending}>
+                  Deploy
+                </Button>
+              </div>
+            </form>
           ) : step === "bucket" ? (
             <form
               className="flex flex-col gap-4 p-4"
@@ -444,6 +586,18 @@ export function NewServiceDialog({
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+/** An app's tile: its initials (the gallery bundles no app logos). */
+function AppTile({ name }: { name: string }) {
+  return (
+    <span
+      aria-hidden
+      className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-muted text-xs font-semibold text-muted-foreground"
+    >
+      {appMonogram(name)}
+    </span>
   );
 }
 
