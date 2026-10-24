@@ -177,6 +177,14 @@ impl Cluster {
 
     /// A joined node on a fake runtime.
     async fn start_node(&self) -> Arc<FakeRuntime> {
+        self.start_node_with(None).await
+    }
+
+    /// A joined node on a fake runtime, with a fake Database executor.
+    async fn start_node_with(
+        &self,
+        db: Option<Arc<dyn modula_node::db::Executor>>,
+    ) -> Arc<FakeRuntime> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(modula_server::nodes::serve(
@@ -199,7 +207,7 @@ impl Cluster {
         let caps = modula_node::reconcile::Capabilities {
             edge: None,
             build: None,
-            db: None,
+            db,
             upgrade: None,
             mesh: None,
         };
@@ -741,6 +749,293 @@ async fn r2_bucket_variables_resolve_to_a_target(pool: PgPool) {
     )
     .await;
     assert!(backup::load_target(&c.app.state, target).await.is_err());
+}
+
+impl Cluster {
+    async fn active_deployment(&self, instance: Id, not: Option<&str>) -> String {
+        for _ in 0..200 {
+            let id: Option<Id> = sqlx::query_scalar(
+                "SELECT id FROM deployments WHERE service_instance_id = $1 AND status = 'active'
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(instance)
+            .fetch_optional(self.app.db())
+            .await
+            .unwrap();
+            if let Some(id) = id.map(|i| i.to_string())
+                && Some(id.as_str()) != not
+            {
+                return id;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("timed out waiting for a new active deployment");
+    }
+}
+
+fn rfc3339(t: time::OffsetDateTime) -> String {
+    t.format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
+
+/// PITR with a fake node and runtime: turning it on redeploys with WAL-G's
+/// settings, base backups run on the node and are pruned to the window, and
+/// restores (into a new service, or over the same one) start deployments
+/// that replay to the chosen time.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn point_in_time_recovery_end_to_end(pool: PgPool) {
+    let (endpoint, _s3) = mock_s3().await;
+    let c = cluster(TestApp::new(pool)).await;
+    let db = Arc::new(modula_node::db::fake::FakeDb::default());
+    let rt = c.start_node_with(Some(db.clone())).await;
+    let ws = c.app.create_workspace(&c.admin, "team").await;
+    let instance = c.database(ws).await;
+    c.ok(
+        Method::PATCH,
+        &format!("/api/service-instances/{instance}/variables"),
+        Some(json!({ "set": { "POSTGRES_PASSWORD": "source-password" } })),
+    )
+    .await;
+    // As the template makes it.
+    sqlx::query(
+        "INSERT INTO volumes (id, service_instance_id, mount_path)
+         VALUES ($1, $2, '/var/lib/postgresql/data')",
+    )
+    .bind(Id::new())
+    .bind(instance)
+    .execute(c.app.db())
+    .await
+    .unwrap();
+    let target = c.target(ws, &endpoint).await;
+    let pitr = format!("/api/service-instances/{instance}/pitr");
+    let first = c.active_deployment(instance, None).await;
+
+    // On: the database is redeployed with WAL-G's settings and mount.
+    let r = c
+        .ok(
+            Method::PUT,
+            &pitr,
+            Some(json!({ "enabled": true, "targetId": target, "windowDays": 7 })),
+        )
+        .await;
+    assert_eq!(r["config"]["enabled"], true);
+    assert_eq!(r["config"]["windowDays"], 7);
+    let second = c.active_deployment(instance, Some(&first)).await;
+    let env = rt.env_of(&second);
+    assert_eq!(
+        env["WALG_S3_PREFIX"],
+        format!("s3://backups/team/{ws}/{instance}/wal-g")
+    );
+    assert_eq!(env["AWS_ENDPOINT"], endpoint);
+    assert_eq!(env["AWS_S3_FORCE_PATH_STYLE"], "true");
+    assert_eq!(env["MODULA_PITR"], "1");
+    assert_eq!(env["WALG_LIBSODIUM_KEY"].len(), 64);
+    assert!(rt.workload_of(&second).unwrap().pitr.is_some());
+
+    // A base backup: wal-g runs in the container, as postgres.
+    let finished = time::OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .unwrap()
+        - time::Duration::minutes(1);
+    let listed = json!([{
+        "backup_name": "base_000000010000000000000003",
+        "start_time": rfc3339(finished - time::Duration::seconds(5)),
+        "finish_time": rfc3339(finished),
+        "compressed_size": 4_000_000,
+    }]);
+    *rt.exec_stdout.lock().unwrap() = listed.to_string().into_bytes();
+    c.ok(Method::POST, &format!("{pitr}/base-backups"), None)
+        .await;
+    wait_for("base backup", || async {
+        let r = c.ok(Method::GET, &pitr, None).await;
+        r["baseBackups"][0]["status"] == "completed"
+    })
+    .await;
+    let execs = rt.execs.lock().unwrap().clone();
+    assert_eq!(
+        execs[execs.len() - 2].cmd[..4],
+        ["gosu", "postgres", "wal-g", "backup-push"]
+    );
+    db.answer(
+        "walStatus",
+        Ok(json!({
+            "inRecovery": false, "archiveMode": "on", "archivedCount": 9, "failedCount": 0,
+            "lastArchivedAt": time::OffsetDateTime::now_utc().unix_timestamp() as f64,
+            "lastFailedAt": null,
+        })),
+    );
+    let r = c.ok(Method::GET, &pitr, None).await;
+    assert_eq!(
+        r["baseBackups"][0]["walgName"],
+        "base_000000010000000000000003"
+    );
+    assert_eq!(r["baseBackups"][0]["sizeBytes"], 4_000_000);
+    assert_eq!(r["window"]["from"], rfc3339(finished));
+    assert!(r["archiving"]["lastArchivedAt"].is_string());
+    // Base backups are not dumps: not in the dump list's restore path.
+    let id = r["baseBackups"][0]["id"].as_str().unwrap().to_owned();
+    let restore_dump = c
+        .call(Method::POST, &format!("/api/backups/{id}/restore"), None)
+        .await;
+    assert_eq!(restore_dump.status, StatusCode::CONFLICT);
+
+    // Outside the window.
+    let restore = format!("{pitr}/restore");
+    let r = c
+        .call(
+            Method::POST,
+            &restore,
+            Some(json!({ "targetTime": rfc3339(finished - time::Duration::hours(1)) })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+
+    // Into a new service: the source's credentials, the base backup, the time.
+    let at = finished + time::Duration::seconds(30);
+    let r = c
+        .ok(
+            Method::POST,
+            &restore,
+            Some(json!({ "targetTime": rfc3339(at) })),
+        )
+        .await;
+    assert_eq!(r["serviceName"], "db-restored");
+    let copy: Id = r["instanceId"].as_str().unwrap().parse().unwrap();
+    let dep = c.active_deployment(copy, None).await;
+    let env = rt.env_of(&dep);
+    assert_eq!(
+        env["MODULA_PITR_RESTORE_TIME"],
+        modula_server::backup::pitr::recovery_time(at)
+    );
+    assert_eq!(
+        env["MODULA_PITR_RESTORE_BACKUP"],
+        "base_000000010000000000000003"
+    );
+    assert_eq!(
+        env["WALG_S3_PREFIX"],
+        format!("s3://backups/team/{ws}/{instance}/wal-g"),
+        "reads the source's WAL"
+    );
+    assert!(!env.contains_key("MODULA_PITR"), "never archives into it");
+    assert_eq!(env["POSTGRES_PASSWORD"], "source-password");
+    // Out of recovery: done.
+    wait_for("restore completed", || async {
+        let r = c.ok(Method::GET, &pitr, None).await;
+        r["restores"][0]["status"] == "completed"
+    })
+    .await;
+
+    // Over the same service: typed confirmation, then a fresh volume.
+    let r = c
+        .call(
+            Method::POST,
+            &restore,
+            Some(json!({ "targetTime": rfc3339(at), "into": "same" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let volume: Id = sqlx::query_scalar("SELECT id FROM volumes WHERE service_instance_id = $1")
+        .bind(instance)
+        .fetch_one(c.app.db())
+        .await
+        .unwrap();
+    db.answer(
+        "walStatus",
+        Ok(json!({ "inRecovery": true, "archiveMode": "on", "lastArchivedAt": time::OffsetDateTime::now_utc().unix_timestamp() as f64 })),
+    );
+    let r = c
+        .ok(
+            Method::POST,
+            &restore,
+            Some(json!({ "targetTime": rfc3339(at), "into": "same", "confirm": "db" })),
+        )
+        .await;
+    assert_eq!(r["instanceId"], instance.to_string());
+    let third = c.active_deployment(instance, Some(&second)).await;
+    let env = rt.env_of(&third);
+    assert_eq!(env["MODULA_PITR"], "1", "archives on, a new timeline");
+    assert!(env.contains_key("MODULA_PITR_RESTORE_TIME"));
+    let fresh: Id = sqlx::query_scalar("SELECT id FROM volumes WHERE service_instance_id = $1")
+        .bind(instance)
+        .fetch_one(c.app.db())
+        .await
+        .unwrap();
+    assert_ne!(fresh, volume);
+    let queued: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM volume_removals WHERE volume_id = $1)")
+            .bind(volume)
+            .fetch_one(c.app.db())
+            .await
+            .unwrap();
+    assert!(
+        queued
+            || rt
+                .removed_volumes()
+                .contains(&format!("modula-vol-{volume}"))
+    );
+    // Still replaying: running.
+    let r = c.ok(Method::GET, &pitr, None).await;
+    assert_eq!(r["restores"][0]["status"], "running");
+
+    // Pruning: base backups older than the one covering the window go.
+    for days in [10, 9] {
+        sqlx::query(
+            "INSERT INTO backups (id, service_instance_id, target_id, kind, engine, method,
+                                  status, object_key, walg_name, finished_at)
+             VALUES ($1, $2, $3, 'scheduled', 'postgres', 'walg', 'completed', 'x', $4,
+                     now() - make_interval(days => $5))",
+        )
+        .bind(Id::new())
+        .bind(instance)
+        .bind(target.parse::<Id>().unwrap())
+        .bind(format!("base_old_{days}"))
+        .bind(days)
+        .execute(c.app.db())
+        .await
+        .unwrap();
+    }
+    modula_server::backup::pitr::tick(&c.app.state)
+        .await
+        .unwrap();
+    wait_for("old base backup pruned", || async {
+        let left: Vec<String> = sqlx::query_scalar(
+            "SELECT walg_name FROM backups WHERE service_instance_id = $1 AND method = 'walg'
+               AND status = 'completed' ORDER BY finished_at",
+        )
+        .bind(instance)
+        .fetch_all(c.app.db())
+        .await
+        .unwrap();
+        left == ["base_old_9", "base_000000010000000000000003"]
+    })
+    .await;
+    let exec = rt.execs.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        exec.cmd[3..],
+        ["delete", "before", "FIND_FULL", "base_old_9", "--confirm"]
+    );
+
+    // Off: redeployed without archiving.
+    c.ok(Method::PUT, &pitr, Some(json!({ "enabled": false })))
+        .await;
+    let fourth = c.active_deployment(instance, Some(&third)).await;
+    assert!(!rt.env_of(&fourth).contains_key("MODULA_PITR"));
+
+    let actions: Vec<String> =
+        sqlx::query_scalar("SELECT action FROM audit_log WHERE action LIKE 'pitr%' ORDER BY id")
+            .fetch_all(c.app.db())
+            .await
+            .unwrap();
+    assert_eq!(
+        actions,
+        [
+            "pitr.update",
+            "pitr.base_backup",
+            "pitr.restore",
+            "pitr.restore",
+            "pitr.update"
+        ]
+    );
 }
 
 /// Needs `pg_dump` on PATH (skipped otherwise).

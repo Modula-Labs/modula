@@ -170,7 +170,7 @@ async fn dispatch(
     let recipient = super::recipient(state, workspace).await.map_err(app)?;
     let previous: Option<i64> = sqlx::query_scalar(
         "SELECT size_bytes FROM backups WHERE service_instance_id = $1 AND status = 'completed'
-         ORDER BY started_at DESC LIMIT 1",
+           AND method = 'dump' ORDER BY started_at DESC LIMIT 1",
     )
     .bind(instance)
     .fetch_optional(&state.db)
@@ -296,7 +296,8 @@ pub async fn on_result(state: &AppState, node: Id, r: pb::BackupResult) -> anyho
         return Ok(());
     }
     let owned: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM backups WHERE id = $1 AND node_id = $2 AND status = 'running')",
+        "SELECT EXISTS (SELECT 1 FROM backups WHERE id = $1 AND node_id = $2 AND status = 'running'
+                        AND method = 'dump')",
     )
     .bind(id)
     .bind(node)
@@ -390,7 +391,7 @@ pub async fn finish_job(state: AppState, job: Job) -> anyhow::Result<()> {
 pub async fn start_restore(state: &AppState, backup: Id, created_by: Id) -> AppResult<Id> {
     let row: Option<(Option<Id>, Id, String, String)> = sqlx::query_as(
         "SELECT service_instance_id, target_id, engine, object_key FROM backups
-         WHERE id = $1 AND status = 'completed'",
+         WHERE id = $1 AND status = 'completed' AND method = 'dump'",
     )
     .bind(backup)
     .fetch_optional(&state.db)
@@ -490,7 +491,8 @@ pub enum Removal {
 /// the node that can reach it to, and mark it deleting.
 pub async fn remove(state: &AppState, backup: Id) -> AppResult<Removal> {
     let (target, key): (Id, String) = sqlx::query_as(
-        "SELECT target_id, object_key FROM backups WHERE id = $1 AND status = 'completed'",
+        "SELECT target_id, object_key FROM backups
+         WHERE id = $1 AND status = 'completed' AND method = 'dump'",
     )
     .bind(backup)
     .fetch_optional(&state.db)

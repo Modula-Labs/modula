@@ -23,6 +23,7 @@ pub const DEFAULT_CPU_MILLIS: u32 = 1000;
 #[derive(sqlx::FromRow)]
 struct Row {
     id: Id,
+    instance_id: Id,
     status: String,
     image: String,
     commit_sha: Option<String>,
@@ -59,7 +60,8 @@ struct RouteRow {
 /// SQL: one [`Row`] per deployment replica (`r`), up to the WHERE clause.
 macro_rules! workload_rows {
     () => {
-        "SELECT d.id, d.status, d.image, d.commit_sha, d.created_at, u.sha256 AS upload_sha256,
+        "SELECT d.id, i.id AS instance_id, d.status, d.image, d.commit_sha, d.created_at,
+                u.sha256 AS upload_sha256,
                 p.workspace_id,
                 d.config, d.env_sealed, i.environment_id, e.name AS environment_name,
                 s.id AS service_id, s.name AS service_name, s.project_id,
@@ -106,7 +108,7 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
         if !networks.contains(&r.environment_id) {
             networks.push(r.environment_id);
         }
-        workloads.push(workload(state, r).await?);
+        workloads.push(workload(state, node, r).await?);
     }
     // Cron services run here between snapshots: their networks stay.
     let cron_networks: Vec<Id> = sqlx::query_scalar(
@@ -191,13 +193,13 @@ pub async fn cron_workload(
     .fetch_optional(&state.db)
     .await?;
     match row {
-        Some(r) => Ok(Some(workload(state, r).await?)),
+        Some(r) => Ok(Some(workload(state, node, r).await?)),
         None => Ok(None),
     }
 }
 
-/// One deployment replica on this node, as the node runs it.
-async fn workload(state: &AppState, r: Row) -> AppResult<pb::Workload> {
+/// One deployment replica on `node`, as the node runs it.
+async fn workload(state: &AppState, node: Id, r: Row) -> AppResult<pb::Workload> {
     let cfg: ServiceConfig = serde_json::from_value(r.config).map_err(anyhow::Error::from)?;
     let vars = match &r.env_sealed {
         Some(sealed) => {
@@ -235,6 +237,26 @@ async fn workload(state: &AppState, r: Row) -> AppResult<pb::Workload> {
         name: k.clone(),
         value: v.expose_secret().to_owned(),
     }));
+    // Point-in-time recovery: WAL-G's settings win over variables. One that
+    // can't be resolved (its storage is gone) leaves the database without
+    // it rather than the node without a desired state.
+    let pitr = match crate::backup::pitr::workload(state, r.instance_id, r.environment_id, node)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(instance = %r.instance_id, error = ?e, "point-in-time recovery left out");
+            None
+        }
+    };
+    let pitr = pitr.map(|(vars, mount)| {
+        env_vars.retain(|e| !vars.iter().any(|(k, _)| *k == e.name));
+        env_vars.extend(
+            vars.into_iter()
+                .map(|(name, value)| pb::EnvVar { name, value }),
+        );
+        mount
+    });
     // Built images run their baked start command (Railpack wraps it in a
     // shell); everything else takes the configured argv.
     let railpack = cfg.builds_from_source() && cfg.builder == Builder::Railpack;
@@ -347,6 +369,7 @@ async fn workload(state: &AppState, r: Row) -> AppResult<pb::Workload> {
         },
         mesh_ip: r.mesh_ip.unwrap_or_default(),
         cron: cfg.cron_schedule.is_some(),
+        pitr,
     })
 }
 

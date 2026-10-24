@@ -294,12 +294,33 @@ pub async fn run(client: &Client, op: Op) -> Result<Value, DbError> {
         }
         Op::Extensions => extensions(client).await,
         Op::Extension(a) => extension(client, a).await,
-        Op::Password(a) => {
-            let ok = (16..=128).contains(&a.password.len())
-                && a.password.bytes().all(|b| b.is_ascii_alphanumeric());
-            if !ok {
-                return Err(DbError::BadRequest("invalid password".into()));
+        Op::WalStatus => wal_status(client).await,
+        Op::Replication => replication(client).await,
+        Op::ReplicationRole(a) => {
+            check_password(&a.password)?;
+            let verifier = postgres_protocol::password::scram_sha_256(a.password.as_bytes());
+            client
+                .batch_execute(&replication_role_sql(&verifier))
+                .await
+                .map_err(pg)?;
+            Ok(json!({ "ok": true }))
+        }
+        Op::Promote => {
+            let row = client
+                .query_one("SELECT pg_is_in_recovery()", &[])
+                .await
+                .map_err(pg)?;
+            if !get::<bool>(&row, 0)? {
+                return Ok(json!({ "promoted": false }));
             }
+            let row = client
+                .query_one("SELECT pg_promote(true, 60)", &[])
+                .await
+                .map_err(pg)?;
+            Ok(json!({ "promoted": get::<bool>(&row, 0)? }))
+        }
+        Op::Password(a) => {
+            check_password(&a.password)?;
             // A SCRAM verifier, so the password itself never reaches the
             // server (or its statement log).
             let verifier = postgres_protocol::password::scram_sha_256(a.password.as_bytes());
@@ -311,6 +332,109 @@ pub async fn run(client: &Client, op: Op) -> Result<Value, DbError> {
             Ok(json!({ "ok": true }))
         }
     }
+}
+
+/// Generated passwords: 16–128 letters and digits.
+fn check_password(p: &str) -> Result<(), DbError> {
+    let ok = (16..=128).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_alphanumeric());
+    if ok {
+        Ok(())
+    } else {
+        Err(DbError::BadRequest("invalid password".into()))
+    }
+}
+
+/// The role read replicas stream from, as a SCRAM verifier (never the
+/// password itself).
+pub const REPLICATOR: &str = "modula_replicator";
+
+fn replication_role_sql(verifier: &str) -> String {
+    let role = sql::quote_ident(REPLICATOR);
+    let password = sql::quote_literal(verifier);
+    format!(
+        "DO $$ BEGIN
+           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {name}) THEN
+             ALTER ROLE {role} WITH REPLICATION LOGIN PASSWORD {password};
+           ELSE
+             CREATE ROLE {role} WITH REPLICATION LOGIN PASSWORD {password};
+           END IF;
+         END $$;",
+        name = sql::quote_literal(REPLICATOR),
+    )
+}
+
+/// `pg_stat_archiver` and whether the server is in recovery. Times are Unix
+/// seconds.
+async fn wal_status(client: &Client) -> Result<Value, DbError> {
+    let r = client
+        .query_one(
+            "SELECT pg_is_in_recovery(), current_setting('archive_mode'),
+                    extract(epoch FROM last_archived_time)::float8,
+                    extract(epoch FROM last_failed_time)::float8,
+                    archived_count, failed_count
+             FROM pg_stat_archiver",
+            &[],
+        )
+        .await
+        .map_err(pg)?;
+    Ok(json!({
+        "inRecovery": get::<bool>(&r, 0)?,
+        "archiveMode": get::<String>(&r, 1)?,
+        "lastArchivedAt": get::<Option<f64>>(&r, 2)?,
+        "lastFailedAt": get::<Option<f64>>(&r, 3)?,
+        "archivedCount": get::<i64>(&r, 4)?,
+        "failedCount": get::<i64>(&r, 5)?,
+    }))
+}
+
+/// A primary's standbys (`pg_stat_replication`), or, on a standby, how far
+/// behind it replays.
+async fn replication(client: &Client) -> Result<Value, DbError> {
+    let in_recovery: bool = get(
+        &client
+            .query_one("SELECT pg_is_in_recovery()", &[])
+            .await
+            .map_err(pg)?,
+        0,
+    )?;
+    if in_recovery {
+        let r = client
+            .query_one(
+                "SELECT extract(epoch FROM now() - pg_last_xact_replay_timestamp())::float8,
+                        pg_last_wal_receive_lsn() IS NOT DISTINCT FROM pg_last_wal_replay_lsn(),
+                        (SELECT status FROM pg_stat_wal_receiver LIMIT 1)",
+                &[],
+            )
+            .await
+            .map_err(pg)?;
+        return Ok(json!({
+            "role": "replica",
+            "replayLagSeconds": get::<Option<f64>>(&r, 0)?,
+            "caughtUp": get::<bool>(&r, 1)?,
+            "receiver": get::<Option<String>>(&r, 2)?,
+        }));
+    }
+    let rows = client
+        .query(
+            "SELECT application_name, client_addr::text, state,
+                    extract(epoch FROM replay_lag)::float8,
+                    pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::float8
+             FROM pg_stat_replication ORDER BY application_name",
+            &[],
+        )
+        .await
+        .map_err(pg)?;
+    let mut standbys = Vec::with_capacity(rows.len());
+    for r in &rows {
+        standbys.push(json!({
+            "name": get::<String>(r, 0)?,
+            "address": get::<Option<String>>(r, 1)?,
+            "state": get::<Option<String>>(r, 2)?,
+            "replayLagSeconds": get::<Option<f64>>(r, 3)?,
+            "lagBytes": get::<Option<f64>>(r, 4)?,
+        }));
+    }
+    Ok(json!({ "role": "primary", "standbys": standbys }))
 }
 
 async fn connect(t: &Target, timeout: Duration) -> Result<Client, DbError> {
@@ -1064,6 +1188,15 @@ mod tests {
             password: "pw".into(),
             database: "postgres".into(),
         }
+    }
+
+    #[test]
+    fn replication_role_sql_sets_a_verifier() {
+        let sql = replication_role_sql("SCRAM-SHA-256$4096:abc");
+        assert!(sql.contains(r#"ALTER ROLE "modula_replicator" WITH REPLICATION LOGIN PASSWORD 'SCRAM-SHA-256$4096:abc';"#));
+        assert!(sql.contains(r#"CREATE ROLE "modula_replicator""#));
+        assert!(check_password("short").is_err());
+        assert!(check_password(&"a".repeat(32)).is_ok());
     }
 
     #[test]

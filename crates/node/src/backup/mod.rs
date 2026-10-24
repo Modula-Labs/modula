@@ -17,6 +17,7 @@
 //! control plane is unreachable is reported after reconnecting.
 
 pub mod engines;
+pub mod walg;
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};

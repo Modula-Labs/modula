@@ -121,7 +121,7 @@ EOF
       cd /tmp && xcaddy build $CADDY_VERSION ${with[*]} --output /out/caddy-linux-$arch
     "
 
-  echo "$arch: fetching buildctl and railpack (pinned sums)"
+  echo "$arch: fetching buildctl, railpack and wal-g (pinned sums)"
   scripts/fetch-build-tools.sh "$arch" "$OUT"
 done
 
@@ -144,7 +144,7 @@ cp scripts/install-cli.sh "$OUT/install-cli.sh"
 cp LICENSE "$OUT/LICENSE"
 cp THIRD_PARTY_NOTICES.md "$OUT/THIRD_PARTY_NOTICES.md"
 # shellcheck disable=SC2046 # the darwin CLIs may be absent
-(cd "$OUT" && sha256sum VERSION install.sh install-cli.sh LICENSE THIRD_PARTY_NOTICES.md modula-*-linux-* modula-linux-* $(ls modula-darwin-* 2>/dev/null) caddy-linux-* buildctl-linux-* railpack-linux-* >SHA256SUMS)
+(cd "$OUT" && sha256sum VERSION install.sh install-cli.sh LICENSE THIRD_PARTY_NOTICES.md modula-*-linux-* modula-linux-* $(ls modula-darwin-* 2>/dev/null) caddy-linux-* buildctl-linux-* railpack-linux-* wal-g-linux-* >SHA256SUMS)
 openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$OUT/SHA256SUMS" -out "$OUT/SHA256SUMS.sig"
 openssl pkeyutl -verify -pubin -inkey deploy/release.pub.pem -rawin \
   -in "$OUT/SHA256SUMS" -sigfile "$OUT/SHA256SUMS.sig" >/dev/null

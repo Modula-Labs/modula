@@ -58,6 +58,7 @@ message NodeMessage {
     LogBatch log_batch = 8;
     BackupResult backup_result = 20;
     BackupDeleted backup_deleted = 21;
+    WalgResult walg_result = 22;
     DbResponse db_result = 30;
     TunnelOpened tunnel_opened = 31;
     TunnelData tunnel_data = 32;
@@ -216,6 +217,7 @@ message ServerMessage {
     BackupRequest backup = 20;
     RestoreRequest restore = 21;
     BackupDelete backup_delete = 22;
+    WalgRequest walg = 23;
     DbRequest db = 30;
     TunnelOpen tunnel_open = 31;
     TunnelData tunnel_data = 32;
@@ -383,6 +385,17 @@ message Workload {
   // pulled (and the pre-deploy command ran), with no container started.
   // Runs come as CronRun.
   bool cron = 90;
+  // Point-in-time recovery (Postgres with WAL-G); absent = none.
+  Pitr pitr = 95;
+}
+
+// The node bind-mounts its own WAL-G binary read-only at /usr/local/bin/wal-g
+// (never one the server names). WAL-G's settings (WALG_*) are in the
+// workload's env.
+message Pitr {
+  // WAL-G's file storage on this node: `<workspace>/<instance>/wal-g` under
+  // the backup directory, mounted at /var/lib/modula-wal-g. Empty = none.
+  string local_dir = 1;
 }
 
 message Volume {
@@ -583,6 +596,37 @@ message BackupDeleted {
   string backup_id = 1;
   bool ok = 2;
   string error = 3;
+}
+
+// A WAL-G command run inside a Postgres container with PITR (as the postgres
+// user, with the container's WALG_* settings). Answered with WalgResult.
+message WalgRequest {
+  // backup-push: the backup's id; delete-before: any id, echoed back.
+  string request_id = 1;
+  string deployment_id = 2;
+  WalgOp op = 3;
+  // delete-before: the oldest base backup to keep (WAL-G's name).
+  string backup_name = 4;
+}
+
+enum WalgOp {
+  WALG_UNSPECIFIED = 0;
+  // Take a base backup of PGDATA.
+  WALG_BACKUP_PUSH = 1;
+  // Delete base backups and WAL older than backup_name.
+  WALG_DELETE_BEFORE = 2;
+}
+
+message WalgResult {
+  string request_id = 1;
+  WalgOp op = 2;
+  bool ok = 3;
+  string error = 4;
+  // backup-push: the base backup taken (WAL-G's name, times, compressed size).
+  string backup_name = 5;
+  int64 start_unix = 6;
+  int64 finish_unix = 7;
+  uint64 size_bytes = 8;
 }
 
 // The outcome of a BackupRequest or RestoreRequest.

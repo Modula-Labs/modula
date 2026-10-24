@@ -64,12 +64,12 @@ async fn postgres_only(state: &AppState, instance: Id) -> AppResult<()> {
 }
 
 /// The active deployment of a Postgres instance and the node running it.
-struct Live {
-    deployment: Id,
-    node: Id,
+pub(crate) struct Live {
+    pub(crate) deployment: Id,
+    pub(crate) node: Id,
 }
 
-async fn live(state: &AppState, instance: Id) -> AppResult<Live> {
+pub(crate) async fn live(state: &AppState, instance: Id) -> AppResult<Live> {
     postgres_only(state, instance).await?;
     let row: Option<(Id, Id, bool)> = sqlx::query_as(
         "SELECT d.id, n.id, coalesce(n.info->'capabilities' ? 'db', false)
@@ -94,7 +94,7 @@ async fn live(state: &AppState, instance: Id) -> AppResult<Live> {
 }
 
 /// Run one operation on the database's node.
-async fn call(
+pub(crate) async fn call(
     state: &AppState,
     live: &Live,
     op: &str,

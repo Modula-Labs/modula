@@ -58,7 +58,20 @@ const fn urls(private: &'static str, public: &'static str) -> [Connect; 2] {
 /// Clients use `sslmode=require` (encrypted, unverified, like Railway); the
 /// private network still accepts plain connections. pg_stat_statements is
 /// preloaded so the Database tab's slow-query view works once installed.
-const POSTGRES_START: &str = concat!(
+///
+/// The rest follows the environment the control plane sets:
+/// - Read replicas connect as `modula_replicator` (`REPLICATION_PASSWORD`,
+///   a role the control plane creates when a replica is added), so pg_hba
+///   allows replication for it: appended to an existing cluster's file, or
+///   by an init script on first start.
+/// - `MODULA_PITR`: WAL archiving with WAL-G (`backup::pitr`).
+/// - `MODULA_PITR_RESTORE_TIME`/`_BACKUP`: an empty data directory is first
+///   filled from that WAL-G base backup, then WAL is replayed up to that
+///   time and the server promotes itself.
+/// - `MODULA_REPLICA_OF`: an empty data directory is first filled with
+///   `pg_basebackup -R` from that primary, so the server runs as its
+///   streaming standby.
+pub const POSTGRES_START: &str = concat!(
     "set -e\n",
     "d=/var/lib/postgresql/data/certs\n",
     "mkdir -p \"$d\"\n",
@@ -66,10 +79,41 @@ const POSTGRES_START: &str = concat!(
     "  openssl req -new -x509 -days 3650 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1",
     " -subj \"/CN=${MODULA_PRIVATE_DOMAIN:-postgres}\" -keyout \"$d/server.key\" -out \"$d/server.crt\" 2>/dev/null\n",
     "fi\n",
-    "if [ \"$(id -u)\" = 0 ]; then chown -R postgres:postgres \"$d\"; fi\n",
+    "root=; if [ \"$(id -u)\" = 0 ]; then root=1; chown -R postgres:postgres \"$d\"; fi\n",
     "chmod 600 \"$d/server.key\"\n",
-    "exec docker-entrypoint.sh postgres -c ssl=on -c \"ssl_cert_file=$d/server.crt\"",
-    " -c \"ssl_key_file=$d/server.key\" -c shared_preload_libraries=pg_stat_statements\n",
+    "as_pg() { if [ -n \"$root\" ]; then gosu postgres \"$@\"; else \"$@\"; fi; }\n",
+    "set -- -c ssl=on -c \"ssl_cert_file=$d/server.crt\" -c \"ssl_key_file=$d/server.key\"",
+    " -c shared_preload_libraries=pg_stat_statements\n",
+    "hba='host replication modula_replicator all scram-sha-256'\n",
+    "if [ -s \"$PGDATA/pg_hba.conf\" ]; then\n",
+    "  grep -qxF \"$hba\" \"$PGDATA/pg_hba.conf\" || echo \"$hba\" >>\"$PGDATA/pg_hba.conf\"\n",
+    "elif [ -n \"$root\" ]; then\n",
+    "  mkdir -p /docker-entrypoint-initdb.d\n",
+    "  echo \"echo '$hba' >>\\\"\\$PGDATA/pg_hba.conf\\\"\" >/docker-entrypoint-initdb.d/zz-modula-replication.sh\n",
+    "fi\n",
+    "if [ -n \"$MODULA_PITR\" ]; then\n",
+    "  set -- \"$@\" -c wal_level=replica -c archive_mode=on -c 'archive_command=wal-g wal-push %p' -c archive_timeout=60\n",
+    "fi\n",
+    "if [ -d /var/lib/modula-wal-g ] && [ -n \"$root\" ]; then chown postgres:postgres /var/lib/modula-wal-g; fi\n",
+    "if [ ! -s \"$PGDATA/PG_VERSION\" ] && { [ -n \"$MODULA_PITR_RESTORE_TIME\" ] || [ -n \"$MODULA_REPLICA_OF\" ]; }; then\n",
+    "  mkdir -p \"$PGDATA\"\n",
+    "  if [ -n \"$root\" ]; then chown postgres:postgres \"$PGDATA\"; fi\n",
+    "  chmod 700 \"$PGDATA\"\n",
+    "  if [ -n \"$MODULA_PITR_RESTORE_TIME\" ]; then\n",
+    "    as_pg wal-g backup-fetch \"$PGDATA\" \"$MODULA_PITR_RESTORE_BACKUP\"\n",
+    "    as_pg touch \"$PGDATA/recovery.signal\"\n",
+    "  else\n",
+    "    until as_pg env PGPASSWORD=\"$REPLICATION_PASSWORD\" pg_basebackup -h \"$MODULA_REPLICA_OF\"",
+    " -U modula_replicator -D \"$PGDATA\" -R -X stream -c fast; do\n",
+    "      echo 'waiting for the primary'; find \"$PGDATA\" -mindepth 1 -delete; sleep 5\n",
+    "    done\n",
+    "  fi\n",
+    "fi\n",
+    "if [ -n \"$MODULA_PITR_RESTORE_TIME\" ]; then\n",
+    "  set -- \"$@\" -c 'restore_command=wal-g wal-fetch %f %p'",
+    " -c \"recovery_target_time=$MODULA_PITR_RESTORE_TIME\" -c recovery_target_action=promote\n",
+    "fi\n",
+    "exec docker-entrypoint.sh postgres \"$@\"\n",
 );
 
 pub const CATALOG: &[Template] = &[
@@ -88,6 +132,8 @@ pub const CATALOG: &[Template] = &[
             ("POSTGRES_USER", "postgres"),
             ("POSTGRES_PASSWORD", SECRET),
             ("POSTGRES_DB", "app"),
+            // What read replicas connect with (see POSTGRES_START).
+            ("REPLICATION_PASSWORD", SECRET),
             // A subdirectory: the volume root may hold lost+found.
             ("PGDATA", "/var/lib/postgresql/data/pgdata"),
             ("PGHOST", "${{MODULA_PRIVATE_DOMAIN}}"),
@@ -298,6 +344,37 @@ pub fn password() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_postgres_start_script_parses_and_covers_its_modes() {
+        let out = std::process::Command::new("sh")
+            .args(["-n", "-c", POSTGRES_START])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for part in [
+            "host replication modula_replicator all scram-sha-256",
+            "/docker-entrypoint-initdb.d/zz-modula-replication.sh",
+            "-c wal_level=replica -c archive_mode=on -c 'archive_command=wal-g wal-push %p' -c archive_timeout=60",
+            "as_pg wal-g backup-fetch \"$PGDATA\" \"$MODULA_PITR_RESTORE_BACKUP\"",
+            "recovery_target_time=$MODULA_PITR_RESTORE_TIME",
+            "recovery_target_action=promote",
+            "pg_basebackup -h \"$MODULA_REPLICA_OF\" -U modula_replicator -D \"$PGDATA\" -R -X stream",
+            "exec docker-entrypoint.sh postgres \"$@\"",
+        ] {
+            assert!(POSTGRES_START.contains(part), "{part}");
+        }
+        let pg = get("postgres").unwrap();
+        assert!(
+            pg.variables
+                .iter()
+                .any(|(k, v)| *k == "REPLICATION_PASSWORD" && *v == SECRET)
+        );
+    }
 
     #[test]
     fn templates_are_valid_and_passwords_fresh() {

@@ -1,6 +1,8 @@
 //! Services and their per-environment configuration (service instances).
 //! Variables are in [`super::variables`].
 
+use std::collections::HashMap;
+
 use axum::Json;
 use axum::extract::State;
 use modula_id::Id;
@@ -142,7 +144,33 @@ pub async fn create(
     meta: RequestMeta,
     Json(req): Json<CreateService>,
 ) -> AppResult<Json<CreatedService>> {
-    let project = grant.id();
+    let workspace = grant.workspace_id()?;
+    create_service(
+        &state,
+        &actor,
+        &meta,
+        workspace,
+        grant.id(),
+        req,
+        &HashMap::new(),
+    )
+    .await
+    .map(Json)
+}
+
+/// Create a service in `project` with one instance per environment.
+/// `overrides` replaces (or adds) template variables of the instance in an
+/// environment, by name: a restored or replicated database keeps the
+/// credentials of the one it came from.
+pub async fn create_service(
+    state: &AppState,
+    actor: &Actor,
+    meta: &RequestMeta,
+    workspace: Id,
+    project: Id,
+    req: CreateService,
+    overrides: &HashMap<Id, Vec<(String, String)>>,
+) -> AppResult<CreatedService> {
     validate_service_name(&req.name)?;
     let template = match req.template.as_deref() {
         Some(buckets::R2_TEMPLATE) => {
@@ -179,7 +207,16 @@ pub async fn create(
     let mut instances = Vec::with_capacity(envs.len());
     for env in envs {
         let vars = match template {
-            Some(t) => variables::seal_new(&state, env, &t.variables()).await?,
+            Some(t) => {
+                let mut vars = t.variables();
+                for (name, value) in overrides.get(&env).into_iter().flatten() {
+                    match vars.iter_mut().find(|(k, _)| k == name) {
+                        Some(v) => v.1 = value.clone(),
+                        None => vars.push((name.clone(), value.clone())),
+                    }
+                }
+                variables::seal_new(state, env, &vars).await?
+            }
             None => Vec::new(),
         };
         instances.push((env, Id::new(), vars));
@@ -226,9 +263,9 @@ pub async fn create(
         let created = [Change::new("service", "created", req.name.as_str())];
         activity::record(&mut tx, *env, Some(id), Some(actor.user_id), &created).await?;
     }
-    Entry::new("service.create", &meta)
-        .actor(&actor)
-        .workspace(grant.workspace_id()?)
+    Entry::new("service.create", meta)
+        .actor(actor)
+        .workspace(workspace)
         .target("service", id)
         .metadata(json!({
             "project": project,
@@ -241,13 +278,13 @@ pub async fn create(
     tx.commit().await?;
     let mut loaded = Vec::with_capacity(instances.len());
     for (_, i, _) in instances {
-        loaded.push(load_instance(&state, i).await?);
+        loaded.push(load_instance(state, i).await?);
     }
-    Ok(Json(CreatedService {
+    Ok(CreatedService {
         id,
         name: req.name,
         instances: loaded,
-    }))
+    })
 }
 
 pub async fn delete(

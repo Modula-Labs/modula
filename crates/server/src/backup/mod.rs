@@ -18,6 +18,7 @@
 //! Scheduling, retention and cleanup run from one periodic job (`schedule`).
 
 pub mod control_plane;
+pub mod pitr;
 pub mod retention;
 pub mod run;
 pub mod s3;

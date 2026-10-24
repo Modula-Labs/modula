@@ -356,16 +356,7 @@ impl Runtime for DockerRuntime {
                 name: Some(restart),
                 maximum_retry_count: max_retries,
             }),
-            // A named volume: Docker creates it on first use, empty, and it
-            // outlives containers until the server asks for its removal.
-            mounts: w.volume.as_ref().map(|v| {
-                vec![Mount {
-                    typ: Some(MountType::VOLUME),
-                    source: Some(v.name.clone()),
-                    target: Some(v.mount_path.clone()),
-                    ..Default::default()
-                }]
-            }),
+            mounts: Some(mounts(w)?).filter(|m| !m.is_empty()),
             ..host_config(w)
         };
         let mesh = self.mesh_for(w);
@@ -720,6 +711,48 @@ fn host_config(w: &Workload) -> HostConfig {
         network_mode: Some(network_name(&w.environment_id)),
         ..Default::default()
     }
+}
+
+/// A workload's mounts: its named volume (Docker creates it on first use,
+/// empty, and it outlives containers until the server asks for its
+/// removal) and, with point-in-time recovery, WAL-G (see
+/// [`crate::backup::walg`]).
+fn mounts(w: &Workload) -> anyhow::Result<Vec<Mount>> {
+    use crate::backup::walg;
+    let mut out = Vec::new();
+    if let Some(v) = &w.volume {
+        out.push(Mount {
+            typ: Some(MountType::VOLUME),
+            source: Some(v.name.clone()),
+            target: Some(v.mount_path.clone()),
+            ..Default::default()
+        });
+    }
+    if let Some(p) = &w.pitr {
+        let bin = walg::bin().context(
+            "this server has no WAL-G binary for point-in-time recovery (modula-node --wal-g)",
+        )?;
+        out.push(Mount {
+            typ: Some(MountType::BIND),
+            source: Some(bin.to_string_lossy().into_owned()),
+            target: Some(walg::CONTAINER_BIN.into()),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        if !p.local_dir.is_empty() {
+            out.push(Mount {
+                typ: Some(MountType::BIND),
+                source: Some(
+                    walg::local_dir(&p.local_dir)?
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                target: Some(walg::CONTAINER_DIR.into()),
+                ..Default::default()
+            });
+        }
+    }
+    Ok(out)
 }
 
 fn force_remove() -> bollard::query_parameters::RemoveContainerOptions {

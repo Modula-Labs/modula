@@ -257,7 +257,7 @@ pub struct Destination {
 }
 
 impl Destination {
-    fn given(&self) -> usize {
+    pub(crate) fn given(&self) -> usize {
         usize::from(self.target_id.is_some())
             + usize::from(self.bucket_instance_id.is_some())
             + usize::from(self.local_disk)
@@ -378,7 +378,7 @@ async fn insert_implicit(
 
 /// The target a destination stands for, made on first use for bucket
 /// services and disks. `instance` is the database being backed up.
-async fn resolve_destination(
+pub(crate) async fn resolve_destination(
     state: &AppState,
     actor: &Actor,
     meta: &RequestMeta,
@@ -494,13 +494,17 @@ pub struct Backup {
     pub error: Option<String>,
     pub target_name: String,
     pub target_kind: String,
+    /// `dump`, or `walg` (a base backup for point-in-time recovery).
+    pub method: String,
+    /// WAL-G's name of a base backup.
+    pub walg_name: Option<String>,
 }
 
 macro_rules! select_backups {
     ($rest:literal) => {
         concat!(
             "SELECT b.id, b.status, b.kind, b.size_bytes, b.started_at, b.finished_at, b.error,
-                    t.name AS target_name, t.kind AS target_kind
+                    t.name AS target_name, t.kind AS target_kind, b.method, b.walg_name
              FROM backups b JOIN backup_targets t ON t.id = b.target_id ",
             $rest
         )

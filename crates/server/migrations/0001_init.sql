@@ -704,6 +704,11 @@ CREATE TABLE backups (
     node_id             id REFERENCES nodes (id) ON DELETE SET NULL,
     kind                text NOT NULL CHECK (kind IN ('scheduled', 'manual')),
     engine              text NOT NULL CHECK (engine IN ('postgres', 'mysql', 'redis', 'mongo')),
+    -- 'dump': one encrypted object (object_key). 'walg': a WAL-G base backup
+    -- (point-in-time recovery) named walg_name, in the WAL-G storage at
+    -- object_key; its finished_at is WAL-G's finish time.
+    method              text NOT NULL DEFAULT 'dump' CHECK (method IN ('dump', 'walg')),
+    walg_name           text,
     -- 'deleting': a node was asked to delete it (bucket and local targets).
     status              text NOT NULL DEFAULT 'running'
                         CHECK (status IN ('running', 'completed', 'failed', 'deleting', 'deleted')),
@@ -753,6 +758,46 @@ CREATE TABLE instance_backup (
     updated_at          timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO instance_backup (id) VALUES (true);
+
+-- Point-in-time recovery of a Postgres instance with WAL-G: WAL archived
+-- continuously to a target (at most a minute behind, archive_timeout) and a
+-- daily base backup; base backups older than window_days are pruned (with
+-- their WAL) once a newer one covers the window. The WAL-G encryption key
+-- (libsodium, 32 bytes) is sealed with the workspace data key (AAD:
+-- pitr_configs/key/<instance>). Turning it on or off redeploys the database.
+CREATE TABLE pitr_configs (
+    service_instance_id id PRIMARY KEY REFERENCES service_instances (id) ON DELETE CASCADE,
+    enabled             boolean NOT NULL DEFAULT true,
+    target_id           id NOT NULL REFERENCES backup_targets (id) ON DELETE CASCADE,
+    window_days         integer NOT NULL DEFAULT 7 CHECK (window_days BETWEEN 1 AND 35),
+    hour_utc            smallint NOT NULL DEFAULT 3 CHECK (hour_utc BETWEEN 0 AND 23),
+    key_sealed          bytea NOT NULL,
+    last_scheduled_at   timestamptz,
+    updated_at          timestamptz NOT NULL DEFAULT now()
+);
+
+-- A point-in-time restore of source_instance_id's WAL-G storage (as of
+-- target_id) into instance_id: a new service, or the same instance on a
+-- fresh volume. While running, instance_id's deployments start by fetching
+-- base_backup and replaying WAL up to target_time, then promote; done once
+-- the database is out of recovery.
+CREATE TABLE pitr_restores (
+    id                  id PRIMARY KEY,
+    source_instance_id  id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    instance_id         id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    target_id           id NOT NULL REFERENCES backup_targets (id) ON DELETE CASCADE,
+    base_backup         text NOT NULL,
+    target_time         timestamptz NOT NULL,
+    status              text NOT NULL DEFAULT 'running'
+                        CHECK (status IN ('running', 'completed', 'failed')),
+    error               text,
+    created_by          id REFERENCES users (id) ON DELETE SET NULL,
+    started_at          timestamptz NOT NULL DEFAULT now(),
+    finished_at         timestamptz
+);
+CREATE INDEX pitr_restores_source_idx ON pitr_restores (source_instance_id, started_at DESC);
+CREATE UNIQUE INDEX pitr_restores_one_running ON pitr_restores (instance_id)
+    WHERE status = 'running';
 
 ---------------------------------------------------------------------------
 -- API tokens (the modula CLI, automation)

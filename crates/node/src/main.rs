@@ -121,6 +121,10 @@ enum Command {
         /// Where backups to this server's disk are kept.
         #[arg(long, env = "MODULA_BACKUP_DIR", default_value = modula_node::backup::DEFAULT_DIR)]
         backup_dir: PathBuf,
+        /// WAL-G binary, mounted into Postgres containers with point-in-time
+        /// recovery.
+        #[arg(long = "wal-g", env = "MODULA_WALG", default_value = "wal-g")]
+        walg: PathBuf,
     },
     /// Show this server's identity.
     Status,
@@ -187,8 +191,10 @@ async fn main() -> anyhow::Result<()> {
             no_mesh,
             wg_port,
             backup_dir,
+            walg,
         } => {
             modula_node::backup::set_dir(backup_dir);
+            modula_node::backup::walg::set_bin(walg);
             let runtime = Arc::new(DockerRuntime::connect()?);
             // Containers must not reach the cloud's metadata service.
             tokio::spawn(modula_node::runtime::firewall::block_metadata());

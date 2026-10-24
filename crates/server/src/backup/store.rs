@@ -58,6 +58,8 @@ pub struct PrivateBucket {
     pub port: u16,
     /// Its address on the private network, when it is in one.
     pub mesh_ip: Option<String>,
+    /// Its service's name (`<name>.modula.internal` in its environment).
+    pub service_name: String,
 }
 
 impl PrivateBucket {
@@ -177,8 +179,13 @@ impl BucketVars {
 }
 
 async fn bucket_store(state: &AppState, instance: Id, prefix: &str) -> AppResult<Store> {
-    let (template, environment, config): (Option<String>, Id, serde_json::Value) = sqlx::query_as(
-        "SELECT s.template, i.environment_id, i.config FROM service_instances i
+    let (template, environment, config, service_name): (
+        Option<String>,
+        Id,
+        serde_json::Value,
+        String,
+    ) = sqlx::query_as(
+        "SELECT s.template, i.environment_id, i.config, s.name FROM service_instances i
              JOIN services s ON s.id = i.service_id WHERE i.id = $1",
     )
     .bind(instance)
@@ -235,6 +242,7 @@ async fn bucket_store(state: &AppState, instance: Id, prefix: &str) -> AppResult
                 environment,
                 port,
                 mesh_ip,
+                service_name,
             }))
         }
         _ => Err(AppError::Conflict(
@@ -297,6 +305,7 @@ mod tests {
             environment: Id::new(),
             port: 9000,
             mesh_ip: Some("10.80.3.7".into()),
+            service_name: "files".into(),
         };
         let local = b.access(here).unwrap();
         assert_eq!(local.endpoint, "", "resolved by the node itself");

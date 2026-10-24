@@ -31,6 +31,7 @@ pub(crate) use due;
 pub async fn tick_job(state: AppState, _job: Job) -> anyhow::Result<()> {
     start_due(&state).await?;
     control_plane::start_due(&state).await?;
+    super::pitr::tick(&state).await?;
     sweep_stale(&state).await?;
     prune(&state).await?;
     Ok(())
@@ -104,7 +105,8 @@ async fn prune(state: &AppState) -> anyhow::Result<()> {
                 coalesce(s.weekly_days, $2) AS weekly_days,
                 coalesce(s.monthly_days, $3) AS monthly_days
          FROM backups b LEFT JOIN backup_schedules s ON s.service_instance_id = b.service_instance_id
-         WHERE b.status = 'completed' AND b.kind = 'scheduled' AND b.finished_at IS NOT NULL",
+         WHERE b.status = 'completed' AND b.kind = 'scheduled' AND b.method = 'dump'
+           AND b.finished_at IS NOT NULL",
     )
     .bind(retention::DEFAULT.daily_days)
     .bind(retention::DEFAULT.weekly_days)
