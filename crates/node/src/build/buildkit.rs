@@ -34,6 +34,10 @@ use super::{BuildLog, Builder, Built};
 
 /// Pinned by digest; bump together with the buildctl in the release.
 pub const BUILDKIT_IMAGE: &str = "moby/buildkit:v0.34.1-rootless@sha256:f68752a5a94acfcdad2d07867b7075601a421638e17fc5f28efc1c814d0c4f89";
+/// What `railpack prepare` is told a variable's value is: not empty
+/// (Railpack drops those), never the real value (argv is visible to `ps`).
+const SECRET_PLACEHOLDER: &str = "1";
+
 /// The AppArmor profile install.sh loads where unprivileged user namespaces
 /// are restricted (Ubuntu 23.10+): unconfined, plus `userns`.
 const APPARMOR_PROFILE: &str = "modula-buildkit";
@@ -376,12 +380,14 @@ impl BuildkitBuilder {
             args.extend(["--start-cmd".into(), spec.start_command.clone()]);
         }
         for (name, value) in secrets {
-            // Names declare the secrets the build may mount; only Railpack's
-            // own settings carry their values here.
+            // Names declare the secrets the build steps mount (their values
+            // come through BuildKit, never argv); only Railpack's own
+            // settings carry their values here. Railpack ignores a variable
+            // with an empty value, so the others get a placeholder.
             let value = if CONFIG_PREFIXES.iter().any(|p| name.starts_with(p)) {
                 value
             } else {
-                ""
+                SECRET_PLACEHOLDER
             };
             args.extend(["--env".into(), format!("{name}={value}")]);
         }
