@@ -191,8 +191,12 @@ pub async fn start(
     .bind(&vars_sealed)
     .execute(&mut *tx)
     .await?;
-    // Addresses on the private network (the trigger created replica 0).
+    // Addresses on the private network (the trigger created replica 0), and
+    // the service's virtual IP the first time it runs there.
     let mesh_ip = crate::mesh::allocate_ip(&mut *tx, node).await?;
+    if mesh_ip.is_some() {
+        crate::mesh::ensure_vip(&mut *tx, d.instance).await?;
+    }
     sqlx::query(
         "UPDATE deployment_replicas SET mesh_ip = $2 WHERE deployment_id = $1 AND ordinal = 0",
     )

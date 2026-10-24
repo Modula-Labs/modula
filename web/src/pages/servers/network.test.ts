@@ -19,6 +19,9 @@ describe("network tab", () => {
     expect(linkState(link({ lastHandshake: now - 600 }), now)).toBe("down");
     expect(linkState(link(), now)).toBe("down");
     expect(linkState(link({ path: "none", endpoint: null }), now)).toBe("waiting");
+    // Relayed: no handshake of its own; the round trip through the main server tells.
+    expect(linkState(link({ path: "relay", endpoint: null }), now)).toBe("up");
+    expect(linkState(link({ path: "relay", endpoint: null, latencyMs: null }), now)).toBe("down");
   });
 
   it("formats latency", () => {

@@ -27,6 +27,8 @@ export function linkState(
   l: Link,
   nowSecs = Date.now() / 1000,
 ): "up" | "waiting" | "down" {
+  // Relayed: no tunnel of its own; the round trip through the main server tells.
+  if (l.path === "relay") return l.latencyMs != null ? "up" : "down";
   if (l.lastHandshake && nowSecs - l.lastHandshake < HANDSHAKE_FRESH_SECS)
     return "up";
   if (l.path === "none") return "waiting";
@@ -95,6 +97,10 @@ export function NetworkPanel() {
                         <Badge tone="success">Private</Badge>
                       ) : l.path === "public" ? (
                         <Badge>Public</Badge>
+                      ) : l.path === "relay" ? (
+                        <span title="One of them is behind NAT: traffic goes through the main server">
+                          <Badge>Relay</Badge>
+                        </span>
                       ) : (
                         <Badge tone="warn">Inbound only</Badge>
                       )}

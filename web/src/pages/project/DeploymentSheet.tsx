@@ -9,7 +9,7 @@ import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import { api } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
 import { sleepingLine } from "@/lib/deployments";
-import { deploymentBadge, isLive, isServingStatus } from "@/lib/status";
+import { badgeOf, isLive, isServingStatus } from "@/lib/status";
 import { LogViewer } from "./LogViewer";
 
 type Tab = "details" | "build" | "logs";
@@ -51,7 +51,7 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
         d ? (
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center gap-2.5">
-              <Badge tone={deploymentBadge[d.status].tone}>{deploymentBadge[d.status].label}</Badge>
+              <Badge tone={badgeOf(d).tone}>{badgeOf(d).label}</Badge>
               <span className="truncate font-mono text-[13px]">{d.source || d.image}</span>
             </div>
             <div className="text-sm text-muted-foreground">

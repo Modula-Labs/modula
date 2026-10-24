@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod client;
+pub mod firewall;
 
 use std::collections::BTreeMap;
 
@@ -105,12 +106,16 @@ pub async fn provider(state: &AppState, workspace: Id) -> AppResult<Option<Hetzn
         .await?;
     let token = String::from_utf8(plain.to_vec())
         .map_err(|_| anyhow::anyhow!("stored Hetzner token is not UTF-8"))?;
-    Ok(Some(Hetzner::new(state, workspace, token.into())?))
+    let mut h = Hetzner::new(state, workspace, token.into())?;
+    h.mesh_sources = firewall::mesh_sources(&state.db, Some(workspace)).await?;
+    Ok(Some(h))
 }
 
 pub struct Hetzner {
     client: Client,
     workspace: Id,
+    /// Public IPs allowed to the WireGuard port ([`firewall::mesh_sources`]).
+    mesh_sources: Vec<String>,
 }
 
 impl Hetzner {
@@ -122,6 +127,7 @@ impl Hetzner {
         Ok(Self {
             client: Client::new(state.cfg.hetzner_api.clone(), token)?,
             workspace,
+            mesh_sources: Vec::new(),
         })
     }
 
@@ -129,12 +135,16 @@ impl Hetzner {
         &self.client
     }
 
+    pub fn workspace(&self) -> Id {
+        self.workspace
+    }
+
     /// One firewall per workspace and SSH choice, shared by its servers;
     /// its rules are reset to ours on every use.
     async fn ensure_firewall(&self, ssh: bool) -> Result<i64, ProviderError> {
         let ssh_label = if ssh { "1" } else { "0" };
         let selector = format!("modula=1,workspace={},ssh={ssh_label}", self.workspace);
-        let rules = firewall_rules(ssh);
+        let rules = firewall_rules(ssh, &self.mesh_sources);
         if let Some(fw) = self.client.firewalls(&selector).await?.into_iter().next() {
             self.client.set_firewall_rules(fw.id, &rules).await?;
             return Ok(fw.id);
@@ -154,17 +164,11 @@ impl Hetzner {
 }
 
 /// Inbound only what a worker serves: HTTP(S) (incl. HTTP/3), the TCP proxy
-/// range, ping, and SSH when asked. Workers dial out to the control plane,
-/// so nothing else is needed; outbound stays open.
-pub fn firewall_rules(ssh: bool) -> Vec<FirewallRule> {
-    const ANY: [&str; 2] = ["0.0.0.0/0", "::/0"];
-    let rule = |protocol, port, description| FirewallRule {
-        direction: "in",
-        protocol,
-        port,
-        source_ips: ANY.to_vec(),
-        description,
-    };
+/// range, ping, SSH when asked, and WireGuard from Modula's other servers
+/// ([`firewall::mesh_rule`]). Workers dial out to the control plane, so
+/// nothing else is needed; outbound stays open.
+pub fn firewall_rules(ssh: bool, mesh_sources: &[String]) -> Vec<FirewallRule> {
+    let rule = FirewallRule::inbound_any;
     let mut rules = vec![
         rule("tcp", Some("80"), "HTTP"),
         rule("tcp", Some("443"), "HTTPS"),
@@ -175,6 +179,7 @@ pub fn firewall_rules(ssh: bool) -> Vec<FirewallRule> {
     if ssh {
         rules.push(rule("tcp", Some("22"), "SSH"));
     }
+    rules.extend(firewall::mesh_rule(mesh_sources));
     rules
 }
 
@@ -364,18 +369,30 @@ mod tests {
 
     #[test]
     fn firewall_opens_only_web_and_proxies() {
-        let ports = |ssh| {
-            firewall_rules(ssh)
+        let ports = |ssh, mesh: &[String]| {
+            firewall_rules(ssh, mesh)
                 .into_iter()
-                .map(|r| format!("{}/{}", r.protocol, r.port.unwrap_or("-")))
+                .map(|r| format!("{}/{}", r.protocol, r.port.as_deref().unwrap_or("-")))
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            ports(false),
+            ports(false, &[]),
             ["tcp/80", "tcp/443", "udp/443", "tcp/20000-29999", "icmp/-"]
         );
-        assert!(ports(true).contains(&"tcp/22".to_owned()));
-        assert!(firewall_rules(true).iter().all(|r| r.direction == "in"));
+        assert!(ports(true, &[]).contains(&"tcp/22".to_owned()));
+        assert!(
+            firewall_rules(true, &[])
+                .iter()
+                .all(|r| r.direction == "in")
+        );
+        // WireGuard only from the other servers.
+        let rules = firewall_rules(false, &["203.0.113.4".to_owned()]);
+        let wg = rules.last().unwrap();
+        assert_eq!(
+            (wg.protocol.as_str(), wg.port.as_deref()),
+            ("udp", Some("51820"))
+        );
+        assert_eq!(wg.source_ips, ["203.0.113.4/32"]);
     }
 
     #[test]

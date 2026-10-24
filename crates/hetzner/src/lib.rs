@@ -198,20 +198,63 @@ pub struct ApiError {
     pub message: String,
 }
 
+/// The description of the firewall rule that lets Modula's servers reach
+/// each other's WireGuard port; the control plane rewrites it as servers
+/// come and go, and whoever else sets a Modula firewall's rules keeps it.
+pub const MESH_RULE: &str = "Modula private network";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Firewall {
     pub id: i64,
     pub name: String,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub rules: Vec<FirewallRule>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FirewallRule {
-    pub direction: &'static str,
-    pub protocol: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub port: Option<&'static str>,
-    pub source_ips: Vec<&'static str>,
-    pub description: &'static str,
+    pub direction: String,
+    pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_ips: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destination_ips: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl FirewallRule {
+    /// Inbound `protocol` (`port`, a number or range) from anywhere.
+    pub fn inbound_any(protocol: &str, port: Option<&str>, description: &str) -> Self {
+        Self::inbound(
+            protocol,
+            port,
+            vec!["0.0.0.0/0".into(), "::/0".into()],
+            description,
+        )
+    }
+
+    /// Inbound `protocol` (`port`) from `sources` (CIDRs; never empty: the
+    /// API refuses an inbound rule without sources).
+    pub fn inbound(
+        protocol: &str,
+        port: Option<&str>,
+        sources: Vec<String>,
+        description: &str,
+    ) -> Self {
+        Self {
+            direction: "in".into(),
+            protocol: protocol.into(),
+            port: port.map(str::to_owned),
+            source_ips: sources,
+            destination_ips: Vec::new(),
+            description: Some(description.into()),
+        }
+    }
 }
 
 /// What `POST /servers` needs. `root_password` in the response is never read.

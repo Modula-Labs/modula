@@ -35,6 +35,9 @@ pub enum Event {
     DeploymentFailed,
     #[serde(rename = "deployment.crashed")]
     DeploymentCrashed,
+    /// A replica of an active deployment crashed while others still serve.
+    #[serde(rename = "deployment.degraded")]
+    DeploymentDegraded,
 }
 
 impl Event {
@@ -43,6 +46,7 @@ impl Event {
             Self::DeploymentSucceeded => "deployment.succeeded",
             Self::DeploymentFailed => "deployment.failed",
             Self::DeploymentCrashed => "deployment.crashed",
+            Self::DeploymentDegraded => "deployment.degraded",
         }
     }
 }

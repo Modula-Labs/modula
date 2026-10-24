@@ -150,6 +150,25 @@ pub struct Target {
     pub ips: Vec<String>,
 }
 
+/// A server whose node has been offline this long leaves its services' A
+/// records (it is back in them once it reconnects).
+pub const OFFLINE_GRACE: time::Duration = time::Duration::minutes(5);
+
+/// The A records' addresses: every server running a replica of the serving
+/// deployment (or the instance's own server before it has one), without
+/// those offline longer than [`OFFLINE_GRACE`] unless that would leave none.
+pub fn pick_ips(servers: Vec<(String, bool)>) -> Vec<String> {
+    let keep_all = !servers.iter().any(|(_, fresh)| *fresh);
+    let mut ips: Vec<String> = servers
+        .into_iter()
+        .filter(|(_, fresh)| keep_all || *fresh)
+        .map(|(ip, _)| ip)
+        .collect();
+    ips.sort();
+    ips.dedup();
+    ips
+}
+
 pub async fn target(db: &sqlx::PgPool, instance: Id) -> AppResult<Target> {
     let cname = sqlx::query_scalar::<_, String>(
         "SELECT hostname FROM domains WHERE service_instance_id = $1 AND kind = 'generated'
@@ -158,18 +177,55 @@ pub async fn target(db: &sqlx::PgPool, instance: Id) -> AppResult<Target> {
     .bind(instance)
     .fetch_optional(db)
     .await?;
-    let ips: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT n.public_ip FROM nodes n
+    let servers: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT n.public_ip,
+                n.status = 'online' OR coalesce(n.last_seen_at > now() - $2, false) AS fresh
+         FROM nodes n
          WHERE n.public_ip IS NOT NULL AND n.status <> 'revoked' AND (
-             n.id IN (SELECT node_id FROM deployments
-                      WHERE service_instance_id = $1 AND status IN ('active', 'sleeping', 'crashed'))
-             OR n.id = (SELECT node_id FROM service_instances WHERE id = $1))
-         ORDER BY n.public_ip",
+             n.id IN (SELECT r.node_id FROM deployments d
+                      JOIN deployment_replicas r ON r.deployment_id = d.id
+                      WHERE d.service_instance_id = $1 AND d.status IN ('active', 'sleeping', 'crashed'))
+             OR (n.id = (SELECT node_id FROM service_instances WHERE id = $1)
+                 AND NOT EXISTS (SELECT 1 FROM deployments
+                                 WHERE service_instance_id = $1 AND status IN ('active', 'sleeping', 'crashed'))))",
     )
     .bind(instance)
+    .bind(OFFLINE_GRACE)
     .fetch_all(db)
     .await?;
-    Ok(Target { cname, ips })
+    Ok(Target {
+        cname,
+        ips: pick_ips(servers),
+    })
+}
+
+/// Queues a routing resync for every instance with custom domains that has a
+/// replica on `node` (it went offline or came back), at `run_at` or now.
+pub async fn resync_for_node(
+    db: impl sqlx::PgExecutor<'_>,
+    node: Id,
+    run_at: Option<time::OffsetDateTime>,
+) -> AppResult<()> {
+    let late = run_at.is_some();
+    sqlx::query(
+        "INSERT INTO jobs (kind, payload, run_at, dedupe_key)
+         SELECT $2, json_build_object('serviceInstanceId', i.id), coalesce($3, now()),
+                CASE WHEN $4 THEN 'domains.resync.late:' || i.id END
+         FROM service_instances i
+         WHERE EXISTS (SELECT 1 FROM domains m WHERE m.service_instance_id = i.id AND m.kind = 'custom')
+           AND EXISTS (SELECT 1 FROM deployments d JOIN deployment_replicas r ON r.deployment_id = d.id
+                       WHERE d.service_instance_id = i.id AND d.status IN ('active', 'sleeping', 'crashed')
+                         AND r.node_id = $1)
+         ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'running')
+         DO NOTHING",
+    )
+    .bind(node)
+    .bind(RESYNC_JOB)
+    .bind(run_at)
+    .bind(late)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Apex names (`example.com`) can't have a CNAME next to their SOA/NS records.
@@ -289,8 +345,9 @@ pub async fn sync_records(
 pub const RESYNC_JOB: &str = "domains.resync_routing";
 
 /// Job: rewrites the routing records of an instance's custom domains at the
-/// workspace's DNS provider after it moved to other servers, so A records
-/// follow it (a server's IP is dropped once its deployment there is gone).
+/// workspace's DNS provider after the servers running it changed (a new
+/// deployment elsewhere, a server offline past [`OFFLINE_GRACE`] or back),
+/// so there is one A record per server running a replica ([`target`]).
 pub async fn resync_job(state: AppState, job: crate::jobs::Job) -> anyhow::Result<()> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -610,6 +667,24 @@ mod tests {
         }
         assert!(ok(&format!("{}.com", "a".repeat(64))).is_err());
         assert!(ok(&format!("{}.com", "a".repeat(63))).is_ok());
+    }
+
+    #[test]
+    fn a_records_skip_servers_long_offline_unless_all_are() {
+        let s = |ip: &str, fresh| (ip.to_owned(), fresh);
+        assert_eq!(
+            pick_ips(vec![
+                s("203.0.113.2", true),
+                s("203.0.113.1", false),
+                s("203.0.113.2", true)
+            ]),
+            ["203.0.113.2"]
+        );
+        assert_eq!(
+            pick_ips(vec![s("203.0.113.2", false), s("203.0.113.1", false)]),
+            ["203.0.113.1", "203.0.113.2"]
+        );
+        assert!(pick_ips(vec![]).is_empty());
     }
 
     #[test]

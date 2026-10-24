@@ -158,6 +158,28 @@ fn event(dep: Id, phase: pb::DeploymentPhase) -> pb::DeploymentEvent {
     }
 }
 
+async fn degraded(app: &TestApp, dep: Id) -> bool {
+    sqlx::query_scalar(concat!(
+        "SELECT ",
+        modula_server::degraded_sql!(),
+        " FROM deployments d WHERE d.id = $1"
+    ))
+    .bind(dep)
+    .fetch_one(app.db())
+    .await
+    .unwrap()
+}
+
+async fn degraded_events(app: &TestApp) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE (kind = 'webhooks.dispatch' AND payload->>'event' = 'deployment.degraded')
+            OR (kind = 'alerts.event' AND payload->>'kind' = 'deployment_degraded')",
+    )
+    .fetch_one(app.db())
+    .await
+    .unwrap()
+}
+
 async fn status(app: &TestApp, dep: Id) -> String {
     sqlx::query_scalar("SELECT status FROM deployments WHERE id = $1")
         .bind(dep)
@@ -238,6 +260,7 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(status(&app, started.id).await, "active");
+    assert!(!degraded(&app, started.id).await);
     assert!(kick.contains(&a) && kick.contains(&b));
     assert_eq!(
         status(&app, chain.deployment).await,
@@ -260,6 +283,78 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .find(|r| r.deployment_id == started.id.to_string())
         .unwrap();
     assert_eq!(route.remote_upstreams, ["10.80.1.2:80"]);
+    // Custom domains point at every server running a replica, minus one
+    // that has been offline past the grace period (unless none is left).
+    sqlx::query("UPDATE nodes SET public_ip = '203.0.113.1', status = 'online' WHERE id = $1")
+        .bind(a)
+        .execute(app.db())
+        .await
+        .unwrap();
+    let b_ip: String = sqlx::query_scalar("SELECT public_ip FROM nodes WHERE id = $1")
+        .bind(b)
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    let ips = |app: &TestApp| {
+        let db = app.db().clone();
+        let instance = chain.instance;
+        async move {
+            modula_server::domains::target(&db, instance)
+                .await
+                .unwrap()
+                .ips
+        }
+    };
+    assert_eq!(ips(&app).await, ["203.0.113.1".to_owned(), b_ip.clone()]);
+    let away = |node: Id, minutes: i32| {
+        let db = app.db().clone();
+        async move {
+            sqlx::query(
+                "UPDATE nodes SET status = 'offline', last_seen_at = now() - make_interval(mins => $2)
+                 WHERE id = $1",
+            )
+            .bind(node)
+            .bind(minutes)
+            .execute(&db)
+            .await
+            .unwrap();
+        }
+    };
+    away(b, 1).await;
+    assert_eq!(ips(&app).await.len(), 2, "within the grace period");
+    away(b, 10).await;
+    assert_eq!(ips(&app).await, ["203.0.113.1"]);
+    away(a, 10).await;
+    assert_eq!(ips(&app).await.len(), 2, "never no record at all");
+    sqlx::query("UPDATE nodes SET status = 'online'")
+        .execute(app.db())
+        .await
+        .unwrap();
+    // A server going away (or coming back) queues a resync of the instances
+    // with custom domains it runs.
+    sqlx::query(
+        "INSERT INTO domains (id, service_instance_id, hostname, kind, verification_token)
+         VALUES ($1, $2, 'shop.example', 'custom', 'modula-verify=0')",
+    )
+    .bind(Id::new())
+    .bind(chain.instance)
+    .execute(app.db())
+    .await
+    .unwrap();
+    let later = time::OffsetDateTime::now_utc() + time::Duration::minutes(6);
+    for _ in 0..2 {
+        modula_server::domains::resync_for_node(app.db(), b, Some(later))
+            .await
+            .unwrap();
+    }
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE kind = 'domains.resync_routing' AND run_at > now()",
+    )
+    .fetch_one(app.db())
+    .await
+    .unwrap();
+    assert_eq!(queued, 1, "deduplicated");
+
     // The address book: both replicas, healthy.
     let mesh = ds.mesh.unwrap();
     let env = &mesh.environments[0];
@@ -270,6 +365,17 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .map(|m| (m.ip.as_str(), m.healthy))
         .collect();
     assert_eq!(members, [("10.80.1.2", true), ("10.80.2.2", true)]);
+    // The service's virtual IP, the first of the environment's, kept by
+    // later deployments.
+    let vips: Vec<(&str, &str)> = env
+        .services
+        .iter()
+        .map(|s| (s.name.as_str(), s.vip.as_str()))
+        .collect();
+    assert_eq!(
+        vips,
+        [(env.members[0].service_name.as_str(), "10.80.255.1")]
+    );
 
     // One replica crashes: the other keeps serving, and leaves the balancer.
     let crashed = pb::DeploymentPhase::Crashed;
@@ -277,6 +383,8 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(status(&app, started.id).await, "active");
+    assert!(degraded(&app, started.id).await);
+    assert_eq!(degraded_events(&app).await, 2, "a webhook and an alert");
     let ds = deploy::desired::build(&app.state, a).await.unwrap();
     let route = ds
         .routes
@@ -295,11 +403,18 @@ async fn replicas_run_one_per_server_and_balance_over_the_mesh(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(status(&app, started.id).await, "crashed");
-    // Back up: active again.
+    // One back up: active again, still degraded until the other is.
     deploy::state::apply_event(app.db(), b, &event(started.id, active))
         .await
         .unwrap();
     assert_eq!(status(&app, started.id).await, "active");
+    assert!(degraded(&app, started.id).await);
+    deploy::state::apply_event(app.db(), a, &event(started.id, active))
+        .await
+        .unwrap();
+    assert!(!degraded(&app, started.id).await);
+    // Only a crash while others serve is a degraded event.
+    assert_eq!(degraded_events(&app).await, 2, "no more events");
 
     // A new deployment gets fresh addresses next to the serving one's, and
     // stays on the same two servers.
@@ -394,4 +509,111 @@ async fn the_network_tab_shows_paths_and_latency(pool: PgPool) {
     assert_eq!(ab["lastHandshake"], 1_700_000_000);
     let ba = links.iter().find(|l| l["from"] == b.to_string()).unwrap();
     assert!(ba["latencyMs"].is_null());
+}
+
+fn handshakes(peers: &[(Id, i64)]) -> pb::MeshReport {
+    pb::MeshReport {
+        peers: peers
+            .iter()
+            .map(|(id, at)| pb::PeerStatus {
+                node_id: id.to_string(),
+                last_handshake_unix: *at,
+                ..Default::default()
+            })
+            .collect(),
+    }
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn a_server_behind_nat_is_relayed_through_the_main_server(pool: PgPool) {
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let (hub, a, nat) = (
+        node(&app, "main").await,
+        node(&app, "a").await,
+        node(&app, "nat").await,
+    );
+    sqlx::query(
+        "UPDATE nodes SET info = '{\"capabilities\": [\"dashboard\", \"mesh\"]}' WHERE id = $1",
+    )
+    .bind(hub)
+    .execute(app.db())
+    .await
+    .unwrap();
+    join_mesh(&app, hub, KEYS[0], "203.0.113.200/32").await;
+    join_mesh(&app, a, KEYS[1], "203.0.113.201/32").await;
+    join_mesh(&app, nat, KEYS[2], "192.168.1.5/24").await;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    // `a` reaches the hub (and nobody reached `nat`); `nat` reaches the hub only.
+    modula_server::mesh::record_report(app.db(), a, &handshakes(&[(hub, now - 10), (nat, 0)]))
+        .await
+        .unwrap();
+    let report = handshakes(&[(hub, now - 10), (a, 0)]);
+    let kick = modula_server::mesh::record_report(app.db(), nat, &report)
+        .await
+        .unwrap();
+    assert!(kick.is_empty(), "not before it has looked that way a while");
+    sqlx::query(
+        "UPDATE nodes SET mesh_unreachable_since = now() - interval '3 minutes' WHERE id = $1",
+    )
+    .bind(nat)
+    .execute(app.db())
+    .await
+    .unwrap();
+    let kick = modula_server::mesh::record_report(app.db(), nat, &report)
+        .await
+        .unwrap();
+    assert!(kick.contains(&nat) && kick.contains(&a) && kick.contains(&hub));
+
+    // `a` and `nat` reach each other through the hub, which forwards.
+    let relayed = |m: &pb::Mesh| -> Vec<(String, bool, bool)> {
+        m.peers
+            .iter()
+            .map(|p| (p.name.clone(), p.relayed, p.hub))
+            .collect()
+    };
+    let m = modula_server::mesh::build(app.db(), a)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        relayed(&m),
+        [("main".into(), false, true), ("nat".into(), true, false)]
+    );
+    let m = modula_server::mesh::build(app.db(), hub)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(m.relay_hub);
+    let r = app
+        .call(
+            axum::http::Method::GET,
+            "/api/nodes/network",
+            Some(&admin),
+            None,
+        )
+        .await;
+    let links = r.json["links"].as_array().unwrap();
+    let path = |from: Id, to: Id| {
+        links
+            .iter()
+            .find(|l| l["from"] == from.to_string() && l["to"] == to.to_string())
+            .unwrap()["path"]
+            .clone()
+    };
+    assert_eq!(path(a, nat), "relay");
+    assert_eq!(path(nat, a), "relay");
+    assert_eq!(path(nat, hub), "public");
+
+    // New networking (it moved): direct paths are tried again.
+    let changed =
+        modula_server::mesh::record_hello(app.db(), nat, &hello(KEYS[2], "198.51.100.4/32"))
+            .await
+            .unwrap();
+    assert!(changed);
+    let m = modula_server::mesh::build(app.db(), a)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(m.peers.iter().all(|p| !p.relayed));
 }

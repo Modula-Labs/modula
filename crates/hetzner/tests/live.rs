@@ -28,13 +28,7 @@ fn labels() -> BTreeMap<String, String> {
 }
 
 fn rule(port: &'static str) -> FirewallRule {
-    FirewallRule {
-        direction: "in",
-        protocol: "tcp",
-        port: Some(port),
-        source_ips: vec!["0.0.0.0/0", "::/0"],
-        description: "live test",
-    }
+    FirewallRule::inbound_any("tcp", Some(port), "live test")
 }
 
 async fn wait(hz: &Client, action: i64, what: &str) {

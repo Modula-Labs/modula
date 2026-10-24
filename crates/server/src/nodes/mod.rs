@@ -76,6 +76,8 @@ pub async fn revoke(tx: &mut sqlx::PgConnection, node: modula_id::Id) -> AppResu
     .bind(node)
     .execute(&mut *tx)
     .await?;
+    // Modula's Hetzner firewalls stop letting its address in.
+    crate::integrations::hetzner::firewall::enqueue_sync(&mut *tx).await?;
     Ok(true)
 }
 

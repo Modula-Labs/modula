@@ -157,14 +157,7 @@ pub fn hetzner_error(e: ProviderError) -> anyhow::Error {
 /// Inbound what a main server serves, as install.sh opens it in ufw: SSH,
 /// HTTP(S) incl. HTTP/3, the TCP proxy range, the node port, and ping.
 pub fn firewall_rules() -> Vec<FirewallRule> {
-    const ANY: [&str; 2] = ["0.0.0.0/0", "::/0"];
-    let rule = |protocol, port, description| FirewallRule {
-        direction: "in",
-        protocol,
-        port,
-        source_ips: ANY.to_vec(),
-        description,
-    };
+    let rule = FirewallRule::inbound_any;
     vec![
         rule("tcp", Some("22"), "SSH"),
         rule("tcp", Some("80"), "HTTP"),
@@ -212,6 +205,14 @@ pub async fn provision(
     let existing = hz.firewalls(&selector).await.map_err(he)?;
     let (firewall, reused) = match existing.into_iter().next() {
         Some(fw) => {
+            // The control plane keeps the private network's rule up to date.
+            let mut rules = rules;
+            rules.extend(
+                fw.rules
+                    .iter()
+                    .filter(|r| r.description.as_deref() == Some(modula_hetzner::MESH_RULE))
+                    .cloned(),
+            );
             hz.set_firewall_rules(fw.id, &rules).await.map_err(he)?;
             (fw, true)
         }
@@ -751,7 +752,7 @@ mod tests {
     fn firewall_matches_install_sh() {
         let ports: Vec<String> = firewall_rules()
             .into_iter()
-            .map(|r| format!("{}/{}", r.protocol, r.port.unwrap_or("-")))
+            .map(|r| format!("{}/{}", r.protocol, r.port.as_deref().unwrap_or("-")))
             .collect();
         assert_eq!(
             ports,

@@ -304,6 +304,7 @@ async fn describe_event(
             let title = match kind {
                 Kind::BuildFailed => format!("{svc} failed to build"),
                 Kind::DeploymentCrashed => format!("{svc} crashed"),
+                Kind::DeploymentDegraded => format!("{svc} is degraded: a replica crashed"),
                 _ => format!("{svc} failed to deploy"),
             };
             (title, error(e), "deployments", ev.deployment_id)

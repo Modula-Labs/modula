@@ -77,6 +77,7 @@ export function ProjectPage({
         domain: i?.domain ?? undefined,
         repo: i?.sourceType === "repo" ? (i.repo ?? undefined) : undefined,
         status: (i?.latestDeploymentStatus ?? null) as DeploymentStatus | null,
+        degraded: i?.degraded,
         stack: templateStack(s.template ?? i?.template) ?? i?.stack,
         volume: i?.volume?.mountPath ?? null,
         image: i?.sourceType === "image" ? i.image : undefined,

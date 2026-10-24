@@ -6,11 +6,24 @@
 //! addresses are assigned here too (`.2`–`.191`; the node keeps `.192/26` for
 //! one-off containers), so every node knows which address belongs to which
 //! environment: that drives the nodes' nftables isolation and their
-//! `<service>.modula.internal` resolvers.
+//! `<service>.modula.internal` resolvers. Each service also gets a virtual IP
+//! in its environment (`10.80.255.<n>`, [`ensure_vip`]) that every node
+//! balances over the service's healthy replicas.
 //!
 //! Path per pair of nodes: an address both have in one private subnet (a
 //! Hetzner Cloud Network, a VPC) if there is one, else the peer's public IP.
 //! WireGuard runs over either, so both are encrypted and handled alike.
+//!
+//! Relay: a node that can't receive UDP (behind NAT) still reaches servers
+//! with a public address, but not another such node. A node whose reports
+//! show a handshake with the main server (the one serving the dashboard,
+//! the hub) and none with any other peer that itself reaches the hub, for
+//! [`RELAY_AFTER`], is marked `mesh_relay` ([`record_report`]). From then
+//! on it and its peers have no tunnel between them: each routes the other's
+//! /24 through its tunnel to the hub, and the hub forwards between them
+//! (nftables there accepts tunnel-to-tunnel traffic inside the mesh). The
+//! mark stays until the node's networking changes (its next Hello with new
+//! addresses or key retries direct paths).
 
 use std::net::Ipv4Addr;
 
@@ -25,11 +38,18 @@ pub const DEFAULT_WG_PORT: u16 = 51820;
 /// Node /24s are 10.80.1.0/24 … 10.80.254.0/24.
 const FIRST_INDEX: i16 = 1;
 const LAST_INDEX: i16 = 254;
+/// Services' virtual IPs are `10.80.255.0/24` (no node has index 255).
+const VIP_INDEX: i16 = 255;
 /// Container addresses the server assigns within a node's /24.
 const FIRST_HOST: i16 = 2;
 const LAST_HOST: i16 = 191;
 /// Cap on what a node may report (addresses, peers).
 const MAX_REPORTED: usize = 32;
+/// A handshake this recent means the tunnel works (WireGuard rekeys every
+/// 2 minutes on an active tunnel; peers keep theirs alive every 25 s).
+const HANDSHAKE_FRESH_SECS: i64 = 180;
+/// How long a node must look unreachable before it is relayed.
+pub const RELAY_AFTER: time::Duration = time::Duration::seconds(120);
 
 /// `10.80.<index>.0/24`.
 pub fn subnet(index: i16) -> String {
@@ -59,6 +79,41 @@ pub struct NodeNet {
     /// "ip/prefix" of the node's interfaces.
     pub addresses: Vec<String>,
     pub index: i16,
+    /// Reached through the hub ([`RELAY_AFTER`]).
+    pub relay: bool,
+    /// The main server: relays for the others.
+    pub hub: bool,
+}
+
+/// How `me` reaches `peer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Path {
+    /// Its own tunnel (over a private network or the public internet).
+    Direct,
+    /// Through the hub's tunnel.
+    Relay,
+}
+
+/// Relayed when either side is and neither is the hub (and there is one).
+pub fn path(me: &NodeNet, peer: &NodeNet, hub_present: bool) -> Path {
+    if hub_present && (me.relay || peer.relay) && !me.hub && !peer.hub {
+        Path::Relay
+    } else {
+        Path::Direct
+    }
+}
+
+/// From a node's report (peer → last handshake, unix seconds): does it look
+/// unreachable? It reaches `hub` but none of `others` (peers that reach the
+/// hub themselves, relayed ones excluded). Without such peers there is
+/// nothing to tell.
+pub fn looks_unreachable(handshakes: &[(Id, i64)], hub: Id, others: &[Id], now: i64) -> bool {
+    let fresh = |id: Id| {
+        handshakes
+            .iter()
+            .any(|(p, at)| *p == id && *at > 0 && now - at <= HANDSHAKE_FRESH_SECS)
+    };
+    !others.is_empty() && fresh(hub) && !others.iter().any(|o| fresh(*o))
 }
 
 fn parse_cidr(s: &str) -> Option<(Ipv4Addr, u8)> {
@@ -168,20 +223,26 @@ pub async fn record_hello(db: &PgPool, node: Id, hello: &pb::Hello) -> AppResult
         Some(i) => i,
         None => allocate_index(&mut tx).await?,
     };
+    let changed = key.as_deref() != Some(info.wg_public_key.as_str())
+        || old_port != Some(i32::from(port))
+        || old_addresses != addresses_json;
+    // New networking: direct paths get another chance.
     sqlx::query(
-        "UPDATE nodes SET wg_public_key = $2, wg_port = $3, addresses = $4, mesh_index = $5 WHERE id = $1",
+        "UPDATE nodes SET wg_public_key = $2, wg_port = $3, addresses = $4, mesh_index = $5,
+                mesh_relay = mesh_relay AND NOT $6,
+                mesh_unreachable_since = CASE WHEN $6 THEN NULL ELSE mesh_unreachable_since END
+         WHERE id = $1",
     )
     .bind(node)
     .bind(&info.wg_public_key)
     .bind(i32::from(port))
     .bind(&addresses_json)
     .bind(index)
+    .bind(changed)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(key.as_deref() != Some(info.wg_public_key.as_str())
-        || old_port != Some(i32::from(port))
-        || old_addresses != addresses_json)
+    Ok(changed)
 }
 
 /// The lowest free /24. Serialized by a transaction-level advisory lock so
@@ -259,6 +320,44 @@ pub async fn allocate_ip(tx: &mut PgConnection, node: Id) -> AppResult<Option<St
     Ok(Some(format!("10.80.{index}.{host}")))
 }
 
+/// Gives `instance` a virtual IP (`10.80.255.<1–254>`, unique within its
+/// environment) unless it has one. Serialized per environment.
+pub async fn ensure_vip(tx: &mut PgConnection, instance: Id) -> AppResult<()> {
+    let (environment, vip): (Id, Option<String>) =
+        sqlx::query_as("SELECT environment_id, mesh_vip FROM service_instances WHERE id = $1")
+            .bind(instance)
+            .fetch_one(&mut *tx)
+            .await?;
+    if vip.is_some() {
+        return Ok(());
+    }
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('modula.mesh_vip:' || $1))")
+        .bind(environment)
+        .execute(&mut *tx)
+        .await?;
+    let taken: Vec<String> = sqlx::query_scalar(
+        "SELECT mesh_vip FROM service_instances WHERE environment_id = $1 AND mesh_vip IS NOT NULL",
+    )
+    .bind(environment)
+    .fetch_all(&mut *tx)
+    .await?;
+    let used: Vec<i16> = taken
+        .iter()
+        .filter_map(|ip| host_of(ip, VIP_INDEX))
+        .collect();
+    let host = lowest_free(&used, 1, 254).ok_or_else(|| {
+        AppError::Conflict(
+            "this environment has no private service addresses left (254 services)".into(),
+        )
+    })?;
+    sqlx::query("UPDATE service_instances SET mesh_vip = $2 WHERE id = $1 AND mesh_vip IS NULL")
+        .bind(instance)
+        .bind(format!("10.80.{VIP_INDEX}.{host}"))
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
 #[derive(sqlx::FromRow)]
 struct NodeRow {
     id: Id,
@@ -268,6 +367,8 @@ struct NodeRow {
     public_ip: Option<String>,
     addresses: serde_json::Value,
     mesh_index: i16,
+    mesh_relay: bool,
+    hub: bool,
 }
 
 impl From<NodeRow> for NodeNet {
@@ -283,13 +384,17 @@ impl From<NodeRow> for NodeNet {
             public_ip: r.public_ip,
             addresses: serde_json::from_value(r.addresses).unwrap_or_default(),
             index: r.mesh_index,
+            relay: r.mesh_relay && !r.hub,
+            hub: r.hub,
         }
     }
 }
 
+/// The hub is the node serving the dashboard (`private::nodes::DASHBOARD_CAPABILITY`).
 macro_rules! node_columns {
     () => {
-        "n.id, n.name, n.wg_public_key, n.wg_port, n.public_ip, n.addresses, n.mesh_index"
+        "n.id, n.name, n.wg_public_key, n.wg_port, n.public_ip, n.addresses, n.mesh_index, n.mesh_relay,
+         coalesce(n.info->'capabilities' ? 'dashboard', false) AS hub"
     };
 }
 
@@ -332,13 +437,16 @@ pub struct Member {
     pub deployment_id: Id,
     pub node_id: Id,
     pub healthy: bool,
+    /// Its service's virtual IP.
+    pub vip: Option<String>,
 }
 
 /// Every mesh address of the environments `node` runs something of.
 pub async fn members(db: &PgPool, node: Id) -> AppResult<Vec<Member>> {
     Ok(sqlx::query_as(
         "SELECT i.environment_id, r.mesh_ip AS ip, s.name AS service_name, d.id AS deployment_id,
-                r.node_id, (d.status IN ('active', 'crashed') AND r.status = 'active') AS healthy
+                r.node_id, (d.status IN ('active', 'crashed') AND r.status = 'active') AS healthy,
+                i.mesh_vip AS vip
          FROM deployment_replicas r
          JOIN deployments d ON d.id = r.deployment_id
          JOIN service_instances i ON i.id = d.service_instance_id
@@ -366,9 +474,18 @@ pub fn render(me: &NodeNet, peers: &[NodeNet], members: &[Member]) -> pb::Mesh {
             environments.push(pb::MeshEnvironment {
                 environment_id: env,
                 members: Vec::new(),
+                services: Vec::new(),
             });
         }
         if let Some(e) = environments.last_mut() {
+            if let Some(vip) = &m.vip
+                && !e.services.iter().any(|s| s.name == m.service_name)
+            {
+                e.services.push(pb::MeshService {
+                    name: m.service_name.clone(),
+                    vip: vip.clone(),
+                });
+            }
             e.members.push(pb::MeshMember {
                 ip: m.ip.clone(),
                 service_name: m.service_name.clone(),
@@ -378,6 +495,7 @@ pub fn render(me: &NodeNet, peers: &[NodeNet], members: &[Member]) -> pb::Mesh {
             });
         }
     }
+    let hub_present = me.hub || peers.iter().any(|p| p.hub);
     pb::Mesh {
         subnet: subnet(me.index),
         listen_port: u32::from(me.port),
@@ -392,10 +510,13 @@ pub fn render(me: &NodeNet, peers: &[NodeNet], members: &[Member]) -> pb::Mesh {
                     endpoint,
                     subnet: subnet(p.index),
                     private_path,
+                    relayed: path(me, p, hub_present) == Path::Relay,
+                    hub: p.hub,
                 }
             })
             .collect(),
         environments,
+        relay_hub: me.hub && peers.iter().any(|p| p.relay),
     }
 }
 
@@ -407,8 +528,9 @@ pub async fn build(db: &PgPool, node: Id) -> AppResult<Option<pb::Mesh>> {
     Ok(Some(render(&me, &peers, &members)))
 }
 
-/// A node's report on its tunnels, kept for the Network tab.
-pub async fn record_report(db: &PgPool, node: Id, report: &pb::MeshReport) -> AppResult<()> {
+/// A node's report on its tunnels, kept for the Network tab, then whether
+/// it now has to be relayed. Returns the nodes whose desired state changed.
+pub async fn record_report(db: &PgPool, node: Id, report: &pb::MeshReport) -> AppResult<Vec<Id>> {
     let peers: Vec<serde_json::Value> = report
         .peers
         .iter()
@@ -424,12 +546,79 @@ pub async fn record_report(db: &PgPool, node: Id, report: &pb::MeshReport) -> Ap
             })
         })
         .collect();
+    let now = time::OffsetDateTime::now_utc();
     sqlx::query("UPDATE nodes SET mesh_status = $2 WHERE id = $1")
         .bind(node)
-        .bind(serde_json::json!({ "at": time::OffsetDateTime::now_utc().unix_timestamp(), "peers": peers }))
+        .bind(serde_json::json!({ "at": now.unix_timestamp(), "peers": peers }))
         .execute(db)
         .await?;
-    Ok(())
+    check_relay(db, node, report, now).await
+}
+
+/// Marks `node` relayed once it has looked unreachable for [`RELAY_AFTER`]
+/// (see [`looks_unreachable`]); bumps it and its peers when it is.
+async fn check_relay(
+    db: &PgPool,
+    node: Id,
+    report: &pb::MeshReport,
+    now: time::OffsetDateTime,
+) -> AppResult<Vec<Id>> {
+    let Some((me, peers)) = nodes(db, node).await? else {
+        return Ok(Vec::new());
+    };
+    let Some(hub) = peers.iter().find(|p| p.hub) else {
+        return Ok(Vec::new());
+    };
+    if me.hub || me.relay {
+        return Ok(Vec::new());
+    }
+    // Peers that reach the hub, by their own last reports.
+    let candidates: Vec<Id> = peers
+        .iter()
+        .filter(|p| !p.hub && !p.relay)
+        .map(|p| p.id)
+        .collect();
+    let reaching: Vec<Id> = sqlx::query_scalar(
+        "SELECT n.id FROM nodes n
+         CROSS JOIN LATERAL jsonb_array_elements(coalesce(n.mesh_status->'peers', '[]'::jsonb)) AS s
+         WHERE n.id = ANY($1) AND n.status = 'online' AND s->>'nodeId' = $2
+           AND (s->>'lastHandshake')::bigint > $3",
+    )
+    .bind(&candidates)
+    .bind(hub.id)
+    .bind(now.unix_timestamp() - HANDSHAKE_FRESH_SECS)
+    .fetch_all(db)
+    .await?;
+    let handshakes: Vec<(Id, i64)> = report
+        .peers
+        .iter()
+        .filter_map(|p| Some((p.node_id.parse().ok()?, p.last_handshake_unix)))
+        .collect();
+    if !looks_unreachable(&handshakes, hub.id, &reaching, now.unix_timestamp()) {
+        sqlx::query("UPDATE nodes SET mesh_unreachable_since = NULL WHERE id = $1")
+            .bind(node)
+            .execute(db)
+            .await?;
+        return Ok(Vec::new());
+    }
+    let relayed: bool = sqlx::query_scalar(
+        "UPDATE nodes SET mesh_unreachable_since = coalesce(mesh_unreachable_since, $2),
+                mesh_relay = coalesce(mesh_unreachable_since, $2) <= $2 - $3
+         WHERE id = $1 RETURNING mesh_relay",
+    )
+    .bind(node)
+    .bind(now)
+    .bind(RELAY_AFTER)
+    .fetch_one(db)
+    .await?;
+    if !relayed {
+        return Ok(Vec::new());
+    }
+    tracing::info!(%node, "peers can't reach this server directly; relaying it through the main server");
+    let mut kick = bump_peers(db, node).await?;
+    crate::deploy::bump(db, node).await?;
+    kick.push(node);
+    Ok(kick)
 }
 
 #[cfg(test)]
@@ -445,7 +634,77 @@ mod tests {
             public_ip: public.map(str::to_owned),
             addresses: addrs.iter().map(|s| (*s).to_owned()).collect(),
             index,
+            relay: false,
+            hub: false,
         }
+    }
+
+    #[test]
+    fn a_node_reaching_only_the_hub_looks_unreachable() {
+        let (hub, b, c) = (Id::new(), Id::new(), Id::new());
+        let now = 1_000_000;
+        let recent = now - 30;
+        let stale = now - 600;
+        // Handshakes with the hub and nobody else of those who reach it.
+        assert!(looks_unreachable(&[(hub, recent), (b, 0)], hub, &[b], now));
+        assert!(looks_unreachable(
+            &[(hub, recent), (b, stale)],
+            hub,
+            &[b, c],
+            now
+        ));
+        // A direct handshake with any of them: fine.
+        assert!(!looks_unreachable(
+            &[(hub, recent), (c, recent)],
+            hub,
+            &[b, c],
+            now
+        ));
+        // Not reaching the hub either (offline, broken): not NAT, don't relay.
+        assert!(!looks_unreachable(&[(hub, stale)], hub, &[b], now));
+        // Nobody else to compare with.
+        assert!(!looks_unreachable(&[(hub, recent)], hub, &[], now));
+    }
+
+    #[test]
+    fn relayed_peers_go_through_the_hub() {
+        let mut hub = node(1, Some("203.0.113.1"), &["203.0.113.1/32"]);
+        hub.hub = true;
+        let mut nat = node(2, Some("198.51.100.9"), &["192.168.1.5/24"]);
+        nat.relay = true;
+        let c = node(3, Some("203.0.113.3"), &["203.0.113.3/32"]);
+        let relayed = |m: &pb::Mesh| -> Vec<(String, bool, bool)> {
+            m.peers
+                .iter()
+                .map(|p| (p.subnet.clone(), p.relayed, p.hub))
+                .collect()
+        };
+        // The relayed node: a tunnel to the hub only.
+        let m = render(&nat, &[hub.clone(), c.clone()], &[]);
+        assert_eq!(
+            relayed(&m),
+            [
+                ("10.80.1.0/24".into(), false, true),
+                ("10.80.3.0/24".into(), true, false)
+            ]
+        );
+        assert!(!m.relay_hub);
+        // Its peers reach it through the hub too.
+        let m = render(&c, &[hub.clone(), nat.clone()], &[]);
+        assert_eq!(
+            relayed(&m),
+            [
+                ("10.80.1.0/24".into(), false, true),
+                ("10.80.2.0/24".into(), true, false)
+            ]
+        );
+        // The hub tunnels to everyone and forwards.
+        let m = render(&hub, &[nat.clone(), c.clone()], &[]);
+        assert!(m.peers.iter().all(|p| !p.relayed));
+        assert!(m.relay_hub);
+        // Without a hub nothing is relayed.
+        let m = render(&c, &[nat], &[]);
+        assert!(!m.peers[0].relayed);
     }
 
     #[test]
@@ -499,11 +758,16 @@ mod tests {
             deployment_id: Id::new(),
             node_id: b.id,
             healthy,
+            vip: Some(format!("10.80.255.{}", svc.len())),
         };
         let mesh = render(
             &a,
             std::slice::from_ref(&b),
-            &[m("10.80.2.2", "db", true), m("10.80.2.3", "api", false)],
+            &[
+                m("10.80.2.2", "db", true),
+                m("10.80.2.3", "api", false),
+                m("10.80.2.4", "db", true),
+            ],
         );
         assert_eq!(mesh.subnet, "10.80.1.0/24");
         assert_eq!(mesh.listen_port, 51820);
@@ -520,7 +784,21 @@ mod tests {
             .iter()
             .map(|m| (m.ip.as_str(), m.healthy))
             .collect();
-        assert_eq!(ips, [("10.80.2.2", true), ("10.80.2.3", false)]);
+        assert_eq!(
+            ips,
+            [
+                ("10.80.2.2", true),
+                ("10.80.2.3", false),
+                ("10.80.2.4", true)
+            ]
+        );
+        // One virtual IP per service.
+        let vips: Vec<(&str, &str)> = mesh.environments[0]
+            .services
+            .iter()
+            .map(|s| (s.name.as_str(), s.vip.as_str()))
+            .collect();
+        assert_eq!(vips, [("db", "10.80.255.2"), ("api", "10.80.255.3")]);
     }
 
     #[test]

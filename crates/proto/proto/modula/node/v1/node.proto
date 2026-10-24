@@ -300,6 +300,9 @@ message Mesh {
   // Environments with workloads on this node, with every mesh address of
   // theirs on any node (isolation and discovery).
   repeated MeshEnvironment environments = 4;
+  // This node is the relay: it forwards between peers that can't reach
+  // each other directly (one of them behind NAT).
+  bool relay_hub = 5;
 }
 
 message MeshPeer {
@@ -312,11 +315,24 @@ message MeshPeer {
   string subnet = 5;
   // The endpoint is on a private network shared with this node.
   bool private_path = 6;
+  // No tunnel of its own: its /24 is reached through the relay peer.
+  bool relayed = 7;
+  // The relay (the main server): relayed peers' /24s go through its tunnel.
+  bool hub = 8;
 }
 
 message MeshEnvironment {
   string environment_id = 1;
   repeated MeshMember members = 2;
+  // Its services' virtual IPs (10.80.255.0/24, per environment): the
+  // resolver answers `<name>.modula.internal` with the VIP, and every node
+  // DNATs new connections from the environment to a healthy member.
+  repeated MeshService services = 3;
+}
+
+message MeshService {
+  string name = 1;
+  string vip = 2;
 }
 
 message MeshMember {

@@ -2,19 +2,23 @@
 //!
 //! Only decisions to *drop* live here: Docker's own (iptables) FORWARD
 //! chain still has to accept mesh traffic, which `linux.rs` arranges with
-//! two `DOCKER-USER` rules. Both chains see every packet; a drop in either wins.
+//! `DOCKER-USER` rules. Both chains see every packet; a drop in either wins.
 //!
 //! What it enforces, on every node:
 //!   * only the mesh bridge sends into the tunnel, and only from this node's
 //!     own container addresses (no container can borrow the host's identity
 //!     through an environment bridge's masquerade, or spoof another's);
-//!   * what arrives through the tunnel only goes to the mesh bridge;
+//!   * what arrives through the tunnel only goes to the mesh bridge (on the
+//!     relay hub also back into the tunnel, between mesh addresses);
 //!   * a new connection is allowed when source and destination are in the
 //!     same environment's set, or the source is a node (Caddy balancing over
 //!     replicas on other servers);
 //!   * containers reach nothing of the host over the mesh but its resolver,
 //!     and other nodes' containers nothing of it at all (replies to the
-//!     host's own connections, e.g. Caddy's, excepted).
+//!     host's own connections, e.g. Caddy's, excepted);
+//!   * a service's virtual IP takes new connections from its environment
+//!     only, each DNATed to a random healthy replica on any node (the
+//!     isolation above then applies to the replica's address).
 
 use std::fmt::Write as _;
 use std::net::Ipv4Addr;
@@ -30,6 +34,19 @@ pub struct Spec {
     pub peers: Vec<Ipv4Addr>,
     /// (environment id, every mesh address of it on any node).
     pub environments: Vec<(String, Vec<Ipv4Addr>)>,
+    /// This node relays between peers: tunnel-to-tunnel traffic inside the
+    /// mesh passes (the receiving node's firewall still decides).
+    pub relay_hub: bool,
+    /// Services' virtual IPs ([`super::VIP_RANGE`]).
+    pub vips: Vec<Vip>,
+}
+
+/// A service's virtual IP within its environment, and its healthy replicas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Vip {
+    pub environment: String,
+    pub vip: Ipv4Addr,
+    pub backends: Vec<Ipv4Addr>,
 }
 
 /// Environment ids become set names (`env_<id>`): ids are 16 lowercase
@@ -76,7 +93,17 @@ pub fn render(spec: &Spec) -> String {
         out,
         "\tchain forward {{
 \t\ttype filter hook forward priority filter - 1; policy accept;
-\t\tiifname \"{INTERFACE}\" oifname != \"{BRIDGE}\" drop
+"
+    );
+    if spec.relay_hub {
+        let _ = writeln!(
+            out,
+            "\t\tiifname \"{INTERFACE}\" oifname \"{INTERFACE}\" ip saddr 10.80.0.0/16 ip daddr 10.80.0.0/16 accept"
+        );
+    }
+    let _ = write!(
+        out,
+        "\t\tiifname \"{INTERFACE}\" oifname != \"{BRIDGE}\" drop
 \t\toifname \"{INTERFACE}\" iifname != \"{BRIDGE}\" drop
 \t\tiifname \"{BRIDGE}\" meta nfproto ipv6 drop
 \t\tiifname \"{BRIDGE}\" ip saddr != {own} drop
@@ -101,15 +128,94 @@ pub fn render(spec: &Spec) -> String {
 \t\tiifname \"{BRIDGE}\" ip daddr {gw} meta l4proto {{ tcp, udp }} th dport 53 accept
 \t\tiifname \"{BRIDGE}\" drop
 \t}}
-}}
 "
     );
+    // Virtual IPs: a new connection from the service's environment goes to
+    // one of its healthy replicas, picked at random (any port, unchanged);
+    // before Docker's nat (the first NAT binding wins). A replica on this
+    // node answers through the host (masquerade), or its reply would skip
+    // the translation on the shared bridge.
+    let known: Vec<&str> = envs.iter().map(|(id, _)| id.as_str()).collect();
+    let mut vips: Vec<&Vip> = spec
+        .vips
+        .iter()
+        .filter(|v| !v.backends.is_empty() && known.contains(&v.environment.as_str()))
+        .collect();
+    vips.sort_by(|a, b| (&a.environment, a.vip).cmp(&(&b.environment, b.vip)));
+    if !vips.is_empty() {
+        out.push_str(
+            "\tchain prerouting {\n\t\ttype nat hook prerouting priority dstnat - 10; policy accept;\n",
+        );
+        for v in vips {
+            let mut backends = v.backends.clone();
+            backends.sort();
+            backends.dedup();
+            let map: Vec<String> = backends
+                .iter()
+                .enumerate()
+                .map(|(i, ip)| format!("{i} : {ip}"))
+                .collect();
+            let _ = writeln!(
+                out,
+                "\t\tiifname \"{BRIDGE}\" ip saddr @env_{} ip daddr {} dnat ip to numgen random mod {} map {{ {} }}",
+                v.environment,
+                v.vip,
+                backends.len(),
+                map.join(", ")
+            );
+        }
+        let _ = write!(
+            out,
+            "\t}}
+\tchain postrouting {{
+\t\ttype nat hook postrouting priority srcnat - 10; policy accept;
+\t\toifname \"{BRIDGE}\" ip saddr {own} ct status dnat masquerade
+\t}}
+"
+        );
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// The host's listing without what changes on its own: counters' packets
+/// and bytes, and whitespace.
+pub fn normalize(listing: &str) -> String {
+    let mut out = String::with_capacity(listing.len());
+    for line in listing.lines() {
+        let mut words = line.split_whitespace();
+        let mut kept: Vec<&str> = Vec::new();
+        while let Some(w) = words.next() {
+            if w == "packets" || w == "bytes" {
+                words.next();
+                continue;
+            }
+            kept.push(w);
+        }
+        if !kept.is_empty() {
+            out.push_str(&kept.join(" "));
+            out.push('\n');
+        }
+    }
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizing_drops_counter_values_only() {
+        let a = "table inet modula {\n\tchain forward {\n\t\tcounter packets 3 bytes 180 drop\n\t}\n}\n";
+        let b =
+            "table inet modula {\n  chain forward {\n    counter packets 9001 bytes 5 drop\n  }\n}";
+        assert_eq!(normalize(a), normalize(b));
+        assert_eq!(
+            normalize(a),
+            "table inet modula {\nchain forward {\ncounter drop\n}\n}\n"
+        );
+        assert_ne!(normalize(a), normalize(&a.replace("drop", "accept")));
+    }
 
     fn ip(s: &str) -> Ipv4Addr {
         s.parse().unwrap()
@@ -130,6 +236,8 @@ mod tests {
                 ("Robert'); drop".into(), vec![ip("10.80.1.9")]),
                 ("cccccccccccccccc".into(), vec![]),
             ],
+            relay_hub: false,
+            vips: vec![],
         };
         let expected = "table inet modula
 delete table inet modula
@@ -171,6 +279,21 @@ table inet modula {
 }
 ";
         assert_eq!(render(&spec), expected);
+
+        // The relay hub forwards tunnel to tunnel inside the mesh, before
+        // the rule that sends tunnel traffic only to the bridge.
+        let hub = render(&Spec {
+            relay_hub: true,
+            ..spec
+        });
+        assert_eq!(
+            hub,
+            expected.replace(
+                "\t\tiifname \"modula0\" oifname != \"modula-mesh\" drop\n",
+                "\t\tiifname \"modula0\" oifname \"modula0\" ip saddr 10.80.0.0/16 ip daddr 10.80.0.0/16 accept\n\
+                 \t\tiifname \"modula0\" oifname != \"modula-mesh\" drop\n"
+            )
+        );
     }
 
     #[test]
@@ -179,11 +302,59 @@ table inet modula {
             subnet: Subnet { index: 4 },
             peers: vec![],
             environments: vec![],
+            relay_hub: false,
+            vips: vec![],
         });
         assert!(
             r.contains("\tset nodes {\n\t\ttype ipv4_addr\n\t}\n"),
             "{r}"
         );
         assert!(!r.contains("@env_"));
+        assert!(!r.contains("nat hook"));
+    }
+
+    #[test]
+    fn virtual_ips_balance_over_healthy_replicas_of_their_environment() {
+        let env = "aaaaaaaaaaaaaaaa";
+        let vip = |v: &str, backends: &[&str]| Vip {
+            environment: env.into(),
+            vip: ip(v),
+            backends: backends.iter().map(|b| ip(b)).collect(),
+        };
+        let r = render(&Spec {
+            subnet: Subnet { index: 1 },
+            peers: vec![ip("10.80.2.1")],
+            environments: vec![(
+                env.into(),
+                vec![ip("10.80.1.2"), ip("10.80.2.2"), ip("10.80.1.5")],
+            )],
+            relay_hub: false,
+            vips: vec![
+                vip("10.80.255.2", &["10.80.2.2", "10.80.1.2"]),
+                // No healthy replica: no rule (the address answers nothing).
+                vip("10.80.255.3", &[]),
+                // An environment without members here: no set, no rule.
+                Vip {
+                    environment: "bbbbbbbbbbbbbbbb".into(),
+                    ..vip("10.80.255.4", &["10.80.3.2"])
+                },
+                vip("10.80.255.1", &["10.80.1.5"]),
+            ],
+        });
+        let nat = &r[r.find("\tchain prerouting").unwrap()..];
+        assert_eq!(
+            nat,
+            "\tchain prerouting {
+\t\ttype nat hook prerouting priority dstnat - 10; policy accept;
+\t\tiifname \"modula-mesh\" ip saddr @env_aaaaaaaaaaaaaaaa ip daddr 10.80.255.1 dnat ip to numgen random mod 1 map { 0 : 10.80.1.5 }
+\t\tiifname \"modula-mesh\" ip saddr @env_aaaaaaaaaaaaaaaa ip daddr 10.80.255.2 dnat ip to numgen random mod 2 map { 0 : 10.80.1.2, 1 : 10.80.2.2 }
+\t}
+\tchain postrouting {
+\t\ttype nat hook postrouting priority srcnat - 10; policy accept;
+\t\toifname \"modula-mesh\" ip saddr 10.80.1.0/24 ct status dnat masquerade
+\t}
+}
+"
+        );
     }
 }

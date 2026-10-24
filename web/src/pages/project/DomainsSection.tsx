@@ -110,6 +110,14 @@ function DomainRow({ domain: d, canEdit, cloudflare, onRemove, onChange }: { dom
           ) : null}
         </div>
       ) : null}
+      {d.kind === "custom" && live && !cloudflare && d.dnsRecords.filter((r) => r.type === "A").length > 1 ? (
+        <div className="flex flex-col gap-2 border-t border-border px-3 py-3">
+          <p className="text-sm text-muted-foreground">
+            This service runs on {d.dnsRecords.filter((r) => r.type === "A").length} servers. Keep one A record per server at your DNS provider.
+          </p>
+          <DnsRecords domain={{ ...d, dnsRecords: d.dnsRecords.filter((r) => r.type === "A") }} />
+        </div>
+      ) : null}
       {d.kind === "custom" && live && d.dnsTargetOk === false && !cloudflare ? (
         <p className="border-t border-border px-3 py-2 text-sm text-muted-foreground">
           The domain's {d.dnsRecords[0]?.type ?? "DNS"} record doesn't point here. That's expected behind a proxy such as Cloudflare; otherwise update it to the value below.

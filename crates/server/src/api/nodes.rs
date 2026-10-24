@@ -94,7 +94,12 @@ pub async fn network(State(state): State<AppState>) -> AppResult<Json<serde_json
             continue;
         };
         let reported = status.get("peers").and_then(|p| p.as_array());
+        let hub_present = me.hub || peers.iter().any(|p| p.hub);
+        if let Some(n) = nodes.last_mut() {
+            n["relayed"] = json!(me.relay);
+        }
         for p in peers {
+            let relayed = crate::mesh::path(&me, &p, hub_present) == crate::mesh::Path::Relay;
             let (endpoint, private) = crate::mesh::endpoint(&me, &p);
             let seen = reported.and_then(|r| {
                 r.iter()
@@ -107,12 +112,13 @@ pub async fn network(State(state): State<AppState>) -> AppResult<Json<serde_json
             links.push(json!({
                 "from": id,
                 "to": p.id,
-                "path": match (endpoint.is_empty(), private) {
-                    (true, _) => "none",
-                    (false, true) => "private",
-                    (false, false) => "public",
+                "path": match (relayed, endpoint.is_empty(), private) {
+                    (true, _, _) => "relay",
+                    (false, true, _) => "none",
+                    (false, false, true) => "private",
+                    (false, false, false) => "public",
                 },
-                "endpoint": (!endpoint.is_empty()).then_some(endpoint),
+                "endpoint": (!relayed && !endpoint.is_empty()).then_some(endpoint),
                 "latencyMs": latency_us.map(|us| us as f64 / 1000.0),
                 "lastHandshake": seen
                     .and_then(|s| s.get("lastHandshake"))

@@ -928,3 +928,138 @@ async fn workspace_delete_refuses_while_servers_exist(pool: PgPool) {
         .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
 }
+
+fn mesh_sources(fw: &Value) -> Option<Vec<String>> {
+    fw["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["description"] == "Modula private network")
+        .map(|r| {
+            assert_eq!(
+                (r["protocol"].as_str(), r["port"].as_str()),
+                (Some("udp"), Some("51820"))
+            );
+            r["source_ips"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s.as_str().unwrap().to_owned())
+                .collect()
+        })
+}
+
+async fn mesh_node(app: &TestApp, ws: Option<Id>, ip: &str) -> Id {
+    let id = Id::new();
+    sqlx::query(
+        "INSERT INTO nodes (id, workspace_id, name, status, cert_serial, cert_expires_at, public_ip, wg_public_key)
+         VALUES ($1, $2, 'n', 'online', $1::text, now() + interval '1 day', $3, 'k')",
+    )
+    .bind(id)
+    .bind(ws)
+    .bind(ip)
+    .execute(app.db())
+    .await
+    .unwrap();
+    id
+}
+
+async fn sync_firewalls(app: &TestApp) {
+    let job = modula_server::jobs::Job {
+        id: 0,
+        kind: modula_server::integrations::hetzner::firewall::SYNC_JOB.into(),
+        payload: json!({}),
+        attempts: 0,
+        max_attempts: 3,
+    };
+    modula_server::integrations::hetzner::firewall::sync_job(app.state.clone(), job)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn wireguard_is_open_only_between_modulas_servers(pool: PgPool) {
+    let (app, mock) = app_with_mock(pool).await;
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    let other = app.create_workspace(&admin, "other").await;
+    connect(&app, &admin, ws).await;
+    // The main server (shared) and its CLI-made firewall in the same project.
+    mesh_node(&app, None, "198.51.100.1").await;
+    mock.lock().unwrap().firewalls.push(json!({
+        "id": 900, "name": "modula-main",
+        "labels": {"modula": "1", "role": "main", "server": "main"},
+        "rules": [{"direction": "in", "protocol": "tcp", "port": "22",
+                   "source_ips": ["0.0.0.0/0", "::/0"], "description": "SSH"}],
+    }));
+    // A worker's firewall opens WireGuard to the servers already there.
+    let r = provision(
+        &app,
+        &admin,
+        ws,
+        json!({"location": "hetzner:fsn1", "serverType": "cx22", "name": "worker-1"}),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let worker_fw = |m: &Mock| m.firewalls.iter().find(|f| f["id"] != 900).unwrap().clone();
+    assert_eq!(
+        mesh_sources(&worker_fw(&mock.lock().unwrap())),
+        Some(vec!["198.51.100.1/32".to_owned()])
+    );
+
+    // The worker joins (with the address Hetzner gave it), so do a server of
+    // the workspace's own and another workspace's. Each firewall lets in the
+    // servers that peer with the ones behind it.
+    mesh_node(&app, Some(ws), "203.0.113.10").await;
+    let joined = mesh_node(&app, Some(ws), "203.0.113.9").await;
+    mesh_node(&app, Some(other), "192.0.2.50").await;
+    sync_firewalls(&app).await;
+    {
+        let m = mock.lock().unwrap();
+        assert_eq!(
+            mesh_sources(&worker_fw(&m)),
+            Some(vec![
+                "198.51.100.1/32".to_owned(),
+                "203.0.113.10/32".to_owned(),
+                "203.0.113.9/32".to_owned()
+            ])
+        );
+        let main = m.firewalls.iter().find(|f| f["id"] == 900).unwrap();
+        assert_eq!(
+            mesh_sources(main),
+            Some(vec![
+                "192.0.2.50/32".to_owned(),
+                "198.51.100.1/32".to_owned(),
+                "203.0.113.10/32".to_owned(),
+                "203.0.113.9/32".to_owned()
+            ])
+        );
+        // Its other rules are kept.
+        assert_eq!(main["rules"][0]["description"], "SSH");
+    }
+    // Unchanged: no API writes.
+    let writes = |m: &Mock| m.calls.iter().filter(|c| c.ends_with("set_rules")).count();
+    let before = writes(&mock.lock().unwrap());
+    sync_firewalls(&app).await;
+    assert_eq!(writes(&mock.lock().unwrap()), before);
+
+    // A revoked server leaves them (the revoke queues the sync).
+    let mut tx = app.db().begin().await.unwrap();
+    modula_server::nodes::revoke(&mut tx, joined).await.unwrap();
+    tx.commit().await.unwrap();
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE kind = 'hetzner.sync_firewalls' AND status = 'queued'",
+    )
+    .fetch_one(app.db())
+    .await
+    .unwrap();
+    assert_eq!(queued, 1);
+    sync_firewalls(&app).await;
+    assert_eq!(
+        mesh_sources(&worker_fw(&mock.lock().unwrap())),
+        Some(vec![
+            "198.51.100.1/32".to_owned(),
+            "203.0.113.10/32".to_owned()
+        ])
+    );
+}

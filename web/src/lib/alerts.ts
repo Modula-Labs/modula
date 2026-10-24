@@ -17,6 +17,7 @@ export type RuleKind =
   | "deployment_failed"
   | "build_failed"
   | "deployment_crashed"
+  | "deployment_degraded"
   | "backup_failed"
   | "cpu"
   | "memory"
@@ -120,6 +121,7 @@ export const RULE_KINDS: RuleKindInfo[] = [
   { value: "deployment_failed", label: "Deployment failed", hint: "A deployment failed after the build.", threshold: false, window: null },
   { value: "build_failed", label: "Build failed", hint: "A build failed.", threshold: false, window: null },
   { value: "deployment_crashed", label: "Deployment crashed", hint: "A running deployment exited unexpectedly.", threshold: false, window: null },
+  { value: "deployment_degraded", label: "Deployment degraded", hint: "A replica crashed while the others keep serving.", threshold: false, window: null },
   { value: "backup_failed", label: "Backup failed", hint: "A database backup failed.", threshold: false, window: null },
   {
     value: "cpu",

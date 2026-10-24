@@ -89,7 +89,7 @@ pub struct InstanceDetail {
     pub id: String,
     pub service_name: String,
     pub environment_name: String,
-    /// `online`, `deploying`, `crashed` or `offline`.
+    /// `online`, `degraded`, `deploying`, `crashed` or `offline`.
     pub status: String,
     pub config: Value,
     #[serde(default)]

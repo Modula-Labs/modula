@@ -124,7 +124,11 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 integrations::cloudflare::publish::JOB,
                 integrations::cloudflare::publish::job,
             )
-            .on(provision::track::TRACK_JOB, provision::track::track_job),
+            .on(provision::track::TRACK_JOB, provision::track::track_job)
+            .on(
+                integrations::hetzner::firewall::SYNC_JOB,
+                integrations::hetzner::firewall::sync_job,
+            ),
         format!("server-{}", modula_id::Id::new()),
         stop.clone(),
     ));
