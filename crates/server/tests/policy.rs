@@ -30,8 +30,9 @@ const PUBLIC_ROUTES: &[(&str, &str)] = &[
     // Nodes downloading an upload they build: a signed token bound to a
     // deployment that must still be building it (deploy::upload).
     ("GET", "/api/build-source"),
-    // Nodes uploading a static site's build output: a signed token bound to
-    // a deployment that must still be building (deploy::output).
+    // Nodes uploading build output hosted elsewhere (a static site, or a
+    // function's bundle): a signed token bound to a deployment that must
+    // still be building (deploy::output).
     ("PUT", "/api/build-output"),
 ];
 
@@ -443,8 +444,67 @@ async fn roles_are_enforced(pool: PgPool) {
     );
 }
 
+/// A function's code runs on the servers with the environment's variables:
+/// only members and above write it; viewers and deployers read it.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn function_code_is_written_by_members_only(pool: PgPool) {
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    let p = app
+        .call(
+            Method::POST,
+            &format!("/api/workspaces/{ws}/projects"),
+            Some(&admin),
+            Some(serde_json::json!({"name": "api"})),
+        )
+        .await;
+    let project = p.json["id"].as_str().unwrap().to_owned();
+    let config = |code: &str| {
+        serde_json::json!({ "source": { "type": "function", "code": code, "compatibilityDate": "2026-10-01" } })
+    };
+    let s = app
+        .call(
+            Method::POST,
+            &format!("/api/projects/{project}/services"),
+            Some(&admin),
+            Some(serde_json::json!({ "name": "hello", "config": config("export default {}") })),
+        )
+        .await;
+    assert_eq!(s.status, StatusCode::OK, "{:?}", s.json);
+    let instance = s.json["instances"][0]["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/service-instances/{instance}");
+    let evil = serde_json::json!({ "config": config("export default { fetch() { return fetch('http://169.254.169.254/') } }") });
+    for (email, role, writes) in [
+        ("viewer@example.com", "viewer", false),
+        ("deployer@example.com", "deployer", false),
+        ("member@example.com", "member", true),
+    ] {
+        let (id, cookie) = app.user(email).await;
+        app.add_member(ws, id, role).await;
+        let r = app.call(Method::GET, &path, Some(&cookie), None).await;
+        assert_eq!(r.status, StatusCode::OK, "{role} reads it");
+        assert_eq!(r.json["config"]["source"]["type"], "function");
+        let r = app
+            .call(Method::PATCH, &path, Some(&cookie), Some(evil.clone()))
+            .await;
+        let want = if writes { StatusCode::OK } else { StatusCode::FORBIDDEN };
+        assert_eq!(r.status, want, "{role}: {:?}", r.json);
+        let r = app
+            .call(
+                Method::POST,
+                &format!("/api/projects/{project}/services"),
+                Some(&cookie),
+                Some(serde_json::json!({ "name": format!("fn-{role}"), "config": config("export default {}") })),
+            )
+            .await;
+        assert_eq!(r.status, want, "{role} creating one: {:?}", r.json);
+    }
+}
+
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
 async fn instance_admin_has_no_implicit_workspace_access(pool: PgPool) {
+
     let app = TestApp::new(pool);
     let admin = app.setup_admin().await;
     let (_, other) = app.user("other@example.com").await;
