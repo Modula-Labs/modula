@@ -15,6 +15,7 @@ export const Activity = kobra(T.IconActivity);
 export const Archive = kobra(T.IconArchive);
 export const ArrowLeft = kobra(T.IconArrowLeft);
 export const Box = kobra(T.IconBox);
+export const Bucket = kobra(T.IconBucket);
 export const BrandDocker = kobra(T.IconBrandDocker);
 export const BrandGithub = kobra(T.IconBrandGithub);
 export const Check = kobra(T.IconCheck);

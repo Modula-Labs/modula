@@ -14,6 +14,7 @@ import {
 } from "@/lib/integrations";
 import { GithubIntegration } from "./IntegrationsGithub";
 import { HetznerIntegration } from "./IntegrationsHetzner";
+import { R2Buckets } from "./R2Buckets";
 
 const statusKey = (ws: string) => ["cloudflare", ws];
 
@@ -178,6 +179,9 @@ function CloudflareRow({
               ))}
             </div>
           )
+        ) : null}
+        {connected && status?.accountId ? (
+          <R2Buckets workspaceId={workspaceId} />
         ) : null}
       </CardContent>
     </Card>

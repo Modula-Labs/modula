@@ -88,12 +88,13 @@ export interface Form {
   replicas: string;
 }
 
+// R2 buckets (source `r2`) have no settings form: the sheet never shows it.
 export const toForm = (c: ServiceConfig): Form => ({
-  kind: c.source.type,
+  kind: c.source.type === "r2" ? "image" : c.source.type,
   image: c.source.type === "image" ? c.source.image : "",
   repo: c.source.type === "repo" ? c.source.repo : "",
   branch: c.source.type === "repo" ? c.source.branch : "main",
-  rootDir: c.source.type !== "image" ? (c.source.rootDir ?? "") : "",
+  rootDir: c.source.type === "repo" || c.source.type === "local" ? (c.source.rootDir ?? "") : "",
   builder: c.builder ?? "railpack",
   dockerfilePath: c.dockerfilePath ?? "",
   buildCommand: c.buildCommand ?? "",
@@ -214,7 +215,7 @@ export function SettingsTab({
   const dirty =
     JSON.stringify(toConfig(form)) !==
     JSON.stringify(toConfig(toForm(instance.config)));
-  const origKind = instance.config.source.type;
+  const origKind = toForm(instance.config).kind;
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const workspaceId = qc.getQueryData<ProjectDetail>([
     "project",

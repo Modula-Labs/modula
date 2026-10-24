@@ -11,6 +11,7 @@ use secrecy::ExposeSecret;
 use serde::Serialize;
 use serde_json::json;
 
+use crate::api::buckets;
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
@@ -180,14 +181,21 @@ pub async fn get(
         .into_iter()
         .map(|i| {
             let template = i.template.as_deref().and_then(templates::get);
+            let r2 = i.template.as_deref() == Some(buckets::R2_TEMPLATE);
             ServiceEntry {
                 service_id: i.service_id,
                 service_name: i.service_name,
                 instance_id: i.id,
-                template_config: template.map(templates::Template::config),
-                template_variables: template
-                    .map(|t| t.variables.iter().map(|(k, _)| *k).collect())
-                    .unwrap_or_default(),
+                template_config: match template {
+                    Some(t) => Some(t.config()),
+                    None if r2 => Some(buckets::r2_config()),
+                    None => None,
+                },
+                template_variables: match template {
+                    Some(t) => t.variables.iter().map(|(k, _)| *k).collect(),
+                    None if r2 => buckets::VARIABLES.to_vec(),
+                    None => Vec::new(),
+                },
                 template: i.template,
                 config: i.config,
                 volume: i.volume,

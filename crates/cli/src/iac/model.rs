@@ -87,7 +87,8 @@ impl SharedSpec {
 pub struct ServiceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceSpec>,
-    /// A database template (`postgres`, `mysql`, `redis`, `mongo`).
+    /// A template: a database (`postgres`, `mysql`, `redis`, `mongo`), a
+    /// self-hosted `bucket`, or an `r2` bucket (created in the dashboard).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
 
@@ -476,9 +477,14 @@ impl ServiceSpec {
             );
         }
         if let Some(t) = &self.template
-            && !matches!(t.as_str(), "postgres" | "mysql" | "redis" | "mongo")
+            && !matches!(
+                t.as_str(),
+                "postgres" | "mysql" | "redis" | "mongo" | "bucket" | "r2"
+            )
         {
-            bail!("services.{name}: unknown template {t:?} (postgres, mysql, redis or mongo)");
+            bail!(
+                "services.{name}: unknown template {t:?} (postgres, mysql, redis, mongo, bucket or r2)"
+            );
         }
         for (var, spec) in &self.variables {
             validate_var_name(var).with_context(|| format!("services.{name}.variables.{var}"))?;

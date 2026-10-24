@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { endpointHint } from "./backup";
 import { formatBytes } from "./format";
-import { templateStack, uniqueName } from "./templates";
+import { r2Choice } from "@/pages/project/BucketFields";
+import { isDatabaseTemplate, suggestBucketName, templateStack, uniqueName, validBucketName } from "./templates";
 
 describe("uniqueName", () => {
   it("keeps a free name", () => expect(uniqueName("postgres", ["web"])).toBe("postgres"));
@@ -31,5 +32,33 @@ describe("endpointHint", () => {
     expect(endpointHint("r2")).toBe("https://<account>.r2.cloudflarestorage.com");
     expect(endpointHint("s3", "eu-west-1")).toBe("https://s3.eu-west-1.amazonaws.com");
     expect(endpointHint("b2")).toBe("https://s3.<region>.backblazeb2.com");
+  });
+});
+
+describe("buckets", () => {
+  it("suggests valid R2 names from service and environment", () => {
+    expect(suggestBucketName("media", "production")).toBe("media-production");
+    expect(suggestBucketName("My_Files", "Staging 2")).toBe("my-files-staging-2");
+    expect(suggestBucketName("x", undefined)).toBe("bucket");
+    const long = suggestBucketName("a".repeat(60), "production");
+    expect(long.length).toBeLessThanOrEqual(63);
+    expect(validBucketName(long)).toBe(true);
+  });
+  it("validates R2 names", () => {
+    expect(validBucketName("abc")).toBe(true);
+    expect(validBucketName("ab")).toBe(false);
+    expect(validBucketName("-abc")).toBe(false);
+    expect(validBucketName("a_b_c")).toBe(false);
+  });
+  it("builds the create-or-link choice", () => {
+    expect(r2Choice("new", " media ", "")).toEqual({ bucket: "media" });
+    expect(r2Choice("new", "Bad Name", "")).toBeNull();
+    expect(r2Choice("existing", "media", "")).toBeNull();
+    expect(r2Choice("existing", "", "old")).toEqual({ existing: "old" });
+  });
+  it("keeps buckets out of the database templates", () => {
+    expect(isDatabaseTemplate("postgres")).toBe(true);
+    expect(isDatabaseTemplate("bucket")).toBe(false);
+    expect(templateStack("r2")).toBe("bucket");
   });
 });

@@ -2,6 +2,7 @@ pub mod account;
 pub mod activity;
 pub mod auth;
 pub mod backups;
+pub mod buckets;
 pub mod database;
 pub mod deployments;
 pub mod domains;
@@ -128,6 +129,11 @@ pub fn routes(state: AppState) -> ApiRouter {
         .delete("/api/volumes/{volume_id}", Resource(Action::VolumeDelete), storage::delete_volume)
         .post("/api/service-instances/{instance_id}/tcp-proxy", Resource(Action::TcpProxyCreate), storage::create_tcp_proxy)
         .delete("/api/tcp-proxies/{tcp_proxy_id}", Resource(Action::TcpProxyDelete), storage::delete_tcp_proxy)
+        // Cloudflare R2 buckets (services with no container; see api/buckets)
+        .post("/api/projects/{project_id}/buckets", Resource(Action::ServiceCreate), buckets::create)
+        .post("/api/service-instances/{instance_id}/r2", Resource(Action::BucketProvision), buckets::provision_instance)
+        .delete("/api/service-instances/{instance_id}/r2", Resource(Action::BucketUnlink), buckets::unlink)
+        .post("/api/service-instances/{instance_id}/r2/delete-bucket", Resource(Action::BucketDelete), buckets::delete_bucket)
         // Private TCP tunnel to the running container (WebSocket; `modula connect`)
         .get("/api/service-instances/{instance_id}/tunnel", Resource(Action::TunnelOpen), crate::tunnel::open)
         // Backups: storage targets per workspace, schedules and backups per database
@@ -160,6 +166,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/workspaces/{workspace_id}/integrations/cloudflare/zones", Resource(Action::CloudflareRead), cloudflare::zones)
         .get("/api/workspaces/{workspace_id}/integrations/cloudflare/r2", Resource(Action::CloudflareRead), cloudflare::r2_info)
         .post("/api/workspaces/{workspace_id}/integrations/cloudflare/r2-targets", Resource(Action::BackupTargetCreate), cloudflare::create_r2_target)
+        .get("/api/workspaces/{workspace_id}/integrations/cloudflare/r2/buckets", Resource(Action::CloudflareRead), buckets::list)
         // Read through DomainUpdate (Member): only members can act on the answer.
         .get("/api/domains/{domain_id}/ingress", Resource(Action::DomainUpdate), cloudflare::ingress)
         .put("/api/domains/{domain_id}/ingress", Resource(Action::DomainUpdate), cloudflare::set_ingress)

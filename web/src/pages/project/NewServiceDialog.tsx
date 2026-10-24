@@ -2,14 +2,17 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { ArrowLeft, BrandDocker, BrandGithub, ChevronRight, Search } from "@/components/ui/icons";
+import { ArrowLeft, BrandDocker, BrandGithub, Bucket, ChevronRight, Search } from "@/components/ui/icons";
 import { Field, Input } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/misc";
+import { Segmented } from "@/components/ui/Tabs";
 import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { ApiError, api, type ProjectDetail, type Template } from "@/lib/api";
 import { useTemplates } from "@/lib/useTemplates";
 import { projectReturnPath } from "@/lib/github";
-import { templateStack, uniqueName } from "@/lib/templates";
+import { isDatabaseTemplate, suggestBucketName, templateStack, uniqueName } from "@/lib/templates";
+import { useCloudflare } from "@/pages/settings/Integrations";
+import { R2ChoiceFields, r2Choice, type R2Mode } from "./BucketFields";
 import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
 
 /** `ghcr.io/acme/api:1.2` → `api`, made a valid service name. */
@@ -38,7 +41,7 @@ export function parseRepo(input: string): string | null {
 /** `acme/My_App` → `my-app`, made a valid service name. */
 export const serviceNameFromRepo = (repo: string) => serviceNameFromImage(repo.split("/").pop() ?? "");
 
-export type NewServiceStep = "root" | "image" | "repo" | "database";
+export type NewServiceStep = "root" | "image" | "repo" | "database" | "bucket";
 type Step = NewServiceStep;
 
 /** Command-style picker for adding a service (Docker image or GitHub repo). */
@@ -73,6 +76,11 @@ export function NewServiceDialog({
   const [branch, setBranch] = useState("main");
   const [rootDir, setRootDir] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [bucketKind, setBucketKind] = useState<"r2" | "self">("r2");
+  const [r2Mode, setR2Mode] = useState<R2Mode>("new");
+  // null: follow the service name.
+  const [bucketName, setBucketName] = useState<string | null>(null);
+  const [existingBucket, setExistingBucket] = useState("");
 
   const reset = () => {
     setStep("root");
@@ -83,10 +91,22 @@ export function NewServiceDialog({
     setBranch("main");
     setRootDir("");
     setNotice(null);
+    setBucketKind("r2");
+    setR2Mode("new");
+    setBucketName(null);
+    setExistingBucket("");
   };
 
   const repo = parseRepo(repoInput);
-  const workspaceId = qc.getQueryData<ProjectDetail>(["project", projectId])?.workspaceId;
+  const projectData = qc.getQueryData<ProjectDetail>(["project", projectId]);
+  const workspaceId = projectData?.workspaceId;
+  const envName = projectData?.environments.find((e) => e.id === environmentId)?.name;
+  const takenNames = projectData?.services.map((s) => s.name) ?? [];
+  const bucketService = name || uniqueName("bucket", takenNames);
+  const bucketValue = bucketName ?? suggestBucketName(bucketService, envName);
+  const cf = useCloudflare(workspaceId ?? "");
+  const cfConnected = !!cf.data?.connected;
+  const choice = r2Choice(r2Mode, bucketValue, existingBucket);
   const suggestions = useRepoSuggestions(
     open && step === "repo" ? workspaceId : undefined,
     repoInput,
@@ -127,6 +147,26 @@ export function NewServiceDialog({
       reset();
     },
   });
+
+  const createBucket = useMutation({
+    mutationFn: async () => {
+      if (bucketKind === "self") {
+        const svc = await api.createService(projectId, { name: bucketService, template: "bucket" });
+        await deployNew(svc);
+        return svc;
+      }
+      if (!choice) throw new Error("Choose a bucket.");
+      return api.createBucket(projectId, { name: bucketService, environmentId, ...choice });
+    },
+    onSuccess: async (svc) => {
+      await qc.invalidateQueries({ queryKey: ["project", projectId] });
+      void qc.invalidateQueries({ queryKey: ["cloudflare-r2-buckets"] });
+      onCreated(svc.id);
+      onOpenChange(false);
+      reset();
+    },
+  });
+  const dbTemplates = templates.data?.filter((t) => isDatabaseTemplate(t.id)) ?? [];
 
   const create = useMutation({
     mutationFn: async () => {
@@ -183,7 +223,15 @@ export function NewServiceDialog({
               </Button>
             )}
             <span className="text-sm text-foreground">
-              {step === "root" ? "What would you like to add?" : step === "repo" ? "GitHub repo" : step === "database" ? "Database" : "Docker image"}
+              {step === "root"
+                ? "What would you like to add?"
+                : step === "repo"
+                  ? "GitHub repo"
+                  : step === "database"
+                    ? "Database"
+                    : step === "bucket"
+                      ? "Bucket"
+                      : "Docker image"}
             </span>
           </div>
 
@@ -193,9 +241,10 @@ export function NewServiceDialog({
                 <>
                   <PickerRow icon={<BrandGithub />} label="GitHub repo" onClick={() => setStep("repo")} />
                   <PickerRow icon={<BrandDocker />} label="Docker image" onClick={() => setStep("image")} />
+                  <PickerRow icon={<Bucket />} label="Bucket" onClick={() => setStep("bucket")} />
                 </>
               ) : null}
-              {templates.data?.length ? (
+              {dbTemplates.length ? (
                 <>
                   {step === "root" ? <div className="px-3 pt-3 pb-1 text-xs text-muted-foreground">Database</div> : null}
                   {createDatabase.error ? (
@@ -208,7 +257,7 @@ export function NewServiceDialog({
                       <Alert tone="warn">{notice}</Alert>
                     </div>
                   ) : null}
-                  {templates.data.map((t) => (
+                  {dbTemplates.map((t) => (
                     <PickerRow
                       key={t.id}
                       icon={<ServiceIcon stack={templateStack(t.id)} size="sm" />}
@@ -221,6 +270,75 @@ export function NewServiceDialog({
                 </>
               ) : null}
             </div>
+          ) : step === "bucket" ? (
+            <form
+              className="flex flex-col gap-4 p-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                createBucket.mutate();
+              }}
+            >
+              {createBucket.error ? <Alert>{createBucket.error.message}</Alert> : null}
+              {notice ? <Alert tone="warn">{notice}</Alert> : null}
+              <Segmented
+                label="Where"
+                value={bucketKind}
+                onChange={setBucketKind}
+                options={[
+                  { value: "r2", label: "Cloudflare R2" },
+                  { value: "self", label: "Self-hosted" },
+                ]}
+              />
+              {bucketKind === "self" ? (
+                <p className="text-sm text-muted-foreground">
+                  An S3-compatible server on your own servers, with the bucket on a volume. Other services reach it on the private network.
+                </p>
+              ) : cf.isPending && workspaceId ? null : !cfConnected ? (
+                <Alert tone="info">
+                  Connect Cloudflare in workspace Settings → Integrations to create R2 buckets. Each bucket gets its own credentials,
+                  limited to that bucket.
+                </Alert>
+              ) : (
+                <R2ChoiceFields
+                  workspaceId={workspaceId}
+                  mode={r2Mode}
+                  onMode={setR2Mode}
+                  bucket={bucketValue}
+                  onBucket={setBucketName}
+                  existing={existingBucket}
+                  onExisting={setExistingBucket}
+                />
+              )}
+              <Field
+                label="Service name"
+                hint={
+                  <>
+                    Others use <span className="font-mono">{`\${{${bucketService}.S3_BUCKET}}`}</span>, S3_ENDPOINT, S3_REGION,
+                    AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+                  </>
+                }
+              >
+                {(p) => <Input {...p} placeholder={bucketService} value={name} onChange={(e) => setName(e.target.value)} />}
+              </Field>
+              {bucketKind === "r2" && cfConnected ? (
+                <p className="text-xs text-muted-foreground">
+                  The bucket is for {envName ?? "this environment"}; other environments add theirs from the bucket&apos;s tab.
+                </p>
+              ) : null}
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  loading={createBucket.isPending}
+                  disabled={bucketKind === "r2" && (!cfConnected || !choice)}
+                >
+                  Add bucket
+                </Button>
+              </div>
+            </form>
           ) : step === "repo" ? (
             <form
               className="flex flex-col gap-4 p-4"

@@ -87,6 +87,11 @@ pub async fn start(
     d: NewDeployment,
 ) -> AppResult<Started> {
     d.config.validate()?;
+    if !d.config.deployable() {
+        return Err(crate::error::AppError::bad_request(
+            "an R2 bucket runs at Cloudflare: there is nothing to deploy",
+        ));
+    }
     let id = Id::new();
     let resolved = env::resolve_for_deployment(
         &state.keys,

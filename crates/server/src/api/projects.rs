@@ -66,6 +66,8 @@ pub struct InstanceSummary {
     pub template: Option<String>,
     #[sqlx(json(nullable))]
     pub volume: Option<serde_json::Value>,
+    /// An R2 bucket service's bucket in this environment.
+    pub bucket: Option<String>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -269,7 +271,8 @@ pub async fn detail(state: &AppState, id: Id) -> AppResult<ProjectDetail> {
                 ) AS depends_on,
                 s.template,
                 (SELECT json_build_object('id', v.id, 'mountPath', v.mount_path)
-                 FROM volumes v WHERE v.service_instance_id = i.id) AS volume
+                 FROM volumes v WHERE v.service_instance_id = i.id) AS volume,
+                (SELECT r.bucket FROM r2_buckets r WHERE r.service_instance_id = i.id) AS bucket
          FROM service_instances i
          JOIN services s ON s.id = i.service_id
          LEFT JOIN LATERAL (
@@ -349,6 +352,7 @@ pub async fn delete(
     meta: RequestMeta,
 ) -> AppResult<Json<serde_json::Value>> {
     let id = grant.id();
+    crate::api::buckets::release_best_effort(&state, crate::api::buckets::Scope::Project(id)).await;
     let mut tx = state.db.begin().await?;
     let mut nodes = deploy::remove_live(&mut tx, LiveFilter::Project, id).await?;
     nodes.extend(deploy::queue_volume_removals(&mut tx, LiveFilter::Project, id).await?);
@@ -550,6 +554,8 @@ pub async fn delete_environment(
             "a project needs at least one environment".into(),
         ));
     }
+    crate::api::buckets::release_best_effort(&state, crate::api::buckets::Scope::Environment(id))
+        .await;
     let mut nodes = deploy::remove_live(&mut tx, LiveFilter::Environment, id).await?;
     nodes.extend(deploy::queue_volume_removals(&mut tx, LiveFilter::Environment, id).await?);
     sqlx::query("DELETE FROM environments WHERE id = $1")
@@ -624,6 +630,7 @@ async fn copy_environment(
     from: Id,
 ) -> AppResult<(u32, u32)> {
     // Copy variables first (sealing needs the keyring, outside the transaction).
+    // An R2 bucket's variables are its own credentials: never copied.
     // (target instance or None for shared, source variable, name, value, refs)
     #[allow(clippy::type_complexity)]
     let missing: Vec<(Option<Id>, Id, String, Vec<u8>, Vec<String>)> = sqlx::query_as(
@@ -633,6 +640,7 @@ async fn copy_environment(
          LEFT JOIN service_instances ti ON ti.service_id = si.service_id AND ti.environment_id = $1
          WHERE v.environment_id = $2 AND NOT v.sealed
            AND (v.service_instance_id IS NULL OR ti.id IS NOT NULL)
+           AND NOT EXISTS (SELECT 1 FROM r2_buckets r WHERE r.service_instance_id = v.service_instance_id)
            AND NOT EXISTS (SELECT 1 FROM variables t WHERE t.environment_id = $1
                            AND t.service_instance_id IS NOT DISTINCT FROM ti.id AND t.name = v.name)",
     )

@@ -102,6 +102,12 @@ pub enum Action {
     VolumeDelete,
     TcpProxyCreate,
     TcpProxyDelete,
+    /// Create or link an R2 bucket for an R2 service instance (Cloudflare).
+    BucketProvision,
+    /// Revoke an R2 instance's bucket token and forget the bucket (kept).
+    BucketUnlink,
+    /// Delete an R2 instance's bucket at Cloudflare.
+    BucketDelete,
     /// Instance-level, no path parameter.
     NodeList,
     /// Instance-level, no path parameter.
@@ -219,6 +225,7 @@ impl Action {
             Self::VolumeCreate | Self::TcpProxyCreate => K::ServiceInstance,
             Self::VolumeDelete => K::Volume,
             Self::TcpProxyDelete => K::TcpProxy,
+            Self::BucketProvision | Self::BucketUnlink | Self::BucketDelete => K::ServiceInstance,
             Self::DeploymentRead | Self::DeploymentRemove | Self::DeploymentRollout => {
                 K::Deployment
             }
@@ -296,12 +303,15 @@ impl Action {
             | Self::VolumeCreate
             | Self::TcpProxyCreate
             | Self::TcpProxyDelete
+            | Self::BucketProvision
+            | Self::BucketUnlink
             | Self::GithubRepoList => Role::Member,
             Self::WorkspaceUpdate
             | Self::WorkspaceDelete
             | Self::ProjectDelete
             | Self::EnvironmentDelete
             | Self::VolumeDelete
+            | Self::BucketDelete
             | Self::GithubInstall => Role::Admin,
             Self::SessionRevoke
             | Self::NodeList
@@ -356,6 +366,7 @@ impl Action {
             | Self::EnvironmentDelete
             | Self::ServiceDelete
             | Self::VolumeDelete
+            | Self::BucketDelete
             | Self::VariableReveal
             | Self::NodeJoinTokenCreate
             | Self::NodeRevoke
@@ -390,6 +401,8 @@ impl Action {
             | Self::VolumeCreate
             | Self::TcpProxyCreate
             | Self::TcpProxyDelete
+            | Self::BucketProvision
+            | Self::BucketUnlink
             | Self::NodeList
             | Self::NodeUpdate
             | Self::GithubInstall

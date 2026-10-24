@@ -163,7 +163,7 @@ export interface InstanceSummary {
   latestDeploymentId: string | null;
   latestDeploymentStatus: DeploymentStatus | null;
   domain: string | null;
-  sourceType: "image" | "repo" | "local" | null;
+  sourceType: "image" | "repo" | "local" | "r2" | null;
   repo: string | null;
   image?: string | null;
   /** Detected framework/runtime (e.g. "nextjs", "postgres"), used for the card icon. */
@@ -173,6 +173,8 @@ export interface InstanceSummary {
   template?: string | null;
   /** Mount path of the attached volume, if any. */
   volume?: { id: string; mountPath: string; createdAt: string } | null;
+  /** An R2 bucket service's bucket in this environment (null = none yet). */
+  bucket?: string | null;
 }
 export interface ProjectDetail extends Project {
   environments: Environment[];
@@ -208,7 +210,9 @@ export type RestartPolicy = "on_failure" | "always" | "never";
 export type ServiceSource =
   | { type: "image"; image: string }
   | { type: "repo"; repo: string; branch: string; rootDir?: string }
-  | { type: "local"; rootDir?: string };
+  | { type: "local"; rootDir?: string }
+  /** A Cloudflare R2 bucket: nothing runs or deploys. */
+  | { type: "r2" };
 export type Builder = "railpack" | "dockerfile";
 export interface ServiceConfig {
   source: ServiceSource;
@@ -259,8 +263,19 @@ export interface Instance {
   template?: string | null;
   volume?: Volume | null;
   tcpProxy?: TcpProxy | null;
+  /** An R2 bucket service's bucket in this environment (null = none yet). */
+  r2?: R2Link | null;
   updatedAt: string;
 }
+export interface R2Link {
+  bucket: string;
+  accountId: string;
+  /** Created by Modula (only then can it be deleted from here). */
+  created: boolean;
+  createdAt: string;
+}
+/** A new R2 bucket by name, or an existing one to link. */
+export type BucketChoice = { bucket: string } | { existing: string };
 export interface Volume {
   id: string;
   mountPath: string;
@@ -272,7 +287,7 @@ export interface TcpProxy {
   publicPort: number;
   targetPort: number;
 }
-export type TemplateId = "postgres" | "mysql" | "redis" | "mongo";
+export type TemplateId = "postgres" | "mysql" | "redis" | "mongo" | "bucket";
 export interface Template {
   id: TemplateId;
   name: string;
@@ -826,7 +841,14 @@ export const api = {
       `/api/projects/${enc(project)}/services`,
       b,
     ),
-  deleteService: (id: string) => del<{ ok: true }>(`/api/services/${enc(id)}`),
+  /** `warnings`: R2 bucket tokens left at Cloudflare (it was disconnected). */
+  deleteService: (id: string) => del<{ ok: true; warnings?: string[] }>(`/api/services/${enc(id)}`),
+  createBucket: (project: string, b: { name: string; environmentId: string } & BucketChoice) =>
+    post<{ id: string; name: string; instances: Instance[] }>(`/api/projects/${enc(project)}/buckets`, b),
+  provisionBucket: (instance: string, b: BucketChoice) => post<Instance>(`/api/service-instances/${enc(instance)}/r2`, b),
+  unlinkBucket: (instance: string) => del<{ ok: true; warnings?: string[] }>(`/api/service-instances/${enc(instance)}/r2`),
+  deleteBucket: (instance: string, confirm: string) =>
+    post<{ ok: true }>(`/api/service-instances/${enc(instance)}/r2/delete-bucket`, { confirm }),
   serviceInstance: (id: string) =>
     get<Instance>(`/api/service-instances/${enc(id)}`),
   moveInstance: (id: string, nodeId: string) =>

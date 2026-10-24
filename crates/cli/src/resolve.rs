@@ -95,7 +95,15 @@ pub fn pick_service<'a>(
                 )
             });
     }
-    let dbs: Vec<&Service> = services.iter().filter(|s| s.template.is_some()).collect();
+    let dbs: Vec<&Service> = services
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.template.as_deref(),
+                Some("postgres" | "mysql" | "redis" | "mongo")
+            )
+        })
+        .collect();
     match dbs[..] {
         [only] => Ok(only),
         [] => bail!(
