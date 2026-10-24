@@ -439,6 +439,310 @@ async fn a_node_cannot_report_on_another_nodes_backup(pool: PgPool) {
     assert_eq!(queued, 0);
 }
 
+impl Cluster {
+    /// A running self-hosted bucket service (template `bucket`) in its own
+    /// project, listening on `port` (the mock S3's, which the fake runtime
+    /// reports as every container's address).
+    async fn bucket_service(&self, ws: Id, port: u16) -> Id {
+        let p = self
+            .ok(
+                Method::POST,
+                &format!("/api/workspaces/{ws}/projects"),
+                Some(json!({"name": "files"})),
+            )
+            .await;
+        let s = self
+            .ok(
+                Method::POST,
+                &format!("/api/projects/{}/services", p["id"].as_str().unwrap()),
+                Some(json!({ "name": "files", "template": "bucket" })),
+            )
+            .await;
+        let instance: Id = s["instances"][0]["id"].as_str().unwrap().parse().unwrap();
+        sqlx::query(
+            "UPDATE service_instances SET config = jsonb_set(config, '{port}', to_jsonb($2::int))
+             WHERE id = $1",
+        )
+        .bind(instance)
+        .bind(i32::from(port))
+        .execute(self.app.db())
+        .await
+        .unwrap();
+        let d = self
+            .ok(
+                Method::POST,
+                &format!("/api/service-instances/{instance}/deployments"),
+                None,
+            )
+            .await;
+        let d = d["id"].as_str().unwrap().to_owned();
+        wait_for("bucket running", || async {
+            let r = self
+                .ok(Method::GET, &format!("/api/deployments/{d}"), None)
+                .await;
+            r["status"] == "active"
+        })
+        .await;
+        instance
+    }
+}
+
+/// A self-hosted bucket (only the private network reaches it: the node does
+/// the requests) and the database server's own disk, end to end.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn backups_to_a_bucket_service_and_to_the_servers_disk(pool: PgPool) {
+    let (endpoint, s3) = mock_s3().await;
+    let port: u16 = endpoint.rsplit(':').next().unwrap().parse().unwrap();
+    let disk = std::env::temp_dir().join(format!("modula-disk-{}", Id::new()));
+    modula_node::backup::set_dir(disk.clone());
+    let c = cluster(TestApp::new(pool)).await;
+    let rt = c.start_node().await;
+    *rt.address_override.lock().unwrap() = Some("127.0.0.1".parse().unwrap());
+    let dump: Vec<u8> = b"PGDMP to a bucket "
+        .iter()
+        .copied()
+        .cycle()
+        .take(100_000)
+        .collect();
+    *rt.exec_stdout.lock().unwrap() = dump.clone();
+    let ws = c.app.create_workspace(&c.admin, "team").await;
+    let instance = c.database(ws).await;
+    let bucket = c.bucket_service(ws, port).await;
+
+    // The Storage choices: the bucket, and the database server's disk.
+    let dest = format!("/api/service-instances/{instance}/backup-destinations");
+    let d = c.ok(Method::GET, &dest, None).await;
+    assert_eq!(d["buckets"][0]["instanceId"], bucket.to_string());
+    assert_eq!(d["buckets"][0]["template"], "bucket");
+    assert!(d["buckets"][0]["targetId"].is_null());
+    assert_eq!(d["servers"][0]["name"], "db-1");
+
+    let schedule = format!("/api/service-instances/{instance}/backup-schedule");
+    let r = c
+        .call(
+            Method::PUT,
+            &schedule,
+            Some(json!({ "enabled": true, "hourUtc": 3, "localDisk": true,
+                         "bucketInstanceId": bucket })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "one destination");
+    let r = c
+        .ok(
+            Method::PUT,
+            &schedule,
+            Some(json!({ "enabled": true, "hourUtc": 3, "bucketInstanceId": bucket })),
+        )
+        .await;
+    assert_eq!(r["schedule"]["targetKind"], "bucket");
+    assert_eq!(r["schedule"]["targetName"], "files (production)");
+    // Choosing it again reuses its target; Settings lists it with its service.
+    let again = c
+        .ok(
+            Method::PUT,
+            &schedule,
+            Some(json!({ "enabled": true, "hourUtc": 4, "bucketInstanceId": bucket })),
+        )
+        .await;
+    assert_eq!(again["schedule"]["targetId"], r["schedule"]["targetId"]);
+    let targets = c
+        .ok(
+            Method::GET,
+            &format!("/api/workspaces/{ws}/backup-targets"),
+            None,
+        )
+        .await;
+    assert_eq!(targets.as_array().unwrap().len(), 1);
+    assert_eq!(targets[0]["kind"], "bucket");
+    assert_eq!(targets[0]["serviceName"], "files");
+    assert_eq!(targets[0]["projectName"], "files");
+
+    let backups = format!("/api/service-instances/{instance}/backups");
+    let b = c.ok(Method::POST, &backups, None).await;
+    let id = b["id"].as_str().unwrap().to_owned();
+    wait_for("backup to the bucket", || async {
+        let r = c.ok(Method::GET, &backups, None).await;
+        r["backups"][0]["status"] == "completed"
+    })
+    .await;
+    // The node did the multipart upload itself, under the bucket's prefix.
+    let (key, object) = s3
+        .objects
+        .lock()
+        .unwrap()
+        .first_key_value()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .unwrap();
+    assert!(
+        key.starts_with(&format!("bucket/modula-backups/{ws}/{instance}/")),
+        "{key}"
+    );
+    assert!(s3.uploads.lock().unwrap().is_empty(), "completed");
+    let identity = backup::identity(&c.app.state, ws).await.unwrap();
+    assert_eq!(decrypt(&object, &identity), dump);
+
+    c.ok(Method::POST, &format!("/api/backups/{id}/restore"), None)
+        .await;
+    wait_for("restore from the bucket", || async {
+        let r = c.ok(Method::GET, &backups, None).await;
+        r["restores"][0]["status"] == "completed"
+    })
+    .await;
+    let exec = rt.execs.lock().unwrap().last().unwrap().clone();
+    assert_eq!(exec.stdin.as_deref(), Some(&dump[..]));
+
+    // Deleting goes through the bucket's server, which reports back.
+    let r = c
+        .ok(Method::DELETE, &format!("/api/backups/{id}"), None)
+        .await;
+    assert!(r["status"] == "deleting" || r["status"] == "deleted", "{r}");
+    wait_for("deleted from the bucket", || async {
+        let r = c.ok(Method::GET, &backups, None).await;
+        r["backups"][0]["status"] == "deleted"
+    })
+    .await;
+    assert!(s3.objects.lock().unwrap().is_empty());
+
+    // The server's disk.
+    let r = c
+        .ok(
+            Method::PUT,
+            &schedule,
+            Some(json!({ "enabled": true, "hourUtc": 3, "localDisk": true })),
+        )
+        .await;
+    assert_eq!(r["schedule"]["targetKind"], "local");
+    assert_eq!(r["schedule"]["targetName"], "Disk of db-1");
+    let b = c.ok(Method::POST, &backups, None).await;
+    let id = b["id"].as_str().unwrap().to_owned();
+    wait_for("backup to disk", || async {
+        let r = c.ok(Method::GET, &backups, None).await;
+        r["backups"][0]["status"] == "completed"
+    })
+    .await;
+    let dir = disk.join(ws.to_string()).join(instance.to_string());
+    let files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].to_string_lossy().ends_with(".dump.age"));
+    assert_eq!(decrypt(&std::fs::read(&files[0]).unwrap(), &identity), dump);
+    let listed = c.ok(Method::GET, &backups, None).await;
+    assert_eq!(listed["backups"][0]["targetKind"], "local");
+
+    c.ok(Method::POST, &format!("/api/backups/{id}/restore"), None)
+        .await;
+    wait_for("restore from disk", || async {
+        let r = c.ok(Method::GET, &backups, None).await;
+        r["restores"][0]["status"] == "completed"
+    })
+    .await;
+    c.ok(Method::DELETE, &format!("/api/backups/{id}"), None)
+        .await;
+    wait_for("deleted from disk", || async {
+        let r = c.ok(Method::GET, &backups, None).await;
+        r["backups"][0]["status"] == "deleted"
+    })
+    .await;
+    assert!(!files[0].exists());
+
+    // The control plane can't back itself up to either.
+    let local: Id = sqlx::query_scalar("SELECT id FROM backup_targets WHERE kind = 'local'")
+        .fetch_one(c.app.db())
+        .await
+        .unwrap();
+    let r = c
+        .call(
+            Method::PUT,
+            "/api/instance/self-backup",
+            Some(json!({ "enabled": true, "targetId": local, "hourUtc": 3 })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let _ = std::fs::remove_dir_all(disk);
+}
+
+/// An R2 bucket service's target is its instance's variables, read when used.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn r2_bucket_variables_resolve_to_a_target(pool: PgPool) {
+    let c = cluster(TestApp::new(pool)).await;
+    let ws = c.app.create_workspace(&c.admin, "team").await;
+    let p = c
+        .ok(
+            Method::POST,
+            &format!("/api/workspaces/{ws}/projects"),
+            Some(json!({"name": "media"})),
+        )
+        .await;
+    let s = c
+        .ok(
+            Method::POST,
+            &format!("/api/projects/{}/services", p["id"].as_str().unwrap()),
+            Some(json!({ "name": "media", "config": { "source": { "type": "image", "image": "busybox" } } })),
+        )
+        .await;
+    let bucket: Id = s["instances"][0]["id"].as_str().unwrap().parse().unwrap();
+    sqlx::query("UPDATE services SET template = 'r2' WHERE id = $1")
+        .bind(s["id"].as_str().unwrap())
+        .execute(c.app.db())
+        .await
+        .unwrap();
+    c.ok(
+        Method::PATCH,
+        &format!("/api/service-instances/{bucket}/variables"),
+        Some(json!({
+            "set": {
+                "S3_BUCKET": "media-prod",
+                "BUCKET_NAME": "${{S3_BUCKET}}",
+                "S3_ENDPOINT": "https://0123456789abcdef.r2.cloudflarestorage.com",
+                "S3_REGION": "auto",
+                "AWS_ACCESS_KEY_ID": "AKR2",
+                "AWS_SECRET_ACCESS_KEY": "r2-secret",
+            },
+            "sealed": ["AWS_SECRET_ACCESS_KEY"],
+        })),
+    )
+    .await;
+    let target = Id::new();
+    sqlx::query(
+        "INSERT INTO backup_targets (id, workspace_id, name, kind, provider, prefix, bucket_instance_id)
+         VALUES ($1, $2, 'media', 'bucket', 'r2', 'modula-backups/', $3)",
+    )
+    .bind(target)
+    .bind(ws)
+    .bind(bucket)
+    .execute(c.app.db())
+    .await
+    .unwrap();
+    let (owner, store) = backup::load_target(&c.app.state, target).await.unwrap();
+    assert_eq!(owner, ws);
+    let backup::Store::Remote(t) = store else {
+        panic!("R2 is reached by the control plane");
+    };
+    assert_eq!(t.provider, backup::s3::Provider::R2);
+    assert_eq!(
+        t.endpoint.as_str(),
+        "https://0123456789abcdef.r2.cloudflarestorage.com/"
+    );
+    assert_eq!(
+        (t.bucket.as_str(), t.region.as_str()),
+        ("media-prod", "auto")
+    );
+    assert_eq!(t.access_key_id, "AKR2");
+    assert_eq!(t.secret.as_str(), "r2-secret");
+    assert_eq!(t.key("x"), "modula-backups/x");
+
+    // An edited endpoint is checked like any user input.
+    c.ok(
+        Method::PATCH,
+        &format!("/api/service-instances/{bucket}/variables"),
+        Some(json!({ "set": { "S3_ENDPOINT": "http://169.254.169.254" } })),
+    )
+    .await;
+    assert!(backup::load_target(&c.app.state, target).await.is_err());
+}
+
 /// Needs `pg_dump` on PATH (skipped otherwise).
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
 async fn the_control_plane_backs_itself_up(pool: PgPool) {
@@ -569,7 +873,10 @@ fn real_target() -> backup::s3::Target {
 #[ignore = "needs an S3-compatible store (MODULA_TEST_S3_*)"]
 async fn real_storage_round_trip() {
     let target = real_target();
-    target.probe().await.expect("probe");
+    target
+        .probe(backup::s3::http().unwrap(), "test")
+        .await
+        .expect("probe");
 
     // 12 MiB of noise in 5 MiB parts: three parts, the last one short.
     let mut x = 0x2545_f491_4f6c_dd1d_u64;
@@ -586,7 +893,10 @@ async fn real_storage_round_trip() {
     let identity = modula_backup::keys::parse_identity(&identity).unwrap();
 
     let key = target.key("db.dump.age");
-    let upload_id = target.create_multipart(&key).await.expect("create");
+    let upload_id = target
+        .create_multipart(backup::s3::http().unwrap(), &key)
+        .await
+        .expect("create");
     let urls = target.presign_parts(&key, &upload_id, 10).unwrap();
     let chunks = plaintext
         .chunks(100_000)
@@ -603,7 +913,12 @@ async fn real_storage_round_trip() {
     .expect("upload");
     assert_eq!(uploaded.etags.len(), 3);
     target
-        .complete_multipart(&key, &upload_id, &uploaded.etags)
+        .complete_multipart(
+            backup::s3::http().unwrap(),
+            &key,
+            &upload_id,
+            &uploaded.etags,
+        )
         .await
         .expect("complete");
 
@@ -619,13 +934,22 @@ async fn real_storage_round_trip() {
     assert!(out == plaintext, "the round trip changed the data");
 
     // An aborted upload leaves nothing behind; deleting twice is fine.
-    let aborted = target.create_multipart(&target.key("x")).await.unwrap();
-    target
-        .abort_multipart(&target.key("x"), &aborted)
+    let aborted = target
+        .create_multipart(backup::s3::http().unwrap(), &target.key("x"))
         .await
         .unwrap();
-    target.delete(&key).await.unwrap();
-    target.delete(&key).await.unwrap();
+    target
+        .abort_multipart(backup::s3::http().unwrap(), &target.key("x"), &aborted)
+        .await
+        .unwrap();
+    target
+        .delete(backup::s3::http().unwrap(), &key)
+        .await
+        .unwrap();
+    target
+        .delete(backup::s3::http().unwrap(), &key)
+        .await
+        .unwrap();
     let gone = backup::s3::http().unwrap().get(&url).send().await.unwrap();
     assert_eq!(gone.status(), StatusCode::NOT_FOUND);
 }
@@ -737,7 +1061,10 @@ async fn real_postgres_backup_and_restore() {
     };
 
     let key = target.key("orders.dump.age");
-    let upload_id = target.create_multipart(&key).await.unwrap();
+    let upload_id = target
+        .create_multipart(backup::s3::http().unwrap(), &key)
+        .await
+        .unwrap();
     modula_node::backup::backup(
         runtime.clone(),
         modula_proto::node::v1::BackupRequest {
@@ -747,6 +1074,7 @@ async fn real_postgres_backup_and_restore() {
             age_recipient: recipient,
             part_urls: target.presign_parts(&key, &upload_id, 5).unwrap(),
             part_size: modula_backup::stream::MIN_PART_SIZE as u64,
+            ..Default::default()
         },
         tx.clone(),
     )
@@ -754,7 +1082,7 @@ async fn real_postgres_backup_and_restore() {
     let r = result(rx.recv().await.unwrap());
     assert!(r.ok, "backup failed: {}", r.error);
     target
-        .complete_multipart(&key, &upload_id, &r.etags)
+        .complete_multipart(backup::s3::http().unwrap(), &key, &upload_id, &r.etags)
         .await
         .unwrap();
 
@@ -771,6 +1099,7 @@ async fn real_postgres_backup_and_restore() {
             engine: modula_proto::node::v1::DatabaseEngine::EnginePostgres as i32,
             object_url: target.presign_get(&key).unwrap(),
             age_identity: (*identity).clone(),
+            ..Default::default()
         },
         tx.clone(),
     )
@@ -791,6 +1120,7 @@ async fn real_postgres_backup_and_restore() {
             engine: modula_proto::node::v1::DatabaseEngine::EnginePostgres as i32,
             object_url: target.presign_get(&key).unwrap(),
             age_identity: (*modula_backup::keys::generate().1).clone(),
+            ..Default::default()
         },
         tx.clone(),
     )
@@ -800,7 +1130,10 @@ async fn real_postgres_backup_and_restore() {
     assert_eq!(psql(&name, "SELECT count(*) FROM orders"), "5000");
 
     // A dump that fails reports the tool's error, not a silent success.
-    let upload_id = target.create_multipart(&key).await.unwrap();
+    let upload_id = target
+        .create_multipart(backup::s3::http().unwrap(), &key)
+        .await
+        .unwrap();
     modula_node::backup::backup(
         runtime.clone(),
         modula_proto::node::v1::BackupRequest {
@@ -810,6 +1143,7 @@ async fn real_postgres_backup_and_restore() {
             age_recipient: modula_backup::keys::generate().0,
             part_urls: target.presign_parts(&key, &upload_id, 5).unwrap(),
             part_size: modula_backup::stream::MIN_PART_SIZE as u64,
+            ..Default::default()
         },
         tx,
     )
@@ -821,6 +1155,12 @@ async fn real_postgres_backup_and_restore() {
         "{}",
         r.error
     );
-    target.abort_multipart(&key, &upload_id).await.unwrap();
-    target.delete(&key).await.unwrap();
+    target
+        .abort_multipart(backup::s3::http().unwrap(), &key, &upload_id)
+        .await
+        .unwrap();
+    target
+        .delete(backup::s3::http().unwrap(), &key)
+        .await
+        .unwrap();
 }

@@ -28,7 +28,7 @@ use tokio::io::AsyncReadExt;
 use url::Url;
 use zeroize::Zeroizing;
 
-use super::{Kind, PART_URLS, load_target, part_size, run};
+use super::{Kind, PART_URLS, Store, load_target, part_size, run};
 use crate::keyring::Keyring;
 use crate::state::AppState;
 
@@ -92,9 +92,10 @@ async fn dump_and_upload(state: &AppState, backup: Id) -> anyhow::Result<u64> {
             .bind(backup)
             .fetch_one(&state.db)
             .await?;
-    let (_, target) = load_target(state, target_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let Store::Remote(target) = load_target(state, target_id).await.map_err(run::app)?.1 else {
+        bail!("the control plane backs up only to S3-compatible storage it reaches");
+    };
+    let http = super::s3::http()?;
     let previous: Option<i64> = sqlx::query_scalar(
         "SELECT size_bytes FROM backups WHERE service_instance_id IS NULL AND status = 'completed'
          ORDER BY started_at DESC LIMIT 1",
@@ -105,7 +106,7 @@ async fn dump_and_upload(state: &AppState, backup: Id) -> anyhow::Result<u64> {
     let part_size = part_size(previous);
     let recipient = identity(&state.keys)?.to_public();
 
-    let upload_id = target.create_multipart(&key).await?;
+    let upload_id = target.create_multipart(http, &key).await?;
     sqlx::query("UPDATE backups SET upload_id = $2 WHERE id = $1")
         .bind(backup)
         .bind(&upload_id)
@@ -127,7 +128,7 @@ async fn dump_and_upload(state: &AppState, backup: Id) -> anyhow::Result<u64> {
         text
     });
     let uploaded = modula_backup::stream::encrypt_and_upload(
-        super::s3::http()?,
+        http,
         tokio_util::io::ReaderStream::new(stdout),
         &recipient,
         &urls,
@@ -142,7 +143,7 @@ async fn dump_and_upload(state: &AppState, backup: Id) -> anyhow::Result<u64> {
     }
     let uploaded = uploaded?;
     target
-        .complete_multipart(&key, &upload_id, &uploaded.etags)
+        .complete_multipart(http, &key, &upload_id, &uploaded.etags)
         .await?;
     Ok(uploaded.size_bytes)
 }

@@ -118,6 +118,9 @@ enum Command {
         /// UDP port of this server's WireGuard tunnel to the others.
         #[arg(long, env = "MODULA_WG_PORT", default_value_t = modula_node::mesh::DEFAULT_PORT)]
         wg_port: u16,
+        /// Where backups to this server's disk are kept.
+        #[arg(long, env = "MODULA_BACKUP_DIR", default_value = modula_node::backup::DEFAULT_DIR)]
+        backup_dir: PathBuf,
     },
     /// Show this server's identity.
     Status,
@@ -183,7 +186,9 @@ async fn main() -> anyhow::Result<()> {
             upgrade_dir,
             no_mesh,
             wg_port,
+            backup_dir,
         } => {
+            modula_node::backup::set_dir(backup_dir);
             let runtime = Arc::new(DockerRuntime::connect()?);
             // Containers must not reach the cloud's metadata service.
             tokio::spawn(modula_node::runtime::firewall::block_metadata());

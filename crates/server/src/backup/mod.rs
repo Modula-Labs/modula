@@ -1,10 +1,14 @@
 //! Database backups.
 //!
-//! A backup of a database service runs on the node that runs it: the server
-//! starts an S3 multipart upload in the workspace's target, presigns its part
-//! URLs and sends them with the workspace's age recipient; the node dumps,
-//! encrypts and uploads, then reports the part ETags, and the server completes
-//! the upload (see `run`). Restores send a presigned download URL and the
+//! A backup of a database service runs on the node that runs it, to one of
+//! three stores (see `store`). For S3-compatible storage the control plane
+//! reaches, the server starts a multipart upload, presigns its part URLs and
+//! sends them with the workspace's age recipient; the node dumps, encrypts
+//! and uploads, then reports the part ETags, and the server completes the
+//! upload (see `run`). A self-hosted bucket service is only reachable over the
+//! private network, so the node gets its credentials and uploads by itself;
+//! a server's own disk is written by that server. Restores send a presigned
+//! download URL (or the bucket's credentials, or the file's path) and the
 //! workspace's age identity over the node's mTLS stream.
 //!
 //! Every workspace has its own age key pair (`backup_keys`), the identity
@@ -18,6 +22,7 @@ pub mod retention;
 pub mod run;
 pub mod s3;
 pub mod schedule;
+pub mod store;
 
 use std::time::Duration;
 
@@ -32,7 +37,8 @@ use crate::error::{AppError, AppResult};
 use crate::jobs;
 use crate::state::AppState;
 
-pub use run::on_result;
+pub use run::{on_deleted, on_result};
+pub use store::{Store, load_target, target_aad};
 
 /// Presigned part URLs sent with each backup request.
 const PART_URLS: u16 = 1000;
@@ -187,61 +193,6 @@ pub async fn identity(state: &AppState, workspace: Id) -> AppResult<Zeroizing<St
         .await?;
     let text = std::str::from_utf8(&plain).map_err(anyhow::Error::from)?;
     Ok(Zeroizing::new(text.to_owned()))
-}
-
-// ---------------------------------------------------------------- targets
-
-pub fn target_aad(workspace: Id, row: &str) -> FieldAad<'_> {
-    FieldAad {
-        scope: workspace,
-        table: "backup_targets",
-        column: "secret_access_key",
-        row,
-    }
-}
-
-/// A target with its secret opened, and the workspace that owns it.
-pub async fn load_target(state: &AppState, id: Id) -> AppResult<(Id, s3::Target)> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        workspace_id: Id,
-        provider: String,
-        endpoint: String,
-        region: String,
-        bucket: String,
-        prefix: String,
-        access_key_id: String,
-        secret_sealed: Vec<u8>,
-    }
-    let r: Row = sqlx::query_as(
-        "SELECT workspace_id, provider, endpoint, region, bucket, prefix, access_key_id, secret_sealed
-         FROM backup_targets WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound)?;
-    let row = id.to_string();
-    let secret = state
-        .keys
-        .open(
-            &state.db,
-            &r.secret_sealed,
-            target_aad(r.workspace_id, &row),
-        )
-        .await?;
-    let secret = std::str::from_utf8(&secret).map_err(anyhow::Error::from)?;
-    let target = s3::Target {
-        provider: s3::Provider::parse(&r.provider)
-            .ok_or_else(|| anyhow::anyhow!("unknown provider {}", r.provider))?,
-        endpoint: r.endpoint.parse().map_err(anyhow::Error::from)?,
-        region: r.region,
-        bucket: r.bucket,
-        prefix: r.prefix,
-        access_key_id: r.access_key_id,
-        secret: Zeroizing::new(secret.to_owned()),
-    };
-    Ok((r.workspace_id, target))
 }
 
 // ---------------------------------------------------------------- jobs

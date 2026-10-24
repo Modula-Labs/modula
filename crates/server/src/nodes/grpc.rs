@@ -512,6 +512,7 @@ async fn handle(
         }
         In::BackupResult(r) => crate::backup::on_result(state, node, r).await?,
         In::CronResult(r) => crate::cron::on_result(state, node, r).await?,
+        In::BackupDeleted(r) => crate::backup::on_deleted(state, node, r).await?,
         In::DbResult(r) => state.hub.deliver_db(node, r),
         In::UpgradeStatus(s) => crate::updates::rollout::on_status(state, node, s).await?,
         In::AccessStatus(s) => state.private.deliver(node, s),

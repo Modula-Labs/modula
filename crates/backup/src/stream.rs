@@ -1,11 +1,12 @@
-//! The two streaming pipelines:
+//! The streaming pipelines:
 //!
 //! - backup: plaintext chunks → age encryption → fixed-size parts PUT to
-//!   presigned multipart-upload URLs;
-//! - restore: presigned GET → age decryption → plaintext chunks.
+//!   presigned multipart-upload URLs (or into a local file);
+//! - restore: presigned GET (or a local file) → age decryption → plaintext
+//!   chunks.
 //!
 //! At most one part of ciphertext is held in memory; plaintext is never held
-//! beyond the chunk being encrypted, and nothing is written to disk.
+//! beyond the chunk being encrypted, and never written to disk.
 
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Mutex};
@@ -188,6 +189,37 @@ pub async fn storage_error(res: reqwest::Response) -> String {
     }
 }
 
+/// Encrypt `plaintext` to `recipient` into `out` (a local file). Returns the
+/// ciphertext bytes written; `out` is flushed, not synced.
+pub async fn encrypt_to<S, E, W>(
+    mut plaintext: S,
+    recipient: &Recipient,
+    out: &mut W,
+) -> anyhow::Result<u64>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: Into<anyhow::Error>,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let spool = Spool::default();
+    let mut writer = age::Encryptor::with_recipients(std::iter::once(recipient as _))?
+        .wrap_output(spool.clone())?;
+    let mut written = 0u64;
+    while let Some(chunk) = plaintext.next().await {
+        writer.write_all(&chunk.map_err(Into::into)?)?;
+        let ready = spool.take_rest();
+        written += ready.len() as u64;
+        out.write_all(&ready).await?;
+    }
+    writer.finish()?;
+    let rest = spool.take_rest();
+    written += rest.len() as u64;
+    out.write_all(&rest).await?;
+    out.flush().await?;
+    Ok(written)
+}
+
 /// Download an encrypted backup from a presigned URL and decrypt it as it
 /// arrives. Each yielded chunk has been authenticated; a truncated or
 /// tampered file ends the stream with an error.
@@ -213,6 +245,27 @@ pub async fn download_and_decrypt(
         .map_err(|e| io::Error::other(e.without_url()))
         .boxed()
         .into_async_read();
+    decrypt_stream(body, identity).await
+}
+
+/// Decrypt an encrypted backup read from a local file, as it is read.
+pub async fn read_and_decrypt(
+    file: tokio::fs::File,
+    identity: &Identity,
+) -> anyhow::Result<BoxStream<'static, anyhow::Result<Bytes>>> {
+    let body = tokio_util::io::ReaderStream::new(file)
+        .boxed()
+        .into_async_read();
+    decrypt_stream(body, identity).await
+}
+
+async fn decrypt_stream<R>(
+    body: R,
+    identity: &Identity,
+) -> anyhow::Result<BoxStream<'static, anyhow::Result<Bytes>>>
+where
+    R: futures::AsyncBufRead + Unpin + Send + 'static,
+{
     let reader = age::Decryptor::new_async_buffered(body)
         .await?
         .decrypt_async(std::iter::once(identity as _))?;

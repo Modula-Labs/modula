@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 
-use super::{Engine, Kind, PART_URLS, load_target, part_size, stamp};
+use super::{Engine, Kind, PART_URLS, Store, load_target, part_size, s3, stamp};
 use crate::error::{AppError, AppResult};
 use crate::jobs::{self, Job};
 use crate::state::AppState;
@@ -166,12 +166,8 @@ async fn dispatch(
     key: &str,
 ) -> anyhow::Result<()> {
     let (deployment, node) = live_node(state, instance).await?;
-    let (workspace, target) = load_target(state, target_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let recipient = super::recipient(state, workspace)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let (workspace, store) = load_target(state, target_id).await.map_err(app)?;
+    let recipient = super::recipient(state, workspace).await.map_err(app)?;
     let previous: Option<i64> = sqlx::query_scalar(
         "SELECT size_bytes FROM backups WHERE service_instance_id = $1 AND status = 'completed'
          ORDER BY started_at DESC LIMIT 1",
@@ -180,7 +176,34 @@ async fn dispatch(
     .fetch_optional(&state.db)
     .await?
     .flatten();
-    let upload_id = target.create_multipart(key).await?;
+    let mut request = pb::BackupRequest {
+        backup_id: backup.to_string(),
+        deployment_id: deployment.to_string(),
+        engine: engine.proto() as i32,
+        age_recipient: recipient,
+        part_size: part_size(previous),
+        ..Default::default()
+    };
+    let upload_id = match store {
+        Store::Remote(target) => {
+            let upload_id = target.create_multipart(s3::http()?, key).await?;
+            request.part_urls = target.presign_parts(key, &upload_id, PART_URLS)?;
+            Some(upload_id)
+        }
+        Store::Private(bucket) => {
+            request.s3 = Some(bucket.access(node).map_err(app)?);
+            request.object_key = key.to_owned();
+            None
+        }
+        Store::Disk { node: disk } => {
+            anyhow::ensure!(
+                disk == node,
+                "backups to a server's disk need the database to run on that server"
+            );
+            request.local_path = key.to_owned();
+            None
+        }
+    };
     // Recorded first, so a failure from here on aborts the upload.
     sqlx::query("UPDATE backups SET upload_id = $2, node_id = $3 WHERE id = $1")
         .bind(backup)
@@ -188,14 +211,6 @@ async fn dispatch(
         .bind(node)
         .execute(&state.db)
         .await?;
-    let request = pb::BackupRequest {
-        backup_id: backup.to_string(),
-        deployment_id: deployment.to_string(),
-        engine: engine.proto() as i32,
-        age_recipient: recipient,
-        part_urls: target.presign_parts(key, &upload_id, PART_URLS)?,
-        part_size: part_size(previous),
-    };
     anyhow::ensure!(
         state
             .hub
@@ -204,6 +219,15 @@ async fn dispatch(
         "the server running the database is offline"
     );
     Ok(())
+}
+
+/// An error for a backup's own record: the message alone for the user's
+/// mistakes and conflicts.
+pub(crate) fn app(e: AppError) -> anyhow::Error {
+    match e {
+        AppError::Conflict(m) | AppError::BadRequest(m) => anyhow::anyhow!(m),
+        e => anyhow::anyhow!("{e:?}"),
+    }
 }
 
 /// Mark a running backup failed and abort its upload (best effort).
@@ -224,9 +248,14 @@ pub async fn fail(state: &AppState, backup: Id, error: &str) -> anyhow::Result<(
     Ok(())
 }
 
+/// Abort an upload the control plane started (nodes abort their own).
 pub async fn abort(state: &AppState, target: Id, key: &str, upload_id: &str) {
     let aborted = match load_target(state, target).await {
-        Ok((_, t)) => t.abort_multipart(key, upload_id).await,
+        Ok((_, Store::Remote(t))) => match s3::http() {
+            Ok(http) => t.abort_multipart(http, key, upload_id).await,
+            Err(e) => Err(e),
+        },
+        Ok(_) => Ok(()),
         Err(e) => Err(anyhow::anyhow!("{e:?}")),
     };
     if let Err(e) = aborted {
@@ -310,7 +339,7 @@ pub async fn finish_job(state: AppState, job: Job) -> anyhow::Result<()> {
     .bind(p.backup_id)
     .fetch_optional(&state.db)
     .await?;
-    let Some((target, key, Some(upload_id))) = row else {
+    let Some((target, key, upload_id)) = row else {
         return Ok(());
     };
     if !p.ok {
@@ -321,13 +350,21 @@ pub async fn finish_job(state: AppState, job: Job) -> anyhow::Result<()> {
         };
         return fail(&state, p.backup_id, error).await;
     }
-    let completed = async {
-        let (_, t) = load_target(&state, target)
+    // Only uploads the control plane started are its to complete; nodes
+    // finish their own (self-hosted buckets, disks).
+    let completed = match upload_id {
+        Some(upload_id) => {
+            async {
+                let Store::Remote(t) = load_target(&state, target).await.map_err(app)?.1 else {
+                    anyhow::bail!("the backup target changed kind");
+                };
+                t.complete_multipart(s3::http()?, &key, &upload_id, &p.etags)
+                    .await
+            }
             .await
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-        t.complete_multipart(&key, &upload_id, &p.etags).await
-    }
-    .await;
+        }
+        None => Ok(()),
+    };
     match completed {
         Ok(()) => {
             sqlx::query(
@@ -384,8 +421,28 @@ pub async fn start_restore(state: &AppState, backup: Id, created_by: Id) -> AppR
             "wait for the running backup to finish".into(),
         ));
     }
-    let (workspace, target) = load_target(state, target_id).await?;
+    let (workspace, store) = load_target(state, target_id).await?;
     let id = Id::new();
+    let mut request = pb::RestoreRequest {
+        restore_id: id.to_string(),
+        deployment_id: deployment.to_string(),
+        engine: engine.proto() as i32,
+        ..Default::default()
+    };
+    match store {
+        Store::Remote(target) => request.object_url = target.presign_get(&key)?,
+        Store::Private(bucket) => {
+            request.s3 = Some(bucket.access(node)?);
+            request.object_key = key;
+        }
+        Store::Disk { node: disk } if disk == node => request.local_path = key,
+        Store::Disk { .. } => {
+            return Err(AppError::Conflict(
+                "this backup is on another server's disk: it restores only while the database runs there"
+                    .into(),
+            ));
+        }
+    }
     let inserted: Option<Id> = sqlx::query_scalar(
         "INSERT INTO backup_restores (id, backup_id, service_instance_id, node_id, created_by)
          VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING RETURNING id",
@@ -400,13 +457,7 @@ pub async fn start_restore(state: &AppState, backup: Id, created_by: Id) -> AppR
     if inserted.is_none() {
         return Err(AppError::Conflict("a restore is already running".into()));
     }
-    let request = pb::RestoreRequest {
-        restore_id: id.to_string(),
-        deployment_id: deployment.to_string(),
-        engine: engine.proto() as i32,
-        object_url: target.presign_get(&key)?,
-        age_identity: (*super::identity(state, workspace).await?).clone(),
-    };
+    request.age_identity = (*super::identity(state, workspace).await?).clone();
     if !state
         .hub
         .send(node, pb::server_message::Msg::Restore(request))
@@ -424,4 +475,97 @@ pub async fn start_restore(state: &AppState, backup: Id, created_by: Id) -> AppR
         ));
     }
     Ok(id)
+}
+
+/// What deleting a backup's object did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Removal {
+    /// Deleted (by the control plane), and marked so.
+    Done,
+    /// A node was asked to (self-hosted buckets, disks); it reports back.
+    Requested,
+}
+
+/// Delete a completed backup's object and mark the backup deleted, or ask
+/// the node that can reach it to, and mark it deleting.
+pub async fn remove(state: &AppState, backup: Id) -> AppResult<Removal> {
+    let (target, key): (Id, String) = sqlx::query_as(
+        "SELECT target_id, object_key FROM backups WHERE id = $1 AND status = 'completed'",
+    )
+    .bind(backup)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::Conflict("only a completed backup can be deleted".into()))?;
+    let mut request = pb::BackupDelete {
+        backup_id: backup.to_string(),
+        ..Default::default()
+    };
+    let node = match load_target(state, target).await?.1 {
+        Store::Remote(t) => {
+            t.delete(s3::http()?, &key)
+                .await
+                .map_err(|e| AppError::Unavailable(format!("cannot delete the backup: {e:#}")))?;
+            sqlx::query("UPDATE backups SET status = 'deleted', deleted_at = now() WHERE id = $1")
+                .bind(backup)
+                .execute(&state.db)
+                .await?;
+            return Ok(Removal::Done);
+        }
+        // The bucket's own server reaches it without the private network.
+        Store::Private(bucket) => {
+            request.s3 = Some(bucket.access(bucket.node)?);
+            request.object_key = key;
+            bucket.node
+        }
+        Store::Disk { node } => {
+            request.local_path = key;
+            node
+        }
+    };
+    sqlx::query(
+        "UPDATE backups SET status = 'deleting', node_id = $2, deleted_at = now() WHERE id = $1",
+    )
+    .bind(backup)
+    .bind(node)
+    .execute(&state.db)
+    .await?;
+    if !state
+        .hub
+        .send(node, pb::server_message::Msg::BackupDelete(request))
+        .await
+    {
+        sqlx::query("UPDATE backups SET status = 'completed', deleted_at = NULL WHERE id = $1")
+            .bind(backup)
+            .execute(&state.db)
+            .await?;
+        return Err(AppError::Conflict(
+            "the server holding this backup is offline".into(),
+        ));
+    }
+    Ok(Removal::Requested)
+}
+
+/// A node's answer to a deletion it was asked for (by it alone).
+pub async fn on_deleted(state: &AppState, node: Id, r: pb::BackupDeleted) -> anyhow::Result<()> {
+    let Ok(id) = r.backup_id.parse::<Id>() else {
+        return Ok(());
+    };
+    let error: String = r.error.chars().take(500).collect();
+    sqlx::query(
+        "UPDATE backups
+         SET status = CASE WHEN $3 THEN 'deleted' ELSE 'completed' END,
+             deleted_at = CASE WHEN $3 THEN now() END,
+             error = CASE WHEN $3 THEN error ELSE 'could not delete: ' || $4 END
+         WHERE id = $1 AND node_id = $2 AND status = 'deleting'",
+    )
+    .bind(id)
+    .bind(node)
+    .bind(r.ok)
+    .bind(&error)
+    .execute(&state.db)
+    .await?;
+    if !r.ok {
+        tracing::warn!(backup = %id, error, "a node could not delete a backup");
+    }
+    Ok(())
 }

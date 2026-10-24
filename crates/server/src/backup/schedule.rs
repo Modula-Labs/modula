@@ -7,8 +7,8 @@ use modula_id::Id;
 use time::OffsetDateTime;
 
 use super::retention::{self, Policy};
-use super::run::{abort, start};
-use super::{Kind, control_plane, load_target};
+use super::run::{Removal, abort, remove, start};
+use super::{Kind, control_plane};
 use crate::jobs::Job;
 use crate::state::AppState;
 
@@ -77,6 +77,13 @@ async fn sweep_stale(state: &AppState) -> anyhow::Result<()> {
     )
     .execute(&state.db)
     .await?;
+    // A deletion a node never answered is tried again (by the prune).
+    sqlx::query(
+        "UPDATE backups SET status = 'completed', deleted_at = NULL
+         WHERE status = 'deleting' AND deleted_at < now() - interval '1 hour'",
+    )
+    .execute(&state.db)
+    .await?;
     Ok(())
 }
 
@@ -87,14 +94,12 @@ async fn prune(state: &AppState) -> anyhow::Result<()> {
     struct Row {
         id: Id,
         service_instance_id: Option<Id>,
-        target_id: Id,
-        object_key: String,
         finished_at: OffsetDateTime,
         #[sqlx(flatten)]
         policy: Policy,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT b.id, b.service_instance_id, b.target_id, b.object_key, b.finished_at,
+        "SELECT b.id, b.service_instance_id, b.finished_at,
                 coalesce(s.daily_days, $1) AS daily_days,
                 coalesce(s.weekly_days, $2) AS weekly_days,
                 coalesce(s.monthly_days, $3) AS monthly_days
@@ -116,23 +121,11 @@ async fn prune(state: &AppState) -> anyhow::Result<()> {
         let backups: Vec<(&Row, OffsetDateTime)> =
             rows.iter().map(|r| (r, r.finished_at)).collect();
         for row in retention::expired(&backups, now, &rows[0].policy) {
-            let (id, target, key) = (row.id, &row.target_id, &row.object_key);
-            let deleted = match load_target(state, *target).await {
-                Ok((_, t)) => t.delete(key).await,
-                Err(e) => Err(anyhow::anyhow!("{e:?}")),
-            };
-            match deleted {
-                Ok(()) => {
-                    sqlx::query(
-                        "UPDATE backups SET status = 'deleted', deleted_at = now() WHERE id = $1",
-                    )
-                    .bind(id)
-                    .execute(&state.db)
-                    .await?;
-                    tracing::info!(backup = %id, "expired backup deleted");
-                }
+            match remove(state, row.id).await {
+                Ok(Removal::Done) => tracing::info!(backup = %row.id, "expired backup deleted"),
+                Ok(Removal::Requested) => {}
                 Err(e) => {
-                    tracing::warn!(backup = %id, error = format!("{e:#}"), "could not delete an expired backup")
+                    tracing::warn!(backup = %row.id, error = ?e, "could not delete an expired backup")
                 }
             }
         }

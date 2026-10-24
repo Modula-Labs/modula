@@ -284,6 +284,13 @@ impl Ctx<'_> {
                     self.results.clone(),
                 ));
             }
+            In::BackupDelete(req) => {
+                tokio::spawn(crate::backup::delete(
+                    self.runtime.clone(),
+                    req,
+                    self.results.clone(),
+                ));
+            }
             // Answered on this session: the caller waits on this connection.
             In::Db(req) => match self.db {
                 Some(executor) => {

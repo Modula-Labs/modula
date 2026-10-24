@@ -633,24 +633,41 @@ CREATE INDEX github_deliveries_received_idx ON github_deliveries (received_at);
 -- Backups
 ---------------------------------------------------------------------------
 
--- S3-compatible storage (AWS S3, Cloudflare R2, Backblaze B2, MinIO) for a
--- workspace's backups. The secret key is sealed with the workspace data key
--- (AAD: backup_targets/secret_access_key/<id>) and never returned.
+-- Where a workspace's backups go, by kind:
+--  * 's3': S3-compatible storage (AWS S3, Cloudflare R2, Backblaze B2, MinIO)
+--    with stored credentials. The secret key is sealed with the workspace
+--    data key (AAD: backup_targets/secret_access_key/<id>) and never returned.
+--  * 'bucket': a bucket service of the workspace (R2 or self-hosted); its
+--    endpoint and credentials are read from the instance's variables when
+--    used. A self-hosted bucket is only reachable over the private network,
+--    so the nodes do its requests (see backup::Store).
+--  * 'local': the disk of one server (/var/lib/modula/backups there).
+-- Bucket and local targets are made on first use by a schedule.
 CREATE TABLE backup_targets (
     id                  id PRIMARY KEY,
     workspace_id        id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     name                text NOT NULL,
-    provider            text NOT NULL CHECK (provider IN ('s3', 'r2', 'b2', 'minio')),
-    endpoint            text NOT NULL,
-    region              text NOT NULL,
-    bucket              text NOT NULL,
+    kind                text NOT NULL DEFAULT 's3' CHECK (kind IN ('s3', 'bucket', 'local')),
+    provider            text CHECK (provider IN ('s3', 'r2', 'b2', 'minio')),
+    endpoint            text NOT NULL DEFAULT '',
+    region              text NOT NULL DEFAULT '',
+    bucket              text NOT NULL DEFAULT '',
     -- Object key prefix: empty, or ends with '/'.
     prefix              text NOT NULL DEFAULT '',
-    access_key_id       text NOT NULL,
-    secret_sealed       bytea NOT NULL,
+    access_key_id       text NOT NULL DEFAULT '',
+    secret_sealed       bytea,
+    bucket_instance_id  id UNIQUE REFERENCES service_instances (id) ON DELETE CASCADE,
+    node_id             id REFERENCES nodes (id) ON DELETE CASCADE,
     created_by          id REFERENCES users (id) ON DELETE SET NULL,
     created_at          timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (workspace_id, name)
+    UNIQUE (workspace_id, name),
+    UNIQUE (workspace_id, node_id),
+    CHECK (CASE kind
+             WHEN 's3' THEN provider IS NOT NULL AND secret_sealed IS NOT NULL
+                            AND bucket_instance_id IS NULL AND node_id IS NULL
+             WHEN 'bucket' THEN bucket_instance_id IS NOT NULL AND node_id IS NULL
+             ELSE node_id IS NOT NULL AND bucket_instance_id IS NULL
+           END)
 );
 
 -- The age X25519 key pair a workspace's backups are encrypted to. The
@@ -687,8 +704,11 @@ CREATE TABLE backups (
     node_id             id REFERENCES nodes (id) ON DELETE SET NULL,
     kind                text NOT NULL CHECK (kind IN ('scheduled', 'manual')),
     engine              text NOT NULL CHECK (engine IN ('postgres', 'mysql', 'redis', 'mongo')),
+    -- 'deleting': a node was asked to delete it (bucket and local targets).
     status              text NOT NULL DEFAULT 'running'
-                        CHECK (status IN ('running', 'completed', 'failed', 'deleted')),
+                        CHECK (status IN ('running', 'completed', 'failed', 'deleting', 'deleted')),
+    -- The object's key in the bucket, or its path under the backup
+    -- directory of the target's server (local targets).
     object_key          text NOT NULL,
     -- The S3 multipart upload while running.
     upload_id           text,

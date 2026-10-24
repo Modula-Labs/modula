@@ -173,6 +173,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/service-instances/{instance_id}/backups", Resource(Action::BackupRead), backups::list)
         .post("/api/service-instances/{instance_id}/backups", Resource(Action::BackupCreate), backups::create)
         .put("/api/service-instances/{instance_id}/backup-schedule", Resource(Action::BackupScheduleUpdate), backups::put_schedule)
+        .get("/api/service-instances/{instance_id}/backup-destinations", Resource(Action::BackupRead), backups::destinations)
         .post("/api/backups/{backup_id}/restore", Resource(Action::BackupRestore), backups::restore)
         .delete("/api/backups/{backup_id}", Resource(Action::BackupDelete), backups::delete)
         .get("/api/instance/self-backup", Instance(Action::SelfBackupRead), backups::get_self_backup)

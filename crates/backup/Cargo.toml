@@ -14,7 +14,10 @@ bech32.workspace = true
 bytes.workspace = true
 futures.workspace = true
 reqwest.workspace = true
-tokio = { workspace = true, features = ["net", "time"] }
+rusty-s3.workspace = true
+tokio = { workspace = true, features = ["net", "time", "fs", "io-util"] }
+tokio-util = { workspace = true, features = ["io"] }
+url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

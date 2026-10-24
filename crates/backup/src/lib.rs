@@ -8,4 +8,5 @@
 
 pub mod keys;
 pub mod net;
+pub mod s3;
 pub mod stream;
