@@ -414,8 +414,14 @@ impl Runtime for DockerRuntime {
     }
 
     async fn start(&self, container_id: &str) -> anyhow::Result<()> {
-        self.docker.start_container(container_id, None).await?;
-        Ok(())
+        match self.docker.start_container(container_id, None).await {
+            // 304: already running.
+            Ok(())
+            | Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 304, ..
+            }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn run_once(
@@ -538,6 +544,24 @@ impl Runtime for DockerRuntime {
             .filter(|v| v.name.starts_with("modula-vol-") && !v.mountpoint.is_empty())
             .map(|v| (v.name, std::path::PathBuf::from(v.mountpoint)))
             .collect())
+    }
+
+    async fn stop(&self, container_id: &str) -> anyhow::Result<()> {
+        // No `t`: Docker waits the container's own stop timeout (draining).
+        match self
+            .docker
+            .clone()
+            .with_timeout(STOP_REQUEST_TIMEOUT)
+            .stop_container(container_id, None)
+            .await
+        {
+            // 304: already stopped.
+            Ok(())
+            | Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 304, ..
+            }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     async fn remove_volume(&self, name: &str) -> anyhow::Result<()> {

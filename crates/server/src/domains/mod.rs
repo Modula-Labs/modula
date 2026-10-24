@@ -162,7 +162,7 @@ pub async fn target(db: &sqlx::PgPool, instance: Id) -> AppResult<Target> {
         "SELECT DISTINCT n.public_ip FROM nodes n
          WHERE n.public_ip IS NOT NULL AND n.status <> 'revoked' AND (
              n.id IN (SELECT node_id FROM deployments
-                      WHERE service_instance_id = $1 AND status IN ('active', 'crashed'))
+                      WHERE service_instance_id = $1 AND status IN ('active', 'sleeping', 'crashed'))
              OR n.id = (SELECT node_id FROM service_instances WHERE id = $1))
          ORDER BY n.public_ip",
     )
@@ -301,7 +301,7 @@ pub async fn resync_job(state: AppState, job: crate::jobs::Job) -> anyhow::Resul
     // A site hosted on Cloudflare: its domains belong to the Worker.
     let elsewhere: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = $1
-                          AND status IN ('active', 'crashed') AND config->'hosting' IS NOT NULL)",
+                          AND status IN ('active', 'sleeping', 'crashed') AND config->'hosting' IS NOT NULL)",
     )
     .bind(p.service_instance_id)
     .fetch_one(&state.db)
@@ -418,7 +418,7 @@ pub async fn evaluate(
 pub async fn bump_serving_nodes(tx: &mut sqlx::PgConnection, instance: Id) -> AppResult<Vec<Id>> {
     let nodes: Vec<Option<Id>> = sqlx::query_scalar(
         "SELECT DISTINCT node_id FROM deployments
-         WHERE service_instance_id = $1 AND status IN ('active', 'crashed')",
+         WHERE service_instance_id = $1 AND status IN ('active', 'sleeping', 'crashed')",
     )
     .bind(instance)
     .fetch_all(&mut *tx)

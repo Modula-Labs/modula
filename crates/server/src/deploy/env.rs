@@ -289,7 +289,7 @@ async fn load(
                 (SELECT hostname FROM domains WHERE service_instance_id = i.id AND status = 'verified' ORDER BY created_at LIMIT 1),
                 t.public_port, n.public_ip,
                 (SELECT d.id FROM deployments d WHERE d.service_instance_id = i.id
-                   AND d.status IN ('active', 'crashed') ORDER BY d.created_at DESC LIMIT 1)
+                   AND d.status IN ('active', 'sleeping', 'crashed') ORDER BY d.created_at DESC LIMIT 1)
          FROM service_instances i
          JOIN services s ON s.id = i.service_id
          JOIN environments e ON e.id = i.environment_id

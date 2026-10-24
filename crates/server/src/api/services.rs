@@ -49,7 +49,8 @@ pub struct Instance {
     pub node_id: Option<Id>,
     #[sqlx(json)]
     pub config: ServiceConfig,
-    /// `online`, `deploying`, `crashed` or `offline`, from its deployments.
+    /// `online`, `sleeping` (serverless, scaled to zero), `deploying`,
+    /// `crashed` or `offline`, from its deployments.
     pub status: String,
     #[serde(skip)]
     pub location_id: Option<String>,
@@ -93,11 +94,13 @@ pub async fn load_instance(state: &AppState, id: Id) -> AppResult<Instance> {
                       JOIN deployment_replicas r ON r.deployment_id = d.id
                       JOIN nodes rn ON rn.id = r.node_id
                       CROSS JOIN unnest(rn.edge_unsupported) AS a
-                      WHERE d.service_instance_id = i.id AND d.status IN ('active', 'crashed')
+                      WHERE d.service_instance_id = i.id AND d.status IN ('active', 'sleeping', 'crashed')
                       ORDER BY a) AS edge_unsupported,
                 CASE
                   WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id AND status = 'active')
                     THEN 'online'
+                  WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id AND status = 'sleeping')
+                    THEN 'sleeping'
                   WHEN EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = i.id
                                AND status IN ('waiting_ci', 'queued', 'building', 'deploying'))
                     THEN 'deploying'
@@ -386,6 +389,19 @@ pub(crate) async fn set_config(
             "an R2 bucket's settings can't be changed, and a service can't become one",
         ));
     }
+    if new.serverless.is_some() {
+        let has_volume: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM volumes WHERE service_instance_id = $1)",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if has_volume {
+            return Err(AppError::bad_request(
+                "a service with a volume can't be serverless: its data must stay with one running container",
+            ));
+        }
+    }
     sqlx::query("UPDATE service_instances SET config = $2, updated_at = now() WHERE id = $1")
         .bind(id)
         .bind(&config)
@@ -444,7 +460,7 @@ pub async fn move_instance(
         "SELECT i.node_id,
                 EXISTS (SELECT 1 FROM volumes v WHERE v.service_instance_id = i.id),
                 EXISTS (SELECT 1 FROM deployments d WHERE d.service_instance_id = i.id
-                        AND d.status IN ('building', 'deploying', 'active', 'crashed'))
+                        AND d.status IN ('building', 'deploying', 'active', 'sleeping', 'crashed'))
          FROM service_instances i WHERE i.id = $1",
     )
     .bind(id)

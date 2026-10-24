@@ -432,8 +432,10 @@ CREATE TABLE deployments (
     status              text NOT NULL DEFAULT 'queued'
                         -- waiting_ci: placed, but not built until the commit's
                         -- other checks pass (config.waitForCi; see github::ci).
+                        -- sleeping: a serverless deployment scaled to zero; still
+                        -- the serving one (routed, woken by its next request).
                         CHECK (status IN ('waiting_ci', 'queued', 'building', 'deploying', 'active',
-                                          'failed', 'crashed', 'removed', 'cancelled')),
+                                          'sleeping', 'failed', 'crashed', 'removed', 'cancelled')),
     image               text NOT NULL,
     config              jsonb NOT NULL,
     -- Resolved variables at creation, sealed with the environment's data key
@@ -471,15 +473,19 @@ CREATE TABLE deployments (
     -- Where a deployment hosted elsewhere (config.hosting) is served, e.g.
     -- https://web-production.acme.workers.dev.
     url                 text,
+    -- Serverless: the last wake from sleeping, and how long it took.
+    woke_at             timestamptz,
+    cold_start_ms       integer CHECK (cold_start_ms >= 0),
     created_at          timestamptz NOT NULL DEFAULT now(),
     updated_at          timestamptz NOT NULL DEFAULT now(),
     finished_at         timestamptz
 );
 CREATE INDEX deployments_instance_idx ON deployments (service_instance_id, created_at DESC);
 CREATE INDEX deployments_node_live_idx ON deployments (node_id)
-    WHERE status IN ('building', 'deploying', 'active', 'crashed');
--- At most one active deployment per service instance.
-CREATE UNIQUE INDEX deployments_one_active ON deployments (service_instance_id) WHERE status = 'active';
+    WHERE status IN ('building', 'deploying', 'active', 'sleeping', 'crashed');
+-- At most one serving (active or sleeping) deployment per service instance.
+CREATE UNIQUE INDEX deployments_one_active ON deployments (service_instance_id)
+    WHERE status IN ('active', 'sleeping');
 
 -- Where a deployment runs: one row per replica, each on a different server.
 -- Replica 0 is the deployment's own node (deployments.node_id; it builds,

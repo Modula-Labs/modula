@@ -135,6 +135,11 @@ pub async fn start(
             "a service with a volume runs one replica: raise its CPU and memory instead".into(),
         ));
     }
+    if has_volume && d.config.serverless.is_some() {
+        return Err(crate::error::AppError::Conflict(
+            "a service with a volume can't be serverless: its data must stay with one running container".into(),
+        ));
+    }
     let extra = placement::choose_replicas(&mut *tx, d.instance, node, d.config.replicas).await?;
     // A newer deployment supersedes any still in progress or waiting for CI
     // (the running one keeps serving until the new one is healthy).
@@ -262,7 +267,7 @@ pub async fn retire_for_volume(
 ) -> AppResult<Vec<Id>> {
     let nodes: Vec<Option<Id>> = sqlx::query_scalar(
         "UPDATE deployments SET status = 'removed', finished_at = now(), updated_at = now()
-         WHERE service_instance_id = $1 AND status IN ('active', 'crashed')
+         WHERE service_instance_id = $1 AND status IN ('active', 'sleeping', 'crashed')
            AND id IS DISTINCT FROM $2
            AND EXISTS (SELECT 1 FROM volumes WHERE service_instance_id = $1)
          RETURNING node_id",

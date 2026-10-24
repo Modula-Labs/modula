@@ -134,7 +134,7 @@ pub async fn build(state: &AppState, node: Id) -> AppResult<pb::DesiredState> {
         "SELECT t.public_port, d.id, t.target_port
          FROM tcp_proxies t
          JOIN deployments d ON d.service_instance_id = t.service_instance_id
-         WHERE t.node_id = $1 AND d.node_id = $1 AND d.status IN ('active', 'crashed')
+         WHERE t.node_id = $1 AND d.node_id = $1 AND d.status IN ('active', 'sleeping', 'crashed')
            AND d.config->'hosting' IS NULL AND d.config->'cronSchedule' IS NULL
          ORDER BY t.public_port",
     )
@@ -381,6 +381,9 @@ async fn workload(state: &AppState, node: Id, r: Row) -> AppResult<pb::Workload>
         mesh_ip: r.mesh_ip.unwrap_or_default(),
         cron: cfg.cron_schedule.is_some(),
         pitr,
+        serverless: cfg.serverless.map(|s| pb::Serverless {
+            idle_secs: s.idle_minutes * 60,
+        }),
     })
 }
 
@@ -400,7 +403,7 @@ async fn routes(state: &AppState, node: Id) -> AppResult<Vec<pb::Route>> {
          FROM domains m
          JOIN deployments d ON d.service_instance_id = m.service_instance_id
          JOIN deployment_replicas r ON r.deployment_id = d.id AND r.node_id = $1
-         WHERE d.status IN ('active', 'crashed') AND m.status = 'verified'
+         WHERE d.status IN ('active', 'sleeping', 'crashed') AND m.status = 'verified'
            AND d.config->'hosting' IS NULL AND d.config->'cronSchedule' IS NULL
          ORDER BY m.hostname",
     )

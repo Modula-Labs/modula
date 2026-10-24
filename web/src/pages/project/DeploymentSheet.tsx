@@ -8,7 +8,8 @@ import { TabPanel, Tabs } from "@/components/ui/Tabs";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import { api } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
-import { deploymentBadge, isLive } from "@/lib/status";
+import { sleepingLine } from "@/lib/deployments";
+import { deploymentBadge, isLive, isServingStatus } from "@/lib/status";
 import { LogViewer } from "./LogViewer";
 
 type Tab = "details" | "build" | "logs";
@@ -56,6 +57,7 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
             <div className="text-sm text-muted-foreground">
               {d.trigger} · {relativeTime(d.createdAt)}
             </div>
+            {d.status === "sleeping" ? <div className="text-sm text-muted-foreground">{sleepingLine(d)}</div> : null}
           </div>
         ) : (
           <Skeleton className="h-10 w-72" />
@@ -165,7 +167,7 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
                   </li>
                 ))}
               </ol>
-              {d.status === "active" || d.status === "crashed" || isLive(d.status) ? (
+              {isServingStatus(d.status) || isLive(d.status) ? (
                 <div>
                   {remove.error ? <Alert>{remove.error.message}</Alert> : null}
                   <Button variant="danger-outline" loading={remove.isPending} onClick={() => remove.mutate()}>

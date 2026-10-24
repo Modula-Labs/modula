@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
-import { Checkbox } from "@/components/ui/Controls";
+import { Checkbox, Switch } from "@/components/ui/Controls";
 import { Field, Input, Select, Textarea } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/misc";
 import { Segmented } from "@/components/ui/Tabs";
@@ -95,6 +95,8 @@ export interface Form {
   memoryMb: string;
   cpuMillis: string;
   replicas: string;
+  serverless: boolean;
+  idleMinutes: string;
   cloudflare: boolean;
   outputDir: string;
   spa: boolean;
@@ -131,6 +133,8 @@ export const toForm = (c: ServiceConfig): Form => ({
   memoryMb: c.memoryMb ? String(c.memoryMb) : "",
   cpuMillis: c.cpuMillis ? String(c.cpuMillis) : "",
   replicas: String(c.replicas ?? 1),
+  serverless: !!c.serverless,
+  idleMinutes: String(c.serverless?.idleMinutes ?? DEFAULT_IDLE_MINUTES),
   cloudflare: c.hosting?.type === "cloudflare",
   outputDir: c.hosting?.outputDir ?? "",
   spa: c.hosting?.spa ?? false,
@@ -164,6 +168,34 @@ export function replicasError(
   return null;
 }
 
+/** Minutes without requests before a serverless service stops (the server's default and limit). */
+export const DEFAULT_IDLE_MINUTES = 10;
+export const MAX_IDLE_MINUTES = 1440;
+
+/** Why the service can't scale to zero, or null. The server refuses the same combinations. */
+export function serverlessBlocker(
+  f: Pick<Form, "cronSchedule" | "cloudflare" | "replicas">,
+  hasVolume: boolean,
+): string | null {
+  if (hasVolume) return "Not available with a volume";
+  if (f.cronSchedule.trim()) return "Not available with a cron schedule";
+  if (f.cloudflare) return "Not available with Cloudflare hosting";
+  if (Number(f.replicas) > 1) return "Not available with more than one replica";
+  return null;
+}
+
+/** Why the serverless settings can't be saved, or null. Nothing to check while it is off. */
+export function serverlessError(
+  f: Pick<Form, "serverless" | "idleMinutes" | "cronSchedule" | "cloudflare" | "replicas">,
+  hasVolume: boolean,
+): string | null {
+  if (!f.serverless) return null;
+  const n = Number(f.idleMinutes);
+  if (!f.idleMinutes.trim() || !Number.isInteger(n) || n < 1 || n > MAX_IDLE_MINUTES)
+    return `Between 1 and ${MAX_IDLE_MINUTES}`;
+  return serverlessBlocker(f, hasVolume);
+}
+
 export const toConfig = (f: Form): ServiceConfig => {
   const common = {
     startCommand: f.startCommand.trim() ? splitArgs(f.startCommand) : undefined,
@@ -186,6 +218,7 @@ export const toConfig = (f: Form): ServiceConfig => {
     memoryMb: optNum(f.memoryMb),
     cpuMillis: optNum(f.cpuMillis),
     replicas: Math.max(1, Math.floor(Number(f.replicas)) || 1),
+    serverless: f.serverless ? { idleMinutes: Math.floor(Number(f.idleMinutes)) || DEFAULT_IDLE_MINUTES } : undefined,
     edgeRules: f.edgeRules.length ? f.edgeRules : undefined,
   };
   if (f.kind === "image")
@@ -281,6 +314,7 @@ export function SettingsTab({
     "Teardown",
     "Resources",
     "Regions & Replicas",
+    "Serverless",
     "Volume",
     ...(canDelete ? ["Danger zone"] : []),
   ].map((label) => ({ id: sectionId(label), label }));
@@ -302,6 +336,7 @@ export function SettingsTab({
       : form.kind !== "image"
         ? hostingError(form)
         : null;
+  const blocker = serverlessBlocker(form, !!instance.volume);
   const set =
     <K extends keyof Form>(k: K) =>
     (e: { target: { value: string } }) =>
@@ -818,6 +853,47 @@ export function SettingsTab({
       </Section>
 
       <Section
+        title="Serverless"
+        description="Stop the service while it is idle."
+      >
+        <div className="flex flex-col gap-1.5">
+          <Switch
+            label="Scale to zero when idle"
+            checked={form.serverless}
+            disabled={!canEdit || (!!blocker && !form.serverless)}
+            onCheckedChange={(serverless) => setForm((f) => ({ ...f, serverless }))}
+          />
+          {blocker ? <p className="text-sm text-muted-foreground">{blocker}</p> : null}
+        </div>
+        {form.serverless ? (
+          <Field
+            label="Idle minutes"
+            hint="The service stops after this long without requests and starts on the next one, which takes a cold start. Only requests to its domains wake it. It runs one replica and has no volume."
+            error={serverlessError(form, !!instance.volume)}
+          >
+            {(p) => (
+              <Input
+                {...p}
+                className="w-32"
+                type="number"
+                min={1}
+                max={MAX_IDLE_MINUTES}
+                inputMode="numeric"
+                disabled={!canEdit}
+                placeholder={String(DEFAULT_IDLE_MINUTES)}
+                value={form.idleMinutes}
+                onChange={set("idleMinutes")}
+              />
+            )}
+          </Field>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            After the idle time without requests the service stops, and the next request starts it. Only requests to its domains wake it. One replica, no volume.
+          </p>
+        )}
+      </Section>
+
+      <Section
         title="Volume"
         description="Persistent storage that survives redeploys."
       >
@@ -874,6 +950,7 @@ export function SettingsTab({
                   loading={save.isPending}
                   disabled={
                     !!replicasError(form.replicas, !!instance.volume) ||
+                    !!serverlessError(form, !!instance.volume) ||
                     !!invalidSource
                   }
                   onClick={() => save.mutate()}

@@ -446,6 +446,7 @@ impl Ctx<'_> {
                 .chain(self.upgrade.is_some().then_some("upgrade"))
                 .chain(self.mesh.map(|_| "mesh"))
                 .chain(Some("disk"))
+                .chain(self.reconciler.serverless().then_some("serverless"))
                 .chain(crate::access::applier().map(|_| "cf-access"))
                 .chain(
                     crate::access::applier()

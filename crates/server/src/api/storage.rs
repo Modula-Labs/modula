@@ -57,6 +57,16 @@ pub async fn create_volume(
 ) -> AppResult<Json<Instance>> {
     let instance = grant.id();
     validate_mount_path(&req.mount_path)?;
+    let serverless: bool =
+        sqlx::query_scalar("SELECT config ? 'serverless' FROM service_instances WHERE id = $1")
+            .bind(instance)
+            .fetch_one(&state.db)
+            .await?;
+    if serverless {
+        return Err(AppError::Conflict(
+            "a serverless service can't have a volume: turn serverless off first".into(),
+        ));
+    }
     let id = Id::new();
     let r = sqlx::query(
         "INSERT INTO volumes (id, service_instance_id, mount_path) VALUES ($1, $2, $3)

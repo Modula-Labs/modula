@@ -8,6 +8,7 @@ export const deploymentBadge: Record<DeploymentStatus, { label: string; tone: To
   building: { label: "Building", tone: "strong" },
   deploying: { label: "Deploying", tone: "strong" },
   active: { label: "Active", tone: "success" },
+  sleeping: { label: "Sleeping", tone: "neutral" },
   failed: { label: "Failed", tone: "danger" },
   crashed: { label: "Crashed", tone: "danger" },
   removed: { label: "Removed", tone: "neutral" },
@@ -22,6 +23,8 @@ export function serviceState(status: DeploymentStatus | null): {
   switch (status) {
     case "active":
       return { label: "Online", tone: "success" };
+    case "sleeping":
+      return { label: "Sleeping", tone: "neutral" };
     case "building":
       return { label: "Building", tone: "warn" };
     case "deploying":
@@ -40,3 +43,6 @@ export function serviceState(status: DeploymentStatus | null): {
 
 export const isLive = (s: DeploymentStatus) =>
   s === "waiting_ci" || s === "queued" || s === "building" || s === "deploying";
+
+/** The deployment is the one serving traffic: running, crashed, or scaled to zero. */
+export const isServingStatus = (s: DeploymentStatus) => s === "active" || s === "crashed" || s === "sleeping";

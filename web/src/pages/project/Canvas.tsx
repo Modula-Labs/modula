@@ -18,7 +18,7 @@ import {
 import "@xyflow/react/dist/base.css";
 import { clsx } from "clsx";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Disk, Maximize, Minus, Plus } from "@/components/ui/icons";
+import { Disk, Maximize, Minus, Moon, Plus } from "@/components/ui/icons";
 import { ServiceIcon } from "@/components/ui/ServiceIcon";
 import { StatusDot } from "@/components/ui/misc";
 import type { DeploymentStatus } from "@/lib/api";
@@ -91,7 +91,14 @@ function ServiceCard({ data }: NodeProps<ServiceNode>) {
       <div className="mt-auto flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-2 text-[13px] whitespace-nowrap">
           <span className="shrink-0">
-            <StatusDot tone={state.tone}>{state.label}</StatusDot>
+            {service.status === "sleeping" && !service.r2 ? (
+              <span className="inline-flex items-center gap-1.5 text-sm text-muted-foreground [&_svg]:size-4">
+                <Moon aria-hidden />
+                {state.label}
+              </span>
+            ) : (
+              <StatusDot tone={state.tone}>{state.label}</StatusDot>
+            )}
           </span>
           {pending > 0 ? (
             <span className="truncate text-muted-foreground">

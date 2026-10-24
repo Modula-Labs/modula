@@ -28,6 +28,14 @@
 //! A push to a service with `waitForCi` starts at `waiting_ci`, placed but
 //! not on any node's desired state, until the commit's other checks pass
 //! (`building`) or fail or time out (`failed`); see `github::ci`.
+//!
+//! Serverless deployments (`config.serverless`, one replica) scale to zero:
+//!
+//!   active ──SLEEPING──▶ sleeping ──ACTIVE (woken, cold start ms)──▶ active
+//!
+//! `sleeping` is live: still the serving deployment (routed, in the desired
+//! state, retired like `active`), with its container stopped until a request
+//! wakes it. It is never a crash, and no webhook or commit status is sent.
 
 use modula_id::Id;
 use modula_proto::node::v1::{DeploymentEvent, DeploymentPhase};
@@ -38,7 +46,7 @@ use super::config::ServiceConfig;
 use crate::error::AppResult;
 use crate::jobs::{self, NewJob};
 
-pub const LIVE: &[&str] = &["building", "deploying", "active", "crashed"];
+pub const LIVE: &[&str] = &["building", "deploying", "active", "sleeping", "crashed"];
 
 pub fn phase_name(p: DeploymentPhase) -> &'static str {
     match p {
@@ -53,6 +61,7 @@ pub fn phase_name(p: DeploymentPhase) -> &'static str {
         DeploymentPhase::Failed => "failed",
         DeploymentPhase::Crashed => "crashed",
         DeploymentPhase::Stopped => "stopped",
+        DeploymentPhase::Sleeping => "sleeping",
     }
 }
 
@@ -271,7 +280,36 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
             };
             crate::alerts::enqueue_event(&mut *tx, event).await?;
         }
-        (DeploymentPhase::Crashed, "active") => {
+        (DeploymentPhase::Sleeping, "active") => {
+            sqlx::query(
+                "UPDATE deployments SET status = 'sleeping', updated_at = now() WHERE id = $1",
+            )
+            .bind(dep)
+            .execute(&mut *tx)
+            .await?;
+            // It leaves (and below, rejoins) the private network's names.
+            kick.extend(crate::mesh::bump_environment(&mut tx, environment).await?);
+        }
+        // Woken by a request (or found running again).
+        (DeploymentPhase::Active, "sleeping" | "active")
+            if status == "sleeping" || ev.cold_start_ms > 0 =>
+        {
+            let cold = i32::try_from(ev.cold_start_ms).ok().filter(|ms| *ms > 0);
+            sqlx::query(
+                "UPDATE deployments SET status = 'active', updated_at = now(),
+                        woke_at = CASE WHEN $2::integer IS NULL THEN woke_at ELSE now() END,
+                        cold_start_ms = coalesce($2, cold_start_ms)
+                 WHERE id = $1",
+            )
+            .bind(dep)
+            .bind(cold)
+            .execute(&mut *tx)
+            .await?;
+            if status == "sleeping" {
+                kick.extend(crate::mesh::bump_environment(&mut tx, environment).await?);
+            }
+        }
+        (DeploymentPhase::Crashed, "active" | "sleeping") => {
             // Stays in the desired state so the restart policy can recover it.
             sqlx::query("UPDATE deployments SET status = 'crashed', error = $2, updated_at = now() WHERE id = $1")
                 .bind(dep)
@@ -319,7 +357,7 @@ pub async fn activate(tx: &mut sqlx::PgConnection, instance: Id, dep: Id) -> App
     let old: Vec<Option<Id>> = sqlx::query_scalar(
         "WITH old AS (
              UPDATE deployments SET status = 'removed', finished_at = now(), updated_at = now()
-             WHERE service_instance_id = $1 AND status IN ('active', 'crashed') AND id <> $2
+             WHERE service_instance_id = $1 AND status IN ('active', 'sleeping', 'crashed') AND id <> $2
              RETURNING id)
          SELECT r.node_id FROM deployment_replicas r JOIN old ON old.id = r.deployment_id",
     )

@@ -165,6 +165,9 @@ enum DeploymentPhase {
   FAILED = 6;
   CRASHED = 7;
   STOPPED = 8;
+  // A serverless deployment stopped its idle container; the edge sends its
+  // next request to the node's wake proxy, which starts it again (ACTIVE).
+  SLEEPING = 11;
 }
 
 message DeploymentEvent {
@@ -177,6 +180,9 @@ message DeploymentEvent {
   // The server folds this into the deployment's config snapshot, so restarts
   // and rollbacks run the same way.
   BuildOutput build = 6;
+  // ACTIVE after a serverless wake: how long the start took, from the first
+  // held request to a passing health check.
+  uint32 cold_start_ms = 7;
 }
 
 message BuildOutput {
@@ -508,6 +514,15 @@ message Workload {
   bool cron = 90;
   // Point-in-time recovery (Postgres with WAL-G); absent = none.
   Pitr pitr = 95;
+  // Scale to zero; absent = always running.
+  Serverless serverless = 96;
+}
+
+// The node stops the container after `idle_secs` without requests and starts
+// it again on the next one (see the node's `edge::wake`). Single replica, no
+// volume. Only requests through the edge wake it.
+message Serverless {
+  uint32 idle_secs = 1;
 }
 
 // The node bind-mounts its own WAL-G binary read-only at /usr/local/bin/wal-g

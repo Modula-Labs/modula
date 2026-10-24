@@ -121,7 +121,7 @@ pub async fn purge(state: &AppState) -> AppResult<u64> {
          WHERE u.purged_at IS NULL AND u.created_at < now() - make_interval(secs => $1)
            AND NOT EXISTS (
                SELECT 1 FROM deployments d WHERE d.upload_id = u.id
-                 AND (d.status IN ('queued', 'building', 'deploying', 'active', 'crashed')
+                 AND (d.status IN ('queued', 'building', 'deploying', 'active', 'sleeping', 'crashed')
                       OR d.id IN (SELECT n.id FROM deployments n
                                   WHERE n.service_instance_id = d.service_instance_id
                                   ORDER BY n.created_at DESC LIMIT $2)))

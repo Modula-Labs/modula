@@ -97,6 +97,7 @@ async fn setup(pool: PgPool) -> Setup {
         upgrade: None,
         mesh: None,
         access_log: None,
+        wake: None,
     };
     tokio::spawn(modula_node::session::run(
         dir,
