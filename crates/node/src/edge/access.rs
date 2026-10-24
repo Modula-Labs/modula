@@ -37,36 +37,46 @@ struct Shared {
 #[derive(Deserialize)]
 struct Line {
     ts: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     duration: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     size: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     status: u32,
     request: Request,
     /// Added by the route's `log_append` handlers (see `caddy::render`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     deployment_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     proxied: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     upstream: String,
 }
 
 #[derive(Deserialize)]
 struct Request {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     remote_ip: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     client_ip: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     method: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     host: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     uri: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     headers: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// A missing or `null` field as its default (Caddy logs `"upstream":null`
+/// for requests no upstream served).
+fn lenient<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 fn cut(mut s: String, max: usize) -> String {
@@ -268,6 +278,17 @@ mod tests {
     fn the_cloudflare_client_ip_counts_only_on_proxied_domains() {
         let line = LINE.replace(r#""proxied":"1""#, r#""proxied":"0""#);
         assert_eq!(parse(line.as_bytes()).unwrap().client_ip, "172.70.1.2");
+    }
+
+    /// Verbatim from Caddy 2.11.1 for a request a block rule answered: no
+    /// upstream served it, so `upstream` is null.
+    #[test]
+    fn requests_answered_by_the_edge_have_no_upstream() {
+        let line = r#"{"level":"info","ts":1792870270.6700659,"logger":"http.log.access.modula","msg":"handled request","request":{"remote_ip":"::1","remote_port":"62278","client_ip":"::1","proto":"HTTP/1.1","method":"GET","host":"a.localhost","uri":"/admin","headers":{"User-Agent":["curl/8.7.1"],"Accept":["*/*"]}},"bytes_read":0,"user_id":"","duration":0.000142083,"size":24,"status":403,"resp_headers":{"Server":["Caddy"],"Content-Type":["application/json"]},"upstream":null,"proxied":"0","deployment_id":"dep1"}"#;
+        let r = parse(line.as_bytes()).unwrap();
+        assert_eq!((r.status, r.upstream.as_str()), (403, ""));
+        assert_eq!(r.client_ip, "::1");
+        assert_eq!(r.path, "/admin");
     }
 
     #[test]

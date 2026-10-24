@@ -155,6 +155,22 @@ fn matchers(rule: &pb::EdgeRule, proxied: bool) -> Vec<Map<String, Value>> {
         .collect()
 }
 
+/// Responses larger than this are passed through uncached.
+const CACHE_MAX_BODY: u64 = 8 * 1024 * 1024;
+
+/// cache-handler (Souin). Its settings must sit under
+/// `Configuration.DefaultCache`: the top-level `ttl` it also accepts is
+/// ignored at v0.16.0 (the 120 s app default wins).
+fn cache_handler(ttl_secs: u32) -> Value {
+    json!({
+        "handler": "cache",
+        "Configuration": { "DefaultCache": {
+            "ttl": format!("{ttl_secs}s"),
+            "max_cacheable_body_bytes": CACHE_MAX_BODY
+        } }
+    })
+}
+
 /// Requests a shared cache must never answer or store.
 fn cacheable() -> Map<String, Value> {
     let mut m = Map::new();
@@ -243,10 +259,7 @@ pub fn subroute(
                 } else {
                     sets.into_iter().map(|s| and(s, cacheable())).collect()
                 };
-                (
-                    json!({ "handler": "cache", "ttl": format!("{}s", c.ttl_secs) }),
-                    false,
-                )
+                (cache_handler(c.ttl_secs), false)
             }
         };
         let mut route = json!({ "handle": [handle] });
@@ -437,7 +450,9 @@ pub mod tests {
         // double negation.
         assert_eq!(
             routes[6]["handle"][0],
-            json!({ "handler": "cache", "ttl": "300s" })
+            json!({ "handler": "cache", "Configuration": { "DefaultCache": {
+                "ttl": "300s", "max_cacheable_body_bytes": CACHE_MAX_BODY
+            } } })
         );
         assert_eq!(
             routes[6]["match"][0],
