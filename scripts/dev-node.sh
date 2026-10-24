@@ -43,10 +43,9 @@ docker run --rm \
   sh -c 'apk add -q --no-cache musl-dev protobuf-dev >/dev/null && cargo build -q --release -p modula-node && cp /target/release/modula-node /target/modula-node.out'
 docker run --rm -v "$target":/target -v "$PWD/$build":/out alpine cp /target/modula-node.out /out/modula-node
 arch=$(docker info --format '{{.Architecture}}' | sed 's/x86_64/amd64/; s/aarch64/arm64/')
-[[ -f $build/buildctl-linux-$arch ]] || scripts/fetch-build-tools.sh "$arch" "$build"
-cp "$build/buildctl-linux-$arch" "$build/buildctl"
-cp "$build/railpack-linux-$arch" "$build/railpack"
-cp deploy/dev/node.Dockerfile deploy/dev/entrypoint.sh "$build/"
+[[ -f $build/workerd-linux-$arch ]] || scripts/fetch-build-tools.sh "$arch" "$build"
+for tool in buildctl railpack wal-g workerd; do cp "$build/$tool-linux-$arch" "$build/$tool"; done
+cp deploy/dev/node.Dockerfile deploy/dev/entrypoint.sh deploy/dev/workerd.sh "$build/"
 docker build -q -t "$image" -f "$build/node.Dockerfile" "$build" >/dev/null
 
 if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
