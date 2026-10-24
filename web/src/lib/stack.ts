@@ -50,6 +50,8 @@ export function imageBaseName(image: string): string {
 export function resolveStackIcon({ stack, image, repo }: { stack?: string | null; image?: string | null; repo?: string | null }): string {
   const s = stack?.trim().toLowerCase();
   if (s && KNOWN.has(s)) return s;
+  // Buckets (self-hosted or R2) share a glyph rather than their server's logo.
+  if (s === "bucket") return "bucket";
   if (image) {
     const base = imageBaseName(image);
     const exact = IMAGE_EXACT[base];

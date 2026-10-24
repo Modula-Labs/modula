@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { Activity, BrandDocker, BrandGithub, Copy, Database, Disk, LayoutGrid, Plus, Power, Refresh, Rocket, Trash } from "@/components/ui/icons";
+import { Activity, BrandDocker, BrandGithub, Bucket, Copy, Database, Disk, LayoutGrid, Plus, Power, Refresh, Rocket, Trash } from "@/components/ui/icons";
 import { ContextMenu, MenuItem, MenuLabel, MenuSeparator } from "@/components/ui/Menu";
 import { useLingering } from "@/components/ui/Sheet";
 import { api, type DeploymentStatus } from "@/lib/api";
@@ -79,6 +79,7 @@ export function ProjectPage({
         image: i?.sourceType === "image" ? i.image : undefined,
         dependsOn: i?.dependsOn,
         pendingChanges: pending?.services.find((x) => x.serviceId === s.id)?.changes.length ?? 0,
+        r2: s.template === "r2" ? { bucket: i?.bucket ?? null } : undefined,
       };
     });
   }, [p, env, pending]);
@@ -189,6 +190,9 @@ export function ProjectPage({
                 <MenuItem icon={<BrandDocker />} onSelect={() => openAdd("image", menu.at)}>
                   Docker Image
                 </MenuItem>
+                <MenuItem icon={<Bucket />} onSelect={() => openAdd("bucket", menu.at)}>
+                  Bucket
+                </MenuItem>
                 {search.service && !instanceOf(search.service)?.volume ? (
                   <MenuItem
                     icon={<Disk />}
@@ -272,7 +276,7 @@ export function ProjectPage({
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div className="pointer-events-auto flex flex-col items-center gap-3 rounded-xl border border-dashed border-border bg-card px-10 py-8 text-center">
               <div className="text-base font-bold">Add your first service</div>
-              <p className="max-w-xs text-sm text-muted-foreground">Deploy from a GitHub repository or a Docker image, or add a database.</p>
+              <p className="max-w-xs text-sm text-muted-foreground">Deploy from a GitHub repository or a Docker image, or add a database or a bucket.</p>
               {atLeast(role, "member") ? (
                 <Button variant="outline" icon={<Plus />} onClick={() => openAdd("root")}>
                   Add a service

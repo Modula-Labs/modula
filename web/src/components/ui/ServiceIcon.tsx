@@ -1,5 +1,5 @@
 import { clsx } from "clsx";
-import { Box } from "@/components/ui/icons";
+import { Box, Bucket } from "@/components/ui/icons";
 import { MONO_STACK_ICONS, resolveStackIcon } from "@/lib/stack";
 
 const urls = import.meta.glob<string>("../../assets/stack/*.svg", { query: "?url", import: "default", eager: true });
@@ -45,7 +45,9 @@ export function ServiceIcon({
         className,
       )}
     >
-      {!url ? (
+      {id === "bucket" ? (
+        <Bucket aria-hidden className={clsx(GLYPH[size], "text-muted-foreground")} />
+      ) : !url ? (
         <Box aria-hidden className={clsx(GLYPH[size], "text-muted-foreground")} />
       ) : mono ? (
         <span

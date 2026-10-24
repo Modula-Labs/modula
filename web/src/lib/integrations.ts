@@ -40,6 +40,26 @@ export interface R2Info {
   canCreateBuckets: boolean;
   apiTokensUrl: string;
 }
+export interface R2BucketLink {
+  projectId: string;
+  projectName: string;
+  serviceId: string;
+  serviceName: string;
+  environmentId: string;
+  environmentName: string;
+}
+export interface R2Bucket {
+  name: string;
+  creationDate: string | null;
+  location: string | null;
+  /** Services (per environment) whose credentials reach this bucket. */
+  links: R2BucketLink[];
+}
+export interface R2Buckets {
+  accountId: string;
+  endpoint: string;
+  buckets: R2Bucket[];
+}
 export interface DomainIngress {
   managed: boolean;
   zone: string | null;
@@ -58,6 +78,7 @@ export const cloudflare = {
   disconnect: (ws: string) => del<CloudflareStatus>(base(ws)),
   zones: (ws: string) => get<CloudflareZone[]>(`${base(ws)}/zones`),
   r2: (ws: string) => get<R2Info>(`${base(ws)}/r2`),
+  r2Buckets: (ws: string) => get<R2Buckets>(`${base(ws)}/r2/buckets`),
   createR2Target: (
     ws: string,
     body: { name: string; bucket: string; prefix?: string; accessKeyId: string; secretAccessKey: string },

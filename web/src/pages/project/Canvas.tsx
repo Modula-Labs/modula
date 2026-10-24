@@ -44,6 +44,8 @@ export interface CanvasService {
   volume?: string | null;
   /** Variables and settings changed since the last deployment. */
   pendingChanges?: number;
+  /** A Cloudflare R2 bucket service: its bucket here (null = none yet). Nothing deploys. */
+  r2?: { bucket: string | null };
 }
 
 /** Where a right-click happened: viewport pixels and canvas coordinates. */
@@ -56,7 +58,11 @@ type ServiceNode = Node<{ service: CanvasService; selected: boolean }, "service"
 
 function ServiceCard({ data }: NodeProps<ServiceNode>) {
   const { service, selected } = data;
-  const state = serviceState(service.status);
+  const state = service.r2
+    ? service.r2.bucket
+      ? { label: "Cloudflare R2", tone: "success" as const }
+      : { label: "No bucket in this environment", tone: "neutral" as const }
+    : serviceState(service.status);
   const pending = service.pendingChanges ?? 0;
   return (
     <div
@@ -77,7 +83,7 @@ function ServiceCard({ data }: NodeProps<ServiceNode>) {
           <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-xs font-normal text-muted-foreground">Edited</span>
         ) : null}
       </div>
-      <div className="mt-1 truncate text-[13px] text-muted-foreground">{service.domain ?? service.repo ?? " "}</div>
+      <div className="mt-1 truncate text-[13px] text-muted-foreground">{service.r2?.bucket ?? service.domain ?? service.repo ?? " "}</div>
       <div className="mt-auto flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-2 text-[13px] whitespace-nowrap">
           <span className="shrink-0">
