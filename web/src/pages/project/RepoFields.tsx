@@ -18,15 +18,18 @@ import { Field, Input } from "@/components/ui/Input";
 import { Menu, MenuItem, MenuSeparator } from "@/components/ui/Menu";
 import { relativeTime } from "@/lib/format";
 import {
+  appOwner,
   effectiveAccount,
   filterReposByAccount,
   github,
+  githubAvatar,
   rankBranches,
   rankRepos,
   type GithubInstallation,
   type GithubRepo,
 } from "@/lib/github";
 import {
+  AddAppModal,
   useConnectGithub,
   useGithub,
 } from "@/pages/settings/IntegrationsGithub";
@@ -294,54 +297,84 @@ function AccountPicker({
   disabled?: boolean;
 }) {
   const c = s.connect;
+  const [adding, setAdding] = useState(false);
   const current = s.accounts.find((i) => i.accountLogin === s.account);
   return (
     <Field label="GitHub account">
       {(p) => (
-        <Menu
-          align="start"
-          trigger={
-            <Button
-              type="button"
-              variant="outline"
-              id={p.id}
-              disabled={disabled}
-              className="w-full justify-start gap-2 px-2.5"
-            >
-              {current ? (
-                <AccountLabel i={current} />
-              ) : (
-                <span className="text-muted-foreground">Choose an account</span>
-              )}
-              <ChevronDown className="ml-auto size-4 shrink-0 text-muted-foreground" />
-            </Button>
-          }
-        >
-          {s.accounts.map((i) => (
-            <MenuItem
-              key={i.id}
-              onSelect={() => s.selectAccount(i.accountLogin)}
-              icon={
-                i.accountLogin === s.account ? (
-                  <Check />
+        <>
+          <Menu
+            align="start"
+            trigger={
+              <Button
+                type="button"
+                variant="outline"
+                id={p.id}
+                disabled={disabled}
+                className="w-full justify-start gap-2 px-2.5"
+              >
+                {current ? (
+                  <AccountLabel i={current} />
                 ) : (
-                  <span className="size-4" />
-                )
-              }
-            >
-              <AccountLabel i={i} />
-            </MenuItem>
-          ))}
-          <MenuSeparator />
-          <MenuItem
-            icon={<Plus />}
-            disabled={c.mode !== "connect" || c.busy}
-            title={c.help ?? undefined}
-            onSelect={() => c.connect.mutate(undefined)}
+                  <span className="text-muted-foreground">
+                    Choose an account
+                  </span>
+                )}
+                <ChevronDown className="ml-auto size-4 shrink-0 text-muted-foreground" />
+              </Button>
+            }
           >
-            Add GitHub account or organization
-          </MenuItem>
-        </Menu>
+            {s.accounts.map((i) => (
+              <MenuItem
+                key={i.id}
+                onSelect={() => s.selectAccount(i.accountLogin)}
+                icon={
+                  i.accountLogin === s.account ? (
+                    <Check />
+                  ) : (
+                    <span className="size-4" />
+                  )
+                }
+              >
+                <AccountLabel i={i} />
+              </MenuItem>
+            ))}
+            <MenuSeparator />
+            {c.apps.map((a) => (
+              <MenuItem
+                key={a.id}
+                icon={<Plus />}
+                disabled={c.mode !== "connect" || c.busy}
+                title={c.help ?? undefined}
+                onSelect={() => c.connect.mutate({ appId: a.id })}
+              >
+                Install on {appOwner(a)}
+              </MenuItem>
+            ))}
+            <MenuItem
+              icon={<BrandGithub />}
+              disabled={!c.canAddApp || c.busy}
+              title={
+                c.canAddApp
+                  ? undefined
+                  : (c.help ?? "Ask an instance admin to add a GitHub App.")
+              }
+              onSelect={() => {
+                c.connect.reset();
+                setAdding(true);
+              }}
+            >
+              Add GitHub App
+            </MenuItem>
+          </Menu>
+          <AddAppModal
+            open={adding}
+            onOpenChange={setAdding}
+            busy={c.busy}
+            error={c.connect.error?.message}
+            onSubmit={(org) => c.connect.mutate({ org })}
+          />
+        </>
       )}
     </Field>
   );
@@ -372,7 +405,24 @@ function ConnectPanel({
   disabled?: boolean;
 }) {
   const c = s.connect;
+  const [adding, setAdding] = useState(false);
   if (c.loading) return null;
+  const addApp = (
+    <Button
+      type="button"
+      variant="secondary"
+      className="w-fit"
+      icon={c.step === "add-app" ? <BrandGithub /> : <Plus />}
+      loading={c.step === "add-app" && c.busy}
+      disabled={disabled}
+      onClick={() => {
+        c.connect.reset();
+        setAdding(true);
+      }}
+    >
+      Add GitHub App
+    </Button>
+  );
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-border bg-muted/40 p-4">
       <div className="flex items-center gap-2 text-sm font-bold">
@@ -380,25 +430,74 @@ function ConnectPanel({
         Connect GitHub
       </div>
       <p className="text-sm text-muted-foreground">
-        Pick your personal account or an organization on GitHub, then choose
-        which repositories Modula can see. Needed for private repositories and
-        deploys on push.
+        {c.step === "pick"
+          ? "Pick the GitHub account to connect, then choose which repositories Modula can see. Needed for private repositories and deploys on push."
+          : c.step === "add-app"
+            ? "Add a GitHub App for your personal account or an organization, then choose which repositories Modula can see. Needed for private repositories and deploys on push."
+            : "Connect your GitHub account, then choose which repositories Modula can see. Needed for private repositories and deploys on push."}
       </p>
-      {c.mode === "connect" ? (
-        <Button
-          type="button"
-          variant="secondary"
-          className="w-fit"
-          icon={<BrandGithub />}
-          loading={c.busy}
-          disabled={disabled}
-          onClick={() => c.connect.mutate(undefined)}
-        >
-          Connect GitHub
-        </Button>
-      ) : (
+      {c.mode !== "connect" ? (
         <p className="text-sm">{c.help}</p>
+      ) : c.step === "add-app" ? (
+        addApp
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          {c.step === "install" ? (
+            <Button
+              type="button"
+              variant="secondary"
+              className="w-fit"
+              icon={<BrandGithub />}
+              loading={c.busy}
+              disabled={disabled}
+              onClick={() => c.connect.mutate({ appId: c.apps[0]!.id })}
+            >
+              Connect {appOwner(c.apps[0]!)}
+            </Button>
+          ) : (
+            <Menu
+              align="start"
+              trigger={
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="w-fit"
+                  icon={<BrandGithub />}
+                  loading={c.busy}
+                  disabled={disabled}
+                >
+                  Connect GitHub
+                  <ChevronDown className="text-muted-foreground" />
+                </Button>
+              }
+            >
+              {c.apps.map((a) => (
+                <MenuItem
+                  key={a.id}
+                  onSelect={() => c.connect.mutate({ appId: a.id })}
+                  icon={
+                    <img
+                      src={githubAvatar(appOwner(a))}
+                      alt=""
+                      className="size-4 rounded-full"
+                    />
+                  }
+                >
+                  {appOwner(a)}
+                </MenuItem>
+              ))}
+            </Menu>
+          )}
+          {c.canAddApp ? addApp : null}
+        </div>
       )}
+      <AddAppModal
+        open={adding}
+        onOpenChange={setAdding}
+        busy={c.busy}
+        error={c.connect.error?.message}
+        onSubmit={(org) => c.connect.mutate({ org })}
+      />
     </div>
   );
 }

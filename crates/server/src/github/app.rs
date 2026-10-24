@@ -1,7 +1,8 @@
-//! The instance's GitHub App: created once through GitHub's manifest flow,
-//! installed per workspace. Its private key signs short-lived App JWTs, which
-//! mint installation tokens scoped to one repository and one permission.
-//! Tokens are cached in memory and never logged.
+//! The instance's GitHub Apps: created through GitHub's manifest flow, one per
+//! GitHub account or organization (private: installable only on the account
+//! that owns it), and installed per workspace. An App's private key signs
+//! short-lived App JWTs, which mint installation tokens scoped to one
+//! repository and one permission. Tokens are cached in memory and never logged.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,12 +28,13 @@ use crate::state::AppState;
 const TOKEN_MARGIN: Duration = Duration::minutes(5);
 const MAX_REPO_PAGES: u32 = 10;
 
-pub fn aad(column: &str) -> FieldAad<'_> {
+/// Sealed columns are bound to their App (`row` = the App's id).
+pub fn aad<'a>(column: &'a str, row: &'a str) -> FieldAad<'a> {
     FieldAad {
         scope: INSTANCE_SCOPE,
-        table: "github_app",
+        table: "github_apps",
         column,
-        row: "app",
+        row,
     }
 }
 
@@ -59,17 +61,18 @@ struct Creds {
     key: EncodingKey,
 }
 
-async fn creds(state: &AppState) -> AppResult<Creds> {
-    let row: Option<(i64, Vec<u8>)> =
-        sqlx::query_as("SELECT app_id, private_key_sealed FROM github_app")
+async fn creds(state: &AppState, app_id: i64) -> AppResult<Creds> {
+    let sealed: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT private_key_sealed FROM github_apps WHERE id = $1")
+            .bind(app_id)
             .fetch_optional(&state.db)
             .await?;
-    let (app_id, sealed) = row.ok_or_else(|| {
-        AppError::Unavailable("the GitHub App has not been set up on this instance".into())
+    let sealed = sealed.ok_or_else(|| {
+        AppError::Unavailable("that GitHub App is no longer set up on this instance".into())
     })?;
     let pem = state
         .keys
-        .open(&state.db, &sealed, aad("private_key"))
+        .open(&state.db, &sealed, aad("private_key", &app_id.to_string()))
         .await?;
     let key =
         EncodingKey::from_rsa_pem(&pem).map_err(|e| anyhow::anyhow!("GitHub App key: {e}"))?;
@@ -112,23 +115,27 @@ fn repo_name(repo: &str) -> &str {
 
 pub const HOOK_SYNC_JOB: &str = "github.app_hook_sync";
 
-/// Job: points the App's webhook at this dashboard's current address (it
+/// Job: points every App's webhook at this dashboard's current address (it
 /// was registered with the address the App was created from; the dashboard
 /// may have moved to a domain since). The setup and callback URLs can't be
 /// changed through the API; they only matter while installing.
 pub async fn hook_sync_job(state: AppState, _job: crate::jobs::Job) -> anyhow::Result<()> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM github_app)")
-        .fetch_one(&state.db)
+    let apps: Vec<i64> = sqlx::query_scalar("SELECT id FROM github_apps ORDER BY created_at")
+        .fetch_all(&state.db)
         .await?;
-    if !exists {
-        return Ok(());
-    }
     let want = format!(
         "{}{}",
         state.public_origin(),
         crate::api::github::WEBHOOK_PATH
     );
-    let jwt = app_jwt(&creds(&state).await?)?;
+    for app in apps {
+        sync_hook(&state, app, &want).await?;
+    }
+    Ok(())
+}
+
+async fn sync_hook(state: &AppState, app: i64, want: &str) -> anyhow::Result<()> {
+    let jwt = app_jwt(&creds(state, app).await?)?;
     let resp = state
         .github
         .request(Method::GET, "/app/hook/config")
@@ -141,7 +148,7 @@ pub async fn hook_sync_job(state: AppState, _job: crate::jobs::Job) -> anyhow::R
         url: Option<String>,
     }
     let current: HookConfig = resp.error_for_status()?.json().await?;
-    if current.url.as_deref() == Some(want.as_str()) {
+    if current.url.as_deref() == Some(want) {
         return Ok(());
     }
     state
@@ -153,7 +160,7 @@ pub async fn hook_sync_job(state: AppState, _job: crate::jobs::Job) -> anyhow::R
         .await
         .map_err(|e| anyhow::anyhow!("GitHub unreachable: {e}"))?
         .error_for_status()?;
-    tracing::info!(url = %want, previous = ?current.url, "GitHub App webhook URL updated");
+    tracing::info!(app, url = %want, previous = ?current.url, "GitHub App webhook URL updated");
     Ok(())
 }
 
@@ -194,7 +201,13 @@ pub async fn installation_token(
         }
         TokenScope::Repos => json!({ "permissions": { "metadata": "read" } }),
     };
-    let jwt = app_jwt(&creds(state).await?)?;
+    let app: Option<i64> =
+        sqlx::query_scalar("SELECT app_id FROM github_installations WHERE id = $1")
+            .bind(installation)
+            .fetch_optional(&state.db)
+            .await?;
+    let app = app.ok_or_else(|| AppError::bad_request("unknown GitHub App installation"))?;
+    let jwt = app_jwt(&creds(state, app).await?)?;
     let resp = state
         .github
         .request(
@@ -237,6 +250,11 @@ pub async fn installation_token(
 /// Forget an installation's cached tokens (it was uninstalled).
 pub fn forget_installation(state: &AppState, installation: i64) {
     crate::sync::lock(&state.github.tokens).retain(|(id, _), _| *id != installation);
+}
+
+/// Forget every cached token (an App was removed).
+pub fn forget_tokens(state: &AppState) {
+    crate::sync::lock(&state.github.tokens).clear();
 }
 
 /// The installation in `workspace` that covers `repo`'s owner, if any.
@@ -407,9 +425,9 @@ pub struct Installation {
     pub account_type: String,
 }
 
-/// Look an installation up as the App (proves it belongs to our App).
-pub async fn installation(state: &AppState, id: i64) -> AppResult<Installation> {
-    let jwt = app_jwt(&creds(state).await?)?;
+/// Look an installation up as `app` (proves it belongs to that App).
+pub async fn installation(state: &AppState, app: i64, id: i64) -> AppResult<Installation> {
+    let jwt = app_jwt(&creds(state, app).await?)?;
     let resp = state
         .github
         .request(Method::GET, &format!("/app/installations/{id}"))
@@ -475,6 +493,7 @@ pub fn is_github_web_url(state: &AppState, raw: &str) -> bool {
 /// The user token is used for this one check and dropped.
 pub async fn user_has_installation(
     state: &AppState,
+    app: i64,
     code: &str,
     installation: i64,
 ) -> AppResult<bool> {
@@ -483,17 +502,18 @@ pub async fn user_has_installation(
         return Err(AppError::bad_request("invalid code"));
     }
     let row: Option<(String, Vec<u8>)> =
-        sqlx::query_as("SELECT client_id, client_secret_sealed FROM github_app")
+        sqlx::query_as("SELECT client_id, client_secret_sealed FROM github_apps WHERE id = $1")
+            .bind(app)
             .fetch_optional(&state.db)
             .await?;
     let Some((client_id, sealed)) = row else {
         return Err(AppError::Unavailable(
-            "the GitHub App has not been set up on this instance".into(),
+            "that GitHub App is no longer set up on this instance".into(),
         ));
     };
     let secret = state
         .keys
-        .open(&state.db, &sealed, aad("client_secret"))
+        .open(&state.db, &sealed, aad("client_secret", &app.to_string()))
         .await?;
     let secret =
         zeroize::Zeroizing::new(String::from_utf8(secret.to_vec()).map_err(anyhow::Error::from)?);

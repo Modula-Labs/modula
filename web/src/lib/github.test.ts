@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
+import type { Role } from "@/lib/api";
 import { serviceNameFromRepo } from "@/pages/project/NewServiceDialog";
 import {
+  appOwner,
   connectMode,
+  connectStep,
+  githubAvatar,
   defaultAccount,
   effectiveAccount,
   filterReposByAccount,
@@ -101,42 +105,36 @@ describe("githubReturnNotice", () => {
 });
 
 describe("connectMode", () => {
-  it("lets workspace admins connect, creating the App only as an instance admin", () => {
-    expect(
-      connectMode({
-        appConfigured: true,
-        isInstanceAdmin: false,
-        role: "admin",
-      }),
-    ).toBe("connect");
-    expect(
-      connectMode({
-        appConfigured: false,
-        isInstanceAdmin: true,
-        role: "admin",
-      }),
-    ).toBe("connect");
-    expect(
-      connectMode({
-        appConfigured: false,
-        isInstanceAdmin: false,
-        role: "admin",
-      }),
-    ).toBe("ask-instance-admin");
-    expect(
-      connectMode({
-        appConfigured: true,
-        isInstanceAdmin: true,
-        role: "member",
-      }),
-    ).toBe("ask-workspace-admin");
-    expect(
-      connectMode({
-        appConfigured: true,
-        isInstanceAdmin: false,
-        role: undefined,
-      }),
-    ).toBe("ask-workspace-admin");
+  const m = (
+    appCount: number,
+    isInstanceAdmin: boolean,
+    role: Role | undefined,
+  ) => connectMode({ appCount, isInstanceAdmin, role });
+  it("lets workspace admins connect, adding the first App only as an instance admin", () => {
+    expect(m(1, false, "admin")).toBe("connect");
+    expect(m(3, false, "admin")).toBe("connect");
+    expect(m(0, true, "admin")).toBe("connect");
+    expect(m(0, false, "admin")).toBe("ask-instance-admin");
+    expect(m(1, true, "member")).toBe("ask-workspace-admin");
+    expect(m(1, false, undefined)).toBe("ask-workspace-admin");
+  });
+});
+
+describe("connectStep", () => {
+  it("adds the first App, installs the only one, asks which with several", () => {
+    expect(connectStep(0)).toBe("add-app");
+    expect(connectStep(1)).toBe("install");
+    expect(connectStep(2)).toBe("pick");
+  });
+});
+
+describe("appOwner / githubAvatar", () => {
+  it("falls back to the slug and encodes the login", () => {
+    expect(appOwner({ ownerLogin: "acme", slug: "modula-acme" })).toBe("acme");
+    expect(appOwner({ ownerLogin: null, slug: "modula-x" })).toBe("modula-x");
+    expect(githubAvatar("a b")).toBe(
+      "https://avatars.githubusercontent.com/a%20b?s=64",
+    );
   });
 });
 
@@ -171,6 +169,8 @@ describe("accounts", () => {
     avatarUrl: "",
     configureUrl: "",
     createdAt: "",
+    appId: 1,
+    appSlug: "app",
   });
   const r = (fullName: string, updatedAt: string | null): GithubRepo => ({
     ...repo(fullName),

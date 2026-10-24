@@ -52,7 +52,7 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
     let row: Option<(Id, String, bool, serde_json::Value)> = sqlx::query_as(
         "SELECT service_instance_id, status,
                 commit_sha IS NOT NULL AND trigger IN ('push', 'manual')
-                  AND EXISTS (SELECT 1 FROM github_app),
+                  AND EXISTS (SELECT 1 FROM github_apps),
                 config
          FROM deployments WHERE id = $1 AND node_id = $2 FOR UPDATE",
     )

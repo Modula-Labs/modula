@@ -507,15 +507,16 @@ CREATE INDEX changes_set_idx ON changes (change_set_id);
 -- GitHub App (private repositories, push-to-deploy, commit statuses)
 ---------------------------------------------------------------------------
 
--- One App per instance, created through GitHub's manifest flow. Secrets are
--- sealed with the instance data key.
-CREATE TABLE github_app (
-    id                     boolean PRIMARY KEY DEFAULT true CHECK (id),
-    app_id                 bigint NOT NULL,
+-- GitHub Apps, created through GitHub's manifest flow: one per GitHub account
+-- or organization (a private App installs only on the account that owns it).
+-- Secrets are sealed with the instance data key.
+CREATE TABLE github_apps (
+    id                     bigint PRIMARY KEY,  -- GitHub's App id
     slug                   text NOT NULL,
     client_id              text NOT NULL,
     html_url               text NOT NULL,
     owner_login            text,
+    public                 boolean NOT NULL DEFAULT false,
     private_key_sealed     bytea NOT NULL,
     webhook_secret_sealed  bytea NOT NULL,
     client_secret_sealed   bytea NOT NULL,
@@ -526,6 +527,7 @@ CREATE TABLE github_app (
 -- Installations of the App, each bound to one workspace. `id` is GitHub's.
 CREATE TABLE github_installations (
     id             bigint PRIMARY KEY,
+    app_id         bigint NOT NULL REFERENCES github_apps (id) ON DELETE CASCADE,
     workspace_id   id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     account_login  text NOT NULL,
     account_type   text NOT NULL,
@@ -544,9 +546,11 @@ CREATE TABLE github_flow_states (
     kind          text NOT NULL CHECK (kind IN ('manifest', 'install')),
     user_id       id NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     workspace_id  id REFERENCES workspaces (id) ON DELETE CASCADE,
+    -- The App being installed ('install' flows).
+    app_id        bigint REFERENCES github_apps (id) ON DELETE CASCADE,
     return_to     text CHECK (left(return_to, 1) = '/' AND length(return_to) <= 512),
     expires_at    timestamptz NOT NULL,
-    CHECK (kind = 'manifest' OR workspace_id IS NOT NULL)
+    CHECK (kind = 'manifest' OR (workspace_id IS NOT NULL AND app_id IS NOT NULL))
 );
 
 -- Webhook deliveries already processed (replay protection), pruned after 7 days.

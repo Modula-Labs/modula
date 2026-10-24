@@ -165,6 +165,7 @@ fn is_sha(s: &str) -> bool {
 pub async fn handle_push(
     state: &AppState,
     meta: &RequestMeta,
+    app: i64,
     delivery: &str,
     ev: &PushEvent,
 ) -> AppResult<Vec<Id>> {
@@ -185,7 +186,7 @@ pub async fn handle_push(
          JOIN services s ON s.id = i.service_id
          JOIN projects p ON p.id = s.project_id
          JOIN github_installations g ON g.workspace_id = p.workspace_id
-         WHERE g.id = $1 AND lower(g.account_login) = lower($2)
+         WHERE g.id = $1 AND g.app_id = $5 AND lower(g.account_login) = lower($2)
            AND i.config->'source'->>'type' = 'repo'
            AND lower(i.config->'source'->>'repo') = lower($3)
            AND i.config->'source'->>'branch' = $4
@@ -196,6 +197,7 @@ pub async fn handle_push(
     .bind(owner)
     .bind(repo)
     .bind(branch)
+    .bind(app)
     .fetch_all(&state.db)
     .await?;
     if candidates.is_empty() {

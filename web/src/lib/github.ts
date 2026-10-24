@@ -5,11 +5,18 @@ import { get, post, type Role } from "./api";
 import { atLeast } from "./roles";
 import { safeHttpUrl } from "./url";
 
+/** One GitHub App of the instance (one private App per GitHub account/organization). */
 export interface GithubApp {
-  configured: boolean;
-  slug: string | null;
-  htmlUrl: string | null;
+  id: number;
+  slug: string;
+  htmlUrl: string;
+  /** The GitHub account or organization that owns it (the only one a private App installs on). */
   ownerLogin: string | null;
+  public: boolean;
+  createdAt: string;
+}
+export interface GithubApps {
+  apps: GithubApp[];
   /** Where GitHub delivers webhooks: this instance's public URL. */
   webhookUrl: string;
 }
@@ -21,6 +28,9 @@ export interface GithubInstallation {
   /** The installation's settings on GitHub (repository access). */
   configureUrl: string;
   createdAt: string;
+  /** The App this installation belongs to. */
+  appId: number;
+  appSlug: string;
 }
 export interface GithubRepo {
   fullName: string;
@@ -46,7 +56,9 @@ const qs = (q: string) =>
   q.trim() ? `?q=${encodeURIComponent(q.trim())}&perPage=100` : "?perPage=100";
 
 export const github = {
-  app: () => get<GithubApp>("/api/github/app"),
+  apps: () => get<GithubApps>("/api/github/apps"),
+  /** Instance admins; sudo (the request layer asks). Removes its installations everywhere. */
+  deleteApp: (id: number) => post<void>("/api/github/apps/remove", { id }),
   /** Instance admins (sudo; the request layer asks). With a workspace, GitHub goes on to
    *  installing the new App there and comes back to `returnTo`. */
   manifest: (
@@ -57,8 +69,9 @@ export const github = {
       workspaceId: o.workspaceId,
       returnTo: o.returnTo,
     }),
-  installUrl: (workspaceId: string, returnTo?: string) =>
-    post<{ url: string }>(`${ws(workspaceId)}/install`, { returnTo }),
+  /** `appId` is required once the instance has more than one App. */
+  installUrl: (workspaceId: string, returnTo?: string, appId?: number) =>
+    post<{ url: string }>(`${ws(workspaceId)}/install`, { returnTo, appId }),
   installations: (workspaceId: string) =>
     get<GithubInstallation[]>(`${ws(workspaceId)}/installations`),
   repos: (workspaceId: string, q = "") =>
@@ -90,16 +103,30 @@ export type ConnectMode =
   "connect" | "ask-instance-admin" | "ask-workspace-admin";
 
 export function connectMode(o: {
-  appConfigured: boolean;
+  appCount: number;
   isInstanceAdmin: boolean;
   role: Role | undefined;
 }): ConnectMode {
   // Installing binds GitHub to the workspace: its admins only.
   if (!atLeast(o.role, "admin")) return "ask-workspace-admin";
-  // Without an App, the flow starts by creating it: instance admins only.
-  if (!o.appConfigured && !o.isInstanceAdmin) return "ask-instance-admin";
+  // Without an App, the flow starts by creating one: instance admins only.
+  if (o.appCount === 0 && !o.isInstanceAdmin) return "ask-instance-admin";
   return "connect";
 }
+
+/** What "Connect GitHub" starts: create the first App, install the only App, or pick whose. */
+export const connectStep = (
+  appCount: number,
+): "add-app" | "install" | "pick" =>
+  appCount === 0 ? "add-app" : appCount === 1 ? "install" : "pick";
+
+/** The App's owner as shown to people (falls back to the slug). */
+export const appOwner = (a: Pick<GithubApp, "ownerLogin" | "slug">) =>
+  a.ownerLogin || a.slug;
+
+/** GitHub's avatar for an account login. */
+export const githubAvatar = (login: string) =>
+  `https://avatars.githubusercontent.com/${encodeURIComponent(login)}?s=64`;
 
 export const connectHelp: Record<Exclude<ConnectMode, "connect">, string> = {
   "ask-instance-admin":
@@ -107,17 +134,18 @@ export const connectHelp: Record<Exclude<ConnectMode, "connect">, string> = {
   "ask-workspace-admin": "Ask a workspace admin to connect GitHub.",
 };
 
-/** One click: create the instance's App first when there is none (it then goes straight on to
- *  installing it), else straight to GitHub's installation page. GitHub sends the browser back
- *  to `returnTo` with `?github=…`. Resolves once the browser is on its way. */
+/** Install an existing App on the workspace (straight to GitHub's installation page), or, with
+ *  no `appId`, create a new one first (`org`, else the admin's personal account; it then goes
+ *  straight on to installing it). GitHub sends the browser back to `returnTo` with `?github=…`.
+ *  Resolves once the browser is on its way. */
 export async function connectGithub(o: {
   workspaceId: string;
   returnTo: string;
-  appConfigured: boolean;
+  appId?: number;
   org?: string;
 }) {
-  if (o.appConfigured) {
-    const { url } = await github.installUrl(o.workspaceId, o.returnTo);
+  if (o.appId !== undefined) {
+    const { url } = await github.installUrl(o.workspaceId, o.returnTo, o.appId);
     const safe = safeHttpUrl(url, true);
     if (!safe) throw new Error("unexpected GitHub URL");
     window.location.assign(safe);
@@ -164,7 +192,7 @@ export function githubReturnNotice(
     case "created":
       return {
         tone: "success",
-        text: "GitHub App created. Install it on the accounts whose repositories you deploy.",
+        text: "GitHub App created. Install it on the account that owns it to pick repositories.",
       };
     case "installed":
       return { tone: "success", text: "GitHub connected — pick a repo." };

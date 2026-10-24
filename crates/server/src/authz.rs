@@ -111,6 +111,8 @@ pub enum Action {
     NodeUpdate,
     /// Instance-level, no path parameter: create the instance's GitHub App.
     GithubAppCreate,
+    /// Instance-level: remove one of the instance's GitHub Apps.
+    GithubAppDelete,
     /// Install the GitHub App for a workspace.
     GithubInstall,
     /// List repositories reachable through a workspace's installations.
@@ -222,7 +224,10 @@ impl Action {
             }
             Self::NodeRevoke | Self::NodeUpdate => K::Node,
             Self::GithubInstall | Self::GithubRepoList => K::Workspace,
-            Self::NodeList | Self::NodeJoinTokenCreate | Self::GithubAppCreate => return None,
+            Self::NodeList
+            | Self::NodeJoinTokenCreate
+            | Self::GithubAppCreate
+            | Self::GithubAppDelete => return None,
             Self::BackupTargetList | Self::BackupTargetCreate => K::Workspace,
             Self::BackupTargetDelete => K::BackupTarget,
             Self::BackupRead | Self::BackupScheduleUpdate | Self::BackupCreate => {
@@ -303,7 +308,8 @@ impl Action {
             | Self::NodeJoinTokenCreate
             | Self::NodeRevoke
             | Self::NodeUpdate
-            | Self::GithubAppCreate => Role::Admin,
+            | Self::GithubAppCreate
+            | Self::GithubAppDelete => Role::Admin,
             Self::BackupRead => Role::Viewer,
             Self::BackupCreate => Role::Deployer,
             Self::BackupTargetList
@@ -353,7 +359,8 @@ impl Action {
             | Self::VariableReveal
             | Self::NodeJoinTokenCreate
             | Self::NodeRevoke
-            | Self::GithubAppCreate => true,
+            | Self::GithubAppCreate
+            | Self::GithubAppDelete => true,
             Self::WorkspaceRead
             | Self::WorkspaceUpdate
             | Self::SessionRevoke
@@ -710,6 +717,7 @@ mod tests {
             Action::NodeJoinTokenCreate,
             Action::NodeRevoke,
             Action::GithubAppCreate,
+            Action::GithubAppDelete,
             Action::UpdatesRead,
             Action::UpdatesUpdate,
             Action::UpdatesRun,

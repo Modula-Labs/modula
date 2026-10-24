@@ -217,8 +217,8 @@ async fn manifest_state(app: &TestApp, admin: &str) -> String {
         r.json["manifest"]["hook_attributes"]["url"],
         format!("{ORIGIN}/api/github/webhook")
     );
-    // Installable on any account or org (binding still needs a flow started here).
-    assert_eq!(r.json["manifest"]["public"], true);
+    // Private: installable only on the account that owns it.
+    assert_eq!(r.json["manifest"]["public"], false);
     r.json["state"].as_str().unwrap().to_owned()
 }
 
@@ -327,7 +327,7 @@ async fn manifest_callback_state_is_single_use_and_bound(pool: PgPool) {
 
     // Credentials are stored sealed, never in the clear.
     let (slug, sealed): (String, Vec<u8>) =
-        sqlx::query_as("SELECT slug, webhook_secret_sealed FROM github_app")
+        sqlx::query_as("SELECT slug, webhook_secret_sealed FROM github_apps")
             .fetch_one(app.db())
             .await
             .unwrap();
@@ -337,16 +337,32 @@ async fn manifest_callback_state_is_single_use_and_bound(pool: PgPool) {
             .windows(WEBHOOK_SECRET.len())
             .any(|w| w == WEBHOOK_SECRET.as_bytes())
     );
-    // One App per instance.
+    // One App per account: the owner already has one...
     let r = app
         .call(
             Method::POST,
             "/api/github/app/manifest",
             Some(&admin),
-            Some(json!({})),
+            Some(json!({ "org": "ACME" })),
         )
         .await;
-    assert_eq!(r.status, StatusCode::CONFLICT);
+    assert_eq!(r.status, StatusCode::CONFLICT, "{:?}", r.json);
+    // ...another organization gets its own.
+    let r = app
+        .call(
+            Method::POST,
+            "/api/github/app/manifest",
+            Some(&admin),
+            Some(json!({ "org": "other-org" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    // The same App coming back again is refused.
+    let st = r.json["state"].as_str().unwrap().to_owned();
+    assert_eq!(
+        callback(&app, &admin, "goodcode", &st).await.status,
+        StatusCode::CONFLICT
+    );
 }
 
 /// "Connect GitHub" on an instance without an App: creating it carries
@@ -495,7 +511,7 @@ async fn connect_states_and_permissions(pool: PgPool) {
         callback(&app, &admin, "goodcode", &st).await.status,
         StatusCode::BAD_REQUEST
     );
-    let apps: i64 = sqlx::query_scalar("SELECT count(*) FROM github_app")
+    let apps: i64 = sqlx::query_scalar("SELECT count(*) FROM github_apps")
         .fetch_one(app.db())
         .await
         .unwrap();
@@ -605,8 +621,8 @@ async fn seed(app: &TestApp, admin: &str, instances: &[(&str, Value)]) -> Vec<Id
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO github_installations (id, workspace_id, account_login, account_type)
-         VALUES ($1, $2, 'acme', 'Organization')",
+        "INSERT INTO github_installations (id, app_id, workspace_id, account_login, account_type)
+         VALUES ($1, 1001, $2, 'acme', 'Organization')",
     )
     .bind(INSTALLATION)
     .bind(ws)
@@ -872,10 +888,12 @@ async fn installation_binds_to_the_workspace_that_started_it(pool: PgPool) {
     );
     // The App's status says where webhooks go: the instance's public URL.
     let r = app
-        .call(Method::GET, "/api/github/app", Some(&admin), None)
+        .call(Method::GET, "/api/github/apps", Some(&admin), None)
         .await;
     assert_eq!(r.json["webhookUrl"], format!("{ORIGIN}/api/github/webhook"));
-    assert_eq!(r.json["ownerLogin"], "acme");
+    assert_eq!(r.json["apps"][0]["ownerLogin"], "acme");
+    assert_eq!(r.json["apps"][0]["id"], 1001);
+    assert_eq!(inst["appId"], 1001);
     assert!(!r.json.to_string().contains(WEBHOOK_SECRET));
 }
 
@@ -1156,4 +1174,124 @@ async fn replayed_push_deploys_a_commit_once(pool: PgPool) {
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     assert_eq!(r.json["deployments"], json!([]));
     assert_eq!(deployments(&app).await.len(), 1);
+}
+
+/// A delivery signed with `secret`, naming App `target` the way GitHub does.
+async fn signed_as(
+    app: &TestApp,
+    secret: &str,
+    target: Option<i64>,
+    event: &str,
+    body: &Value,
+) -> Resp {
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(body.to_string().as_bytes());
+    let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+    let mut b = Request::builder()
+        .method(Method::POST)
+        .uri("/api/github/webhook")
+        .header("x-github-event", event)
+        .header("x-github-delivery", Id::new().to_string())
+        .header("x-hub-signature-256", sig);
+    if let Some(t) = target {
+        b = b.header("x-github-hook-installation-target-id", t.to_string());
+    }
+    app.send(b, None, Some(body.clone())).await
+}
+
+/// One App per GitHub account: each App's webhooks act only on its own
+/// installations, installing needs the App named once there are several,
+/// and removing an App removes its installations.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn several_apps_stay_apart(pool: PgPool) {
+    let (app, admin) = app_with_github(pool).await;
+    create_app(&app, &admin).await;
+    // A second App (another organization's), with its own webhook secret.
+    const OTHER: i64 = 2002;
+    const OTHER_SECRET: &str = "whsec-other";
+    let row = OTHER.to_string();
+    let mut sealed = Vec::new();
+    for (col, v) in [
+        ("private_key", b"not a key".as_slice()),
+        ("webhook_secret", OTHER_SECRET.as_bytes()),
+        ("client_secret", b"cs2".as_slice()),
+    ] {
+        let aad = modula_server::github::app::aad(col, &row);
+        sealed.push(app.state.keys.seal(app.db(), v, aad).await.unwrap());
+    }
+    sqlx::query(
+        "INSERT INTO github_apps (id, slug, client_id, html_url, owner_login, private_key_sealed,
+                                  webhook_secret_sealed, client_secret_sealed)
+         VALUES ($1, 'modula-deploy-other', 'Iv1.other', 'https://github.com/apps/modula-deploy-other',
+                 'other-org', $2, $3, $4)",
+    )
+    .bind(OTHER)
+    .bind(&sealed[0])
+    .bind(&sealed[1])
+    .bind(&sealed[2])
+    .execute(app.db())
+    .await
+    .unwrap();
+    let repo = json!({ "type": "repo", "repo": "acme/app", "branch": "main" });
+    seed(&app, &admin, &[("api", json!({ "source": repo }))]).await;
+    let body = push("refs/heads/main", INSTALLATION, &["x"]);
+
+    // The other App's correctly signed push can't reach the first App's installation.
+    for target in [Some(OTHER), None] {
+        let r = signed_as(&app, OTHER_SECRET, target, "push", &body).await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    }
+    assert!(deployments(&app).await.is_empty());
+    // Claiming to be the first App with the other's secret fails.
+    let r = signed_as(&app, OTHER_SECRET, Some(1001), "push", &body).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
+    // The first App's own push deploys.
+    let r = signed_as(&app, WEBHOOK_SECRET, Some(1001), "push", &body).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(deployments(&app).await.len(), 1);
+
+    // Two Apps: installing names one.
+    let ws: Id = sqlx::query_scalar("SELECT id FROM workspaces WHERE name = 'team'")
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    let path = format!("/api/workspaces/{ws}/github/install");
+    let install = |b: Value| app.call(Method::POST, &path, Some(&admin), Some(b));
+    assert_eq!(install(json!({})).await.status, StatusCode::CONFLICT);
+    let r = install(json!({ "appId": OTHER })).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert!(
+        r.json["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://github.com/apps/modula-deploy-other/")
+    );
+    assert_eq!(
+        install(json!({ "appId": 31337 })).await.status,
+        StatusCode::NOT_FOUND
+    );
+
+    // Removing the first App takes its installation with it.
+    let r = app
+        .call(
+            Method::POST,
+            "/api/github/apps/remove",
+            Some(&admin),
+            Some(json!({ "id": 1001 })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::NO_CONTENT, "{:?}", r.json);
+    let installs: i64 = sqlx::query_scalar("SELECT count(*) FROM github_installations")
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    assert_eq!(installs, 0);
+    let r = app
+        .call(Method::GET, "/api/github/apps", Some(&admin), None)
+        .await;
+    assert_eq!(r.json["apps"].as_array().unwrap().len(), 1);
+    assert_eq!(r.json["apps"][0]["ownerLogin"], "other-org");
+    // Its webhooks no longer authenticate.
+    let r = signed_as(&app, WEBHOOK_SECRET, Some(1001), "push", &body).await;
+    assert_eq!(r.status, StatusCode::UNAUTHORIZED);
 }

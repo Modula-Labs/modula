@@ -3,33 +3,39 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { BrandGithub } from "@/components/ui/icons";
 import { Card, CardContent } from "@/components/ui/Card";
-import { Checkbox } from "@/components/ui/Controls";
+import { Radio, RadioGroup } from "@/components/ui/Controls";
+import { Plus, Trash } from "@/components/ui/icons";
 import { Input } from "@/components/ui/Input";
+import { Modal } from "@/components/ui/Modal";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import { ApiError } from "@/lib/api";
 import {
   SETTINGS_RETURN_PATH,
   connectGithub,
+  appOwner,
   connectHelp,
   connectMode,
+  connectStep,
   github,
+  githubAvatar,
   githubReturnNotice,
+  type GithubApp,
 } from "@/lib/github";
 import { safeHttpUrl } from "@/lib/url";
 import { useMe } from "@/lib/workspace";
 
-/** The instance's GitHub App and this workspace's installations of it. */
+/** The instance's GitHub Apps and this workspace's installations of them. */
 export function useGithub(workspaceId: string) {
-  const app = useQuery({
-    queryKey: ["github-app"],
-    queryFn: github.app,
+  const apps = useQuery({
+    queryKey: ["github-apps"],
+    queryFn: github.apps,
     staleTime: 60_000,
     enabled: !!workspaceId,
   });
   const installations = useQuery({
     queryKey: ["github-installations", workspaceId],
     queryFn: () => github.installations(workspaceId),
-    enabled: !!workspaceId && !!app.data?.configured,
+    enabled: !!workspaceId && (apps.data?.apps.length ?? 0) > 0,
     staleTime: 60_000,
     // Viewers can't list them, and older servers don't have the endpoint.
     retry: (n, e) =>
@@ -37,37 +43,136 @@ export function useGithub(workspaceId: string) {
       n < 2,
   });
   return {
-    app,
+    apps,
     installations,
     connected: (installations.data?.length ?? 0) > 0,
   };
 }
 
 /** "Connect GitHub" for this user and workspace: whether they can, who to ask otherwise, and
- *  the one-click flow (creating the App first when the instance has none). */
+ *  the flows: install one of the instance's Apps, or add a new App (personal account or org). */
 export function useConnectGithub(workspaceId: string, returnTo: string) {
   const { data: me } = useMe();
-  const { app } = useGithub(workspaceId);
-  const appConfigured = !!app.data?.configured;
+  const { apps } = useGithub(workspaceId);
+  const list = apps.data?.apps ?? [];
   const isInstanceAdmin = !!me?.user.isInstanceAdmin;
   const role = me?.workspaces.find((w) => w.id === workspaceId)?.role;
-  const mode = connectMode({ appConfigured, isInstanceAdmin, role });
+  const mode = connectMode({
+    appCount: list.length,
+    isInstanceAdmin,
+    role,
+  });
   const connect = useMutation({
-    mutationFn: (org?: string) =>
-      connectGithub({ workspaceId, returnTo, appConfigured, org }),
+    /** `appId`: install that App; otherwise create a new App (`org`, else personal). */
+    mutationFn: (o: { appId?: number; org?: string }) =>
+      connectGithub({ workspaceId, returnTo, ...o }),
   });
   return {
     /** Whether the instance has an App isn't known yet: don't offer or refuse anything. */
-    loading: app.isPending,
+    loading: apps.isPending,
     mode,
     help: mode === "connect" ? null : connectHelp[mode],
-    /** The instance has no App yet and this user will create it (may pick an organization). */
-    creatingApp: mode === "connect" && !appConfigured,
+    apps: list,
+    step: connectStep(list.length),
+    /** Instance admins can add Apps (one per GitHub account or organization). */
+    canAddApp: mode === "connect" && isInstanceAdmin,
+    isInstanceAdmin,
     connect,
     // The browser is leaving for GitHub once the request succeeds.
     busy: connect.isPending || connect.isSuccess,
   };
 }
+
+/** Personal account or organization: a private App can only be installed on its owner. */
+export function AddAppModal({
+  open,
+  onOpenChange,
+  onSubmit,
+  busy,
+  error,
+  localUrl,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: (org?: string) => void;
+  busy: boolean;
+  error?: string | null;
+  localUrl?: boolean;
+}) {
+  const [kind, setKind] = useState<"personal" | "org">("personal");
+  const [org, setOrg] = useState("");
+  const orgMissing = kind === "org" && !org.trim();
+  return (
+    <Modal
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Add GitHub App"
+      description="A private GitHub App can only be installed on the account that owns it, so add one App per GitHub account or organization whose repositories you deploy."
+      footer={
+        <>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => onOpenChange(false)}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            form="add-github-app"
+            variant="primary"
+            icon={<BrandGithub />}
+            loading={busy}
+            disabled={orgMissing}
+          >
+            Continue to GitHub
+          </Button>
+        </>
+      }
+    >
+      <form
+        id="add-github-app"
+        className="flex flex-col gap-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          // Portal events bubble to React parents: don't submit a form this modal opens from.
+          e.stopPropagation();
+          if (!orgMissing) onSubmit(kind === "org" ? org.trim() : undefined);
+        }}
+      >
+        <RadioGroup
+          aria-label="Owner of the App"
+          value={kind}
+          onValueChange={(v) => setKind(v as "personal" | "org")}
+        >
+          <Radio value="personal" label="Personal account" />
+          <Radio value="org" label="Organization" />
+        </RadioGroup>
+        {kind === "org" ? (
+          <Input
+            mono
+            autoFocus
+            aria-label="GitHub organization"
+            placeholder="acme"
+            autoComplete="off"
+            value={org}
+            onChange={(e) => setOrg(e.target.value)}
+          />
+        ) : null}
+        {localUrl ? (
+          <Alert tone="warn">
+            This instance's public URL is local, so GitHub can't deliver push
+            webhooks. Set the public URL first if you want deploys on push.
+          </Alert>
+        ) : null}
+        {error ? <Alert>{error}</Alert> : null}
+      </form>
+    </Modal>
+  );
+}
+
+const isLocalUrl = (u: string | undefined) =>
+  !!u && /^https?:\/\/(localhost|127\.|\[::1\])/.test(u);
 
 /** Workspace Settings → Integrations → GitHub. */
 export function GithubIntegration({
@@ -78,13 +183,21 @@ export function GithubIntegration({
   isAdmin: boolean;
 }) {
   const qc = useQueryClient();
-  const { data: me } = useMe();
-  const { app, installations } = useGithub(workspaceId);
+  const { apps, installations } = useGithub(workspaceId);
   const c = useConnectGithub(workspaceId, SETTINGS_RETURN_PATH);
   const [notice, setNotice] =
     useState<ReturnType<typeof githubReturnNotice>>(null);
-  const [useOrg, setUseOrg] = useState(false);
-  const [org, setOrg] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [removing, setRemoving] = useState<GithubApp | null>(null);
+  const remove = useMutation({
+    mutationFn: (id: number) => github.deleteApp(id),
+    onSuccess: () => {
+      setRemoving(null);
+      void qc.invalidateQueries({ queryKey: ["github-apps"] });
+      void qc.invalidateQueries({ queryKey: ["github-installations"] });
+      void qc.invalidateQueries({ queryKey: ["github-repos"] });
+    },
+  });
 
   // Back from GitHub (`/settings?github=installed`): say what happened, once.
   useEffect(() => {
@@ -98,11 +211,11 @@ export function GithubIntegration({
       url.pathname + url.search + url.hash,
     );
     setNotice(n);
-    void qc.invalidateQueries({ queryKey: ["github-app"] });
+    void qc.invalidateQueries({ queryKey: ["github-apps"] });
     void qc.invalidateQueries({ queryKey: ["github-installations"] });
   }, [qc]);
   // Bring the card into view once it renders (back from GitHub, or a "Connect GitHub" link).
-  const ready = !!app.data;
+  const ready = !!apps.data;
   useEffect(() => {
     if (ready && (notice || window.location.hash === "#integrations-github"))
       document
@@ -110,7 +223,7 @@ export function GithubIntegration({
         ?.scrollIntoView({ block: "center" });
   }, [ready, notice]);
 
-  if (app.isPending)
+  if (apps.isPending)
     return (
       <Card size="sm">
         <CardContent>
@@ -118,22 +231,21 @@ export function GithubIntegration({
         </CardContent>
       </Card>
     );
-  if (app.error)
+  if (apps.error)
     return (
       <Card size="sm">
         <CardContent>
-          <Alert>{app.error.message}</Alert>
+          <Alert>{apps.error.message}</Alert>
         </CardContent>
       </Card>
     );
 
-  const a = app.data;
+  const appList = apps.data.apps;
   const list = installations.data ?? [];
   const forbidden =
     installations.error instanceof ApiError &&
     installations.error.status === 403;
-  const isInstanceAdmin = !!me?.user.isInstanceAdmin;
-  const localUrl = /^https?:\/\/(localhost|127\.|\[::1\])/.test(a.webhookUrl);
+  const localUrl = isLocalUrl(apps.data.webhookUrl);
 
   return (
     <div id="integrations-github">
@@ -155,56 +267,28 @@ export function GithubIntegration({
                       "Deploy private repositories, and redeploy on every push.")}
               </div>
             </div>
-            {c.mode === "connect" ? (
+            {c.canAddApp ? (
               <Button
                 className="ml-auto shrink-0"
                 variant="secondary"
-                icon={<BrandGithub />}
-                loading={c.busy}
-                onClick={() => c.connect.mutate(useOrg ? org : undefined)}
+                icon={<Plus />}
+                onClick={() => {
+                  c.connect.reset();
+                  setAdding(true);
+                }}
               >
-                {list.length ? "Add account or organization" : "Connect GitHub"}
+                Add GitHub App
               </Button>
             ) : null}
           </div>
           {notice ? <Alert tone={notice.tone}>{notice.text}</Alert> : null}
-          {c.connect.error ? <Alert>{c.connect.error.message}</Alert> : null}
+          {!adding && c.connect.error ? (
+            <Alert>{c.connect.error.message}</Alert>
+          ) : null}
           {installations.error && !forbidden ? (
             <Alert tone="warn">{installations.error.message}</Alert>
           ) : null}
-          {c.creatingApp ? (
-            <div className="flex flex-col gap-2 pl-8">
-              <Checkbox
-                checked={useOrg}
-                onCheckedChange={setUseOrg}
-                label="Create the GitHub App under an organization"
-              />
-              {useOrg ? (
-                <div className="flex max-w-sm flex-col gap-1">
-                  <Input
-                    mono
-                    aria-label="GitHub organization"
-                    placeholder="acme"
-                    autoComplete="off"
-                    value={org}
-                    onChange={(e) => setOrg(e.target.value)}
-                  />
-                  <p className="text-[13px] text-muted-foreground">
-                    A private App can only be installed on the account that owns
-                    it, so pick the organization whose repositories you deploy.
-                  </p>
-                </div>
-              ) : null}
-              {localUrl ? (
-                <Alert tone="warn">
-                  This instance's public URL is local, so GitHub can't deliver
-                  push webhooks. Set the public URL first if you want deploys on
-                  push.
-                </Alert>
-              ) : null}
-            </div>
-          ) : null}
-          {a.configured && installations.isPending && !forbidden ? (
+          {installations.isPending && appList.length && !forbidden ? (
             <Skeleton className="h-8" />
           ) : null}
           {list.length ? (
@@ -221,6 +305,7 @@ export function GithubIntegration({
                     {i.accountType === "Organization"
                       ? "Organization"
                       : "Personal account"}
+                    {i.appSlug ? ` · via ${i.appSlug}` : ""}
                   </span>
                   {isAdmin && safeHttpUrl(i.configureUrl, true) ? (
                     <a
@@ -236,23 +321,112 @@ export function GithubIntegration({
               ))}
             </ul>
           ) : null}
-          {a.configured && safeHttpUrl(a.htmlUrl, true) && isInstanceAdmin ? (
-            <div className="pl-8 text-[13px] text-muted-foreground">
-              App{" "}
-              <a
-                href={safeHttpUrl(a.htmlUrl, true)}
-                target="_blank"
-                rel="noreferrer"
-                className="underline underline-offset-4"
-              >
-                {a.slug}
-              </a>
-              {a.ownerLogin ? ` owned by ${a.ownerLogin}` : ""} · webhooks to{" "}
-              <span className="font-mono">{a.webhookUrl}</span>
+          {appList.length ? (
+            <div className="flex flex-col gap-1 pl-8">
+              <div className="text-[13px] font-bold text-muted-foreground">
+                GitHub Apps
+              </div>
+              <ul className="flex flex-col gap-1">
+                {appList.map((a) => {
+                  const owner = appOwner(a);
+                  const href = safeHttpUrl(a.htmlUrl, true);
+                  return (
+                    <li
+                      key={a.id}
+                      className="flex min-h-9 items-center gap-2.5"
+                    >
+                      <img
+                        src={githubAvatar(owner)}
+                        alt=""
+                        className="size-6 rounded-full border border-border"
+                      />
+                      <span className="text-sm">{owner}</span>
+                      <Badge>{a.public ? "Public" : "Private"}</Badge>
+                      {href ? (
+                        <a
+                          href={href}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[13px] text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                        >
+                          {a.slug}
+                        </a>
+                      ) : null}
+                      <div className="ml-auto flex items-center gap-1.5">
+                        {c.mode === "connect" ? (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            loading={c.busy}
+                            onClick={() => c.connect.mutate({ appId: a.id })}
+                          >
+                            Install
+                          </Button>
+                        ) : null}
+                        {c.isInstanceAdmin ? (
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            aria-label={`Remove ${a.slug}`}
+                            title="Remove App"
+                            className="text-muted-foreground"
+                            onClick={() => {
+                              remove.reset();
+                              setRemoving(a);
+                            }}
+                          >
+                            <Trash />
+                          </Button>
+                        ) : null}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+              {c.isInstanceAdmin ? (
+                <div className="text-[13px] text-muted-foreground">
+                  Webhooks to{" "}
+                  <span className="font-mono">{apps.data.webhookUrl}</span>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </CardContent>
       </Card>
+      <AddAppModal
+        open={adding}
+        onOpenChange={setAdding}
+        busy={c.busy}
+        error={c.connect.error?.message}
+        localUrl={localUrl}
+        onSubmit={(org) => c.connect.mutate({ org })}
+      />
+      <Modal
+        open={!!removing}
+        onOpenChange={(o) => !o && setRemoving(null)}
+        title="Remove GitHub App?"
+        description={
+          removing
+            ? `${removing.slug} is forgotten by Modula and its installations are disconnected from every workspace. Services keep running but stop deploying on push. The App itself stays on GitHub; delete it there too if you no longer need it.`
+            : undefined
+        }
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setRemoving(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              loading={remove.isPending}
+              onClick={() => removing && remove.mutate(removing.id)}
+            >
+              Remove App
+            </Button>
+          </>
+        }
+      >
+        {remove.error ? <Alert>{remove.error.message}</Alert> : null}
+      </Modal>
     </div>
   );
 }

@@ -1,11 +1,15 @@
-//! GitHub App: creation through the manifest flow (instance admins), per-
+//! GitHub Apps: creation through the manifest flow (instance admins), per-
 //! workspace installations, the repository picker, and the webhook.
 //!
-//! "Connect GitHub" is one browser round trip: when the instance has no App
-//! yet, an instance admin creates it through the manifest flow and its callback
-//! carries straight on to installing it on the workspace; otherwise the flow
-//! starts at the installation page. Either way the user lands back where they
-//! started (`return_to`), with `?github=installed`.
+//! An instance has one App per GitHub account or organization it deploys
+//! from. New Apps are private, so each installs only on the account that owns
+//! it (nobody else can install it and send it webhooks).
+//!
+//! "Connect GitHub" is one browser round trip: when there is no App for the
+//! account yet, an instance admin creates one through the manifest flow and its
+//! callback carries straight on to installing it on the workspace; otherwise
+//! the flow starts at the App's installation page. Either way the user lands
+//! back where they started (`return_to`), with `?github=installed`.
 //!
 //! Every leg carries a `state` that is random, single-use, short-lived, stored
 //! hashed, and bound to the user (and workspace, and return path) that started
@@ -49,35 +53,72 @@ const WEBHOOK_PER_IP: Limit = Limit::per_minute(120);
 /// Installation callbacks per user (each costs GitHub API calls).
 const INSTALL_CALLBACK_PER_USER: Limit = Limit::per_minute(10);
 
-#[derive(Serialize)]
+#[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-pub struct AppStatus {
-    configured: bool,
-    slug: Option<String>,
-    html_url: Option<String>,
+pub struct AppView {
+    id: i64,
+    slug: String,
+    html_url: String,
     /// The account or organization that owns the App.
     owner_login: Option<String>,
+    public: bool,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppList {
+    apps: Vec<AppView>,
     /// Where GitHub delivers webhooks: this instance's public URL.
     webhook_url: String,
 }
 
-/// Whether the instance has a GitHub App (no secrets).
-pub async fn status(State(state): State<AppState>) -> AppResult<Json<AppStatus>> {
-    let row: Option<(String, String, Option<String>)> =
-        sqlx::query_as("SELECT slug, html_url, owner_login FROM github_app")
-            .fetch_optional(&state.db)
-            .await?;
-    let (slug, html_url, owner_login) = match row {
-        Some((s, h, o)) => (Some(s), Some(h), o),
-        None => (None, None, None),
-    };
-    Ok(Json(AppStatus {
-        configured: slug.is_some(),
-        slug,
-        html_url,
-        owner_login,
+/// The instance's GitHub Apps (no secrets).
+pub async fn apps(State(state): State<AppState>) -> AppResult<Json<AppList>> {
+    let apps = sqlx::query_as(
+        "SELECT id, slug, html_url, owner_login, public, created_at
+         FROM github_apps ORDER BY created_at",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(AppList {
+        apps,
         webhook_url: format!("{}{WEBHOOK_PATH}", state.public_origin()),
     }))
+}
+
+/// Remove an App from the instance: its installations stop working in every
+/// workspace (the App itself stays on GitHub until deleted there).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteAppReq {
+    id: i64,
+}
+
+pub async fn delete_app(
+    State(state): State<AppState>,
+    actor: Actor,
+    meta: RequestMeta,
+    Json(DeleteAppReq { id }): Json<DeleteAppReq>,
+) -> AppResult<StatusCode> {
+    let mut tx = state.db.begin().await?;
+    let slug: Option<String> =
+        sqlx::query_scalar("DELETE FROM github_apps WHERE id = $1 RETURNING slug")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let slug = slug.ok_or(AppError::NotFound)?;
+    Entry::new("github.app.delete", &meta)
+        .actor(&actor)
+        .target("github_app", id)
+        .metadata(json!({ "slug": slug }))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    app::forget_tokens(&state);
+    app::forget_lists(&state);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// What a flow state remembers besides its user.
@@ -85,6 +126,8 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<AppStatus>>
 struct Flow {
     /// The workspace to install the App on.
     workspace: Option<Id>,
+    /// The App being installed.
+    app: Option<i64>,
     /// The dashboard path to return to (see `return_path`).
     return_to: Option<String>,
 }
@@ -98,13 +141,14 @@ async fn new_state(
 ) -> AppResult<String> {
     let t = modula_crypto::token::generate(STATE_PREFIX)?;
     sqlx::query(
-        "INSERT INTO github_flow_states (state_hash, kind, user_id, workspace_id, return_to, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO github_flow_states (state_hash, kind, user_id, workspace_id, app_id, return_to, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(t.hash.as_bytes())
     .bind(kind)
     .bind(user)
     .bind(flow.workspace)
+    .bind(flow.app)
     .bind(&flow.return_to)
     .bind(OffsetDateTime::now_utc() + ttl)
     .execute(&state.db)
@@ -123,19 +167,28 @@ async fn take_state(
     if !modula_crypto::token::is_well_formed(presented, STATE_PREFIX) {
         return Err(invalid());
     }
-    let row: Option<(Id, Option<Id>, Option<String>, bool)> = sqlx::query_as(
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        user_id: Id,
+        workspace_id: Option<Id>,
+        app_id: Option<i64>,
+        return_to: Option<String>,
+        live: bool,
+    }
+    let row: Option<Row> = sqlx::query_as(
         "DELETE FROM github_flow_states
          WHERE state_hash = $1 AND kind = $2
-         RETURNING user_id, workspace_id, return_to, expires_at > now()",
+         RETURNING user_id, workspace_id, app_id, return_to, expires_at > now() AS live",
     )
     .bind(modula_crypto::token::hash(presented).as_bytes())
     .bind(kind)
     .fetch_optional(&state.db)
     .await?;
     match row {
-        Some((user, workspace, return_to, true)) if user == actor.user_id => Ok(Flow {
-            workspace,
-            return_to,
+        Some(r) if r.live && r.user_id == actor.user_id => Ok(Flow {
+            workspace: r.workspace_id,
+            app: r.app_id,
+            return_to: r.return_to,
         }),
         _ => Err(invalid()),
     }
@@ -225,7 +278,8 @@ fn app_name(host: &str, suffix: Option<&str>) -> String {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ManifestReq {
-    /// Create the App under this organization instead of the admin's account.
+    /// Create the App under this organization instead of the admin's account
+    /// (it can then be installed on that organization only).
     #[serde(default)]
     org: Option<String>,
     /// Install the new App on this workspace right after creating it.
@@ -251,16 +305,22 @@ pub async fn manifest(
     meta: RequestMeta,
     Json(req): Json<ManifestReq>,
 ) -> AppResult<Json<ManifestResp>> {
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM github_app)")
+    if let Some(org) = &req.org {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM github_apps WHERE lower(owner_login) = lower($1))",
+        )
+        .bind(org)
         .fetch_one(&state.db)
         .await?;
-    if exists {
-        return Err(AppError::Conflict(
-            "this instance already has a GitHub App".into(),
-        ));
+        if exists {
+            return Err(AppError::Conflict(format!(
+                "there already is a GitHub App for {org}; install that one"
+            )));
+        }
     }
     let flow = Flow {
         workspace: req.workspace_id,
+        app: None,
         return_to: return_path(req.return_to)?,
     };
     // Checked now, so an instance admin who can't install on the workspace
@@ -292,12 +352,10 @@ pub async fn manifest(
         // callback can prove they can access the installation it names.
         "request_oauth_on_install": true,
         "callback_urls": [format!("{origin}/api/github/install/callback")],
-        // Public: installable on any account or organization the admin picks
-        // (a private App only installs on its owner's account). Installs
-        // nobody started from this dashboard are never bound to a workspace:
-        // binding needs the signed state of a flow started here, and the
-        // OAuth proof above.
-        "public": true,
+        // Private: installable only on the account that owns it, so nobody
+        // else can install it (and send it webhooks). Another account or
+        // organization gets an App of its own.
+        "public": false,
         "default_permissions": {
             "contents": "read",
             "metadata": "read",
@@ -366,27 +424,32 @@ pub async fn app_callback(
         .webhook_secret
         .ok_or_else(|| anyhow::anyhow!("GitHub returned an App without a webhook secret"))?;
     let (keys, db) = (&state.keys, &state.db);
+    let row = c.id.to_string();
     let private_key = keys
-        .seal(db, c.pem.expose_secret().as_bytes(), aad("private_key"))
+        .seal(
+            db,
+            c.pem.expose_secret().as_bytes(),
+            aad("private_key", &row),
+        )
         .await?;
     let webhook = keys
         .seal(
             db,
             webhook_secret.expose_secret().as_bytes(),
-            aad("webhook_secret"),
+            aad("webhook_secret", &row),
         )
         .await?;
     let client_secret = keys
         .seal(
             db,
             c.client_secret.expose_secret().as_bytes(),
-            aad("client_secret"),
+            aad("client_secret", &row),
         )
         .await?;
     let mut tx = state.db.begin().await?;
     let inserted = sqlx::query(
-        "INSERT INTO github_app (app_id, slug, client_id, html_url, owner_login, private_key_sealed,
-                                 webhook_secret_sealed, client_secret_sealed, created_by)
+        "INSERT INTO github_apps (id, slug, client_id, html_url, owner_login, private_key_sealed,
+                                  webhook_secret_sealed, client_secret_sealed, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (id) DO NOTHING",
     )
@@ -404,7 +467,7 @@ pub async fn app_callback(
     .rows_affected();
     if inserted == 0 {
         return Err(AppError::Conflict(
-            "this instance already has a GitHub App".into(),
+            "this GitHub App is already set up".into(),
         ));
     }
     Entry::new("github.app.create", &meta)
@@ -415,6 +478,10 @@ pub async fn app_callback(
         .await?;
     tx.commit().await?;
     if flow.workspace.is_some() {
+        let flow = Flow {
+            app: Some(c.id),
+            ..flow
+        };
         let url = install_url(&state, &c.html_url, actor.user_id, &flow).await?;
         return Ok(Redirect::to(&url));
     }
@@ -427,6 +494,9 @@ pub struct InstallReq {
     /// Where to come back to once it's installed (a dashboard path).
     #[serde(default)]
     return_to: Option<String>,
+    /// Which App to install (needed when the instance has several).
+    #[serde(default)]
+    app_id: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -441,14 +511,29 @@ pub async fn install(
     grant: Grant,
     Json(req): Json<InstallReq>,
 ) -> AppResult<Json<InstallResp>> {
-    let html_url: Option<String> = sqlx::query_scalar("SELECT html_url FROM github_app")
-        .fetch_optional(&state.db)
-        .await?;
-    let html_url = html_url.ok_or_else(|| {
-        AppError::Conflict("an instance admin must set up the GitHub App first".into())
-    })?;
+    let apps: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT id, html_url FROM github_apps WHERE $1::bigint IS NULL OR id = $1 LIMIT 2",
+    )
+    .bind(req.app_id)
+    .fetch_all(&state.db)
+    .await?;
+    let (app_id, html_url) = match (apps.as_slice(), req.app_id) {
+        ([], None) => {
+            return Err(AppError::Conflict(
+                "an instance admin must add a GitHub App first".into(),
+            ));
+        }
+        ([], Some(_)) => return Err(AppError::NotFound),
+        ([one], _) => one.clone(),
+        _ => {
+            return Err(AppError::Conflict(
+                "this instance has several GitHub Apps; choose one (appId)".into(),
+            ));
+        }
+    };
     let flow = Flow {
         workspace: Some(grant.workspace_id()?),
+        app: Some(app_id),
         return_to: return_path(req.return_to)?,
     };
     let url = install_url(&state, &html_url, actor.user_id, &flow).await?;
@@ -498,9 +583,9 @@ pub async fn install_callback(
     if q.setup_action.as_deref() == Some("request") {
         return Ok(back_to(flow.return_to.as_deref(), "requested"));
     }
-    let workspace = flow
-        .workspace
-        .ok_or_else(|| anyhow::anyhow!("install state without a workspace"))?;
+    let (Some(workspace), Some(app_id)) = (flow.workspace, flow.app) else {
+        return Err(anyhow::anyhow!("install state without a workspace or App").into());
+    };
     let id = q
         .installation_id
         .filter(|i| *i > 0)
@@ -518,23 +603,25 @@ pub async fn install_callback(
              authorization (OAuth) during installation\" turned on",
         )
     })?;
-    if !app::user_has_installation(&state, code, id).await? {
+    if !app::user_has_installation(&state, app_id, code, id).await? {
         return Err(not_found());
     }
-    let inst = match app::installation(&state, id).await {
+    let inst = match app::installation(&state, app_id, id).await {
         Err(AppError::BadRequest(_)) => return Err(not_found()),
         r => r?,
     };
     let mut tx = state.db.begin().await?;
     // Re-installing refreshes the account; it never moves to another workspace.
     let bound = sqlx::query(
-        "INSERT INTO github_installations (id, workspace_id, account_login, account_type, created_by)
-         VALUES ($1, $2, $3, $4, $5)
+        "INSERT INTO github_installations (id, app_id, workspace_id, account_login, account_type, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (id) DO UPDATE
            SET account_login = EXCLUDED.account_login, account_type = EXCLUDED.account_type
-           WHERE github_installations.workspace_id = EXCLUDED.workspace_id",
+           WHERE github_installations.workspace_id = EXCLUDED.workspace_id
+             AND github_installations.app_id = EXCLUDED.app_id",
     )
     .bind(id)
+    .bind(app_id)
     .bind(workspace)
     .bind(&inst.account_login)
     .bind(&inst.account_type)
@@ -563,6 +650,8 @@ pub async fn install_callback(
 #[serde(rename_all = "camelCase")]
 pub struct InstallationView {
     id: i64,
+    app_id: i64,
+    app_slug: String,
     account_login: String,
     account_type: String,
     avatar_url: String,
@@ -578,13 +667,14 @@ pub async fn installations(
     grant: Grant,
 ) -> AppResult<Json<Vec<InstallationView>>> {
     let rows = sqlx::query_as(
-        "SELECT id, account_login, account_type,
-                'https://avatars.githubusercontent.com/' || account_login || '?s=64' AS avatar_url,
-                CASE WHEN account_type = 'Organization'
-                     THEN 'https://github.com/organizations/' || account_login || '/settings/installations/' || id
-                     ELSE 'https://github.com/settings/installations/' || id END AS configure_url,
-                created_at
-         FROM github_installations WHERE workspace_id = $1 ORDER BY created_at",
+        "SELECT g.id, g.app_id, a.slug AS app_slug, g.account_login, g.account_type,
+                'https://avatars.githubusercontent.com/' || g.account_login || '?s=64' AS avatar_url,
+                CASE WHEN g.account_type = 'Organization'
+                     THEN 'https://github.com/organizations/' || g.account_login || '/settings/installations/' || g.id
+                     ELSE 'https://github.com/settings/installations/' || g.id END AS configure_url,
+                g.created_at
+         FROM github_installations g JOIN github_apps a ON a.id = g.app_id
+         WHERE g.workspace_id = $1 ORDER BY g.created_at",
     )
     .bind(grant.workspace_id()?)
     .fetch_all(&state.db)
@@ -653,7 +743,9 @@ pub async fn branches(
     Ok(Json(q.apply(&all, |b| &b.name)))
 }
 
-/// GitHub webhook deliveries, authenticated by HMAC under the App's secret.
+/// GitHub webhook deliveries, authenticated by HMAC under the sending App's
+/// secret. GitHub names the App in `X-GitHub-Hook-Installation-Target-ID`;
+/// without it every App's secret is tried.
 pub async fn webhook(
     State(state): State<AppState>,
     meta: RequestMeta,
@@ -665,24 +757,39 @@ pub async fn webhook(
         .check("github-webhook", &meta.ip_string(), WEBHOOK_PER_IP)
         .await?;
     let header = |k: &str| headers.get(k).and_then(|v| v.to_str().ok());
-    let sealed: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT webhook_secret_sealed FROM github_app")
-            .fetch_optional(&state.db)
-            .await?;
-    let (Some(sealed), Some(signature)) = (sealed, header("x-hub-signature-256")) else {
+    let target: Option<i64> =
+        header("x-github-hook-installation-target-id").and_then(|v| v.parse().ok());
+    let candidates: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, webhook_secret_sealed FROM github_apps
+         WHERE $1::bigint IS NULL OR id = $1 ORDER BY created_at",
+    )
+    .bind(target)
+    .fetch_all(&state.db)
+    .await?;
+    let Some(signature) = header("x-hub-signature-256") else {
         return Err(AppError::Unauthorized);
     };
+    if candidates.is_empty() {
+        return Err(AppError::Unauthorized);
+    }
     let body = axum::body::to_bytes(body, MAX_WEBHOOK_BODY)
         .await
         .map_err(|_| AppError::bad_request("payload too large"))?;
-    let secret = state
-        .keys
-        .open(&state.db, &sealed, aad("webhook_secret"))
-        .await?;
-    if !push::verify_signature(&secret, &body, Some(signature)) {
+    let mut sender = None;
+    for (id, sealed) in candidates {
+        let secret = state
+            .keys
+            .open(&state.db, &sealed, aad("webhook_secret", &id.to_string()))
+            .await?;
+        if push::verify_signature(&secret, &body, Some(signature)) {
+            sender = Some(id);
+            break;
+        }
+    }
+    let Some(app_id) = sender else {
         tracing::warn!("webhook with a bad signature");
         return Err(AppError::Unauthorized);
-    }
+    };
     let delivery = header("x-github-delivery")
         .filter(|d| !d.is_empty() && d.len() <= 100)
         .ok_or_else(|| AppError::bad_request("missing X-GitHub-Delivery"))?
@@ -697,7 +804,7 @@ pub async fn webhook(
     if fresh == 0 {
         return Ok((StatusCode::OK, Json(json!({ "duplicate": true }))));
     }
-    let res = handle_event(&state, &meta, &delivery, &event, &body).await;
+    let res = handle_event(&state, &meta, app_id, &delivery, &event, &body).await;
     if matches!(res, Err(AppError::Internal(_))) {
         // Let GitHub's redelivery try again.
         let _ = sqlx::query("DELETE FROM github_deliveries WHERE id = $1")
@@ -708,9 +815,12 @@ pub async fn webhook(
     res
 }
 
+/// `app` is the App whose secret signed the delivery: it acts only on that
+/// App's installations.
 async fn handle_event(
     state: &AppState,
     meta: &RequestMeta,
+    app: i64,
     delivery: &str,
     event: &str,
     body: &[u8],
@@ -720,7 +830,7 @@ async fn handle_event(
         "ping" => Ok((StatusCode::OK, Json(json!({})))),
         "push" => {
             let ev: push::PushEvent = serde_json::from_slice(body).map_err(bad)?;
-            let ids = push::handle_push(state, meta, delivery, &ev).await?;
+            let ids = push::handle_push(state, meta, app, delivery, &ev).await?;
             Ok((StatusCode::OK, Json(json!({ "deployments": ids }))))
         }
         "installation" | "installation_repositories" => {
@@ -737,9 +847,11 @@ async fn handle_event(
             if event == "installation" && ev.action == "deleted" {
                 let mut tx = state.db.begin().await?;
                 let ws: Option<Id> = sqlx::query_scalar(
-                    "DELETE FROM github_installations WHERE id = $1 RETURNING workspace_id",
+                    "DELETE FROM github_installations WHERE id = $1 AND app_id = $2
+                     RETURNING workspace_id",
                 )
                 .bind(id)
+                .bind(app)
                 .fetch_optional(&mut *tx)
                 .await?;
                 if let Some(ws) = ws {
@@ -753,9 +865,10 @@ async fn handle_event(
             } else if event == "installation_repositories" {
                 // Repository access changed on GitHub: record it for the workspace.
                 let ws: Option<Id> = sqlx::query_scalar(
-                    "SELECT workspace_id FROM github_installations WHERE id = $1",
+                    "SELECT workspace_id FROM github_installations WHERE id = $1 AND app_id = $2",
                 )
                 .bind(id)
+                .bind(app)
                 .fetch_optional(&state.db)
                 .await?;
                 if let Some(ws) = ws {

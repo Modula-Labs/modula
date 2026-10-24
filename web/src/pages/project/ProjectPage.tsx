@@ -119,7 +119,7 @@ export function ProjectPage({
   useEffect(() => {
     if (!search.add && !search.github) return;
     const back = projectReturn(search);
-    void qc.invalidateQueries({ queryKey: ["github-app"] });
+    void qc.invalidateQueries({ queryKey: ["github-apps"] });
     void qc.invalidateQueries({ queryKey: ["github-installations"] });
     if (back.reopen) {
       setGithubNotice(back.notice);

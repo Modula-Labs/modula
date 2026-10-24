@@ -196,7 +196,8 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/servers/{server_id}", Resource(Action::ServerRead), provision::api::get)
         .delete("/api/servers/{server_id}", Resource(Action::ServerDelete), provision::api::delete)
         // GitHub App: one per instance (admins), installed per workspace.
-        .get("/api/github/app", Authenticated, github::status)
+        .get("/api/github/apps", Authenticated, github::apps)
+        .post("/api/github/apps/remove", Instance(Action::GithubAppDelete), github::delete_app)
         .post("/api/github/app/manifest", Instance(Action::GithubAppCreate), github::manifest)
         // Bound to the admin's session by the single-use state, so not Public.
         .get("/api/github/app/callback", Authenticated, github::app_callback)
