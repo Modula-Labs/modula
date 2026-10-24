@@ -138,6 +138,8 @@ export interface Environment {
   id: string;
   name: string;
   createdAt: string;
+  /** The project's first environment (production): can't be deleted. */
+  isDefault: boolean;
 }
 export interface ServiceSummary {
   id: string;
@@ -165,6 +167,8 @@ export interface InstanceSummary {
   domain: string | null;
   sourceType: "image" | "repo" | "local" | "r2" | null;
   repo: string | null;
+  /** The branch a repo source deploys from. */
+  branch?: string | null;
   image?: string | null;
   /** Detected framework/runtime (e.g. "nextjs", "postgres"), used for the card icon. */
   stack?: string | null;
@@ -805,10 +809,14 @@ export const api = {
   updateProject: (id: string, b: { name?: string; description?: string }) =>
     patch<Project>(`/api/projects/${enc(id)}`, b),
   deleteProject: (id: string) => del<{ ok: true }>(`/api/projects/${enc(id)}`),
+  /** Without `duplicateFrom`, an empty environment (default environment's
+   *  settings, no variables). `branches`: service id → branch, repo services only. */
   createEnvironment: (
     project: string,
-    b: { name: string; cloneFrom?: string; copyVariables?: boolean },
+    b: { name: string; duplicateFrom?: string; branches?: Record<string, string> },
   ) => post<Environment>(`/api/projects/${enc(project)}/environments`, b),
+  renameEnvironment: (id: string, name: string) =>
+    patch<Environment>(`/api/environments/${enc(id)}`, { name }),
   syncEnvironment: (target: string, fromEnvironmentId: string) =>
     post<SyncResult>(`/api/environments/${enc(target)}/sync`, {
       fromEnvironmentId,

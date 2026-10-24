@@ -19,8 +19,9 @@ Roles: Viewer < Deployer < Member < Admin. **+sudo = impossible with a token.**
 | GET | `/workspaces` | any |
 | GET/POST | `/workspaces/{ws}/projects` | Viewer / Member |
 | GET / PATCH / DELETE | `/projects/{p}` | Viewer / Member / Admin+sudo |
-| POST | `/projects/{p}/environments` `{name, cloneFrom?, copyVariables?}` | Member |
-| DELETE | `/environments/{env}` | Admin+sudo |
+| POST | `/projects/{p}/environments` `{name, duplicateFrom?, branches?: {serviceId: branch}}` | Member |
+| PATCH | `/environments/{env}` `{name}` | Member |
+| DELETE | `/environments/{env}` (not the default one) | Admin+sudo |
 | POST | `/environments/{env}/sync` `{fromEnvironmentId}` | Member |
 | GET | `/projects/{p}/activity?environmentId=&serviceId=&kind=` | Viewer |
 | GET | `/environments/{env}/config` (whole environment; non-sealed values; audited) | Member |

@@ -386,7 +386,7 @@ async fn environments_copy_config_and_keep_their_own_keys(pool: PgPool) {
         .await;
     assert_eq!(vars.json.as_array().unwrap().len(), 0);
 
-    // Deleting an environment destroys its data key; the last one can't go.
+    // Deleting an environment destroys its data key; the default one can't go.
     f.app
         .call(
             Method::PATCH,
@@ -596,39 +596,31 @@ async fn activity_records_names_and_sync_copies_config(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn environments_clone_config_and_optionally_variables(pool: PgPool) {
+async fn duplicates_copy_every_variable_and_keep_sealed_ones_sealed(pool: PgPool) {
+    use secrecy::ExposeSecret;
     let f = fixture(pool).await;
     f.set_vars(
         &f.admin,
-        json!({ "set": { "PLAIN": "1", "SECRET": "2" }, "sealed": ["SECRET"] }),
+        json!({ "set": { "PLAIN": "1", "SECRET": "two" }, "sealed": ["SECRET"] }),
     )
     .await;
-    let prod: String =
-        sqlx::query_scalar("SELECT environment_id FROM service_instances WHERE id = $1")
-            .bind(&f.instance)
-            .fetch_one(&f.app.state.db)
-            .await
-            .unwrap();
-    let create = |body: Value| {
-        let (app, admin, project) = (&f.app, f.admin.clone(), f.project.clone());
+    let prod = f.production().await;
+    let shared = f
+        .app
+        .call(
+            Method::PATCH,
+            &format!("/api/environments/{prod}/variables"),
+            Some(&f.admin),
+            Some(json!({ "set": { "REGION": "eu" } })),
+        )
+        .await;
+    assert_eq!(shared.status, StatusCode::OK, "{:?}", shared.json);
+    let db = f.app.state.db.clone();
+    let vars = |env: Id| {
+        let db = db.clone();
         async move {
-            let r = app
-                .call(
-                    Method::POST,
-                    &format!("/api/projects/{project}/environments"),
-                    Some(&admin),
-                    Some(body),
-                )
-                .await;
-            assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
-            r.json["id"].as_str().unwrap().to_owned()
-        }
-    };
-    let names = |env: String| {
-        let db = f.app.state.db.clone();
-        async move {
-            sqlx::query_scalar::<_, String>(
-                "SELECT name FROM variables WHERE environment_id = $1 ORDER BY name",
+            sqlx::query_as::<_, (Id, String, bool, Vec<u8>)>(
+                "SELECT id, name, sealed, value_sealed FROM variables WHERE environment_id = $1 ORDER BY name",
             )
             .bind(env)
             .fetch_all(&db)
@@ -636,17 +628,272 @@ async fn environments_clone_config_and_optionally_variables(pool: PgPool) {
             .unwrap()
         }
     };
-    let bare = create(json!({ "name": "bare", "cloneFrom": prod })).await;
-    assert!(names(bare).await.is_empty());
-    let copy = create(json!({ "name": "copy", "cloneFrom": prod, "copyVariables": true })).await;
-    assert_eq!(
-        names(copy).await,
-        ["PLAIN"],
-        "sealed variables are never copied"
+
+    let empty = f.create_env(json!({ "name": "empty" })).await;
+    assert!(
+        vars(empty).await.is_empty(),
+        "an empty environment has no variables"
     );
+
+    let staging = f
+        .create_env(json!({ "name": "staging", "duplicateFrom": prod }))
+        .await;
+    let copied = vars(staging).await;
+    let names: Vec<(&str, bool)> = copied.iter().map(|v| (v.1.as_str(), v.2)).collect();
+    assert_eq!(
+        names,
+        [("PLAIN", false), ("REGION", false), ("SECRET", true)]
+    );
+    // Re-encrypted under the new environment's own key, same value.
+    let (id, _, _, sealed) = copied.iter().find(|v| v.1 == "SECRET").unwrap();
+    let keys = &f.app.state.keys;
+    let value = modula_server::deploy::env::open_variable(keys, &db, staging, *id, sealed)
+        .await
+        .unwrap();
+    assert_eq!(value.expose_secret(), "two");
+    assert!(
+        modula_server::deploy::env::open_variable(keys, &db, prod, *id, sealed)
+            .await
+            .is_err(),
+        "the copy is sealed with the new environment's key"
+    );
+    // Still write-only over the API.
+    let si: String =
+        sqlx::query_scalar("SELECT id FROM service_instances WHERE environment_id = $1")
+            .bind(staging)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    let r = f
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/service-instances/{si}/variables"),
+            Some(&f.admin),
+            None,
+        )
+        .await;
+    let secret = r
+        .json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "SECRET")
+        .unwrap();
+    assert_eq!(secret["sealed"], true, "{secret:?}");
+    assert!(secret.get("value").is_none_or(Value::is_null), "{secret:?}");
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn new_environments_can_deploy_another_branch(pool: PgPool) {
+    let f = fixture(pool).await;
+    let prod = f.production().await;
+    let service: String =
+        sqlx::query_scalar("SELECT service_id FROM service_instances WHERE id = $1")
+            .bind(&f.instance)
+            .fetch_one(f.app.db())
+            .await
+            .unwrap();
+    let create = |body: Value| {
+        let (app, admin, project) = (&f.app, f.admin.clone(), f.project.clone());
+        async move {
+            app.call(
+                Method::POST,
+                &format!("/api/projects/{project}/environments"),
+                Some(&admin),
+                Some(body),
+            )
+            .await
+        }
+    };
+    // An image service has no branch.
+    let r = create(json!({ "name": "x", "branches": { &service: "dev" } })).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+
+    sqlx::query("UPDATE service_instances SET config = $2 WHERE id = $1")
+        .bind(&f.instance)
+        .bind(json!({ "source": { "type": "repo", "repo": "acme/app", "branch": "main" } }))
+        .execute(f.app.db())
+        .await
+        .unwrap();
+    let r = create(json!({ "name": "x", "branches": { &service: "bad branch" } })).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+    let r = create(json!({ "name": "x", "branches": { Id::new().to_string(): "dev" } })).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+    let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM environments WHERE name = 'x'")
+        .fetch_one(f.app.db())
+        .await
+        .unwrap();
+    assert_eq!(exists, 0, "a rejected request creates nothing");
+
+    let branch = |env: Id| {
+        let db = f.app.state.db.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT config->'source'->>'branch' FROM service_instances WHERE environment_id = $1",
+            )
+            .bind(env)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        }
+    };
+    let dev = f
+        .create_env(
+            json!({ "name": "dev", "duplicateFrom": prod, "branches": { &service: "dev" } }),
+        )
+        .await;
+    assert_eq!(branch(dev).await, "dev");
+    assert_eq!(branch(prod).await, "main", "the source keeps its branch");
+    let same = f
+        .create_env(json!({ "name": "same", "duplicateFrom": prod }))
+        .await;
+    assert_eq!(branch(same).await, "main");
+
+    // The project detail carries each instance's branch (for the dialog).
+    let p = f
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/projects/{}", f.project),
+            Some(&f.admin),
+            None,
+        )
+        .await;
+    let dev_instance = p.json["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["environmentId"] == dev.to_string())
+        .unwrap();
+    assert_eq!(dev_instance["branch"], "dev");
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn environments_rename_and_the_default_stays(pool: PgPool) {
+    let f = fixture(pool).await;
+    let prod = f.production().await;
+    let staging = f.create_env(json!({ "name": "staging" })).await;
+    let rename = |env: Id, name: &'static str| {
+        let (app, admin) = (&f.app, f.admin.clone());
+        async move {
+            app.call(
+                Method::PATCH,
+                &format!("/api/environments/{env}"),
+                Some(&admin),
+                Some(json!({ "name": name })),
+            )
+            .await
+        }
+    };
+    let r = rename(staging, "Preview").await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["name"], "preview");
+    assert_eq!(r.json["isDefault"], false);
+    assert_eq!(
+        rename(staging, "production").await.status,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(rename(staging, " ").await.status, StatusCode::BAD_REQUEST);
+
+    // The default can be renamed but stays the default: not deletable.
+    let r = rename(prod, "live").await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["isDefault"], true);
+    let r = f
+        .app
+        .call(
+            Method::DELETE,
+            &format!("/api/environments/{prod}"),
+            Some(&f.admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{:?}", r.json);
+    let r = f
+        .app
+        .call(
+            Method::DELETE,
+            &format!("/api/environments/{staging}"),
+            Some(&f.admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn environment_changes_need_their_roles(pool: PgPool) {
+    let f = fixture(pool).await;
+    let prod = f.production().await;
+    let staging = f.create_env(json!({ "name": "staging" })).await;
+    let mut users = Vec::new();
+    for role in ["viewer", "deployer", "member"] {
+        let (id, cookie) = f.app.user(&format!("{role}@example.com")).await;
+        f.app.add_member(f.workspace, id, role).await;
+        users.push((role, cookie));
+    }
+    let create = format!("/api/projects/{}/environments", f.project);
+    let env = format!("/api/environments/{staging}");
+    for (role, cookie) in &users {
+        let r = f
+            .app
+            .call(
+                Method::POST,
+                &create,
+                Some(cookie),
+                Some(json!({ "name": format!("by-{role}"), "duplicateFrom": prod })),
+            )
+            .await;
+        let rename = f
+            .app
+            .call(
+                Method::PATCH,
+                &env,
+                Some(cookie),
+                Some(json!({ "name": format!("{role}-env") })),
+            )
+            .await;
+        let delete = f.app.call(Method::DELETE, &env, Some(cookie), None).await;
+        let member = *role == "member";
+        assert_eq!(
+            r.status == StatusCode::OK,
+            member,
+            "{role} create: {:?}",
+            r.json
+        );
+        assert_eq!(
+            rename.status == StatusCode::OK,
+            member,
+            "{role} rename: {:?}",
+            rename.json
+        );
+        assert_eq!(delete.status, StatusCode::FORBIDDEN, "{role} delete");
+        assert_ne!(delete.code(), "sudo_required", "{role}");
+    }
+    // Admins delete with a recent re-authentication only.
+    f.app.drop_sudo().await;
+    let r = f.app.call(Method::DELETE, &env, Some(&f.admin), None).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{:?}", r.json);
+    assert_eq!(r.code(), "sudo_required");
 }
 
 impl Fixture {
+    /// Create an environment of the project (admin); returns its id.
+    async fn create_env(&self, body: Value) -> Id {
+        let r = self
+            .app
+            .call(
+                Method::POST,
+                &format!("/api/projects/{}/environments", self.project),
+                Some(&self.admin),
+                Some(body),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+        r.json["id"].as_str().unwrap().parse().unwrap()
+    }
+
     /// A one-click database service; returns its instance in production.
     async fn template_service(&self, template: &str) -> Value {
         let r = self
@@ -756,15 +1003,20 @@ async fn cloned_environments_get_volumes_and_fresh_database_passwords(pool: PgPo
     };
     let prod_password = password(prod).await;
 
-    for copy_variables in [false, true] {
-        let name = format!("clone-{copy_variables}");
+    for duplicate in [false, true] {
+        let name = format!("clone-{duplicate}");
+        let body = if duplicate {
+            json!({ "name": name, "duplicateFrom": prod })
+        } else {
+            json!({ "name": name })
+        };
         let r = f
             .app
             .call(
                 Method::POST,
                 &format!("/api/projects/{}/environments", f.project),
                 Some(&f.admin),
-                Some(json!({ "name": name, "cloneFrom": prod, "copyVariables": copy_variables })),
+                Some(body),
             )
             .await;
         assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
@@ -800,7 +1052,7 @@ async fn cloned_environments_get_volumes_and_fresh_database_passwords(pool: PgPo
         // The database works: every template variable, a new password.
         let fresh = password(env).await;
         assert_eq!(fresh.len(), 32);
-        assert_ne!(fresh, prod_password, "copyVariables={copy_variables}");
+        assert_ne!(fresh, prod_password, "duplicate={duplicate}");
         let resolved = f.resolve(env, &instance).await;
         assert!(resolved.missing.is_empty(), "{:?}", resolved.missing);
         assert!(
@@ -815,7 +1067,7 @@ async fn cloned_environments_get_volumes_and_fresh_database_passwords(pool: PgPo
         .fetch_one(&db)
         .await
         .unwrap();
-        assert_eq!(plain, i64::from(copy_variables));
+        assert_eq!(plain, i64::from(duplicate));
     }
 }
 

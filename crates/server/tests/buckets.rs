@@ -668,3 +668,36 @@ async fn self_hosted_buckets_are_a_template(pool: PgPool) {
         .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
 }
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn duplicated_environments_get_no_bucket_credentials(pool: PgPool) {
+    let c = Ctx::new(pool).await;
+    c.connect().await;
+    c.cf.tokens_allowed.store(true, Ordering::SeqCst);
+    c.ok(
+        Method::POST,
+        &format!("/api/projects/{}/buckets", c.project),
+        Some(json!({ "name": "media", "environmentId": c.prod, "bucket": "media-prod" })),
+    )
+    .await;
+    assert!(!c.variables(c.instance("media", c.prod).await).await.is_empty());
+    let r = c
+        .ok(
+            Method::POST,
+            &format!("/api/projects/{}/environments", c.project),
+            Some(json!({ "name": "preview", "duplicateFrom": c.prod })),
+        )
+        .await;
+    let preview: Id = r["id"].as_str().unwrap().parse().unwrap();
+    // The service exists there, without a bucket or its credentials.
+    let instance = c.instance("media", preview).await;
+    assert!(c.variables(instance).await.is_empty());
+    let buckets: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM r2_buckets WHERE service_instance_id = $1")
+            .bind(instance)
+            .fetch_one(c.app.db())
+            .await
+            .unwrap();
+    assert_eq!(buckets, 0);
+    assert_eq!(c.cf.token_ids().len(), 1);
+}

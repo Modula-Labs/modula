@@ -8,36 +8,34 @@ services in one can't reach services in another.
 
 ## Create an environment
 
-**Environment menu → New environment**. Options:
+**Environment menu (top bar) → New environment**, or **Project Settings →
+Environments**. Start from:
 
-- **Clone from**: the environment whose service settings to copy (default: the
-  project's first environment).
-- **Copy variables**: also copy its service and shared variables. Sealed
-  variables are never copied; set them again in the new environment.
+- **Duplicate <environment>**: every service's settings and all its variables,
+  service and shared. Sealed variables are copied server-side and stay sealed.
+- **Empty**: every service with the default environment's settings and no
+  variables.
+
+Either way:
+
+- **Branch.** Pick the branch each GitHub service deploys from in the new
+  environment (default: the same branch). Pushes to it deploy here only.
+- **Databases** get a new, empty volume at the same path and freshly generated
+  credentials; their data is never copied.
+- **Domains and TCP proxies** are not copied: generate or add them for the new
+  environment. Generated names include the environment
+  (`api-staging-x7k2.apps.example.com`); the default environment's don't.
 
 Names are stored lowercase and must be unique in the project.
 
 ```bash
 curl -fsS -X POST -H "Authorization: Bearer $MODULA_TOKEN" -H 'content-type: application/json' \
   "$MODULA_URL/api/projects/$PROJECT/environments" \
-  -d '{ "name": "staging", "cloneFrom": "<production env id>", "copyVariables": true }'
+  -d '{ "name": "staging", "duplicateFrom": "<production env id>", "branches": { "<service id>": "staging" } }'
 ```
 
 Nothing is deployed yet: the new environment's services show up in the
-**Deploy changes** bar. Before deploying:
-
-- **Branch.** For GitHub services, set the branch for this environment in each
-  service's settings (e.g. `staging`); pushes to it deploy here only.
-- **Databases.** Volumes, domains and TCP proxies are not cloned. Add a volume
-  to each database service in the new environment (Settings → Volume) at its
-  template's path before its first deploy: `/var/lib/postgresql/data`
-  (Postgres), `/var/lib/mysql` (MySQL), `/data` (Redis), `/data/db` (MongoDB).
-  The new database starts empty.
-- **Credentials.** With *Copy variables*, database passwords are copied too;
-  rotate them if environments shouldn't share credentials. Without it, set the
-  database's variables yourself.
-- **Domains.** Generate or add domains for the new environment. Generated
-  names include the environment (`api-staging-x7k2.apps.example.com`).
+**Deploy changes** bar.
 
 References like `${{postgres.DATABASE_URL}}` resolve inside each environment, so
 staging's API talks to staging's database without changes.
@@ -61,11 +59,19 @@ curl -fsS -X POST -H "Authorization: Bearer $MODULA_TOKEN" -H 'content-type: app
 Sync copies settings wholesale, including each service's branch. Re-check
 branches after syncing staging from production.
 
-## Delete an environment
+## Switch, rename and delete
 
-Deletes its deployments, volumes (with their data), variables and encryption
-key. A project keeps at least one environment. Needs the **Admin** role and a
-recent re-authentication (dashboard only).
+The environment menu in the top bar switches environments and keeps you on the
+same page; the choice is in the URL (`?env=`) and remembered per project.
+
+Rename an environment in **Project Settings → Environments** (or
+`PATCH /api/environments/{id}` with `{ "name": "…" }`); existing generated
+domains keep their hostnames.
+
+Deleting removes its deployments, volumes (with their data), variables and
+encryption key. The default environment (the project's first, `production`)
+can't be deleted. Needs the **Admin** role, typing the environment's name, and
+a recent re-authentication (dashboard only).
 
 ## PR environments (coming soon)
 

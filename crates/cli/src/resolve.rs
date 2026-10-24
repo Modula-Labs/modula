@@ -5,9 +5,6 @@ use anyhow::{Context, bail};
 
 use crate::api::{Api, Environment, Project, ProjectDetail, Service, Workspace, api_error};
 
-/// The default environment when none is given or linked.
-pub const DEFAULT_ENVIRONMENT: &str = "production";
-
 /// Ids are 16 lowercase base36 characters (see crates/id).
 pub fn looks_like_id(s: &str) -> bool {
     s.len() == 16
@@ -53,7 +50,8 @@ pub fn pick_project<'a>(
     }
 }
 
-/// Pick an environment by name or id; with no name, `production`, else the only one.
+/// Pick an environment by name or id; with no name, the project's default
+/// (production).
 pub fn pick_environment<'a>(
     envs: &'a [Environment],
     wanted: Option<&str>,
@@ -62,18 +60,12 @@ pub fn pick_environment<'a>(
         Some(w) => envs
             .iter()
             .find(|e| e.id == w || e.name.eq_ignore_ascii_case(w)),
-        None => envs
-            .iter()
-            .find(|e| e.name == DEFAULT_ENVIRONMENT)
-            .or(match envs {
-                [only] => Some(only),
-                _ => None,
-            }),
+        None => envs.iter().find(|e| e.is_default).or(envs.first()),
     };
     found.with_context(|| {
         format!(
             "no environment {} (environments: {})",
-            wanted.unwrap_or(DEFAULT_ENVIRONMENT),
+            wanted.unwrap_or("to default to"),
             names(envs.iter().map(|e| e.name.as_str()))
         )
     })
@@ -201,6 +193,7 @@ mod tests {
         Environment {
             id: id.into(),
             name: name.into(),
+            is_default: name == "production",
         }
     }
 
@@ -227,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn environments_default_to_production() {
+    fn environments_default_to_the_default_one() {
         let envs = [env("1", "staging"), env("2", "production")];
         assert_eq!(pick_environment(&envs, None).unwrap().id, "2");
         assert_eq!(pick_environment(&envs, Some("Staging")).unwrap().id, "1");
@@ -239,7 +232,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("staging, production"), "{err}");
-        // A single non-production environment is the default too.
+        // Without a flagged default, the first one.
         assert_eq!(pick_environment(&[env("3", "dev")], None).unwrap().id, "3");
     }
 

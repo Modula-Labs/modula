@@ -127,29 +127,30 @@ pub async fn list(State(state): State<AppState>, grant: Grant) -> AppResult<Json
     Ok(Json(rows.into_iter().map(|r| to_api(r, &target)).collect()))
 }
 
-/// `<service>-<environment>-<4 random>` (production omits the environment),
-/// trimmed so the label stays within 63 characters.
-fn generated_label(service: &str, environment: &str) -> anyhow::Result<String> {
+/// `<service>-<environment>-<4 random>`, trimmed so the label stays within
+/// 63 characters. `None` is the project's default environment, which omits it.
+fn generated_label(service: &str, environment: Option<&str>) -> anyhow::Result<String> {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let rand = modula_crypto::random_bytes::<4>()?;
     let suffix: String = rand
         .iter()
         .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
         .collect();
-    let env: String = environment
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let base = if env == "production" {
-        service.to_owned()
-    } else {
-        format!("{service}-{env}")
+    let base = match environment {
+        None => service.to_owned(),
+        Some(e) => {
+            let env: String = e
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            format!("{service}-{env}")
+        }
     };
     let base: String = base.chars().take(63 - 5).collect();
     Ok(format!("{}-{suffix}", base.trim_matches('-')))
@@ -167,8 +168,11 @@ pub async fn generate(
             "generated domains need an apps domain: add one in Settings → Domain (or use a custom domain)".into(),
         )
     })?;
-    let (service, environment): (String, String) = sqlx::query_as(
-        "SELECT s.name, e.name FROM service_instances i
+    let (service, environment, default): (String, String, bool) = sqlx::query_as(
+        "SELECT s.name, e.name,
+                e.id = (SELECT f.id FROM environments f WHERE f.project_id = e.project_id
+                        ORDER BY f.created_at, f.id LIMIT 1)
+         FROM service_instances i
          JOIN services s ON s.id = i.service_id JOIN environments e ON e.id = i.environment_id
          WHERE i.id = $1",
     )
@@ -191,7 +195,10 @@ pub async fn generate(
     // A collision on the random suffix is astronomically unlikely; retry once.
     let mut hostname = String::new();
     for _ in 0..2 {
-        hostname = format!("{}.{apps}", generated_label(&service, &environment)?);
+        hostname = format!(
+            "{}.{apps}",
+            generated_label(&service, (!default).then_some(environment.as_str()))?
+        );
         let inserted = sqlx::query(
             "INSERT INTO domains (id, service_instance_id, hostname, kind) VALUES ($1, $2, $3, 'generated')
              ON CONFLICT (hostname) DO NOTHING",
@@ -448,11 +455,11 @@ mod tests {
 
     #[test]
     fn labels() {
-        let l = generated_label("api", "production").unwrap();
+        let l = generated_label("api", None).unwrap();
         assert!(l.starts_with("api-") && l.len() == 8, "{l}");
-        let l = generated_label("api", "Staging EU").unwrap();
+        let l = generated_label("api", Some("Staging EU")).unwrap();
         assert!(l.starts_with("api-staging-eu-"), "{l}");
         let long = "a".repeat(63);
-        assert!(generated_label(&long, &long).unwrap().len() <= 63);
+        assert!(generated_label(&long, Some(&long)).unwrap().len() <= 63);
     }
 }

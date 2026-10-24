@@ -277,15 +277,28 @@ Deletes variables by name (asks first). Pending until deployed, like `set`.
 ### `environment [NAME]` (alias `env`)
 
 With a name: links the directory to that environment (keeping its service).
-Without: lists environments and marks the selected one.
+Without: lists environments and marks the selected and the default one. The
+link stores the environment's id, so renaming it doesn't break the link.
 
-### `environment new <NAME> [--copy <ENV>] [--copy-variables]`
+### `environment new <NAME> [--duplicate <ENV>] [--branch <SERVICE=BRANCH>]…`
 
-Creates an environment and links it. Every service is created in it with the
-settings of `--copy` (default: the project's first environment); volumes are
-recreated empty; domains and TCP proxies are not copied. `--copy-variables`
-also copies that environment's non-sealed variables (database passwords are
-always fresh). Nothing is deployed yet: run `deploy` there.
+Creates an environment and links it. `--duplicate` copies that environment's
+service settings and all its variables (sealed ones stay sealed); without it
+the environment is empty: every service with the default environment's
+settings and no variables. Databases always get an empty volume and fresh
+credentials; domains and TCP proxies are not copied. `--branch` picks the
+branch a repo service deploys from there (default: the same branch).
+Nothing is deployed yet: run `deploy` there.
+
+### `environment rename <ENV> <NAME>`
+
+Renames an environment.
+
+### `environment delete <ENV>`
+
+Deletes an environment (asks first; never the default one). It needs a
+re-authenticated dashboard session, so with an API token it fails and prints
+the Project Settings → Environments link to do it there.
 
 ### `domain [--port <PORT>]`
 

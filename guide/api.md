@@ -119,6 +119,7 @@ re-authentication is also required.
 | PATCH | `/api/projects/{project_id}` | Member |
 | DELETE | `/api/projects/{project_id}` | Admin + sudo |
 | POST | `/api/projects/{project_id}/environments` | Member |
+| PATCH | `/api/environments/{environment_id}` | Member |
 | DELETE | `/api/environments/{environment_id}` | Admin + sudo |
 | POST | `/api/environments/{environment_id}/sync` | Member |
 | GET | `/api/projects/{project_id}/activity` | Viewer |
@@ -136,7 +137,11 @@ re-authentication is also required.
 - `GET /api/projects/{id}` returns `project`, `environments`, `services` and
   `instances` (one per service per environment, with `latestDeploymentStatus`,
   `domain`, `dependsOn`…). Use it to find a service instance id.
-- Create environment: `{ "name": "staging", "cloneFrom": "<env id>", "copyVariables": true }`.
+- Create environment: `{ "name": "staging", "duplicateFrom": "<env id>", "branches": { "<service id>": "staging" } }`
+  (both optional: without `duplicateFrom` the environment is empty — the
+  default environment's service settings, no variables).
+- Rename environment: `{ "name": "preview" }`. The default (oldest)
+  environment, `isDefault` in the project detail, can't be deleted.
 - Sync: `{ "fromEnvironmentId": "<env id>" }`.
 - Activity query: `?environmentId=&serviceId=&kind=deployment|variable|config|service`.
 - Deploy pending changes: `{ "serviceIds": ["…"] }` (omit for all services with changes).

@@ -74,6 +74,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .patch("/api/projects/{project_id}", Resource(Action::ProjectUpdate), projects::update)
         .delete("/api/projects/{project_id}", Resource(Action::ProjectDelete), projects::delete)
         .post("/api/projects/{project_id}/environments", Resource(Action::EnvironmentCreate), projects::create_environment)
+        .patch("/api/environments/{environment_id}", Resource(Action::EnvironmentUpdate), projects::update_environment)
         .delete("/api/environments/{environment_id}", Resource(Action::EnvironmentDelete), projects::delete_environment)
         .post("/api/environments/{environment_id}/sync", Resource(Action::EnvironmentSync), projects::sync_environment)
         .get("/api/projects/{project_id}/activity", Resource(Action::ProjectRead), activity::list)
