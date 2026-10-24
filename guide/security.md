@@ -7,7 +7,13 @@ app (TOTP) and gives you single-use recovery codes. With 2FA on, signing in
 asks for a code after your password (5 wrong codes end the attempt), and
 re-authentication (below) asks for a code instead of your password. Disabling
 2FA, regenerating recovery codes and changing your password need sudo.
-Changing your password signs out every other session.
+Changing your password signs out every other session and, unless you untick
+**Also revoke API tokens**, revokes your API tokens too.
+
+Failed sign-ins are rate limited per email address and source IP (10 per 15
+minutes) and per email address overall (100 per 15 minutes); successful
+sign-ins don't count, so someone guessing your password from elsewhere can't
+lock you out.
 
 **Account → Security → Sessions** lists where you're signed in; revoke any
 session you don't recognize. Sessions expire after 7 days idle and 30 days in
@@ -23,7 +29,8 @@ Actions that need sudo:
 - delete a workspace, project, environment, service or volume
 - reveal a variable's value
 - restore or delete a backup, delete a backup target, change the control-plane backup
-- rotate a database password
+- rotate a database password; write to a database from the Database tab
+  (edit rows, writable SQL, vacuum, extensions)
 - create a server join token, remove a server, create the GitHub App
 - connect, change or disconnect Cloudflare or Hetzner; create or delete a
   Hetzner server

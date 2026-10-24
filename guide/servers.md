@@ -61,10 +61,34 @@ chosen on its first deployment (or when a TCP proxy is created): an online
 server with the fewest running deployments. After that the service stays on
 that server for every deployment, until the server is removed.
 
+Servers added by an instance admin (the join command, or `modula-server
+join-token`) are shared by every workspace. Servers a workspace creates through
+its own [Hetzner integration](#create-servers-in-hetzner) belong to that
+workspace: only its services are placed on them.
+
 ## Remove a server
 
 **Remove** on the server's page revokes its certificate: it's cut off
-immediately and its deployments stop being managed. Needs re-authentication.
+immediately, its deployments stop being managed, and it can never reconnect
+with its old certificate. To bring it back, join it again with a new token.
+Needs re-authentication.
+
+A server renews its certificate on its own during the last third of the
+certificate's 30-day lifetime. A server that floods the control plane (more
+than about 200 log, metric or event messages per second, or 4 MiB/s of logs)
+has the excess dropped; log lines longer than 16 KiB are cut.
+
+## Builds
+
+Each workspace's builds run in their own rootless BuildKit daemon on the
+server, with its own build cache, the process sandbox on, a seccomp profile,
+and limits of 2 GiB memory and 2 CPUs. Build steps can't reach environment
+networks or the cloud metadata service. At most 2 builds run at once per
+server; more wait for a slot. A workspace's daemon stops after 30 idle minutes
+(its cache stays), so the next build starts a few seconds slower. Tune with
+`modula-node` flags or environment: `--build-memory-mb` / `MODULA_BUILD_MEMORY_MB`,
+`--build-cpus` / `MODULA_BUILD_CPUS`, `--build-concurrency` /
+`MODULA_BUILD_CONCURRENCY`.
 
 ## Create servers in Hetzner
 

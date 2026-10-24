@@ -124,8 +124,8 @@ Unknown fields are rejected.
 | `restartPolicyMaxRetries` | number | unlimited | 1–1000; only with `on_failure` |
 | `preDeployCommand` | string[] | none | argv run once from the new image before it starts (e.g. migrations); ≤64 args, each ≤4096 bytes |
 | `drainingSeconds` | number | `0` (server default) | 0–300. Time between SIGTERM and SIGKILL when a container is retired. |
-| `memoryMb` | number | no limit | 16–1048576 |
-| `cpuMillis` | number | no limit | 10–256000 (1000 = one CPU) |
+| `memoryMb` | number | `512` | 16–1048576. Unset means the 512 MB default, so one app can't take the whole server's memory. |
+| `cpuMillis` | number | `1000` | 10–256000 (1000 = one CPU). Unset means one CPU. |
 | `replicas` | number | `1` | Only `1` for now |
 | `builder` | string | `railpack` | `railpack` or `dockerfile` (repo sources) |
 | `dockerfilePath` | string | `Dockerfile` | Relative to the root directory |

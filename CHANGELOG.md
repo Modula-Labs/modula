@@ -9,8 +9,31 @@ may break things).
 
 ### Security
 
-- Security hardening ahead of the open-source release (details to be filled in):
-  - _TODO_
+- Builds run in a sandboxed, rootless BuildKit per workspace (own cache, seccomp
+  profile, memory/CPU limits, own network); Railpack planning runs as an
+  unprivileged `modula-build` user; source archives can't plant symlinks that
+  escape the build directory.
+- Containers and builds can't reach the cloud metadata service.
+- Services without limits get 512 MB and 1 vCPU instead of unlimited.
+- Failed sign-ins are counted per email and IP; an attacker can no longer lock
+  the owner out.
+- A revoked server can't reconnect; servers a workspace creates on Hetzner only
+  run that workspace's services; per-server rate limits on the node stream.
+- GitHub installations are bound only after checking, with a one-time user
+  authorization, that you can access them; replayed push webhooks are ignored.
+- Database tab: reads run as a read-only `modula_reader` role; writes need Admin
+  and sudo.
+- One strict outbound address guard for webhooks and backups (private endpoints
+  opt-in); storage errors no longer echo response bodies.
+- Changing your password revokes API tokens; new password hashes use stronger
+  argon2id parameters; per-workspace upload quota.
+- Installer: secrets passed by environment, signed `VERSION` checked, downgrades
+  refused, hardened `modula-node` unit, TCP proxy ports opened one at a time;
+  dashboard upgrades verify the installer script before running it.
+- Releases: new signing key kept outside the repository, offline builds with
+  pinned images, installers and license files signed too.
+- CLI: ignores untrusted `.modula/token` files and refuses tokens over plain
+  http to non-local hosts.
 - CI builds now install `protoc`, pin every GitHub Action to a commit SHA, and run
   `cargo-deny` and `cargo-audit` on every push and pull request.
 

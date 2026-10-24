@@ -94,7 +94,7 @@ guide's `api.md`.
 | `restartPolicyMaxRetries` | none | 1–1000, only with `on_failure` |
 | `preDeployCommand` | none | argv run once in the new image before start; failure fails the deploy |
 | `drainingSeconds` | 0 | 0–300, SIGTERM→SIGKILL grace |
-| `memoryMb` / `cpuMillis` | no limit | 16–1048576 / 10–256000 |
+| `memoryMb` / `cpuMillis` | 512 / 1000 | 16–1048576 / 10–256000 |
 | `replicas` | 1 | only 1 accepted |
 | `builder` | `railpack` | `railpack` \| `dockerfile` (repo sources) |
 | `dockerfilePath` | `Dockerfile` | relative to root dir |

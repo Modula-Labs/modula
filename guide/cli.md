@@ -76,6 +76,16 @@ used is the first of:
 `logout` removes the token in effect: `.modula/token` if there is one, else
 the global one.
 
+A `.modula/token` is only used when it's a regular file owned by you, readable
+only by you (no group or other permission bits) and not tracked by git;
+otherwise it's ignored with a warning, so a cloned repository can't point your
+CLI at someone else's instance. When it points at a different instance than
+your global login, the CLI says `using instance <url> from <path>` on stderr.
+
+The CLI refuses to send a token over plain `http://` to anything but
+`localhost`; pass `--allow-insecure-http` or set
+`MODULA_ALLOW_INSECURE_HTTP=1` to override (it warns).
+
 **What a token can't do.** Tokens never have sudo (a recent
 re-authentication), so these always fail with "this needs a recently
 re-authenticated dashboard session" and must be done in the dashboard:
