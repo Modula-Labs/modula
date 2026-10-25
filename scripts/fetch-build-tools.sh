@@ -42,6 +42,16 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$out"
 
+# Pinned versions: tools fetched for the same pins are the same files, so
+# they're only downloaded again when a pin changes.
+stamp="$out/.tools-linux-$arch.stamp"
+pins="$BUILDKIT_VERSION $bk_sum $RAILPACK_VERSION $rp_sum $WALG_VERSION $wg_sum $WORKERD_VERSION $wd_sum"
+if [[ $(cat "$stamp" 2>/dev/null) == "$pins" ]] \
+  && [[ -x $out/buildctl-linux-$arch && -x $out/railpack-linux-$arch && -x $out/wal-g-linux-$arch && -x $out/workerd-linux-$arch ]]; then
+  echo "$arch: build tools unchanged, reusing them"
+  exit 0
+fi
+
 fetch() { # url sha256 dest
   curl -fsSL --retry 3 -o "$3" "$1"
   echo "$2  $3" | sha256sum --check --quiet - || { echo "checksum mismatch for $1" >&2; exit 1; }
@@ -62,4 +72,4 @@ install -m 0755 "$tmp/wal-g" "$out/wal-g-linux-$arch"
 fetch "https://github.com/cloudflare/workerd/releases/download/$WORKERD_VERSION/workerd-linux-$wd_arch.gz" "$wd_sum" "$tmp/workerd.gz"
 gunzip "$tmp/workerd.gz"
 install -m 0755 "$tmp/workerd" "$out/workerd-linux-$arch"
-
+echo "$pins" >"$stamp"

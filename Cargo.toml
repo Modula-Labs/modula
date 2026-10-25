@@ -105,7 +105,7 @@ zeroize = { version = "1", features = ["derive"] }
 
 [profile.release]
 lto = "thin"
-codegen-units = 1
+codegen-units = 16
 strip = "symbols"
 panic = "abort"
 

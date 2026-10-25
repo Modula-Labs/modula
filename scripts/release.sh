@@ -18,10 +18,8 @@
 # it; anywhere but inside this repository); its public half is
 # deploy/release.pub.pem, which install.sh and install-cli.sh embed.
 #
-# Compiling sees only what the build needs (Cargo.toml, Cargo.lock, crates/,
-# the dashboard build, the installer and key it embeds, the CLI guide), read
-# only, and runs without a network: dependencies are fetched first, with
-# --locked, in a separate step.
+# Needs zig, cargo-zigbuild and go: every Linux binary is cross-compiled
+# natively (static musl for Rust, CGO-free for Caddy), on Linux or macOS.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -45,9 +43,6 @@ CADDY_PLUGINS=(
   github.com/mholt/caddy-ratelimit@v0.1.1-0.20260612195517-5625512f24f6
   github.com/caddyserver/cache-handler@v0.16.0
 )
-# Build images, pinned by digest (multi-arch index, so --platform still picks).
-RUST_IMAGE=rust:1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87 # rust:1-alpine, rustc 1.99.1
-GO_IMAGE=golang:1.25-alpine@sha256:1ae0735f00daffa3aaf1363a5184c0d2dc55c78e3db4ec70241cdac97bf84b59 # golang:1.25-alpine
 
 [[ -f $KEY ]] || { echo "signing key $KEY not found" >&2; exit 1; }
 repo=$(pwd -P)
@@ -73,60 +68,35 @@ rm -f "$OUT"/SHA256SUMS "$OUT"/SHA256SUMS.sig
 echo "web: building the dashboard (embedded into modula-server)"
 (cd web && pnpm install --frozen-lockfile >/dev/null && pnpm build >/dev/null)
 
-# Exactly what the compiler reads (include_str!/rust-embed paths), read only.
-src_mounts=(
-  -v "$PWD/Cargo.toml:/src/Cargo.toml:ro"
-  -v "$PWD/Cargo.lock:/src/Cargo.lock:ro"
-  -v "$PWD/crates:/src/crates:ro"
-  -v "$PWD/web/dist:/src/web/dist:ro"
-  -v "$PWD/deploy/install.sh:/src/deploy/install.sh:ro"
-  -v "$PWD/deploy/release.pub.pem:/src/deploy/release.pub.pem:ro"
-  -v "$PWD/guide:/src/guide:ro"
-  -v "$PWD/packages/iac:/src/packages/iac:ro"
-)
-cargo_mounts=(
-  -v modula-cargo-registry:/usr/local/cargo/registry
-  -v modula-cargo-git:/usr/local/cargo/git
-)
+# Linux binaries are cross-compiled on this machine, never emulated:
+# static musl builds with cargo-zigbuild (zig links ring's and SQLite's C).
+for tool in zig cargo-zigbuild; do
+  command -v "$tool" >/dev/null || { echo "$tool not found (zig from ziglang.org, cargo install --locked cargo-zigbuild)" >&2; exit 1; }
+done
+triple() { case $1 in amd64) echo x86_64-unknown-linux-musl ;; arm64) echo aarch64-unknown-linux-musl ;; esac; }
 
 for arch in $ARCHES; do
-  echo "$arch: preparing the build image"
-  builder=modula-release-builder:$arch
-  docker build -q --platform "linux/$arch" -t "$builder" - >/dev/null <<EOF
-FROM $RUST_IMAGE
-RUN apk add -q --no-cache musl-dev protobuf-dev
-EOF
+  t=$(triple "$arch")
+  rustup target add "$t" >/dev/null
+  echo "$arch: compiling modula-server, modula-node and the modula CLI"
+  cargo zigbuild -q --release --locked --target "$t" -p modula-server -p modula-node -p modula-cli
+  cp "target/$t/release/modula-server" "$OUT/modula-server-linux-$arch"
+  cp "target/$t/release/modula-node" "$OUT/modula-node-linux-$arch"
+  cp "target/$t/release/modula" "$OUT/modula-linux-$arch"
 
-  echo "$arch: fetching crates (--locked)"
-  docker run --rm --platform "linux/$arch" "${src_mounts[@]}" "${cargo_mounts[@]}" \
-    -w /src "$builder" cargo fetch -q --locked
-
-  echo "$arch: compiling modula-server, modula-node and the modula CLI (offline)"
-  docker run --rm --platform "linux/$arch" --network none \
-    "${src_mounts[@]}" "${cargo_mounts[@]}" \
-    -v "modula-release-target-$arch":/target \
-    -v "$PWD/$OUT":/out \
-    -e CARGO_TARGET_DIR=/target -e CARGO_NET_OFFLINE=true \
-    -w /src "$builder" \
-    sh -euc "
-      cargo build -q --release --locked --offline -p modula-server -p modula-node -p modula-cli
-      cp /target/release/modula-server /out/modula-server-linux-$arch
-      cp /target/release/modula-node /out/modula-node-linux-$arch
-      cp /target/release/modula /out/modula-linux-$arch
-    "
-
-  echo "$arch: building Caddy $CADDY_VERSION with ${CADDY_PLUGINS[*]}"
-  with=()
-  for p in "${CADDY_PLUGINS[@]}"; do with+=(--with "$p"); done
-  docker run --rm \
-    -v modula-go-cache:/root/go \
-    -v "$PWD/$OUT":/out \
-    -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH="$arch" \
-    "$GO_IMAGE" \
-    sh -euc "
-      GOOS= GOARCH= go install github.com/caddyserver/xcaddy/cmd/xcaddy@$XCADDY_VERSION
-      cd /tmp && xcaddy build $CADDY_VERSION ${with[*]} --output /out/caddy-linux-$arch
-    "
+  caddy_stamp="$CADDY_VERSION ${CADDY_PLUGINS[*]}"
+  if [[ -x $OUT/caddy-linux-$arch && $(cat "$OUT/.caddy-linux-$arch.stamp" 2>/dev/null) == "$caddy_stamp" ]]; then
+    echo "$arch: Caddy $CADDY_VERSION unchanged, reusing it"
+  else
+    echo "$arch: building Caddy $CADDY_VERSION with ${CADDY_PLUGINS[*]}"
+    with=()
+    for p in "${CADDY_PLUGINS[@]}"; do with+=(--with "$p"); done
+    command -v go >/dev/null || { echo "go not found" >&2; exit 1; }
+    GOBIN=$PWD/target/go-bin go install "github.com/caddyserver/xcaddy/cmd/xcaddy@$XCADDY_VERSION"
+    (cd "$(mktemp -d)" && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+      "$OLDPWD/target/go-bin/xcaddy" build "$CADDY_VERSION" "${with[@]}" --output "$OLDPWD/$OUT/caddy-linux-$arch")
+    echo "$caddy_stamp" >"$OUT/.caddy-linux-$arch.stamp"
+  fi
 
   echo "$arch: fetching buildctl, railpack, wal-g and workerd (pinned sums)"
   scripts/fetch-build-tools.sh "$arch" "$OUT"
