@@ -182,8 +182,11 @@ pub struct Query {
     pub since_ms: i64,
     pub until_ms: i64,
     pub service: Option<Id>,
+    pub deployment: Option<Id>,
     /// 2–5: only 2xx … 5xx responses.
     pub status_class: Option<i32>,
+    /// Only this status code.
+    pub status: Option<i32>,
     pub method: Option<String>,
     /// Case-insensitive substring of the path.
     pub path: Option<String>,
@@ -248,8 +251,10 @@ pub async fn search(db: &PgPool, environment: Id, q: &Query) -> sqlx::Result<Fou
            AND ($5::int4 IS NULL OR h.status / 100 = $5)
            AND ($6::text IS NULL OR h.method = $6)
            AND ($7::text IS NULL OR h.path ILIKE $7)
+           AND ($8::text IS NULL OR h.deployment_id = $8)
+           AND ($9::int4 IS NULL OR h.status = $9)
          ORDER BY h.at DESC, h.ctid DESC
-         LIMIT $8",
+         LIMIT $10",
     )
     .bind(environment)
     .bind(q.since_ms as f64)
@@ -258,6 +263,8 @@ pub async fn search(db: &PgPool, environment: Id, q: &Query) -> sqlx::Result<Fou
     .bind(q.status_class)
     .bind(&q.method)
     .bind(&path)
+    .bind(q.deployment)
+    .bind(q.status)
     .bind(limit + 1)
     .fetch_all(db)
     .await?;
@@ -279,6 +286,8 @@ pub async fn search(db: &PgPool, environment: Id, q: &Query) -> sqlx::Result<Fou
            AND ($6::int4 IS NULL OR h.status / 100 = $6)
            AND ($7::text IS NULL OR h.method = $7)
            AND ($8::text IS NULL OR h.path ILIKE $8)
+           AND ($9::text IS NULL OR h.deployment_id = $9)
+           AND ($10::int4 IS NULL OR h.status = $10)
          GROUP BY 1 ORDER BY 1",
     )
     .bind(environment)
@@ -289,6 +298,8 @@ pub async fn search(db: &PgPool, environment: Id, q: &Query) -> sqlx::Result<Fou
     .bind(q.status_class)
     .bind(&q.method)
     .bind(&path)
+    .bind(q.deployment)
+    .bind(q.status)
     .fetch_all(db)
     .await?;
     Ok(Found {

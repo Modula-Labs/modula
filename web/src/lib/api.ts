@@ -789,6 +789,9 @@ export interface PendingChanges {
 export interface Deployment {
   id: string;
   serviceInstanceId: string;
+  /** The instance's environment (where its stored logs and requests are searched). */
+  environmentId: string;
+  serviceName: string;
   nodeId: string | null;
   status: DeploymentStatus;
   image: string;
@@ -1031,6 +1034,23 @@ export interface InstanceMetrics {
   memoryLimitBytes: number | null;
   points: MetricsPoint[];
 }
+export type UptimeState = "up" | "down" | "none";
+export interface UptimeBucket {
+  /** Bucket start, unix ms. */
+  t: number;
+  /** none = nothing was meant to run (not deployed, sleeping, stopped). */
+  state: UptimeState;
+  downMs: number;
+  /** Why it was down: "crashed", "unreachable" or "restarting". */
+  reason: string | null;
+}
+export interface Uptime {
+  range: MetricsRange;
+  stepSecs: number;
+  /** Share of recorded minutes up (0–1); null without any. */
+  uptime: number | null;
+  buckets: UptimeBucket[];
+}
 
 export interface LogLine {
   /** Unix ms. */
@@ -1090,7 +1110,10 @@ export interface EnvironmentHttpLogsQuery {
   since: number;
   until?: number;
   service?: string;
-  status?: HttpStatusClass;
+  /** Only this deployment's requests. */
+  deployment?: string;
+  /** A class, or one status code ("404"). */
+  status?: HttpStatusClass | `${number}`;
   method?: string;
   path?: string;
   limit?: number;
@@ -1116,6 +1139,8 @@ export interface EnvironmentLogsQuery {
   until?: number;
   q?: string;
   service?: string;
+  /** Only this deployment's lines. */
+  deployment?: string;
   limit?: number;
 }
 
@@ -1348,11 +1373,18 @@ export const api = {
     get<InstanceMetrics>(
       `/api/projects/${enc(project)}/metrics?environment=${enc(environment)}&range=${range}`,
     ),
+  instanceUptime: (instance: string, range: MetricsRange) =>
+    get<Uptime>(`/api/service-instances/${enc(instance)}/uptime?range=${range}`),
+  projectUptime: (project: string, environment: string, range: MetricsRange) =>
+    get<Uptime>(
+      `/api/projects/${enc(project)}/uptime?environment=${enc(environment)}&range=${range}`,
+    ),
   environmentLogs: (environment: string, q: EnvironmentLogsQuery) => {
     const params = new URLSearchParams({ since: String(q.since) });
     if (q.until !== undefined) params.set("until", String(q.until));
     if (q.q) params.set("q", q.q);
     if (q.service) params.set("service", q.service);
+    if (q.deployment) params.set("deployment", q.deployment);
     if (q.limit !== undefined) params.set("limit", String(q.limit));
     return get<EnvironmentLogs>(
       `/api/environments/${enc(environment)}/logs?${params}`,
@@ -1362,6 +1394,7 @@ export const api = {
     const params = new URLSearchParams({ since: String(q.since) });
     if (q.until !== undefined) params.set("until", String(q.until));
     if (q.service) params.set("service", q.service);
+    if (q.deployment) params.set("deployment", q.deployment);
     if (q.status) params.set("status", q.status);
     if (q.method) params.set("method", q.method);
     if (q.path) params.set("path", q.path);

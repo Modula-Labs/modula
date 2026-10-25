@@ -1,4 +1,4 @@
-import type { HttpBucket, HttpMetrics, HttpRequest } from "./api";
+import type { HttpBucket, HttpMetrics, HttpRequest, HttpStatusClass } from "./api";
 import type { XY } from "./metrics";
 
 export const HTTP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
@@ -102,4 +102,72 @@ export function latencyHeadline(s: Pick<HttpSeries, "p50" | "p95" | "p99">): str
     ["p99", lastValue(s.p99)],
   ];
   return parts.map(([n, v]) => `${n} ${formatDuration(v)}`).join(" · ");
+}
+
+/** Text colour of a status in a dense table: 2xx green, 3xx blue, 4xx amber, 5xx red. */
+export function statusTextClass(status: number): string {
+  switch (statusClass(status)) {
+    case "2xx":
+      return "text-success";
+    case "3xx":
+      return "text-info";
+    case "4xx":
+      return "text-warning";
+    case "5xx":
+      return "text-error";
+    default:
+      return "text-muted-foreground";
+  }
+}
+
+/** Whole milliseconds, as request tables show them: 472.4 -> "472ms", 0.2 -> "<1ms". */
+export function formatMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  return ms < 1 ? "<1ms" : `${Math.round(ms)}ms`;
+}
+
+export interface HttpSearch {
+  /** Substring of the path. */
+  path?: string;
+  method?: string;
+  /** "2xx" … "5xx" or one code ("404"). */
+  status?: HttpStatusClass | `${number}`;
+  /** Tokens that couldn't be used, e.g. "@httpStatus:abc". */
+  invalid: string[];
+}
+
+/** Parses an HTTP log search: `@path:/api @httpStatus:200 @method:post`, where
+ *  `@httpStatus` takes a code or a class (`5xx`); any other words are a path substring. */
+export function parseHttpSearch(input: string): HttpSearch {
+  const out: HttpSearch = { invalid: [] };
+  const bare: string[] = [];
+  for (const tok of input.trim().split(/\s+/).filter(Boolean)) {
+    const m = /^@(\w+):(.*)$/.exec(tok);
+    if (!m) {
+      bare.push(tok);
+      continue;
+    }
+    const [, key, value] = m as unknown as [string, string, string];
+    switch (key.toLowerCase()) {
+      case "path":
+        if (value) out.path = value;
+        break;
+      case "httpstatus":
+      case "status":
+        if (/^[1-5]\d\d$/.test(value)) out.status = value as `${number}`;
+        else if (/^[2-5]xx$/i.test(value)) out.status = value.toLowerCase() as HttpStatusClass;
+        else out.invalid.push(tok);
+        break;
+      case "method": {
+        const v = value.toUpperCase();
+        if ((HTTP_METHODS as readonly string[]).includes(v)) out.method = v;
+        else out.invalid.push(tok);
+        break;
+      }
+      default:
+        out.invalid.push(tok);
+    }
+  }
+  if (!out.path && bare.length) out.path = bare.join(" ");
+  return out;
 }

@@ -11,8 +11,9 @@ import { relativeTime } from "@/lib/format";
 import { sleepingLine } from "@/lib/deployments";
 import { badgeOf, isLive, isServingStatus } from "@/lib/status";
 import { LogViewer } from "./LogViewer";
+import { NetworkLogs } from "./NetworkLogs";
 
-type Tab = "details" | "build" | "logs";
+type Tab = "details" | "build" | "logs" | "network";
 
 const shortDigest = (d: string) => (d.startsWith("sha256:") ? `sha256:${d.slice(7, 19)}` : d.slice(0, 19));
 
@@ -39,6 +40,8 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
   // The node writes a pre-deploy command's output to the build log too.
   const hasBuildLog = isRepo || !!d?.events.some((e) => e.message.startsWith("Running pre-deploy command"));
   // Settle the default once, so the tab doesn't jump when a build finishes.
+  // Requests reach a deployment through the edge; Cloudflare-hosted sites don't.
+  const hasNetwork = !!d?.environmentId && d.hosting !== "cloudflare";
   if (d && !initial) setInitial(d.status === "building" && d.commitSha ? "build" : "logs");
   const tab = picked ?? initial ?? "logs";
 
@@ -71,6 +74,7 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
           { value: "details", label: "Details" },
           ...(hasBuildLog ? [{ value: "build" as const, label: isRepo ? "Build logs" : "Pre-deploy logs" }] : []),
           { value: "logs", label: "Deploy logs" },
+          ...(hasNetwork ? [{ value: "network" as const, label: "Network logs" }] : []),
         ]}
       >
         <TabPanel value="details">
@@ -181,15 +185,33 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
         {hasBuildLog ? (
           <TabPanel value="build">
             <div className="flex h-full flex-col">
-              <LogViewer url={api.deploymentLogsUrl(deploymentId, 500, "build")} downloadName={`deployment-${deploymentId}-build.log`} />
+              <LogViewer
+                url={api.deploymentLogsUrl(deploymentId, 500, "build")}
+                downloadName={`deployment-${deploymentId}-build.log`}
+                deploymentId={deploymentId}
+                serviceName={d?.serviceName}
+              />
             </div>
           </TabPanel>
         ) : null}
         <TabPanel value="logs">
           <div className="flex h-full flex-col">
-            <LogViewer url={api.deploymentLogsUrl(deploymentId)} downloadName={`deployment-${deploymentId}.log`} />
+            <LogViewer
+              url={api.deploymentLogsUrl(deploymentId)}
+              downloadName={`deployment-${deploymentId}.log`}
+              deploymentId={deploymentId}
+              serviceName={d?.serviceName}
+              history={d?.environmentId ? { environmentId: d.environmentId } : undefined}
+            />
           </div>
         </TabPanel>
+        {hasNetwork ? (
+          <TabPanel value="network">
+            <div className="flex h-full flex-col">
+              <NetworkLogs environmentId={d.environmentId} deploymentId={deploymentId} />
+            </div>
+          </TabPanel>
+        ) : null}
       </Tabs>
     </Sheet>
   );

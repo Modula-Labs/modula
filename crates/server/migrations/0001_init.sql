@@ -549,6 +549,20 @@ CREATE TABLE metric_samples (
 CREATE INDEX metric_samples_instance_at_idx ON metric_samples (service_instance_id, at);
 CREATE INDEX metric_samples_at_idx ON metric_samples (at);
 
+-- Whether each service that should be running was, one row per minute
+-- (written by the server's minute monitor; see metrics::record_uptime), kept
+-- as long as the metric samples. No row = nothing to run that minute (not
+-- deployed yet, sleeping, stopped, a cron job): neither up nor down.
+CREATE TABLE uptime_minutes (
+    service_instance_id  id NOT NULL REFERENCES service_instances (id) ON DELETE CASCADE,
+    minute               timestamptz NOT NULL,
+    up                   boolean NOT NULL,
+    -- Why it was down: 'crashed' or 'unreachable' (its servers offline).
+    reason               text,
+    PRIMARY KEY (service_instance_id, minute)
+);
+CREATE INDEX uptime_minutes_minute_idx ON uptime_minutes (minute);
+
 -- Every running workload's output, shipped by the nodes as it happens and
 -- kept a week: logs outlive the containers (each deploy replaces them) and
 -- are searchable across an environment.

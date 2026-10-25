@@ -1,6 +1,8 @@
 import type { LogBucket, LogLine } from "./api";
 
 export const MAX_LOG_LINES = 5000;
+/** How long the server keeps logs and HTTP requests (its RETENTION_DAYS). */
+export const RETENTION_MS = 7 * 24 * 3_600_000;
 
 export const LOG_RANGES = [
   { id: "15m", label: "Last 15 min", ms: 15 * 60_000 },
@@ -66,4 +68,87 @@ export function formatWindowTime(t: number, spanMs: number): string {
   const d = new Date(t);
   const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
   return spanMs > 24 * 3_600_000 ? `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${hm}` : hm;
+}
+
+/** Local "YYYY-MM-DD HH:mm:ss". */
+export function formatLogDateTime(t: number): string {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** The local zone as an offset for column headers: "GMT+5:30", "GMT-8", "GMT".
+ *  `offsetMinutes` is `Date#getTimezoneOffset()` (minutes *behind* UTC). */
+export function timezoneLabel(offsetMinutes = new Date().getTimezoneOffset()): string {
+  if (offsetMinutes === 0) return "GMT";
+  const ahead = -offsetMinutes;
+  const abs = Math.abs(ahead);
+  const mins = abs % 60;
+  return `GMT${ahead > 0 ? "+" : "-"}${Math.floor(abs / 60)}${mins ? `:${pad(mins)}` : ""}`;
+}
+
+export type LogLevel = "error" | "warn" | "info";
+
+/** A structured (JSON object) log line, else null. */
+export function parseJsonLine(text: string): Record<string, unknown> | null {
+  const s = text.trim();
+  if (!s.startsWith("{") || !s.endsWith("}")) return null;
+  try {
+    const v: unknown = JSON.parse(s);
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function levelOfName(v: unknown): LogLevel | null {
+  // pino's numbers: 40 warn, 50 error, 60 fatal; below that is info or quieter.
+  if (typeof v === "number") return v >= 50 ? "error" : v >= 40 ? "warn" : "info";
+  if (typeof v !== "string") return null;
+  const s = v.toLowerCase();
+  if (/^(error|err|fatal|panic|crit|critical|alert|emerg|emergency|severe)$/.test(s)) return "error";
+  if (/^(warn|warning)$/.test(s)) return "warn";
+  if (/^(info|information|notice|debug|trace|verbose|log)$/.test(s)) return "info";
+  return null;
+}
+
+// A level word near the start (after a timestamp or logger name at most),
+// `level=error`, or a JS-style "TypeError: ..." line.
+const TEXT_LEVEL = /^(?:\S+\s+){0,3}?[[(<]?(error|err|fatal|panic|critical|crit|warning|warn|info|debug|trace|notice)[\])>]?(?:[:|\s]|$)/i;
+const KV_LEVEL = /\b(?:level|lvl|severity)=["']?([a-z]+)/i;
+const JS_ERROR = /^\s*(?:Uncaught\s+)?[A-Z]\w*Error(?::|\s|$)/;
+
+/** How bad a line is. An explicit level wins (a JSON `level`/`severity`, a
+ *  leading `ERROR`/`[warn]`, `level=error`); without one, stderr counts as an error. */
+export function logLevel(l: { stderr: boolean; text: string }): LogLevel {
+  const json = parseJsonLine(l.text);
+  if (json) {
+    const named = levelOfName(json.level ?? json.severity ?? json.lvl ?? json.levelname ?? json.log_level);
+    if (named) return named;
+  } else {
+    const m = TEXT_LEVEL.exec(l.text) ?? KV_LEVEL.exec(l.text);
+    const named = m ? levelOfName(m[1]) : null;
+    if (named) return named;
+    if (JS_ERROR.test(l.text)) return "error";
+  }
+  return l.stderr ? "error" : "info";
+}
+
+/** The human part of a structured line (`msg`, `message`, …), else the line itself. */
+export function logMessage(text: string, json = parseJsonLine(text)): string {
+  const m = json && (json.msg ?? json.message ?? json.text ?? json.event);
+  return typeof m === "string" ? m : text;
+}
+
+/** A JSON line's top-level fields as name/value rows; nested values are kept as JSON. */
+export function jsonAttributes(json: Record<string, unknown>): { name: string; value: string }[] {
+  return Object.entries(json).map(([name, v]) => ({
+    name,
+    value: typeof v === "string" ? v : v === undefined ? "" : JSON.stringify(v),
+  }));
+}
+
+/** The raw line, pretty-printed when it's JSON. */
+export function prettyRaw(text: string): string {
+  const json = parseJsonLine(text);
+  return json ? JSON.stringify(json, null, 2) : text;
 }

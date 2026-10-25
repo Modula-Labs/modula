@@ -30,6 +30,9 @@ use crate::state::AppState;
 pub struct Deployment {
     pub id: Id,
     pub service_instance_id: Id,
+    /// The instance's environment (where its stored logs and requests are searched).
+    pub environment_id: Id,
+    pub service_name: String,
     pub node_id: Option<Id>,
     pub status: String,
     pub image: String,
@@ -97,7 +100,7 @@ pub struct DeploymentDetail {
 macro_rules! select_deployments {
     ($rest:literal) => {
         concat!(
-            "SELECT d.id, d.service_instance_id, d.node_id, d.status, d.image, d.image_digest, d.trigger,
+            "SELECT d.id, d.service_instance_id, i.environment_id, s.name AS service_name, d.node_id, d.status, d.image, d.image_digest, d.trigger,
                     d.commit_sha, d.commit_message, d.message, d.commit_author,
                     'https://avatars.githubusercontent.com/' || d.commit_author_login || '?s=64' AS commit_author_avatar,
                     CASE d.config->'source'->>'type'
@@ -118,7 +121,9 @@ macro_rules! select_deployments {
                     d.build_started_at, d.build_finished_at, d.woke_at, d.cold_start_ms, ",
             $crate::degraded_sql!(),
             " AS degraded
-             FROM deployments d LEFT JOIN source_uploads u ON u.id = d.upload_id ",
+             FROM deployments d JOIN service_instances i ON i.id = d.service_instance_id
+             JOIN services s ON s.id = i.service_id
+             LEFT JOIN source_uploads u ON u.id = d.upload_id ",
             $rest
         )
     };

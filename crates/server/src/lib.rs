@@ -101,6 +101,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 tracing::info!(outputs, "abandoned build outputs removed");
                 let samples = metrics::purge(&s.db).await?;
                 tracing::info!(samples, "old metric samples removed");
+                let uptime = metrics::purge_uptime(&s.db).await?;
+                tracing::info!(uptime, "old uptime minutes removed");
                 let lines = logs::purge(&s.db).await?;
                 tracing::info!(lines, "old log lines removed");
                 let requests = http_logs::purge(&s.db).await?;

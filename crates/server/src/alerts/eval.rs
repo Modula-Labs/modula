@@ -589,8 +589,13 @@ pub async fn evaluate_rule(state: &AppState, rule: &Rule) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Job: every enabled metric and offline rule (queued every minute).
+/// Job: every enabled metric and offline rule (queued every minute), and
+/// the minute's uptime rows.
 pub async fn evaluate_job(state: AppState, _job: Job) -> anyhow::Result<()> {
+    // The same minute tick records which services are up (the uptime strip).
+    if let Err(e) = crate::metrics::record_uptime(&state.db).await {
+        tracing::warn!(error = %e, "could not record uptime");
+    }
     let rules: Vec<Rule> = sqlx::query_as(concat!(
         "SELECT ",
         rule_columns!(),

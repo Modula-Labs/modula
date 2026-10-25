@@ -1,4 +1,4 @@
-//! `GET /api/environments/{id}/logs?since&until&q&service&limit`: stored
+//! `GET /api/environments/{id}/logs?since&until&q&service&deployment&limit`: stored
 //! output of every service in the environment (see `crate::logs`).
 
 use axum::Json;
@@ -17,6 +17,7 @@ pub struct Params {
     until: Option<i64>,
     q: Option<String>,
     service: Option<Id>,
+    deployment: Option<Id>,
     limit: Option<i64>,
 }
 
@@ -40,6 +41,7 @@ pub async fn search(
         until_ms: until,
         text: p.q,
         service: p.service,
+        deployment: p.deployment,
         limit: p.limit.unwrap_or(1000),
     };
     Ok(Json(logs::search(&state.db, grant.id(), &q).await?))

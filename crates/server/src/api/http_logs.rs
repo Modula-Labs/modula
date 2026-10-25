@@ -1,5 +1,5 @@
 //! HTTP requests served by the edge (see `crate::http_logs`):
-//! `GET /api/environments/{id}/http-logs?since&until&service&status&method&path&limit`,
+//! `GET /api/environments/{id}/http-logs?since&until&service&deployment&status&method&path&limit`,
 //! and request rate / errors / latency for charts:
 //! `GET /api/service-instances/{id}/http-metrics?range=` and
 //! `GET /api/projects/{id}/http-metrics?environment=&range=`.
@@ -24,7 +24,8 @@ pub struct Params {
     since: i64,
     until: Option<i64>,
     service: Option<Id>,
-    /// `2xx` … `5xx`.
+    deployment: Option<Id>,
+    /// `2xx` … `5xx`, or one code (`404`).
     status: Option<String>,
     method: Option<String>,
     /// Substring of the path.
@@ -44,13 +45,20 @@ pub async fn search(
     if since >= until {
         return Err(AppError::bad_request("since must be before until"));
     }
-    let status_class = match p.status.as_deref() {
-        None | Some("") => None,
-        Some("2xx") => Some(2),
-        Some("3xx") => Some(3),
-        Some("4xx") => Some(4),
-        Some("5xx") => Some(5),
-        Some(_) => return Err(AppError::bad_request("status is one of 2xx, 3xx, 4xx, 5xx")),
+    let (status_class, status) = match p.status.as_deref() {
+        None | Some("") => (None, None),
+        Some("2xx") => (Some(2), None),
+        Some("3xx") => (Some(3), None),
+        Some("4xx") => (Some(4), None),
+        Some("5xx") => (Some(5), None),
+        Some(code) => match code.parse::<i32>() {
+            Ok(c) if code.len() == 3 && (100..=599).contains(&c) => (None, Some(c)),
+            _ => {
+                return Err(AppError::bad_request(
+                    "status is 2xx, 3xx, 4xx, 5xx or a status code",
+                ));
+            }
+        },
     };
     let method = p.method.filter(|m| !m.is_empty());
     if method.as_deref().is_some_and(|m| !METHODS.contains(&m)) {
@@ -63,7 +71,9 @@ pub async fn search(
         since_ms: since,
         until_ms: until,
         service: p.service,
+        deployment: p.deployment,
         status_class,
+        status,
         method,
         path: p.path,
         limit: p.limit.unwrap_or(1000),

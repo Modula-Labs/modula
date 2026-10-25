@@ -7,6 +7,11 @@ use modula_id::Id;
 use modula_proto::node::v1 as pb;
 use serde::Serialize;
 use sqlx::PgPool;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+
+use crate::deploy::env::{self, EnvMap, Redactor};
+use crate::state::AppState;
 
 pub const RETENTION_DAYS: i32 = 7;
 pub const MAX_LIMIT: i64 = 5000;
@@ -47,16 +52,30 @@ pub fn clamp(b: &pb::LogBatch) -> Vec<(&pb::ShippedLine, String)> {
     out
 }
 
-/// Store a node's lines. Only deployments placed on that node count (a node
-/// can't write another node's logs); unknown ones are dropped.
-pub async fn record(db: &PgPool, node: Id, b: &pb::LogBatch) -> anyhow::Result<()> {
+/// Store a node's lines, with secret values masked like the live stream.
+/// Only deployments placed on that node count (a node can't write another
+/// node's logs); unknown ones are dropped.
+pub async fn record(state: &AppState, node: Id, b: &pb::LogBatch) -> anyhow::Result<()> {
     if b.dropped > 0 {
         tracing::warn!(%node, dropped = b.dropped, "a node dropped log lines (buffer full)");
     }
-    let lines = clamp(b);
+    let mut lines = clamp(b);
     if lines.is_empty() {
         return Ok(());
     }
+    let mut redactors: HashMap<&str, Arc<Redactor>> = HashMap::new();
+    for (l, text) in &mut lines {
+        let r = match redactors.get(l.deployment_id.as_str()) {
+            Some(r) => r.clone(),
+            None => {
+                let r = redactor(state, &l.deployment_id).await;
+                redactors.insert(&l.deployment_id, r.clone());
+                r
+            }
+        };
+        *text = r.redact(text);
+    }
+    let db = &state.db;
     sqlx::query(
         "INSERT INTO log_lines (environment_id, service_instance_id, deployment_id, at, stderr, line)
          SELECT i.environment_id, d.service_instance_id, d.id, to_timestamp(l.at / 1000.0), l.err, l.line
@@ -75,6 +94,51 @@ pub async fn record(db: &PgPool, node: Id, b: &pb::LogBatch) -> anyhow::Result<(
     Ok(())
 }
 
+/// Redactors by deployment. A deployment's variables are sealed once at
+/// deploy time, so its redactor never changes.
+static REDACTORS: LazyLock<Mutex<HashMap<String, Arc<Redactor>>>> = LazyLock::new(Default::default);
+const MAX_REDACTORS: usize = 1024;
+
+/// The deployment's redactor; unknown deployments (dropped on insert anyway)
+/// and unreadable snapshots get an empty one, uncached.
+async fn redactor(state: &AppState, deployment: &str) -> Arc<Redactor> {
+    if let Some(r) = REDACTORS.lock().expect("redactors").get(deployment) {
+        return r.clone();
+    }
+    let Ok(id) = deployment.parse::<Id>() else {
+        return Arc::new(Redactor::new(&EnvMap::new()));
+    };
+    let row: Option<(Id, Option<Vec<u8>>)> = sqlx::query_as(
+        "SELECT i.environment_id, d.env_sealed
+         FROM deployments d JOIN service_instances i ON i.id = d.service_instance_id WHERE d.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let vars = match row {
+        Some((env, Some(sealed))) => {
+            match env::open_snapshot(&state.keys, &state.db, env, id, &sealed).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(%id, error = %e, "can't open a deployment's variables to mask its logs");
+                    return Arc::new(Redactor::new(&EnvMap::new()));
+                }
+            }
+        }
+        // Nothing to mask (yet): not cached, in case variables are sealed later.
+        _ => return Arc::new(Redactor::new(&EnvMap::new())),
+    };
+    let r = Arc::new(Redactor::new(&vars));
+    let mut cache = REDACTORS.lock().expect("redactors");
+    if cache.len() >= MAX_REDACTORS {
+        cache.clear();
+    }
+    cache.insert(deployment.to_owned(), r.clone());
+    r
+}
+
 /// Drop lines older than the retention.
 pub async fn purge(db: &PgPool) -> anyhow::Result<u64> {
     let r = sqlx::query("DELETE FROM log_lines WHERE at < now() - make_interval(days => $1)")
@@ -91,6 +155,7 @@ pub struct Query {
     /// Case-insensitive substring.
     pub text: Option<String>,
     pub service: Option<Id>,
+    pub deployment: Option<Id>,
     pub limit: i64,
 }
 
@@ -161,14 +226,16 @@ pub async fn search(db: &PgPool, environment: Id, q: &Query) -> sqlx::Result<Fou
            AND l.at >= to_timestamp($2 / 1000.0) AND l.at < to_timestamp($3 / 1000.0)
            AND ($4::text IS NULL OR l.line ILIKE $4)
            AND ($5::text IS NULL OR s.id = $5)
+           AND ($6::text IS NULL OR l.deployment_id = $6)
          ORDER BY l.at DESC, l.ctid DESC
-         LIMIT $6",
+         LIMIT $7",
     )
     .bind(environment)
     .bind(q.since_ms as f64)
     .bind(q.until_ms as f64)
     .bind(&pattern)
     .bind(q.service)
+    .bind(q.deployment)
     .bind(limit + 1)
     .fetch_all(db)
     .await?;
@@ -186,6 +253,7 @@ pub async fn search(db: &PgPool, environment: Id, q: &Query) -> sqlx::Result<Fou
            AND l.at >= to_timestamp($2 / 1000.0) AND l.at < to_timestamp($3 / 1000.0)
            AND ($5::text IS NULL OR l.line ILIKE $5)
            AND ($6::text IS NULL OR i.service_id = $6)
+           AND ($7::text IS NULL OR l.deployment_id = $7)
          GROUP BY 1 ORDER BY 1",
     )
     .bind(environment)
@@ -194,6 +262,7 @@ pub async fn search(db: &PgPool, environment: Id, q: &Query) -> sqlx::Result<Fou
     .bind(step)
     .bind(&pattern)
     .bind(q.service)
+    .bind(q.deployment)
     .fetch_all(db)
     .await?;
     Ok(Found {

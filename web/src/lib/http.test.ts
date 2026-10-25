@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { HttpMetrics } from "./api";
-import { formatDuration, formatPercent, formatReqRate, httpBucketWindow, httpSeries, latencyHeadline, statusTone } from "./http";
+import {
+  formatDuration,
+  formatMs,
+  formatPercent,
+  formatReqRate,
+  httpBucketWindow,
+  httpSeries,
+  latencyHeadline,
+  parseHttpSearch,
+  statusTextClass,
+  statusTone,
+} from "./http";
 
 describe("statusTone", () => {
   it("is neutral for success and redirects, amber for 4xx, red for 5xx", () => {
@@ -53,4 +64,44 @@ describe("httpSeries", () => {
     expect(s.total).toBe(120);
   });
   it("labels the newest percentiles", () => expect(latencyHeadline(httpSeries(m))).toBe("p50 10 ms · p95 80 ms · p99 210 ms"));
+});
+
+describe("statusTextClass", () => {
+  it("colours each class", () => {
+    expect([200, 304, 404, 502, 101].map(statusTextClass)).toEqual([
+      "text-success",
+      "text-info",
+      "text-warning",
+      "text-error",
+      "text-muted-foreground",
+    ]);
+  });
+});
+
+describe("formatMs", () => {
+  it("rounds to whole ms", () => {
+    expect(formatMs(472.4)).toBe("472ms");
+    expect(formatMs(0.2)).toBe("<1ms");
+    expect(formatMs(12034.6)).toBe("12035ms");
+  });
+});
+
+describe("parseHttpSearch", () => {
+  it("reads tokens and treats other words as the path", () => {
+    expect(parseHttpSearch("@path:/api/users @httpStatus:200 @method:post")).toEqual({
+      path: "/api/users",
+      status: "200",
+      method: "POST",
+      invalid: [],
+    });
+    expect(parseHttpSearch("  users  ")).toEqual({ path: "users", invalid: [] });
+    expect(parseHttpSearch("@httpStatus:5XX health")).toEqual({ status: "5xx", path: "health", invalid: [] });
+  });
+  it("collects tokens it can't use", () => {
+    expect(parseHttpSearch("@httpStatus:abc @method:BREW @foo:1").invalid).toEqual([
+      "@httpStatus:abc",
+      "@method:BREW",
+      "@foo:1",
+    ]);
+  });
 });

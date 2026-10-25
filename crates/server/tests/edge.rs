@@ -91,6 +91,25 @@ async fn http_requests_are_searchable_and_charted(pool: PgPool) {
             now - 15 * 60_000
         )
     };
+    // The deployment sheet finds the environment to search from the deployment.
+    sqlx::query(
+        r#"UPDATE deployments SET config = '{"source":{"type":"image","image":"nginx:alpine"}}' WHERE id = $1"#,
+    )
+    .bind(chain.deployment)
+    .execute(app.db())
+    .await
+    .unwrap();
+    let d = app
+        .call(
+            Method::GET,
+            &format!("/api/deployments/{dep}"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(d.status, StatusCode::OK, "{}", d.json);
+    assert_eq!(d.json["environmentId"], chain.environment.to_string());
+
     let r = app.call(Method::GET, &url(""), Some(&admin), None).await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json);
     let reqs = r.json["requests"].as_array().unwrap();
@@ -114,6 +133,10 @@ async fn http_requests_are_searchable_and_charted(pool: PgPool) {
         ("&path=api", 1),
         ("&path=%25", 0),
         ("&status=4xx&method=GET", 0),
+        ("&status=503", 1),
+        ("&status=200&method=POST", 0),
+        (format!("&deployment={dep}").as_str(), 3),
+        (format!("&deployment={}", Id::new()).as_str(), 0),
     ] {
         let r = app.call(Method::GET, &url(q), Some(&admin), None).await;
         assert_eq!(
@@ -132,7 +155,7 @@ async fn http_requests_are_searchable_and_charted(pool: PgPool) {
         )
         .await;
     assert_eq!(r.json["requests"].as_array().unwrap().len(), 0);
-    for bad in ["&status=6xx", "&method=BREW"] {
+    for bad in ["&status=6xx", "&status=700", "&status=20", "&method=BREW"] {
         let r = app.call(Method::GET, &url(bad), Some(&admin), None).await;
         assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
     }

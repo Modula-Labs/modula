@@ -72,3 +72,7 @@ export const Dots = kobra(T.IconDots);
 export const Pencil = kobra(T.IconPencil);
 export const GripVertical = kobra(T.IconGripVertical);
 export const ChevronUp = kobra(T.IconChevronUp);
+export const ArrowUp = kobra(T.IconArrowUp);
+export const ArrowDown = kobra(T.IconArrowDown);
+export const ExternalLink = kobra(T.IconExternalLink);
+export const Minimize = kobra(T.IconMinimize);

@@ -44,12 +44,12 @@ async fn shipped_logs_are_searchable_per_environment(pool: PgPool) {
         ],
         dropped: 0,
     };
-    modula_server::logs::record(app.db(), chain.node, &batch)
+    modula_server::logs::record(&app.state, chain.node, &batch)
         .await
         .unwrap();
     // Another node can't write this deployment's logs.
     modula_server::logs::record(
-        app.db(),
+        &app.state,
         Id::new(),
         &pb::LogBatch {
             lines: vec![line(&dep, now - 20_000, false, "forged")],
@@ -100,6 +100,32 @@ async fn shipped_logs_are_searchable_per_environment(pool: PgPool) {
         )
         .await;
     assert_eq!(r.json["lines"].as_array().unwrap().len(), 0);
+    // One deployment's lines: the histogram is filtered too.
+    let r = app
+        .call(
+            Method::GET,
+            &url(&format!("&deployment={dep}")),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.json["lines"].as_array().unwrap().len(), 3, "{}", r.json);
+    let r = app
+        .call(
+            Method::GET,
+            &url(&format!("&deployment={}", Id::new())),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.json["lines"].as_array().unwrap().len(), 0);
+    let empty: i64 = r.json["histogram"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["count"].as_i64().unwrap())
+        .sum();
+    assert_eq!(empty, 0);
 
     // The newest lines win when truncated.
     let r = app
@@ -253,4 +279,50 @@ async fn webhooks_are_created_listed_and_removed(pool: PgPool) {
     assert_eq!(r.status, StatusCode::NO_CONTENT);
     let r = app.call(Method::GET, &base, Some(&admin), None).await;
     assert_eq!(r.json.as_array().unwrap().len(), 0);
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn stored_logs_mask_secret_values(pool: PgPool) {
+    use modula_server::deploy::env;
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "ws").await;
+    let chain = app.seed_chain(ws).await;
+    let vars: env::EnvMap = [(
+        "API_TOKEN".to_owned(),
+        secrecy::SecretString::from("tok_9f8e7d6c5b4a".to_owned()),
+    )]
+    .into();
+    let sealed = env::seal_snapshot(
+        &app.state.keys,
+        app.db(),
+        chain.environment,
+        chain.deployment,
+        &vars,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE deployments SET env_sealed = $1 WHERE id = $2")
+        .bind(sealed)
+        .bind(chain.deployment)
+        .execute(app.db())
+        .await
+        .unwrap();
+    let batch = pb::LogBatch {
+        lines: vec![line(
+            &chain.deployment.to_string(),
+            now_ms(),
+            false,
+            "calling with tok_9f8e7d6c5b4a",
+        )],
+        dropped: 0,
+    };
+    modula_server::logs::record(&app.state, chain.node, &batch)
+        .await
+        .unwrap();
+    let stored: String = sqlx::query_scalar("SELECT line FROM log_lines")
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    assert_eq!(stored, format!("calling with {}", env::Redactor::MASK));
 }

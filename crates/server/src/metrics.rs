@@ -164,3 +164,195 @@ pub async fn record_disk(db: &PgPool, node: Id, r: &pb::DiskReport) -> anyhow::R
     }
     Ok(())
 }
+
+/// Record, for the current minute, whether each service that should be
+/// running is (called every minute by the alert monitor; a second call in the
+/// same minute is a no-op). Judged on the serving deployment: up while one of
+/// its replicas is active on a reachable server, down while it is crashed or
+/// all its servers are offline. Nothing is written for services with nothing
+/// to run (not deployed, sleeping, stopped), cron jobs (their container only
+/// runs on schedule) or deployments hosted elsewhere (not observable), nor
+/// while no server is reachable at all (e.g. right after this one restarts).
+pub async fn record_uptime(db: &PgPool) -> sqlx::Result<u64> {
+    let r = sqlx::query(
+        "INSERT INTO uptime_minutes (service_instance_id, minute, up, reason)
+         SELECT DISTINCT ON (d.service_instance_id)
+                d.service_instance_id, date_trunc('minute', now()), s.up, s.reason
+         FROM deployments d
+         CROSS JOIN LATERAL (
+             SELECT coalesce(bool_or(r.status = 'active' AND x.reach), false) AS up,
+                    coalesce(bool_or(x.reach), false) AS any_reach,
+                    coalesce(bool_or(r.status IN ('crashed', 'failed')), false) AS any_crash
+             FROM deployment_replicas r
+             LEFT JOIN nodes n ON n.id = r.node_id
+             CROSS JOIN LATERAL (
+                 SELECT coalesce(n.status = 'online' AND n.last_seen_at > now() - interval '90 seconds', false)
+                     AS reach
+             ) x
+             WHERE r.deployment_id = d.id
+         ) rs
+         CROSS JOIN LATERAL (
+             SELECT d.status = 'active' AND rs.up AS up,
+                    CASE WHEN d.status = 'crashed' THEN 'crashed'
+                         WHEN rs.up THEN NULL
+                         WHEN NOT rs.any_reach THEN 'unreachable'
+                         WHEN rs.any_crash THEN 'crashed'
+                         ELSE 'restarting' END AS reason
+         ) s
+         WHERE d.status IN ('active', 'crashed')
+           AND d.config->'hosting' IS NULL AND d.config->>'cronSchedule' IS NULL
+           -- Seeing no server at all is this server just started (or cut
+           -- off), not every service down: record nothing.
+           AND EXISTS (SELECT 1 FROM nodes
+                       WHERE status = 'online' AND last_seen_at > now() - interval '90 seconds')
+         ORDER BY d.service_instance_id, (d.status = 'active') DESC, d.created_at DESC
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(db)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// Drop uptime rows older than the retention.
+pub async fn purge_uptime(db: &PgPool) -> sqlx::Result<u64> {
+    let r =
+        sqlx::query("DELETE FROM uptime_minutes WHERE minute < now() - make_interval(days => $1)")
+            .bind(RETENTION_DAYS)
+            .execute(db)
+            .await?;
+    Ok(r.rows_affected())
+}
+
+impl Range {
+    /// (span, bucket) in seconds for the uptime strip: 48–84 bars, each a
+    /// whole number of the charts' buckets (the 5xx strip regroups those).
+    pub fn uptime_step(self) -> (i64, i64) {
+        match self {
+            Range::Hour => (3600, 60),
+            Range::SixHours => (6 * 3600, 300),
+            Range::Day => (24 * 3600, 1800),
+            Range::Week => (7 * 24 * 3600, 7200),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UptimeState {
+    Up,
+    Down,
+    /// Nothing was meant to run (or no record of it).
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UptimeBucket {
+    /// Bucket start, unix ms.
+    pub t: i64,
+    pub state: UptimeState,
+    pub down_ms: i64,
+    /// Why it was down ("crashed", "unreachable", "restarting").
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Uptime {
+    pub step_secs: i64,
+    /// Share of the recorded minutes that were up; null without any.
+    pub uptime: Option<f64>,
+    pub buckets: Vec<UptimeBucket>,
+}
+
+/// The instances' uptime over `range`, every bucket present (oldest first,
+/// the last one holding now). Several instances (a project's): a bucket is
+/// down if any was down, `down_ms` counts the minutes any was.
+pub async fn uptime_of(db: &PgPool, instances: &[Id], range: Range) -> sqlx::Result<Uptime> {
+    let (span, step) = range.uptime_step();
+    let n = span / step;
+    let now: i64 = sqlx::query_scalar("SELECT extract(epoch FROM now())::bigint")
+        .fetch_one(db)
+        .await?;
+    let first = now.div_euclid(step) - n + 1;
+    let rows: Vec<(i64, i64, i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT floor(extract(epoch FROM minute) / $3)::bigint AS b,
+                count(*) FILTER (WHERE up),
+                count(*) FILTER (WHERE NOT up),
+                count(DISTINCT minute) FILTER (WHERE NOT up),
+                mode() WITHIN GROUP (ORDER BY reason)
+         FROM uptime_minutes
+         WHERE service_instance_id = ANY($1) AND minute >= to_timestamp($2)
+         GROUP BY 1",
+    )
+    .bind(instances)
+    .bind((first * step) as f64)
+    .bind(step)
+    .fetch_all(db)
+    .await?;
+    Ok(fill_uptime(first, n, step, &rows))
+}
+
+/// Every bucket from `first` (bucket number) on, from per-bucket counts
+/// (bucket, up rows, down rows, distinct down minutes, reason).
+fn fill_uptime(
+    first: i64,
+    n: i64,
+    step: i64,
+    rows: &[(i64, i64, i64, i64, Option<String>)],
+) -> Uptime {
+    let (mut up, mut total) = (0i64, 0i64);
+    let buckets = (first..first + n)
+        .map(|b| {
+            let row = rows.iter().find(|r| r.0 == b);
+            let (u, d, dm, reason) = row.map_or((0, 0, 0, None), |r| (r.1, r.2, r.3, r.4.clone()));
+            up += u;
+            total += u + d;
+            let state = match (u, d) {
+                (_, d) if d > 0 => UptimeState::Down,
+                (u, _) if u > 0 => UptimeState::Up,
+                _ => UptimeState::None,
+            };
+            UptimeBucket {
+                t: b * step * 1000,
+                state,
+                down_ms: dm * 60_000,
+                reason: if d > 0 { reason } else { None },
+            }
+        })
+        .collect();
+    Uptime {
+        step_secs: step,
+        uptime: (total > 0).then(|| up as f64 / total as f64),
+        buckets,
+    }
+}
+
+#[cfg(test)]
+mod uptime_tests {
+    use super::*;
+
+    #[test]
+    fn buckets_are_filled_and_ratio_ignores_empty_minutes() {
+        let rows = vec![
+            (11, 20, 0, 0, None),
+            (12, 16, 4, 4, Some("crashed".to_owned())),
+        ];
+        let u = fill_uptime(10, 4, 1200, &rows);
+        let states: Vec<_> = u.buckets.iter().map(|b| b.state).collect();
+        assert_eq!(
+            states,
+            [
+                UptimeState::None,
+                UptimeState::Up,
+                UptimeState::Down,
+                UptimeState::None
+            ]
+        );
+        assert_eq!(u.buckets[0].t, 10 * 1200 * 1000);
+        assert_eq!(u.buckets[2].down_ms, 4 * 60_000);
+        assert_eq!(u.buckets[2].reason.as_deref(), Some("crashed"));
+        assert_eq!(u.uptime, Some(36.0 / 40.0));
+        assert_eq!(fill_uptime(0, 3, 60, &[]).uptime, None);
+    }
+}

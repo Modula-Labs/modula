@@ -4,6 +4,7 @@ import { Segmented } from "@/components/ui/Tabs";
 import { Alert, Skeleton } from "@/components/ui/misc";
 import { api, type MetricsRange } from "@/lib/api";
 import { METRICS_RANGES } from "@/lib/metrics";
+import { HealthStrips } from "./HealthStrips";
 import { HttpMetricsPanels } from "./HttpMetricsPanels";
 import { MetricsPanels } from "./MetricsPanels";
 
@@ -18,9 +19,14 @@ export function ProjectMetrics({ projectId, environmentId }: { projectId: string
   const m = q.data;
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
+      <HealthStrips
+        range={range}
+        scope={["project", projectId, environmentId]}
+        uptime={() => api.projectUptime(projectId, environmentId, range)}
+        http={() => api.projectHttpMetrics(projectId, environmentId, range)}
+      >
         <Segmented label="Time range" value={range} onChange={setRange} options={METRICS_RANGES.map((r) => ({ value: r, label: r }))} />
-      </div>
+      </HealthStrips>
       {q.error ? <Alert>{q.error.message}</Alert> : null}
       {q.isLoading ? (
         <>

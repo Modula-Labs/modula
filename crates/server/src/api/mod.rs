@@ -130,6 +130,8 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/service-instances/{instance_id}/deployments", Resource(Action::InstanceRead), deployments::list)
         .get("/api/service-instances/{instance_id}/metrics", Resource(Action::InstanceRead), metrics::get)
         .get("/api/projects/{project_id}/metrics", Resource(Action::ProjectRead), metrics::project)
+        .get("/api/service-instances/{instance_id}/uptime", Resource(Action::InstanceRead), metrics::uptime)
+        .get("/api/projects/{project_id}/uptime", Resource(Action::ProjectRead), metrics::project_uptime)
         .get("/api/environments/{environment_id}/logs", Resource(Action::EnvironmentLogsRead), logs::search)
         // HTTP requests served by the edge (access logs) and request charts
         .get("/api/environments/{environment_id}/http-logs", Resource(Action::EnvironmentLogsRead), http_logs::search)
