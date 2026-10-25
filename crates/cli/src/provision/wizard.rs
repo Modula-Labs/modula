@@ -316,7 +316,7 @@ fn location_step(out: &Output, d: &mut Draft, args: &ServerCreateArgs) -> anyhow
         .iter()
         .enumerate()
         .map(|(i, l)| Choice {
-            label: format!("{:<38} {}", l.label(), l.offer()),
+            label: format!("{:<24} {}", l.label(), l.offer()),
             value: i,
         })
         .collect();
@@ -327,7 +327,7 @@ fn location_step(out: &Output, d: &mut Draft, args: &ServerCreateArgs) -> anyhow
     say(
         out,
         &out.dim(
-            "Hetzner's prices, VAT included. They differ by location: outside Europe servers cost more\n  and include less traffic, and the cheapest Arm (arm64) servers are sold in Europe only.\n  You pick the exact size next.",
+            "Cheapest server per location (€/mo incl. VAT, traffic included). Outside Europe costs more,\n  with less traffic and no Arm. You pick the size next.",
         ),
     );
     let r = Select::new("Where should it run?", options)
