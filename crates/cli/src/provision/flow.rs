@@ -658,7 +658,7 @@ pub async fn finish_setup(
     if !instance.setup_required().await? {
         return Err(fail(
             anyhow::anyhow!("setup was already completed on {}", plan.domain),
-            format!("Log in with `modula login --url https://{}`.", plan.domain),
+            format!("Log in with `modula login {}`.", plan.domain),
         ));
     }
     let session = instance

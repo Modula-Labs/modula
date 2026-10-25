@@ -5,7 +5,7 @@ projects, services, variables, deploys, logs, domains, volumes, TCP proxies
 and databases. It mirrors the Railway CLI where the platforms line up.
 
 ```
-Setup        login  logout  whoami  list  init  link  unlink  service  open
+Setup        login  logins  logout  whoami  list  init  link  unlink  service  open
 Status       status  deployment list  logs
 Services     add  variables  environment  domain  volume  tcp-proxy
 Deploying    up  deploy  redeploy  restart  down  rollback
@@ -35,15 +35,30 @@ modula completion zsh > "${fpath[1]}/_modula"   # bash, zsh, fish, elvish, power
 
 ## Authentication
 
-Create an API token (it starts with `mdt_`); see
-[security → API tokens](security.md#api-tokens). Then either log in once:
+Log in once per instance, in your browser:
 
 ```bash
-modula login --url https://deploy.example.com
-# API token (mdt_…): ********   (prompted without echo)
+modula login
+# ◆ Modula server (domain or IP): deploy.example.com
+# ◆ Save this login as: deploy.example.com
+#   Your code: BCDF-GHJK  (check that the browser shows the same)
+#   Opening https://deploy.example.com/cli/login?code=BCDF-GHJK in your browser…
+#   Waiting for approval…
 ```
 
-or, for CI and agents, set environment variables and skip `login` entirely:
+The dashboard page shows the same code and the machine's name; sign in if
+needed, compare the code and click **Approve** (it asks for your password or
+2FA code if you haven't re-authenticated in the last 15 minutes). The CLI then
+gets an ordinary API token named `CLI on <hostname>`, listed and revocable
+under **Account → Security → API tokens**. Codes expire after 10 minutes and
+work once. `modula login deploy.example.com` skips the first question (a bare
+host or IP gets `https://`); `--browserless` prints the URL instead of opening
+a browser (over SSH, say), and the URL is printed whenever no terminal is
+attached.
+
+**CI and agents** don't use the browser: set environment variables and skip
+`login` entirely, with a token created under **Account → Security**
+([security → API tokens](security.md#api-tokens)):
 
 ```bash
 export MODULA_URL=https://deploy.example.com
@@ -51,36 +66,67 @@ export MODULA_TOKEN=mdt_...
 modula whoami
 ```
 
+or save one non-interactively: `modula login https://deploy.example.com
+--token "$MODULA_TOKEN" --name ci`.
+
 | Variable | Effect |
 |---|---|
-| `MODULA_URL` | Instance URL. Overrides the saved one. Also the default for `login --url`. |
+| `MODULA_URL` | Instance URL. Overrides the saved one. Also the default for `login`'s URL. |
 | `MODULA_TOKEN` | API token. Overrides the saved one. Also the default for `login --token`. |
+| `MODULA_LOGIN` | Saved login to use, like `--login`. |
 | `MODULA_PROJECT`, `MODULA_ENVIRONMENT`, `MODULA_SERVICE` | Defaults for `-p`, `-e`, `-s`. |
 | `NO_COLOR` | No colors (they're also off when stdout isn't a terminal). |
 | `XDG_CONFIG_HOME` | Where the config lives (default `~/.config`). |
 
-The login is saved to `$XDG_CONFIG_HOME/modula/config.toml` (or
-`~/.config/modula/config.toml`), readable only by you (mode 0600).
+**Several instances at once.** Each login is saved under a local name of your
+choosing (`--name`, else asked for, defaulting to the host:
+`deploy.example.com`, `localhost-8080`), in
+`$XDG_CONFIG_HOME/modula/config.toml` (or `~/.config/modula/config.toml`),
+readable only by you (mode 0600):
+
+```toml
+current = "work"
+
+[logins.work]
+url = "https://deploy.example.com/"
+token = "mdt_…"
+
+[logins.home]
+url = "https://10.0.0.5/"
+token = "mdt_…"
+```
+
+The newest login becomes the default (`current`). `modula login list` (or
+`modula logins`) shows them, `modula login use <name>` switches the default,
+and `--login <name>` (or `MODULA_LOGIN`) picks one for a single command.
+Logging in again under an existing name replaces it (asking first when it
+was for another instance).
+
+**A linked directory remembers its login.** `link` (and every command that
+rewrites `.modula/project.toml`) records the login in use as `login = "…"`;
+commands run there use it even after you switch the default. If that login
+is gone, they fail with a message naming it; log in again under that name,
+pass `--login`, or link again.
 
 **A token for one directory.** `login --local` (or `link --token`) saves the
 login in `.modula/token` in the linked directory (else the current one)
-instead: same format (`url`, `token`), mode 0600, found from any
-subdirectory, and kept out of git (see [the project link](#the-project-link)).
-Useful for a token scoped to one workspace, or one per repository. The token
-used is the first of:
+instead: one `url` and `token`, mode 0600, found from any subdirectory, and
+kept out of git (see [the project link](#the-project-link)). Useful for a
+token scoped to one workspace, or one per repository.
 
-1. `MODULA_TOKEN` (with `MODULA_URL`, or the saved URL),
-2. the nearest `.modula/token` (its URL, else the global one),
-3. the global config file.
+The token used is the first of:
 
-`logout` removes the token in effect: `.modula/token` if there is one, else
-the global one.
+1. `MODULA_TOKEN` (with `MODULA_URL`, or the URL of the login below),
+2. the login named by `--login` / `MODULA_LOGIN`,
+3. the nearest `.modula/token`,
+4. the login the directory was linked with,
+5. the default login.
 
 A `.modula/token` is only used when it's a regular file owned by you, readable
 only by you (no group or other permission bits) and not tracked by git;
 otherwise it's ignored with a warning, so a cloned repository can't point your
 CLI at someone else's instance. When it points at a different instance than
-your global login, the CLI says `using instance <url> from <path>` on stderr.
+your default login, the CLI says `using instance <url> from <path>` on stderr.
 
 The CLI refuses to send a token over plain `http://` to anything but
 `localhost`; pass `--allow-insecure-http` or set
@@ -105,10 +151,20 @@ Every command accepts these, before or after the command name:
 | `-e, --environment <ENV>` | Environment name or id. Default: the linked one, else `production`. |
 | `-s, --service <SERVICE>` | Service name or id. Default: the linked one, else the project's only service. |
 | `-y, --yes` | Skip confirmations. Destructive commands ask first; when stdin isn't a terminal they refuse (exit code 2) unless `--yes` is given. |
+| `--login <NAME>` | Saved login to use (`MODULA_LOGIN`). Default: the directory's, else the current one. See [authentication](#authentication). |
 
 Commands that confirm: `down`, `rollback`, `variables delete`,
 `variables set --sealed`, `domain delete`, `volume delete`,
 `tcp-proxy disable`, `db query --write`, `config apply`.
+
+**Pickers.** At a terminal, a missing or ambiguous choice is asked for: when
+there are several workspaces, projects or services and none was given (or
+two projects share a name), `link` with several environments, `connect` with
+several databases, `rollback` without a deployment, `members remove` without
+an email, `login use` without a name. Arrow keys move, typing filters, Esc
+cancels. Without a terminal (stdin or stdout redirected), with `--yes`,
+`--json`, or `CI` set, nothing is asked: the command fails with the choices
+listed, as before.
 
 ## Exit codes
 
@@ -129,11 +185,13 @@ project_name = "shop"
 environment = "production"
 service = "a81c…"
 service_name = "api"
+login = "work"
 ```
 
 Commands look for the nearest `.modula/project.toml` in the current directory
 or any parent. `-p/-e/-s` override it for one command; a `-p` naming another
 project ignores the linked environment and service.
+`login` is the [saved login](#authentication) it was linked with.
 
 **`.modula/` stays out of git.** It holds the link, an optional local token
 (`.modula/token`) and [config-as-code](config-as-code.md) secrets files
@@ -148,23 +206,40 @@ Outside a git repository only an existing `.gitignore` is updated. Commit
 
 ## Setup
 
-### `login [--url <URL>] [--token <TOKEN>] [--local]`
+### `login [URL] [--name <NAME>] [--browserless] [--local]`
 
-Checks the token against `/api/auth/me`, saves it, prints
-`Logged in to <url> as <email>`. A bare host gets `https://`. The token is
-prompted for (without echo) when omitted; prefer that over `--token` so it
-doesn't land in shell history. `--local` saves it in `.modula/token` for this
-directory only (see [authentication](#authentication)).
+Logs in through the browser (see [authentication](#authentication)): asks
+for the instance when `URL` is omitted (suggesting saved ones; a bare host or
+IP gets `https://`) and checks it answers, asks for the local name (default:
+the host), then waits for you to approve the code in the dashboard. Saves the
+login as the default and prints `Logged in to <url> as <email> (saved as
+<name>, now the default)`. `--browserless` prints the approval URL without
+opening a browser. `--local` saves it in `.modula/token` for this directory
+only. For CI, `--token <TOKEN>` (or `MODULA_TOKEN`) uses an API token instead
+of the browser; without a terminal, `URL` is required.
 
-### `logout`
+### `login list` (also `logins`)
 
-Removes the saved token: this directory's `.modula/token` if there is one,
-else the global one. **The token stays valid** until you delete it
-(`DELETE /api/account/tokens/{token_id}`).
+The saved logins: name and URL; `*` marks the default. Notes a `.modula/token`
+in effect here.
+
+### `login use [NAME]`
+
+Makes a saved login the default (picked from a list at a terminal when
+`NAME` is omitted).
+
+### `logout [NAME] [--all]`
+
+Forgets a saved login: `NAME`, every one with `--all`, or by default this
+directory's `.modula/token` if there is one, else the login in use. When the
+default goes and one login is left, that one becomes the default. **The token
+stays valid** until you delete it (Account → Security, or
+`DELETE /api/account/tokens/{token_id}`).
 
 ### `whoami`
 
-Your name, email and instance, then each workspace with your role.
+Your name, email, instance and which login is in use, then each workspace with
+your role.
 
 ### `list` (alias `ls`)
 
@@ -418,11 +493,12 @@ deployment in place: same deployment, same image.
 Stops and removes the service's newest live deployment (asks first). The
 service stays; deploy again to bring it back.
 
-### `rollback <DEPLOYMENT> [-w, --wait]`
+### `rollback [DEPLOYMENT] [-w, --wait]`
 
 Rebuilds and deploys an earlier deployment's Git commit or upload (asks
 first). Only deployments built from a repository, or from an upload that is
-still kept, can be rolled back to; pick one from `deployment list`.
+still kept, can be rolled back to; pick one from `deployment list` (at a
+terminal, omit it to pick from the service's deployments).
 
 ## Config as code
 
