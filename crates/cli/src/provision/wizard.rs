@@ -28,7 +28,7 @@ const TEAL: Color = Color::Rgb {
     b: 191,
 };
 
-fn theme() -> RenderConfig<'static> {
+pub(crate) fn theme() -> RenderConfig<'static> {
     let teal = StyleSheet::new().with_fg(TEAL);
     RenderConfig::default_colored()
         .with_prompt_prefix(Styled::new("◆").with_fg(TEAL))

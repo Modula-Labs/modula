@@ -1,4 +1,5 @@
-//! `config init` / `config pull`: write `modula.toml` from the server.
+//! `config init --format toml`: write `.modula/modula.toml` from the server
+//! (and the per-environment specs [`super::typescript`] writes as TS).
 //!
 //! Each environment becomes a full spec; what all environments share goes in
 //! the base and the rest in `[environments.<name>]` overlays. Secret values
@@ -191,14 +192,48 @@ fn split(
     (None, values.iter().map(|v| v.cloned()).collect())
 }
 
-/// The file for `envs` (the first is the base's reference).
-pub fn generate(project: &str, envs: &[RemoteEnv]) -> anyhow::Result<Pulled> {
+/// Every environment's spec, with the variables turned into secrets. With
+/// `only`, just those services, as a `partial` file (shared variables are
+/// then left out, so they stay as they are).
+pub fn environment_specs(
+    project: &str,
+    envs: &[RemoteEnv],
+    only: Option<&BTreeSet<String>>,
+) -> anyhow::Result<(Vec<ProjectSpec>, Vec<String>)> {
     let mut guessed = BTreeSet::new();
-    let mut tables = Vec::with_capacity(envs.len());
+    let mut specs = Vec::with_capacity(envs.len());
     for env in envs {
-        let spec = environment_spec(env, project, &mut guessed)?;
-        let mut t = toml::Table::try_from(&spec)?;
+        let mut spec = environment_spec(env, project, &mut guessed)?;
+        if let Some(only) = only {
+            spec.services.retain(|name, _| only.contains(name));
+            spec.partial = true;
+            spec.shared = Default::default();
+        }
+        specs.push(spec);
+    }
+    if let Some(only) = only {
+        guessed.retain(|g| {
+            g.split_once('.')
+                .is_some_and(|(scope, _)| only.contains(scope))
+        });
+    }
+    Ok((specs, guessed.into_iter().collect()))
+}
+
+/// The file for `envs` (the first is the base's reference); see
+/// [`environment_specs`] for `only`.
+pub fn generate(
+    project: &str,
+    envs: &[RemoteEnv],
+    only: Option<&BTreeSet<String>>,
+) -> anyhow::Result<Pulled> {
+    let (specs, guessed) = environment_specs(project, envs, only)?;
+    let partial = only.is_some();
+    let mut tables = Vec::with_capacity(envs.len());
+    for spec in &specs {
+        let mut t = toml::Table::try_from(spec)?;
         t.remove("project");
+        t.remove("partial");
         tables.push(t);
     }
     let roots: Vec<toml::Value> = tables.into_iter().map(toml::Value::Table).collect();
@@ -219,6 +254,11 @@ pub fn generate(project: &str, envs: &[RemoteEnv]) -> anyhow::Result<Pulled> {
         "project = {}",
         toml::Value::String(project.to_owned())
     )?;
+    if partial {
+        text.push_str(
+            "# Only this repository's services; the others are left alone.\npartial = true\n",
+        );
+    }
     let base = base.and_then(|b| b.as_table().cloned()).unwrap_or_default();
     write_root(&mut text, &[], &base)?;
     for (env, overlay) in envs.iter().zip(overlays) {
@@ -228,7 +268,7 @@ pub fn generate(project: &str, envs: &[RemoteEnv]) -> anyhow::Result<Pulled> {
     }
     Ok(Pulled {
         text,
-        guessed_secrets: guessed.into_iter().collect(),
+        guessed_secrets: guessed,
     })
 }
 
@@ -323,13 +363,13 @@ fn write_root(out: &mut String, prefix: &[&str], root: &toml::Table) -> anyhow::
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::iac::model::ConfigFile;
     use crate::iac::remote::{RemoteDomain, RemoteVolume};
     use serde_json::json;
 
-    fn var(name: &str, value: Option<&str>, sealed: bool) -> RemoteVar {
+    pub(crate) fn var(name: &str, value: Option<&str>, sealed: bool) -> RemoteVar {
         RemoteVar {
             id: name.into(),
             name: name.into(),
@@ -338,7 +378,12 @@ mod tests {
         }
     }
 
-    fn env(name: &str, branch: &str, host: &str, extra: Option<(&str, &str)>) -> RemoteEnv {
+    pub(crate) fn env(
+        name: &str,
+        branch: &str,
+        host: &str,
+        extra: Option<(&str, &str)>,
+    ) -> RemoteEnv {
         let mut vars = vec![
             var("NODE_ENV", Some("production"), false),
             var("API_KEY", Some("leak-me-not"), false),
@@ -405,7 +450,7 @@ mod tests {
                 Some(("DEBUG", "1")),
             ),
         ];
-        let pulled = generate("shop", &envs).unwrap();
+        let pulled = generate("shop", &envs, None).unwrap();
         let text = &pulled.text;
         for secret in ["leak-me-not", "hunter2", "POSTGRES_PASSWORD"] {
             assert!(!text.contains(secret), "{secret} leaked:\n{text}");
@@ -445,12 +490,31 @@ mod tests {
 
     #[test]
     fn a_single_environment_has_no_overlays() {
-        let pulled = generate("shop", &[env("production", "main", "a.example.com", None)]).unwrap();
+        let pulled = generate(
+            "shop",
+            &[env("production", "main", "a.example.com", None)],
+            None,
+        )
+        .unwrap();
         assert!(!pulled.text.contains("[environments"), "{}", pulled.text);
         assert!(
             pulled.text.contains("[shared.variables]\nREGION = \"eu\""),
             "{}",
             pulled.text
         );
+    }
+
+    #[test]
+    fn partial_files_hold_only_the_chosen_services() {
+        let only = BTreeSet::from(["api".to_owned()]);
+        let envs = [env("production", "main", "a.example.com", None)];
+        let pulled = generate("shop", &envs, Some(&only)).unwrap();
+        let text = &pulled.text;
+        let file = ConfigFile::parse(std::path::Path::new("modula.toml"), text).unwrap();
+        let spec = file.resolve(Some("production")).unwrap();
+        assert!(spec.partial, "{text}");
+        assert_eq!(spec.services.keys().collect::<Vec<_>>(), ["api"]);
+        assert!(spec.shared.is_empty(), "{text}");
+        assert_eq!(pulled.guessed_secrets, ["api.API_KEY"]);
     }
 }

@@ -250,7 +250,9 @@ impl Ctx {
             }
             Err(e) => self
                 .out
-                .note(format!("Warning: add .modula/ to your .gitignore ({e:#})")),
+                .note(format!(
+                    "Warning: cannot write .modula/.gitignore; keep .modula/token and .modula/secrets.* out of git ({e:#})"
+                )),
         }
     }
 

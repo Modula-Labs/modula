@@ -93,13 +93,18 @@ pub enum Command {
     /// List your projects.
     #[command(visible_alias = "ls")]
     List,
-    /// Create a project and link the current directory to it.
+    /// Set up this directory: create a project (or pick one with -p) and
+    /// link to it, then optionally write .modula/modula.ts from it. Without
+    /// a terminal: pass a name or -p (and --format to write the config).
     Init {
-        /// The project's name.
-        name: String,
+        /// A new project's name (in a terminal you can pick from a list).
+        name: Option<String>,
         /// Workspace id or name (default: your only one).
         #[arg(short, long)]
         workspace: Option<String>,
+        /// Write the project's config to .modula/ in this format.
+        #[arg(long, value_enum)]
+        format: Option<ConfigFormat>,
     },
     /// Link the current directory to a project (writes .modula/project.toml).
     Link {
@@ -266,17 +271,27 @@ pub enum Command {
         #[command(subcommand)]
         command: InstanceCommand,
     },
-    /// Config as code: plan and apply modula.toml (see `config --help`).
+    /// Config as code: plan and apply .modula/modula.ts (or .toml/.json).
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
 }
 
+/// The language of a written config file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ConfigFormat {
+    /// .modula/modula.ts (runs with Node 22.18+ or Bun).
+    Ts,
+    /// .modula/modula.toml.
+    Toml,
+}
+
 /// Where `config plan`/`apply`/`validate` read from.
 #[derive(Debug, Clone, Default, Args)]
 pub struct ConfigFileArgs {
-    /// The config file (default: modula.toml or modula.json here or above).
+    /// The config file (default: .modula/modula.ts, .modula/modula.toml or
+    /// .modula/modula.json here or above).
     #[arg(long, value_name = "PATH")]
     pub file: Option<std::path::PathBuf>,
 }
@@ -372,16 +387,25 @@ pub enum InstanceDomainCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
-    /// Write modula.toml from the project: every environment, never secret
-    /// values (sealed and credential-like variables become { secret = true }).
+    /// Write .modula/modula.ts (or .toml) from the project: every
+    /// environment, never secret values (sealed and credential-like
+    /// variables become secrets).
     #[command(visible_alias = "pull")]
     Init {
         /// Overwrite an existing file.
         #[arg(long)]
         force: bool,
-        /// Where to write (default: modula.toml here).
+        /// Where to write (default: .modula/modula.<format> in the linked
+        /// directory; the format follows the extension).
         #[arg(long, value_name = "PATH")]
         file: Option<std::path::PathBuf>,
+        /// The file's language (default: ts).
+        #[arg(long, value_enum)]
+        format: Option<ConfigFormat>,
+        /// Only these services, as a partial file (repeatable; the
+        /// project's other services are left alone).
+        #[arg(long = "only", value_name = "SERVICE")]
+        only: Vec<String>,
     },
     /// Show what `config apply` would change (values of secrets masked).
     Plan(ConfigPlanArgs),

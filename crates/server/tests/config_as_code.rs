@@ -1,6 +1,8 @@
-//! `modula config` end to end: apply a modula.toml against the real
-//! HTTP server with an API token, check that the plan is then empty, that
-//! edits show the expected diff, and that `config pull` round-trips.
+//! `modula config` and `modula init` end to end: apply a
+//! .modula/modula.toml against the real HTTP server with an API token, check
+//! that the plan is then empty, that edits show the expected diff, and that
+//! `config pull` round-trips (as TOML, and as TypeScript when Node or Bun is
+//! available).
 
 mod common;
 
@@ -14,6 +16,7 @@ use modula_cli::cli::Cli;
 use modula_cli::commands;
 use modula_cli::context::Session;
 use modula_cli::iac::model::{CONFIG_KEYS, ConfigFile};
+use modula_cli::iac::script::Runtime;
 use modula_cli::output::Output;
 use modula_id::Id;
 use modula_server::deploy::config::ServiceConfig;
@@ -168,10 +171,15 @@ async fn apply_plan_edit_and_pull(pool: PgPool) {
     let s = setup(pool).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     s.ok(&["init", "shop", "--workspace", "team"]).await;
-    let gitignore = std::fs::read_to_string(s.dir.join(".gitignore")).unwrap();
-    assert!(gitignore.contains("\n.modula/\n"), "{gitignore}");
+    let gitignore = std::fs::read_to_string(s.dir.join(".modula/.gitignore")).unwrap();
+    assert!(
+        gitignore.ends_with("\nproject.toml\ntoken\nsecrets.*\n"),
+        "{gitignore}"
+    );
+    // Without a terminal, init writes a config only when asked (--format).
+    assert!(!s.dir.join(".modula/modula.ts").exists());
 
-    s.write("modula.toml", FILE);
+    s.write(".modula/modula.toml", FILE);
     s.ok(&["config", "validate"]).await;
 
     // Secrets come from gitignored files, one per environment.
@@ -349,7 +357,7 @@ async fn apply_plan_edit_and_pull(pool: PgPool) {
             "NEW = 1",
         )
         .replace("domains = [\"api.shop-example.com\"]", "domains = [{ host = \"api.shop-example.com\", port = 9000 }, \"www.shop-example.com\"]");
-    s.write("modula.toml", &edited);
+    s.write(".modula/modula.toml", &edited);
     let human = s.ok(&["config", "plan", "-e", "production"]).await;
     assert!(
         human.contains("~ port: 80 → 8081") && human.contains("- variable DB"),
@@ -398,6 +406,75 @@ async fn apply_plan_edit_and_pull(pool: PgPool) {
         .await;
     let plan = s.json(&["config", "plan", "-e", "production"]).await;
     assert_eq!(plan["changes"], false, "{plan:#}");
+
+    // TypeScript: `config init` writes .modula/modula.ts (--force replaces
+    // the TOML file), and it plans no changes in any environment.
+    if let Err(e) = Runtime::detect() {
+        eprintln!("skipping the modula.ts part: {e:#}");
+        return;
+    }
+    let (r, _) = s.run(&["config", "init"]).await;
+    assert!(r.is_err(), "one config file per .modula/");
+    let written = s.json(&["config", "init", "--force"]).await;
+    assert!(
+        written["file"]
+            .as_str()
+            .unwrap()
+            .ends_with(".modula/modula.ts"),
+        "{written}"
+    );
+    assert!(!s.dir.join(".modula/modula.toml").exists());
+    let ts = std::fs::read_to_string(s.dir.join(".modula/modula.ts")).unwrap();
+    assert!(ts.contains("from \"modula/iac\""), "{ts}");
+    let plan = s.json(&["config", "plan", "--all-envs"]).await;
+    assert_eq!(plan["changes"], false, "{plan:#}\n{ts}");
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn init_creates_or_links_and_writes_the_config(pool: PgPool) {
+    let s = setup(pool).await;
+    s.app.create_workspace(&s.admin, "team").await;
+
+    // Without a terminal a name (or -p) is required; the error lists projects.
+    let (r, _) = s.run(&["init", "--workspace", "team"]).await;
+    let e = format!("{:#}", r.unwrap_err());
+    assert!(e.contains("pass a name") && e.contains("none yet"), "{e}");
+
+    let created = s.json(&["init", "shop", "--workspace", "team"]).await;
+    assert_eq!(created["name"], "shop");
+    assert_eq!(created["created"], true);
+    assert_eq!(created["environment"], "production");
+    assert!(created["config"].is_null());
+    s.ok(&["add", "--database", "postgres"]).await;
+
+    // Linked already: needs --yes to set up again.
+    let (r, _) = s.run(&["init", "-p", "shop", "--format", "toml"]).await;
+    let e = format!("{:#}", r.unwrap_err());
+    assert!(e.contains("already linked to shop"), "{e}");
+
+    let linked = s
+        .json(&["init", "-p", "shop", "--format", "toml", "--yes"])
+        .await;
+    assert_eq!(linked["created"], false);
+    assert_eq!(linked["id"], created["id"]);
+    let file = linked["config"]["file"].as_str().unwrap();
+    assert!(file.ends_with(".modula/modula.toml"), "{linked}");
+    let text = std::fs::read_to_string(file).unwrap();
+    assert!(
+        text.contains("[services.postgres]\ntemplate = \"postgres\""),
+        "{text}"
+    );
+    let found = ConfigFile::find(&s.dir).unwrap().unwrap();
+    assert_eq!(found, s.dir.join(".modula/modula.toml"));
+    let plan = s.json(&["config", "plan"]).await;
+    assert_eq!(plan["changes"], false, "{plan:#}\n{text}");
+
+    // A config already there is kept.
+    let again = s
+        .json(&["init", "-p", "shop", "--format", "ts", "--yes"])
+        .await;
+    assert!(again["config"].is_null(), "{again}");
+    assert!(!s.dir.join(".modula/modula.ts").exists());
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]

@@ -7,6 +7,7 @@ pub mod db;
 pub mod deploy;
 pub mod domain;
 pub mod environment;
+pub mod init;
 pub mod instance;
 pub mod logs;
 pub mod members;
@@ -34,9 +35,11 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
         Command::Logout => auth::logout(ctx)?,
         Command::Whoami => auth::whoami(ctx).await?,
         Command::List => project::list(ctx).await?,
-        Command::Init { name, workspace } => {
-            project::init(ctx, &name, workspace.as_deref()).await?
-        }
+        Command::Init {
+            name,
+            workspace,
+            format,
+        } => init::run(ctx, name, workspace, format).await?,
         Command::Link { token } => {
             if let Some(token) = token {
                 // Here, where the link goes.

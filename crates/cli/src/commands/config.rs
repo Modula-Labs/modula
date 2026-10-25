@@ -1,8 +1,9 @@
 //! `config init|pull`, `config plan`, `config apply`, `config validate`:
-//! the project as code in `modula.toml` (see crate::iac).
+//! the project as code in `.modula/modula.ts` or `.modula/modula.toml`
+//! (see crate::iac).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
 use serde::Serialize;
@@ -12,7 +13,7 @@ use crate::api::endpoints::VariableScope;
 use crate::api::{
     Api, DeployedList, Environment, NewEnvironment, NewService, ProjectDetail, VariableChanges,
 };
-use crate::cli::{ConfigCommand, ConfigFileArgs, ConfigPlanArgs};
+use crate::cli::{ConfigCommand, ConfigFileArgs, ConfigFormat, ConfigPlanArgs};
 use crate::commands::variables::parse_dotenv;
 use crate::config::LINK_DIR;
 use crate::context::Ctx;
@@ -21,14 +22,20 @@ use crate::iac::diff::{
     VarChange, VarOp,
 };
 use crate::iac::model::{ConfigFile, FILES};
-use crate::iac::pull;
 use crate::iac::remote::RemoteEnv;
+use crate::iac::script::Runtime;
+use crate::iac::{pull, typescript};
 use crate::output::{Output, usage};
 use crate::resolve;
 
 pub async fn run(ctx: &mut Ctx, command: ConfigCommand) -> anyhow::Result<i32> {
     match command {
-        ConfigCommand::Init { force, file } => pull_file(ctx, force, file).await.map(|()| 0),
+        ConfigCommand::Init {
+            force,
+            file,
+            format,
+            only,
+        } => pull_file(ctx, force, file, format, only).await.map(|()| 0),
         ConfigCommand::Plan(args) => plan(ctx, &args).await,
         ConfigCommand::Apply { plan, deploy } => apply(ctx, &plan, deploy).await,
         ConfigCommand::Validate(args) => validate(ctx, &args).map(|()| 0),
@@ -38,10 +45,10 @@ pub async fn run(ctx: &mut Ctx, command: ConfigCommand) -> anyhow::Result<i32> {
 fn load_file(ctx: &Ctx, args: &ConfigFileArgs) -> anyhow::Result<ConfigFile> {
     let path = match &args.file {
         Some(p) => ctx.session.cwd.join(p),
-        None => ConfigFile::find(&ctx.session.cwd).ok_or_else(|| {
+        None => ConfigFile::find(&ctx.session.cwd)?.ok_or_else(|| {
             usage(format!(
-                "no {} here or above; write one with `modula config init`",
-                FILES.join(" or ")
+                "no .modula/{} here or above; write one with `modula config init`",
+                FILES.join(", .modula/")
             ))
         })?,
     };
@@ -81,23 +88,52 @@ fn validate(ctx: &Ctx, args: &ConfigFileArgs) -> anyhow::Result<()> {
 
 // ------------------------------------------------------------------ pull
 
-async fn pull_file(ctx: &mut Ctx, force: bool, file: Option<PathBuf>) -> anyhow::Result<()> {
-    let path = ctx
-        .session
-        .cwd
-        .join(file.unwrap_or_else(|| PathBuf::from(FILES[0])));
-    if path.extension().is_some_and(|e| e == "json") {
-        return Err(usage("config init writes TOML: name the file modula.toml"));
+impl ConfigFormat {
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Self::Ts => "modula.ts",
+            Self::Toml => "modula.toml",
+        }
     }
-    if path.exists() && !force {
-        return Err(usage(format!(
-            "{} exists; pass --force to overwrite it (or see `config plan`)",
-            path.display()
-        )));
+}
+
+/// A config file written from the server.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Written {
+    pub file: PathBuf,
+    pub project: String,
+    pub environments: Vec<String>,
+    /// `service.NAME` (or `shared.NAME`) written as a secret although not
+    /// sealed on the server.
+    pub guessed_secrets: Vec<String>,
+    pub partial: bool,
+}
+
+/// The format of `path` (by its extension), else `format`, else TypeScript.
+fn format_of(path: Option<&Path>, format: Option<ConfigFormat>) -> anyhow::Result<ConfigFormat> {
+    let by_name = match path.and_then(|p| p.extension()).and_then(|e| e.to_str()) {
+        None => return Ok(format.unwrap_or(ConfigFormat::Ts)),
+        Some("ts") => ConfigFormat::Ts,
+        Some("toml") => ConfigFormat::Toml,
+        Some(_) => return Err(usage("config init writes TypeScript (.ts) or TOML (.toml)")),
+    };
+    match format {
+        Some(f) if f != by_name => Err(usage("--format and the file's extension disagree")),
+        _ => Ok(by_name),
     }
+}
+
+/// Write `project`'s config (every environment, the default one first) to
+/// `path`; with `only`, just those services as a partial file.
+pub async fn write_config(
+    ctx: &Ctx,
+    project: &ProjectDetail,
+    path: &Path,
+    format: ConfigFormat,
+    only: Option<&BTreeSet<String>>,
+) -> anyhow::Result<Written> {
     let api = ctx.api()?;
-    let project = ctx.project().await?;
-    // The base comes from the default environment (production).
     let mut order: Vec<&Environment> = project.environments.iter().collect();
     if let Some(i) = order.iter().position(|e| e.is_default) {
         let prod = order.remove(i);
@@ -107,34 +143,134 @@ async fn pull_file(ctx: &mut Ctx, force: bool, file: Option<PathBuf>) -> anyhow:
     for e in order {
         envs.push(RemoteEnv::fetch(api, &e.id).await?);
     }
-    let pulled = pull::generate(&project.name, &envs)?;
-    // It must read back as it was written.
-    ConfigFile::parse(&path, &pulled.text).context("the generated file doesn't parse (a bug)")?;
-    std::fs::write(&path, &pulled.text)
+    let pulled = match format {
+        ConfigFormat::Toml => {
+            let pulled = pull::generate(&project.name, &envs, only)?;
+            // It must read back as it was written.
+            ConfigFile::parse(path, &pulled.text)
+                .context("the generated file doesn't parse (a bug)")?;
+            pulled
+        }
+        ConfigFormat::Ts => typescript::generate(&project.name, &envs, only)?,
+    };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    }
+    std::fs::write(path, &pulled.text)
         .with_context(|| format!("cannot write {}", path.display()))?;
-    let result = json!({
-        "file": path,
-        "project": project.name,
-        "environments": envs.iter().map(|e| &e.name).collect::<Vec<_>>(),
-        "guessedSecrets": pulled.guessed_secrets,
-    });
-    ctx.out.either(&result, |o| {
-        o.line(format!(
-            "Wrote {} ({}, {} environment(s))",
-            path.display(),
-            project.name,
-            envs.len()
-        ));
-        if !pulled.guessed_secrets.is_empty() {
-            o.note(format!(
-                "Written as {{ secret = true }} (values stay on the server): {}",
-                pulled.guessed_secrets.join(", ")
+    if format == ConfigFormat::Ts {
+        match Runtime::detect() {
+            Ok(rt) => {
+                ConfigFile::evaluate(path, rt).context("the generated file doesn't run (a bug)")?;
+            }
+            Err(e) => ctx.out.note(format!("Not run yet: {e:#}")),
+        }
+    }
+    let written = Written {
+        file: path.to_owned(),
+        project: project.name.clone(),
+        environments: envs.iter().map(|e| e.name.clone()).collect(),
+        guessed_secrets: pulled.guessed_secrets,
+        partial: only.is_some(),
+    };
+    let in_modula_dir = path
+        .parent()
+        .filter(|d| d.file_name().is_some_and(|n| n == LINK_DIR));
+    if let Some(root) = in_modula_dir.and_then(Path::parent) {
+        ctx.ignore_modula_dir(root);
+        if let Some(gi) = crate::config::gitignore_hides_modula_dir(root) {
+            ctx.out.note(format!(
+                "Warning: {} ignores all of .modula/, so {} won't be committed; remove that line (.modula/.gitignore keeps the token and secrets out)",
+                gi.display(),
+                path.display()
             ));
         }
-        o.note("Review it, commit it, and check it with `modula config plan`.");
-    })
+    }
+    Ok(written)
 }
 
+/// Notes after writing a config file (stderr).
+pub fn describe_written(o: &Output, w: &Written) {
+    if !w.guessed_secrets.is_empty() {
+        o.note(format!(
+            "Written as secrets (values stay on the server): {}",
+            w.guessed_secrets.join(", ")
+        ));
+    }
+    o.note("Review it, commit it, and check it with `modula config plan`.");
+}
+
+/// The services named by `--only`, by name.
+pub fn only_services(
+    project: &ProjectDetail,
+    names: &[String],
+) -> anyhow::Result<Option<BTreeSet<String>>> {
+    if names.is_empty() {
+        return Ok(None);
+    }
+    names
+        .iter()
+        .map(|n| resolve::pick_service(&project.services, Some(n)).map(|s| s.name.clone()))
+        .collect::<anyhow::Result<BTreeSet<_>>>()
+        .map(Some)
+}
+
+async fn pull_file(
+    ctx: &mut Ctx,
+    force: bool,
+    file: Option<PathBuf>,
+    format: Option<ConfigFormat>,
+    only: Vec<String>,
+) -> anyhow::Result<()> {
+    let format = format_of(file.as_deref(), format)?;
+    let path = match &file {
+        Some(p) => ctx.session.cwd.join(p),
+        None => ctx.modula_root().join(LINK_DIR).join(format.file_name()),
+    };
+    if path.exists() && !force {
+        return Err(usage(format!(
+            "{} exists; pass --force to overwrite it (or see `config plan`)",
+            path.display()
+        )));
+    }
+    // One config file per .modula/: --force replaces one in another format.
+    let others: Vec<PathBuf> = match (&file, path.parent()) {
+        (None, Some(dir)) => FILES
+            .iter()
+            .map(|f| dir.join(f))
+            .filter(|p| *p != path && p.is_file())
+            .collect(),
+        _ => Vec::new(),
+    };
+    if let Some(other) = others.first()
+        && !force
+    {
+        return Err(usage(format!(
+            "{} exists; pass --force to replace it with {}",
+            other.display(),
+            path.display()
+        )));
+    }
+    let project = ctx.project().await?;
+    let only = only_services(&project, &only)?;
+    let written = write_config(ctx, &project, &path, format, only.as_ref()).await?;
+    for other in &others {
+        std::fs::remove_file(other)
+            .with_context(|| format!("cannot remove {}", other.display()))?;
+    }
+    ctx.out.either(&written, |o| {
+        o.line(format!(
+            "Wrote {} ({}, {} environment(s))",
+            written.file.display(),
+            written.project,
+            written.environments.len()
+        ));
+        for other in &others {
+            o.note(format!("Removed {}", other.display()));
+        }
+        describe_written(o, &written);
+    })
+}
 // ------------------------------------------------------------------ plan
 
 /// `{ secret = true }` values: the secrets file, and with --from-env the
@@ -177,7 +313,7 @@ fn secrets(
                     ctx.ignore_modula_dir(file.dir());
                 } else if crate::config::gitignore_pending(file.dir()) {
                     ctx.out.note(format!(
-                        "Warning: {} isn't gitignored; add .modula/ to .gitignore (apply does it)",
+                        "Warning: {} isn't gitignored; .modula/.gitignore should list secrets.* (apply adds it)",
                         path.display()
                     ));
                 }
@@ -249,6 +385,34 @@ struct Planned {
     plan: EnvPlan,
 }
 
+/// Ids of the project's pull request previews (only a modula.ts can tell
+/// them apart, through `ctx.isPreview`).
+async fn previews(
+    api: &Api,
+    file: &ConfigFile,
+    p: &ProjectDetail,
+) -> anyhow::Result<BTreeSet<String>> {
+    if !file.is_script() {
+        return Ok(BTreeSet::new());
+    }
+    #[derive(serde::Deserialize)]
+    struct Env {
+        id: String,
+        #[serde(default)]
+        ephemeral: bool,
+    }
+    #[derive(serde::Deserialize)]
+    struct Detail {
+        environments: Vec<Env>,
+    }
+    let d: Detail = api.get(&format!("/api/projects/{}", p.id)).await?;
+    Ok(d.environments
+        .into_iter()
+        .filter(|e| e.ephemeral)
+        .map(|e| e.id)
+        .collect())
+}
+
 async fn compute(
     ctx: &Ctx,
     file: &ConfigFile,
@@ -259,9 +423,11 @@ async fn compute(
     let opts = Options {
         update_sealed: args.update_sealed,
     };
+    let previews = previews(api, file, p).await?;
     let mut out = Vec::new();
     for (name, env) in targets(ctx, p, file, args.all_envs)? {
-        let spec = file.resolve(Some(&name))?;
+        let preview = env.as_ref().is_some_and(|e| previews.contains(&e.id));
+        let spec = file.resolve_for(Some(&name), preview)?;
         let remote = match &env {
             Some(e) => Some(RemoteEnv::fetch(api, &e.id).await?),
             None => None,
@@ -507,12 +673,13 @@ async fn apply(ctx: &Ctx, args: &ConfigPlanArgs, deploy: bool) -> anyhow::Result
     let opts = Options {
         update_sealed: args.update_sealed,
     };
+    let previews = previews(api, &file, &p).await?;
     let mut results = Vec::new();
     for x in &plans {
         let name = &x.plan.environment;
         let env = resolve::pick_environment(&p.environments, Some(name))?.clone();
         let remote = RemoteEnv::fetch(api, &env.id).await?;
-        let spec = file.resolve(Some(name))?;
+        let spec = file.resolve_for(Some(name), previews.contains(&env.id))?;
         let secrets = secrets(ctx, &file, name, args, true)?;
         let fresh = diff::plan(name, &spec, Some(&remote), &secrets, opts);
         if !fresh.errors.is_empty() {
