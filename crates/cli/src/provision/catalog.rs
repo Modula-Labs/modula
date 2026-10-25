@@ -153,6 +153,9 @@ pub fn flag(country: &str) -> String {
 }
 
 /// 821 → `€8.21`.
+/// Hetzner's traffic allowances are binary (20 TiB), which it sells as "20 TB".
+const TIB: f64 = 1_099_511_627_776.0;
+
 pub fn format_eur(cents: i64) -> String {
     format!("€{}.{:02}", cents / 100, cents % 100)
 }
@@ -191,7 +194,7 @@ pub fn build(locations: &[Location], types: &[ServerType]) -> Vec<LocationOption
                         monthly: format_eur(cents),
                         traffic_tb: t
                             .included_traffic_in(&loc.name)
-                            .map(|b| (b as f64 / 1e12 * 10.0).round() / 10.0),
+                            .map(|b| (b as f64 / TIB * 10.0).round() / 10.0),
                         recommended: false,
                     })
                 })
@@ -303,8 +306,8 @@ mod tests {
         assert_eq!(fsn1.types[0].arch, "arm64");
         assert_eq!(fsn1.types[0].monthly, "€7.25");
         assert_eq!(fsn1.recommended.as_deref(), Some("cax21"));
-        assert_eq!(fsn1.types[0].traffic_tb, Some(22.0));
-        assert_eq!(fsn1.offer(), "  €7.25+  4 vCPU  8 GB arm 22 TB");
+        assert_eq!(fsn1.types[0].traffic_tb, Some(20.0));
+        assert_eq!(fsn1.offer(), "  €7.25+  4 vCPU  8 GB arm 20 TB");
 
         let hel1 = at("hel1");
         assert_eq!(hel1.types.len(), 1);
@@ -368,7 +371,7 @@ mod tests {
         let label = fsn1.types[1].label();
         assert_eq!(
             label,
-            "cx33     €7.49   4 vCPU   8 GB   80 GB disk x86 22 TB"
+            "cx33     €7.49   4 vCPU   8 GB   80 GB disk x86 20 TB"
         );
         assert!(fsn1.types[0].label().ends_with("★ recommended"));
         assert_eq!(
