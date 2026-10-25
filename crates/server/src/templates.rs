@@ -349,8 +349,8 @@ mod tests {
 
     #[test]
     fn the_postgres_start_script_parses_and_covers_its_modes() {
-        let out = std::process::Command::new("sh")
-            .args(["-n", "-c", POSTGRES_START])
+        let out = std::process::Command::new("sh") // no-shell: allow (test: syntax-checks a fixed script)
+            .args(["-n", "-c", POSTGRES_START]) // no-shell: allow (same)
             .output()
             .unwrap();
         assert!(

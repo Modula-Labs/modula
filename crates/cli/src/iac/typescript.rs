@@ -227,7 +227,13 @@ fn command(argv: &[Value]) -> Option<String> {
     let plain =
         |a: &str| !a.is_empty() && !a.contains(SHELL_SYNTAX) && !a.contains(char::is_whitespace);
     match args.as_slice() {
-        ["sh", "-c", script] if script.contains(SHELL_SYNTAX) && script.trim() == *script => {
+        // `sh -c <script>` as written in a start command (nothing is run here).
+        [sh, c, script]
+            if *sh == "sh"
+                && *c == "-c"
+                && script.contains(SHELL_SYNTAX)
+                && script.trim() == *script =>
+        {
             Some(string(script))
         }
         args if !args.is_empty() && args.iter().all(|a| plain(a)) => Some(string(&args.join(" "))),
@@ -510,7 +516,7 @@ pub(crate) mod tests {
             Some("\"sh apps/api/predeploy.sh\"")
         );
         assert_eq!(
-            command(&argv(&["sh", "-c", "bun run migrate && bun start"])).as_deref(),
+            command(&argv(&["sh", "-c", "bun run migrate && bun start"])).as_deref(), // no-shell: allow (test data)
             Some("\"bun run migrate && bun start\"")
         );
         // An argument with a space can't be written as one string.
