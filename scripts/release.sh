@@ -82,6 +82,7 @@ src_mounts=(
   -v "$PWD/deploy/install.sh:/src/deploy/install.sh:ro"
   -v "$PWD/deploy/release.pub.pem:/src/deploy/release.pub.pem:ro"
   -v "$PWD/guide:/src/guide:ro"
+  -v "$PWD/packages/iac:/src/packages/iac:ro"
 )
 cargo_mounts=(
   -v modula-cargo-registry:/usr/local/cargo/registry
