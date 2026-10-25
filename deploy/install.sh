@@ -1617,6 +1617,18 @@ upgrade() {
 }
 
 main() {
+  # A server installer: refuse other systems before anything else runs
+  # (macOS's bash 3.2 can't even run the rest of this script).
+  if [[ $(uname -s) != Linux ]]; then
+    printf '\n  ✗ This installs a Modula server, on Ubuntu 22.04+ or Debian 12+.\n' >&2
+    printf '    Run it on your server (over SSH). For the modula CLI on this machine:\n' >&2
+    printf '      curl -fsSL https://usemodula.org/install-cli.sh | bash\n\n' >&2
+    exit 1
+  fi
+  if ((BASH_VERSINFO[0] < 4)); then
+    printf '\n  ✗ This installer needs bash 4 or newer (this is bash %s).\n\n' "$BASH_VERSION" >&2
+    exit 1
+  fi
   exec 3>&1 4>&2
   trap on_exit EXIT
   parse_args "$@"
