@@ -4,6 +4,27 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// `POST /api/cli/login`: what to show the user, and what to poll with.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CliLoginStart {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_url: String,
+    /// Seconds between polls.
+    pub interval: u64,
+    /// Seconds until the codes expire.
+    pub expires_in: u64,
+}
+
+/// `POST /api/cli/login/token`: `pending`, `denied`, `expired`, or
+/// `approved` with the new API token.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CliLoginPoll {
+    pub status: String,
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Me {
     pub user: User,

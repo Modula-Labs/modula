@@ -16,7 +16,7 @@ isn't a terminal).";
     version,
     about = "Ship your apps to your own servers with Modula Deploy.",
     long_about = "Ship your apps to your own servers with Modula Deploy.\n\n\
-New here? Start with `modula login --url https://your-instance`, then\n\
+New here? Start with `modula login`, then\n\
 `modula init <name>` and `modula up` to deploy the current directory.",
     after_help = AFTER_HELP,
     propagate_version = true
@@ -51,6 +51,44 @@ pub struct Global {
     /// this machine (it travels unencrypted).
     #[arg(long, global = true, env = "MODULA_ALLOW_INSECURE_HTTP")]
     pub allow_insecure_http: bool,
+    /// Saved login to use (default: the directory's, else the current one;
+    /// see `modula login list`).
+    #[arg(long, global = true, env = "MODULA_LOGIN", value_name = "NAME")]
+    pub login: Option<String>,
+}
+
+/// `login`: sign in through the browser (or with a token, for CI).
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct LoginArgs {
+    /// Your instance: a domain, an IP or a URL (https unless given); asked
+    /// for when omitted.
+    #[arg(env = "MODULA_URL")]
+    pub url: Option<String>,
+    /// Save the login under this local name (default: the instance's host).
+    #[arg(long)]
+    pub name: Option<String>,
+    /// For CI and scripts: an API token (mdt_…) instead of the browser.
+    #[arg(long, env = "MODULA_TOKEN", hide_env_values = true, hide = true)]
+    pub token: Option<String>,
+    /// Print the approval URL without opening a browser.
+    #[arg(long)]
+    pub browserless: bool,
+    /// Save it for this directory only (.modula/token, mode 0600, kept
+    /// out of git) instead of your user config.
+    #[arg(long, conflicts_with = "name")]
+    pub local: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LoginCommand {
+    /// List saved logins.
+    #[command(visible_alias = "ls")]
+    List,
+    /// Make a saved login the default.
+    Use {
+        /// The login's local name; picked from a list when omitted.
+        name: Option<String>,
+    },
 }
 
 /// `up`: deploy local files without GitHub (honors .gitignore and .modulaignore).
@@ -73,22 +111,27 @@ pub struct UpArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Log in with an API token (create one in the dashboard).
+    /// Log in to an instance: approve in your browser; `login list` and
+    /// `login use` manage saved logins.
+    #[command(args_conflicts_with_subcommands = true)]
     Login {
-        /// Your instance, e.g. https://cloud.example.com.
-        #[arg(long, env = "MODULA_URL")]
-        url: Option<String>,
-        /// The token (mdt_…); prompted for when omitted.
-        #[arg(long, env = "MODULA_TOKEN", hide_env_values = true)]
-        token: Option<String>,
-        /// Save it for this directory only (.modula/token, mode 0600, kept
-        /// out of git) instead of your user config.
-        #[arg(long)]
-        local: bool,
+        #[command(flatten)]
+        args: LoginArgs,
+        #[command(subcommand)]
+        command: Option<LoginCommand>,
     },
-    /// Forget the saved token (this directory's .modula/token if any).
-    Logout,
-    /// Show who you are logged in as.
+    /// List saved logins (same as `login list`).
+    Logins,
+    /// Forget a saved login (default: this directory's .modula/token if
+    /// any, else the one in use).
+    Logout {
+        /// The login's local name.
+        name: Option<String>,
+        /// Forget every saved login.
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+    },
+    /// Show who you are logged in as, where, and under which login.
     Whoami,
     /// List your projects.
     #[command(visible_alias = "ls")]
@@ -144,8 +187,9 @@ pub enum Command {
     Down,
     /// Rebuild and deploy an earlier deployment's Git commit.
     Rollback {
-        /// The deployment to go back to (see `deployment list`).
-        deployment: String,
+        /// The deployment to go back to (see `deployment list`); picked from
+        /// a list at a terminal when omitted.
+        deployment: Option<String>,
         /// Wait until the deployment finishes; exit 1 if it fails.
         #[arg(short, long)]
         wait: bool,
@@ -320,8 +364,8 @@ pub enum MembersCommand {
     /// Remove a member by email. Needs a re-authenticated dashboard session,
     /// so with an API token this points you to the dashboard.
     Remove {
-        /// The member's email.
-        email: String,
+        /// The member's email; picked from a list at a terminal when omitted.
+        email: Option<String>,
     },
 }
 
@@ -907,6 +951,65 @@ mod tests {
         let cli = parse(&["-p", "shop", "--yes", "down"]).unwrap();
         assert_eq!(cli.global.project.as_deref(), Some("shop"));
         assert!(cli.global.yes);
+        let cli = parse(&["status", "--login", "work"]).unwrap();
+        assert_eq!(cli.global.login.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn login_takes_a_url_or_a_subcommand() {
+        let cli = parse(&["login"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Login { command: None, ref args } if args.url.is_none())
+        );
+        let cli = parse(&[
+            "login",
+            "deploy.example.com",
+            "--name",
+            "work",
+            "--browserless",
+        ])
+        .unwrap();
+        let Command::Login {
+            args,
+            command: None,
+        } = cli.command
+        else {
+            panic!("{:?}", cli.command)
+        };
+        assert_eq!(args.url.as_deref(), Some("deploy.example.com"));
+        assert_eq!(args.name.as_deref(), Some("work"));
+        assert!(args.browserless);
+        assert!(matches!(
+            parse(&["login", "list"]).unwrap().command,
+            Command::Login {
+                command: Some(LoginCommand::List),
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["login", "use", "work"]).unwrap().command,
+            Command::Login { command: Some(LoginCommand::Use { name: Some(ref n) }), .. } if n == "work"
+        ));
+        assert!(matches!(
+            parse(&["logins"]).unwrap().command,
+            Command::Logins
+        ));
+        assert!(parse(&["login", "x.example.com", "--local", "--name", "w"]).is_err());
+        assert!(matches!(
+            parse(&["logout", "work"]).unwrap().command,
+            Command::Logout {
+                name: Some(_),
+                all: false
+            }
+        ));
+        assert!(matches!(
+            parse(&["logout", "--all"]).unwrap().command,
+            Command::Logout {
+                name: None,
+                all: true
+            }
+        ));
+        assert!(parse(&["logout", "work", "--all"]).is_err());
     }
 
     #[test]

@@ -1,9 +1,108 @@
 //! Turning names (or ids) from flags and `.modula/project.toml` into the
-//! project, environment and service instance to act on.
+//! project, environment and service instance to act on. When a name is
+//! missing or ambiguous, a person at a terminal picks from a list
+//! ([`choose`]); scripts and agents get an error listing the choices.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, bail};
 
 use crate::api::{Api, Environment, Project, ProjectDetail, Service, Workspace, api_error};
+
+/// Process-wide: whether [`choose`] may ask (see [`set_interactive`]).
+static INTERACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Allow pickers. `commands::run` turns them on when stdin and stdout are
+/// terminals, without `--yes`, `--json` or `CI` set.
+pub fn set_interactive(on: bool) {
+    INTERACTIVE.store(on, Ordering::Relaxed);
+}
+
+/// Whether a person can pick from a list here.
+pub fn interactive() -> bool {
+    INTERACTIVE.load(Ordering::Relaxed)
+}
+
+/// Ask the person at the terminal to pick one of `items` (arrow keys, type
+/// to filter), shown by `label`. Call it only when [`interactive`]; Esc or
+/// Ctrl-C cancels with an error.
+pub fn choose<'a, T>(
+    prompt: &str,
+    items: &'a [T],
+    label: impl Fn(&T) -> String,
+) -> anyhow::Result<&'a T> {
+    match items {
+        [] => bail!("nothing to choose from"),
+        [only] => return Ok(only),
+        _ => {}
+    }
+    let labels: Vec<String> = items.iter().map(label).collect();
+    let picked = inquire::Select::new(prompt, labels)
+        .with_page_size(12)
+        .with_help_message("↑↓ to move, type to filter, enter to choose, esc to cancel")
+        .raw_prompt();
+    match picked {
+        Ok(choice) => Ok(&items[choice.index]),
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => bail!("cancelled"),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `shop (team)`: a project with its workspace.
+pub fn project_label(workspace: &str, p: &Project) -> String {
+    format!("{} ({workspace})", p.name)
+}
+
+/// `production (default)`.
+pub fn environment_label(e: &Environment) -> String {
+    if e.is_default {
+        format!("{} (default)", e.name)
+    } else {
+        e.name.clone()
+    }
+}
+
+/// `db (postgres)` (its template) or `web (app)`.
+pub fn service_label(s: &Service) -> String {
+    match s.template.as_deref() {
+        Some(t) => format!("{} ({t})", s.name),
+        None => format!("{} (app)", s.name),
+    }
+}
+
+/// `2026-10-25 14:02  active  github  1a2b3c4 Fix the header`.
+pub fn deployment_label(d: &crate::api::Deployment) -> String {
+    let when = d
+        .created_at
+        .get(..16)
+        .unwrap_or(&d.created_at)
+        .replace('T', " ");
+    let commit = match (&d.commit_sha, &d.commit_message) {
+        (Some(sha), msg) => format!(
+            "  {} {}",
+            sha.chars().take(7).collect::<String>(),
+            msg.as_deref()
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(50)
+                .collect::<String>()
+        ),
+        _ => String::new(),
+    };
+    format!("{when}  {}  {}{commit}", d.status, d.source)
+        .trim_end()
+        .to_owned()
+}
+
+/// `Team (owner)`.
+pub fn workspace_label(w: &Workspace) -> String {
+    format!("{} ({})", w.name, w.role)
+}
 
 /// Ids are 16 lowercase base36 characters (see crates/id).
 pub fn looks_like_id(s: &str) -> bool {
@@ -36,6 +135,12 @@ pub fn pick_project<'a>(
             match matches[..] {
                 [(_, p)] => Ok(p),
                 [] => bail!("no project named {w} (projects: {})", all()),
+                _ if interactive() => {
+                    let (_, p) = choose(&format!("Which {w}?"), &matches, |(ws, p)| {
+                        project_label(ws, p)
+                    })?;
+                    Ok(p)
+                }
                 _ => bail!(
                     "several projects are named {w} (in {}); pass its id instead",
                     names(matches.iter().map(|(ws, _)| ws.as_str()))
@@ -45,9 +150,26 @@ pub fn pick_project<'a>(
         None => match projects {
             [(_, p)] => Ok(p),
             [] => bail!("you have no projects yet"),
+            _ if interactive() => {
+                let (_, p) = choose("Project", projects, |(ws, p)| project_label(ws, p))?;
+                Ok(p)
+            }
             _ => bail!("pass --project or run `modula link` (projects: {})", all()),
         },
     }
+}
+
+/// Pick an environment by name or id; with no name, ask at a terminal and
+/// default to the project's default one otherwise (for commands that act
+/// on "an environment" rather than the current one).
+pub fn ask_environment<'a>(
+    envs: &'a [Environment],
+    wanted: Option<&str>,
+) -> anyhow::Result<&'a Environment> {
+    if wanted.is_none() && interactive() && envs.len() > 1 {
+        return choose("Environment", envs, environment_label);
+    }
+    pick_environment(envs, wanted)
 }
 
 /// Pick an environment by name or id; with no name, the project's default
@@ -102,6 +224,7 @@ pub fn pick_service<'a>(
             "this project has no database service; name the service to connect to (services: {})",
             names(services.iter().map(|s| s.name.as_str()))
         ),
+        _ if interactive() => Ok(*choose("Database", &dbs, |s| service_label(s))?),
         _ => bail!(
             "this project has several databases; name one: {}",
             names(dbs.iter().map(|s| s.name.as_str()))
@@ -121,6 +244,7 @@ pub fn default_service<'a>(
     match services {
         [only] => Ok(only),
         [] => bail!("this project has no services yet; add one with `modula add`"),
+        _ if interactive() => choose("Service", services, service_label),
         _ => bail!(
             "pass --service or run `modula service <name>` (services: {})",
             names(services.iter().map(|s| s.name.as_str()))
@@ -142,6 +266,7 @@ pub fn pick_workspace<'a>(
         None => match workspaces {
             [only] => Ok(only),
             [] => bail!("you aren't a member of any workspace"),
+            _ if interactive() => choose("Workspace", workspaces, workspace_label),
             _ => bail!("pass --workspace (workspaces: {})", all()),
         },
     }
@@ -210,6 +335,50 @@ mod tests {
             id: id.into(),
             name: name.into(),
         }
+    }
+
+    #[test]
+    fn pickers_label_each_kind() {
+        assert_eq!(project_label("team", &proj("a", "shop")), "shop (team)");
+        assert_eq!(
+            environment_label(&env("1", "production")),
+            "production (default)"
+        );
+        assert_eq!(environment_label(&env("2", "staging")), "staging");
+        assert_eq!(service_label(&svc("db", Some("postgres"))), "db (postgres)");
+        assert_eq!(service_label(&svc("web", None)), "web (app)");
+        let w = Workspace {
+            id: "1".into(),
+            name: "Team".into(),
+            role: "owner".into(),
+        };
+        assert_eq!(workspace_label(&w), "Team (owner)");
+        let d: crate::api::Deployment = serde_json::from_value(serde_json::json!({
+            "id": "d1",
+            "status": "active",
+            "source": "github",
+            "commitSha": "1a2b3c4d5e",
+            "commitMessage": "Fix the header\n\nbody",
+            "createdAt": "2026-10-25T14:02:33Z",
+        }))
+        .unwrap();
+        assert_eq!(
+            deployment_label(&d),
+            "2026-10-25 14:02  active  github  1a2b3c4 Fix the header"
+        );
+    }
+
+    #[test]
+    fn without_a_terminal_ambiguity_is_an_error() {
+        assert!(!interactive(), "tests never prompt");
+        let one = [proj("a", "only")];
+        let only = vec![("team".to_owned(), one[0].clone())];
+        assert_eq!(pick_project(&only, None).unwrap().name, "only");
+        // `choose` with one item doesn't ask.
+        assert_eq!(choose("x", &one, |p| p.name.clone()).unwrap().id, "a");
+        assert!(choose::<Project>("x", &[], |p| p.name.clone()).is_err());
+        let envs = [env("1", "staging"), env("2", "production")];
+        assert_eq!(ask_environment(&envs, None).unwrap().id, "2");
     }
 
     #[test]

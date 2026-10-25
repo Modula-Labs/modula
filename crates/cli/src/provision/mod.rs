@@ -36,7 +36,7 @@ use self::flow::{Created, DnsPlan, Failure, Plan, Secrets, Settings, SshChoice};
 use self::progress::{Event, Progress, duration};
 use crate::api::Api;
 use crate::cli::{OnFailure, ServerCommand, ServerCreateArgs, ServerOptionsArgs};
-use crate::config::{self, Config};
+use crate::config::{self, SavedLogin};
 use crate::context::Ctx;
 use crate::output::{Table, usage};
 
@@ -632,21 +632,27 @@ pub async fn create_with(
         }
     };
 
-    // Saved like `modula login` does; a new instance has no Access settings.
+    // Saved like `modula login` does (named after the domain, now the
+    // default); a new instance has no Access settings.
     let url = format!("https://{}/", plan.domain);
-    let saved = Config {
-        url: Some(url.clone()),
-        token: Some(api_token.expose_secret().to_owned()),
-        ..Default::default()
+    let name = config::default_login_name(&config::parse_url(&url)?);
+    ctx.cfg.set(
+        &name,
+        SavedLogin {
+            url: url.clone(),
+            token: api_token.expose_secret().to_owned(),
+            access: None,
+        },
+    );
+    config::save(&ctx.session.config_path, &ctx.cfg)?;
+    let check = SavedLogin {
+        url: base.to_string(),
+        token: api_token.expose_secret().to_owned(),
+        access: None,
     };
-    config::save(&ctx.session.config_path, &saved)?;
-    ctx.cfg = saved;
-    let check = Config {
-        url: Some(base.to_string()),
-        token: Some(api_token.expose_secret().to_owned()),
-        ..Default::default()
-    };
-    let me = Api::new(config::login(&check, None, None)?)?.me().await?;
+    let me = Api::new(config::login(Some(&check), None, None)?)?
+        .me()
+        .await?;
     progress.event(&Event::LoggedIn {
         url: url.clone(),
         email: me.user.email.clone(),
