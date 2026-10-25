@@ -491,14 +491,16 @@ export default defineModula(async (ctx) => project("shop", {
     }
 
     #[test]
-    fn a_commonjs_package_json_doesnt_break_it() {
+    fn a_package_json_doesnt_change_how_it_loads() {
         let Some(rt) = runtime() else { return };
-        let path = temp_file("modula.ts", ANTON);
-        let root = path.parent().unwrap().parent().unwrap().to_owned();
-        std::fs::write(root.join("package.json"), "{ \"type\": \"commonjs\" }").unwrap();
-        let r = ConfigFile::evaluate(&path, rt);
-        let _ = std::fs::remove_dir_all(&root);
-        r.unwrap_or_else(|e| panic!("{e:#}"));
+        for package in ["{ \"type\": \"commonjs\" }", "{ \"name\": \"app\" }"] {
+            let path = temp_file("modula.ts", ANTON);
+            let root = path.parent().unwrap().parent().unwrap().to_owned();
+            std::fs::write(root.join("package.json"), package).unwrap();
+            let r = ConfigFile::evaluate(&path, rt.clone());
+            let _ = std::fs::remove_dir_all(&root);
+            r.unwrap_or_else(|e| panic!("{package}: {e:#}"));
+        }
     }
 
     #[test]
