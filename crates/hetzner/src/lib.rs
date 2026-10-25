@@ -110,6 +110,14 @@ impl ServerType {
 
 impl ServerType {
     /// The monthly price in `location`, if it is sold there.
+    /// Outgoing traffic included per month in `location`, in bytes.
+    pub fn included_traffic_in(&self, location: &str) -> Option<u64> {
+        self.prices
+            .iter()
+            .find(|p| p.location == location)
+            .and_then(|p| p.included_traffic)
+    }
+
     pub fn monthly_price_in(&self, location: &str) -> Option<&Amount> {
         self.prices
             .iter()
@@ -134,6 +142,9 @@ pub struct TypeLocation {
 pub struct Price {
     pub location: String,
     pub price_monthly: Amount,
+    /// Outgoing traffic included per month, in bytes.
+    #[serde(default)]
+    pub included_traffic: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

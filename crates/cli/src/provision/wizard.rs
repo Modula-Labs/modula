@@ -10,7 +10,7 @@ use inquire::{Confirm, InquireError, Password, PasswordDisplayMode, Select, Text
 use modula_hetzner::SshKey;
 use secrecy::{ExposeSecret, SecretString};
 
-use super::catalog::{self, LocationOption, format_eur};
+use super::catalog::{self, LocationOption};
 use super::flow::{self, Created, DnsPlan, Plan, Secrets, Settings, SshChoice};
 use super::{
     DEFAULT_ADMIN_NAME, DEFAULT_NAME, EnvSecrets, cloud_init, cloudflare, cloudflare_lookup,
@@ -179,7 +179,7 @@ pub async fn run(
     while let Some(&step) = STEPS.get(i) {
         let nav = match step {
             Step::Token => token_step(out, &mut d, settings).await?,
-            Step::Location => location_step(&mut d, args)?,
+            Step::Location => location_step(out, &mut d, args)?,
             Step::Type => type_step(&mut d, args)?,
             Step::Name => name_step(&mut d, args)?,
             Step::Domain => domain_step(&mut d, args)?,
@@ -292,7 +292,7 @@ async fn token_step(out: &Output, d: &mut Draft, settings: &Settings) -> anyhow:
     }
 }
 
-fn location_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
+fn location_step(out: &Output, d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
     if let Some(wanted) = &args.location {
         let i = d
             .catalog
@@ -316,11 +316,7 @@ fn location_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> 
         .iter()
         .enumerate()
         .map(|(i, l)| Choice {
-            label: format!(
-                "{:<46} from {}/mo",
-                l.label(),
-                l.from_cents().map(format_eur).unwrap_or_default()
-            ),
+            label: format!("{:<38} {}", l.label(), l.offer()),
             value: i,
         })
         .collect();
@@ -328,6 +324,12 @@ fn location_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> 
         .location
         .or_else(|| d.catalog.iter().position(|l| l.name == "fsn1"))
         .unwrap_or(0);
+    say(
+        out,
+        &out.dim(
+            "Hetzner's prices, VAT included. They differ by location: outside Europe servers cost more\n  and include less traffic, and the cheapest Arm (arm64) servers are sold in Europe only.\n  You pick the exact size next.",
+        ),
+    );
     let r = Select::new("Where should it run?", options)
         .with_starting_cursor(start)
         .with_page_size(10)

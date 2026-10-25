@@ -52,7 +52,32 @@ impl LocationOption {
 
     /// The cheapest price here, for the location list.
     pub fn from_cents(&self) -> Option<i64> {
-        self.types.iter().map(|t| t.monthly_cents).min()
+        self.cheapest().map(|t| t.monthly_cents)
+    }
+
+    /// The cheapest type here (types are sorted cheapest first).
+    pub fn cheapest(&self) -> Option<&TypeOption> {
+        self.types.first()
+    }
+
+    /// `from €6.49/mo · 2 vCPU · 4 GB RAM · 40 GB disk · arm64 · 20 TB traffic`:
+    /// what the cheapest server here gets you.
+    pub fn offer(&self) -> String {
+        let Some(t) = self.cheapest() else {
+            return String::new();
+        };
+        let mut text = format!(
+            "from {}/mo · {} vCPU · {} GB RAM · {} GB disk · {}",
+            t.monthly,
+            t.cores,
+            format_gb(t.memory_gb),
+            t.disk_gb,
+            t.arch
+        );
+        if let Some(tb) = t.traffic_tb {
+            text.push_str(&format!(" · {} TB traffic", format_gb(tb)));
+        }
+        text
     }
 }
 
@@ -71,6 +96,8 @@ pub struct TypeOption {
     pub monthly_cents: i64,
     /// `€8.21`.
     pub monthly: String,
+    /// Outgoing traffic included per month, in TB.
+    pub traffic_tb: Option<f64>,
     pub recommended: bool,
 }
 
@@ -86,6 +113,9 @@ impl TypeOption {
             self.arch,
             self.monthly
         );
+        if let Some(tb) = self.traffic_tb {
+            text.push_str(&format!(" · {} TB traffic", format_gb(tb)));
+        }
         if self.cpu_type == "dedicated" {
             text.push_str(" · dedicated");
         }
@@ -167,6 +197,9 @@ pub fn build(locations: &[Location], types: &[ServerType]) -> Vec<LocationOption
                         cpu_type: t.cpu_type.clone(),
                         monthly_cents: cents,
                         monthly: format_eur(cents),
+                        traffic_tb: t
+                            .included_traffic_in(&loc.name)
+                            .map(|b| (b as f64 / 1e12 * 10.0).round() / 10.0),
                         recommended: false,
                     })
                 })
@@ -195,7 +228,8 @@ pub fn build(locations: &[Location], types: &[ServerType]) -> Vec<LocationOption
             })
         })
         .collect();
-    out.sort_by(|a, b| (&a.network_zone, &a.name).cmp(&(&b.network_zone, &b.name)));
+    // Cheapest first, then by name.
+    out.sort_by(|a, b| (a.from_cents(), &a.name).cmp(&(b.from_cents(), &b.name)));
     out
 }
 
@@ -226,7 +260,8 @@ mod tests {
         let at = |loc: &str, available: bool| json!({"name": loc, "available": available});
         let price = |loc: &str, gross: &str| {
             json!({"location": loc, "price_hourly": {"net": "0", "gross": "0"},
-                   "price_monthly": {"net": "1", "gross": gross}})
+                   "price_monthly": {"net": "1", "gross": gross},
+                   "included_traffic": if loc == "ash" { 1_099_511_627_776_u64 } else { 21_990_232_555_520 }})
         };
         serde_json::from_value(json!([
             {"id": 1, "name": "cx23", "cores": 2, "memory": 4.0, "disk": 40, "cpu_type": "shared", "architecture": "x86",
@@ -265,18 +300,24 @@ mod tests {
     fn only_available_suitable_types_per_location() {
         let c = build(&locations(), &types());
         let names: Vec<&str> = c.iter().map(|l| l.name.as_str()).collect();
-        // No suitable type is sold in sin; sorted by network zone, then name.
-        assert_eq!(names, ["fsn1", "hel1", "ash"]);
+        // No suitable type is sold in sin; cheapest first.
+        assert_eq!(names, ["hel1", "ash", "fsn1"]);
+        let at = |name: &str| c.iter().find(|l| l.name == name).unwrap();
 
-        let fsn1 = &c[0];
+        let fsn1 = at("fsn1");
         let types: Vec<&str> = fsn1.types.iter().map(|t| t.name.as_str()).collect();
         // cx23 is sold out, cx11 deprecated, tiny too small; cheapest first.
         assert_eq!(types, ["cax21", "cx33", "ccx13"]);
         assert_eq!(fsn1.types[0].arch, "arm64");
         assert_eq!(fsn1.types[0].monthly, "€7.25");
         assert_eq!(fsn1.recommended.as_deref(), Some("cax21"));
+        assert_eq!(fsn1.types[0].traffic_tb, Some(22.0));
+        assert_eq!(
+            fsn1.offer(),
+            "from €7.25/mo · 4 vCPU · 8 GB RAM · 80 GB disk · arm64 · 22 TB traffic"
+        );
 
-        let hel1 = &c[1];
+        let hel1 = at("hel1");
         assert_eq!(hel1.types.len(), 1);
         assert_eq!(hel1.types[0].name, "cx23");
         // No 8 GB type there: the cheapest with 4 GB.
@@ -285,7 +326,7 @@ mod tests {
         assert_eq!(hel1.types[0].monthly_cents, 452);
 
         // Only a 2 GB type: still offered, flagged as tight, recommended as the only one.
-        let ash = &c[2];
+        let ash = at("ash");
         assert_eq!(ash.recommended.as_deref(), Some("cpx11"));
         assert!(ash.label().starts_with("🇺🇸 Ashburn, VA (ash)"));
     }
@@ -311,6 +352,7 @@ mod tests {
             cpu_type: cpu.into(),
             monthly_cents: cents,
             monthly: format_eur(cents),
+            traffic_tb: None,
             recommended: false,
         };
         let list = vec![
@@ -333,15 +375,16 @@ mod tests {
         assert_eq!(flag("??"), "🌐");
         assert_eq!(flag(""), "🌐");
         let c = build(&locations(), &types());
-        let label = c[0].types[1].label();
+        let fsn1 = c.iter().find(|l| l.name == "fsn1").unwrap();
+        let label = fsn1.types[1].label();
         assert!(
             label.starts_with("cx33     4 vCPU ·   8 GB RAM ·   80 GB disk · x86"),
             "{label}"
         );
-        assert!(label.ends_with("€7.49/mo"), "{label}");
-        assert!(c[0].types[0].label().ends_with("★ recommended"));
+        assert!(label.ends_with("€7.49/mo · 22 TB traffic"), "{label}");
+        assert!(fsn1.types[0].label().ends_with("★ recommended"));
         assert_eq!(
-            c[0].types[1].summary(),
+            fsn1.types[1].summary(),
             "cx33 (4 vCPU, 8 GB RAM, 80 GB disk, x86)"
         );
     }

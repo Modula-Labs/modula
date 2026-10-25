@@ -7,6 +7,14 @@ may break things).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-25
+
+### Changed
+
+- `modula server create`: each location shows what its cheapest server gets
+  you (vCPU, RAM, disk, architecture, included traffic), cheapest first,
+  with a note on why prices differ; server sizes show included traffic too.
+
 ## [0.1.2] - 2026-10-25
 
 ### Added
@@ -132,7 +140,8 @@ environments and staged deploys, licensed AGPL-3.0-only.
 - **CLI:** `modula` for projects, deployments, logs, variables, metrics,
   `modula.toml` infrastructure as code, and `modula server create`.
 
-[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/Modula-Labs/modula/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Modula-Labs/modula/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Modula-Labs/modula/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Modula-Labs/modula/releases/tag/v0.1.0
