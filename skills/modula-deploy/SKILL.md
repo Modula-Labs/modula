@@ -8,7 +8,7 @@ description: Use when deploying, inspecting or managing apps on a Modula Deploy 
 Modula Deploy runs projects → environments → services → deployments on the
 user's own servers. You operate it with an API token through the
 `modula` CLI (projects, services, variables, deploys, logs, domains,
-databases; always pass `--json` when you parse output), `modula.toml` config
+databases; always pass `--json` when you parse output), `.modula/modula.ts` config
 as code (`config plan`/`config apply`) for settings across services and
 environments, and the HTTP API for the rest. References:
 [cli](references/cli.md), [api](references/api.md),
@@ -113,8 +113,8 @@ GitHub App). A whole app with its databases, deployed at once:
 `add --template n8n` (`--template list` for the gallery). Names: lowercase letters, digits, `-`. The service exists in
 every environment; nothing is deployed yet.
 
-**Config as code** (Member): if the repo has `modula.toml` (or the user wants
-one), change settings, variables, domains and volumes there, not by hand:
+**Config as code** (Member): if the repo has `.modula/modula.ts` or
+`.modula/modula.toml` (or the user wants one), change settings, variables, domains and volumes there, not by hand:
 `modula config validate`, `config plan --json` (show the user the
 plan; secrets are masked), then `config apply --yes [--deploy]` after they
 agree. `config pull` writes the file from the server (no secret values).

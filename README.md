@@ -29,7 +29,8 @@ changes, variables with references, domains, database backups and a CLI.
 - **Security**: 2FA (TOTP), sudo mode for destructive actions, scoped API tokens,
   per-route authorization, an audit log. See [guide/security.md](guide/security.md).
 - **CLI and config as code**: `modula` mirrors the Railway CLI's commands;
-  `modula.toml` keeps a whole project in git.
+  `.modula/modula.ts` (TypeScript, like Railway's `railway.ts`) or
+  `.modula/modula.toml` keeps a whole project in git.
 
 ## Install
 

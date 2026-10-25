@@ -7,6 +7,24 @@ may break things).
 
 ## [Unreleased]
 
+### Added
+
+- **Config as code in TypeScript:** `.modula/modula.ts`, shaped like
+  Railway's `railway.ts` (`import { project, service, github } from
+  "modula/iac"`, `ctx.isEnvironment(...)`, `ctx.isPreview`). The CLI runs it
+  with Node 22.18+ or Bun; nothing to install.
+- **`modula init` like `railway init`:** pick the workspace, create a
+  project or link an existing one, pick the environment and write
+  `.modula/modula.ts` from the project (`partial` when the repository holds
+  only some of its services). Flags (`-p`, `-e`, `--format`, `--yes`) for CI.
+
+### Changed
+
+- Config files live in `.modula/` (`modula.ts`, `modula.toml` or
+  `modula.json`); a root `modula.toml` is only the build-time file now.
+  `.modula/.gitignore` keeps the link, token and secrets out of git instead
+  of the repository ignoring all of `.modula/`.
+
 ## [0.1.1] - 2026-10-25
 
 ### Added

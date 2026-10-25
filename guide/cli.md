@@ -123,7 +123,7 @@ client's exit code.
 `link`, `init`, `service` and `environment` write `.modula/project.toml`:
 
 ```toml
-# Linked by modula; safe to commit, but usually gitignored.
+# Linked by modula; kept out of git by .modula/.gitignore.
 project = "k3x9…"
 project_name = "shop"
 environment = "production"
@@ -135,16 +135,14 @@ Commands look for the nearest `.modula/project.toml` in the current directory
 or any parent. `-p/-e/-s` override it for one command; a `-p` naming another
 project ignores the linked environment and service.
 
-**`.modula/` stays out of git.** It holds the link, an optional local token
-(`.modula/token`) and [config-as-code](config-as-code.md) secrets files
-(`.modula/secrets.<env>.env`). Whenever the CLI writes into `.modula/`, it
-makes sure the `.gitignore` at the repository root ignores it: it appends an
-annotated `.modula/` block (creating `.gitignore` if the directory is in a git
-repository and has none) and prints what it changed on stderr. A
-`.gitignore` that already ignores `.modula/`, or names both `.modula/token`
-and `.modula/secrets.*` (to commit `project.toml` on purpose), is left alone.
-Outside a git repository only an existing `.gitignore` is updated. Commit
-`modula.toml` at the repository root; it lives outside `.modula/`.
+**What in `.modula/` goes in git.** `.modula/` holds the
+[config](config-as-code.md) (`modula.ts`, `modula.toml` or `modula.json`:
+commit it), the link, an optional local token (`.modula/token`) and secrets
+files (`.modula/secrets.<env>.env`). Whenever the CLI writes into
+`.modula/`, it makes sure `.modula/.gitignore` lists `project.toml`, `token`
+and `secrets.*` (creating it or adding the missing lines) and prints what it
+changed on stderr. If the repository's `.gitignore` ignores all of
+`.modula/`, writing a config warns that the config won't be committed.
 
 ## Setup
 
@@ -170,10 +168,30 @@ Your name, email and instance, then each workspace with your role.
 
 Every project you can see: workspace, name, id; the linked one is marked.
 
-### `init <NAME> [-w, --workspace <WORKSPACE>]`
+### `init [NAME] [-w, --workspace <WORKSPACE>] [-p <PROJECT>] [-e <ENV>] [--format ts|toml] [--yes]`
 
-Creates a project (with a `production` environment) and links the current
-directory to it. `--workspace` takes an id or name; default: your only one.
+Sets up the current directory, like `railway init`. In a terminal, each
+step is a list you can type to filter: the workspace (if you have several),
+**Create a new project** or one of the workspace's projects, the new
+project's name (default: the repository's directory name), the environment
+(if there are several), and then whether to write `.modula/modula.ts` from
+the project's current setup (see [config as code](config-as-code.md)). When
+the project has several services, it also asks which ones this repository
+describes, preselecting those deployed from this repository's GitHub
+`origin`; choosing only some writes a `partial` file.
+
+Without a terminal (CI, agents), flags decide: `NAME` creates a project,
+`-p` links an existing one (`-e` picks the environment, default
+`production`), and the config is written only with `--format` (`ts` or
+`toml`; `partial` when this repository's `origin` deploys some of the
+services but not all). Missing choices are errors that list the options.
+
+In a directory that is already linked, `init` says so and asks before
+setting it up again (`--yes` without a terminal). An existing config file
+in `.modula/` is kept; `modula config init --force` rewrites it.
+
+`--json` prints `{ id, name, workspace, environment, created, link, config }`
+(`config` as `config init` prints it, or null).
 
 ### `link [--token <TOKEN>]`
 
@@ -259,7 +277,7 @@ default service.
 Lists variable names with `sealed`, references and last update. **Values are
 write-only over the API**: listings show `********`, and `--kv` prints
 `NAME=********` lines. Reveal values in the dashboard (`config pull` writes
-non-sealed ones into `modula.toml`, except credential-like names). `--shared` acts on the
+non-sealed ones into `.modula/modula.ts`, except credential-like names). `--shared` acts on the
 environment's shared variables (`${{shared.NAME}}`) instead of the service's.
 
 ### `variables set KEY=VALUE… [--stdin] [--sealed] [--deploy] [--shared]`
@@ -426,15 +444,16 @@ still kept, can be rolled back to; pick one from `deployment list`.
 
 ## Config as code
 
-The whole project in `modula.toml` at the repository root: services,
-settings, variables (secrets stay out of the file), domains, volumes, TCP
-proxies, with per-environment overrides. Full reference:
-[config as code](config-as-code.md).
+The whole project in `.modula/modula.ts` (or `.modula/modula.toml`):
+services, settings, variables (secrets stay out of the file), domains,
+volumes, TCP proxies, per environment. A `modula.ts` runs with Node.js 22.18+
+or Bun. Full reference: [config as code](config-as-code.md).
 
-### `config init [--force] [--file <PATH>]` (alias `config pull`)
+### `config init [--force] [--file <PATH>] [--format ts|toml] [--only <SERVICE>…]` (alias `config pull`)
 
-Writes `modula.toml` from the project (`-p` or the linked one), every
-environment, without secret values.
+Writes `.modula/modula.ts` (or `.toml`) from the project (`-p` or the linked
+one), every environment, without secret values. `--only` (repeatable)
+writes just those services as a `partial` file.
 
 ### `config plan [-e <ENV> | --all-envs] [--file <PATH>] [--secrets-file <PATH>] [--from-env] [--update-sealed]`
 
