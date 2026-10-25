@@ -619,11 +619,17 @@ mod tests {
         assert_eq!(load(&path).unwrap(), Config::default());
         let mut cfg = Config::default();
         cfg.set("work", saved("https://deploy.example.com/", "mdt_w"));
+        // Default names are hosts: dotted keys must stay one key.
+        cfg.set(
+            "deploy.example.com",
+            saved("https://deploy.example.com/", "mdt_d"),
+        );
         cfg.set("home", saved("https://10.0.0.5:8443/", "mdt_h"));
         save(&path, &cfg).unwrap();
         assert_eq!(load(&path).unwrap(), cfg);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("current = \"home\"\n"), "{text}");
+        assert!(text.contains("[logins.\"deploy.example.com\"]"), "{text}");
         assert!(
             text.contains("[logins.work]\nurl = \"https://deploy.example.com/\""),
             "{text}"

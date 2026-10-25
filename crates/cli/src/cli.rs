@@ -68,7 +68,7 @@ pub struct LoginArgs {
     #[arg(long)]
     pub name: Option<String>,
     /// For CI and scripts: an API token (mdt_…) instead of the browser.
-    #[arg(long, env = "MODULA_TOKEN", hide_env_values = true, hide = true)]
+    #[arg(long, env = "MODULA_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
     /// Print the approval URL without opening a browser.
     #[arg(long)]

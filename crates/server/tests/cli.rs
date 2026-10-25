@@ -602,6 +602,13 @@ async fn named_logins_token_and_browser(pool: PgPool) {
     let listed = saved_json(&dir, &["logins"]).await;
     assert_eq!(listed[0]["name"], "a");
     assert_eq!(listed[1]["current"], true);
+    let (r, text) = run_saved(&dir, &["login", "list"]).await;
+    assert_eq!(r.unwrap(), 0);
+    let current = text.lines().find(|l| l.contains('*')).unwrap_or_default();
+    assert!(
+        current.contains(" b ") && current.contains(&api_url),
+        "{text}"
+    );
     saved_json(&dir, &["login", "use", "a"]).await;
     assert_eq!(saved_json(&dir, &["whoami"]).await["login"], "a");
     // A malformed token is refused before anything is saved.
