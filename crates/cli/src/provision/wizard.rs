@@ -384,7 +384,8 @@ fn type_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
         "★ = enough for {} · prices incl. VAT · type to filter · Esc: back",
         catalog::RECOMMENDATION
     );
-    let r = Select::new("Which server?", options)
+    let prompt = format!("Which server in {}?", loc.label());
+    let r = Select::new(&prompt, options)
         .with_starting_cursor(start)
         .with_page_size(12)
         .with_help_message(&help)
