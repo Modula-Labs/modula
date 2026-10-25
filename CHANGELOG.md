@@ -9,6 +9,21 @@ may break things).
 
 ## [0.1.3] - 2026-10-25
 
+### Added
+
+- **Network logs** on a deployment: its HTTP requests (time, method, path,
+  status, duration), searchable with `@path:`, `@httpStatus:` and `@method:`.
+- **Deploy and build logs** as a time and data table with error and warning
+  lines marked, a detail view per line (attributes, raw data, JSON fields,
+  view in context) and Load more for older output.
+- **Uptime and 5xx strips** on service and project metrics: up, down
+  (crashed or unreachable) or no data per bar, and a green-to-red bar by the
+  share of 5xx responses.
+
+### Fixed
+
+- Stored log lines (the Logs page) now mask secret values like the live stream.
+
 ### Changed
 
 - `modula server create`: each location shows what its cheapest server gets
