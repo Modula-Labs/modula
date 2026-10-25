@@ -5,8 +5,11 @@ import { RouteError, Toaster } from "./components/ErrorBoundary";
 import { SudoDialog } from "./components/SudoDialog";
 import { WorkspaceShell } from "./components/shell/WorkspaceShell";
 import { ApiError, api } from "./lib/api";
+import { cliCode } from "./lib/cliLogin";
 import { inviteToken } from "./lib/members";
 import { AccountSecurityPage } from "./pages/AccountSecurity";
+import { CliLoginPage } from "./pages/CliLogin";
+import type { ReturnTo } from "./pages/Login";
 import { DomainOnboardingPage } from "./pages/DomainOnboarding";
 import { InvitePage } from "./pages/Invite";
 import { LoginPage } from "./pages/Login";
@@ -55,29 +58,45 @@ const setupRoute = createRoute({
   component: SetupPage,
 });
 
+/** Where to go after signing in: an invite, or a CLI login to approve. */
+const returnTo = (s: Record<string, unknown>): ReturnTo => ({
+  ...(inviteToken(s.invite) ? { invite: inviteToken(s.invite) } : {}),
+  ...(cliCode(s.cli) ? { cli: cliCode(s.cli) } : {}),
+});
+
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login",
-  validateSearch: (s: Record<string, unknown>): { expired?: boolean; invite?: string } => ({
+  validateSearch: (s: Record<string, unknown>): ReturnTo & { expired?: boolean } => ({
     ...(s.expired ? { expired: true } : {}),
-    ...(inviteToken(s.invite) ? { invite: inviteToken(s.invite) } : {}),
+    ...returnTo(s),
   }),
   beforeLoad: async ({ context }) => {
     if ((await instance(context.queryClient)).setupRequired) throw redirect({ to: "/setup" });
   },
   component: function Login() {
-    const { expired, invite } = loginRoute.useSearch();
-    return <LoginPage invite={invite} notice={expired ? "Your session ended. Sign in again." : undefined} />;
+    const { expired, ...back } = loginRoute.useSearch();
+    return <LoginPage back={back} notice={expired ? "Your session ended. Sign in again." : undefined} />;
   },
 });
 
 const twoFactorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/login/2fa",
-  validateSearch: (s: Record<string, unknown>): { invite?: string } => (inviteToken(s.invite) ? { invite: inviteToken(s.invite) } : {}),
+  validateSearch: returnTo,
   component: function TwoFactor() {
-    const { invite } = twoFactorRoute.useSearch();
-    return <TwoFactorPage invite={invite} />;
+    return <TwoFactorPage back={twoFactorRoute.useSearch()} />;
+  },
+});
+
+/** Public: `modula login` opens this to approve the terminal's login. */
+const cliLoginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/cli/login",
+  validateSearch: (s: Record<string, unknown>): { code?: string } => (cliCode(s.code) ? { code: cliCode(s.code) } : {}),
+  component: function CliLogin() {
+    const { code } = cliLoginRoute.useSearch();
+    return <CliLoginPage code={code} />;
   },
 });
 
@@ -190,6 +209,7 @@ const routeTree = rootRoute.addChildren([
   loginRoute,
   twoFactorRoute,
   inviteRoute,
+  cliLoginRoute,
   appRoute.addChildren([domainOnboardingRoute, workspaceRoute.addChildren([projectsRoute, settingsRoute, securityRoute, serversRoute]), projectRoute.addChildren([projectCanvasRoute, projectMetricsRoute, projectLogsRoute, projectSettingsIndexRoute, projectSettingsRoute]),
   ]),
 ]);

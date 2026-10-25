@@ -7,8 +7,21 @@ import { Field, Input } from "@/components/ui/Input";
 import { Alert } from "@/components/ui/misc";
 import { ApiError, api } from "@/lib/api";
 
-/** `invite`: the invite token to return to after signing in. */
-export function LoginPage({ notice, invite }: { notice?: string; invite?: string }) {
+/** Where to return after signing in: an invite to accept, or a CLI login to approve. */
+export interface ReturnTo {
+  invite?: string;
+  cli?: string;
+}
+
+/** After a full sign-in: back to `back`, else the projects. */
+export function goBack(navigate: ReturnType<typeof useNavigate>, back: ReturnTo) {
+  if (back.invite) return navigate({ to: "/invite/$token", params: { token: back.invite } });
+  if (back.cli) return navigate({ to: "/cli/login", search: { code: back.cli } });
+  return navigate({ to: "/projects" });
+}
+
+/** `back`: where to return after signing in. */
+export function LoginPage({ notice, back }: { notice?: string; back: ReturnTo }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [email, setEmail] = useState("");
@@ -17,7 +30,7 @@ export function LoginPage({ notice, invite }: { notice?: string; invite?: string
   const [busy, setBusy] = useState(false);
 
   return (
-    <AuthCard title="Sign in" subtitle={invite ? "Sign in to accept your invite." : "Welcome back."}>
+    <AuthCard title="Sign in" subtitle={back.invite ? "Sign in to accept your invite." : back.cli ? "Sign in to approve the CLI login." : "Welcome back."}>
       <form
         className="flex flex-col gap-4"
         onSubmit={async (e) => {
@@ -27,10 +40,10 @@ export function LoginPage({ notice, invite }: { notice?: string; invite?: string
           try {
             const r = await api.login({ email, password });
             if (r.mfaRequired) {
-              await navigate({ to: "/login/2fa", search: invite ? { invite } : {} });
+              await navigate({ to: "/login/2fa", search: back });
             } else {
               qc.setQueryData(["me"], r.me);
-              await (invite ? navigate({ to: "/invite/$token", params: { token: invite } }) : navigate({ to: "/projects" }));
+              await goBack(navigate, back);
             }
           } catch (err) {
             const ae = err instanceof ApiError ? err : null;
