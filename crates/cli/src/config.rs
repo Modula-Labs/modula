@@ -317,7 +317,7 @@ pub fn write_link(dir: &Path, link: &Link) -> anyhow::Result<PathBuf> {
         .with_context(|| format!("cannot create {}", link_dir.display()))?;
     let path = link_dir.join(LINK_FILE);
     let text = format!(
-        "# Linked by modula; safe to commit, but usually gitignored.\n{}",
+        "# Linked by modula; kept out of git by .modula/.gitignore.\n{}",
         toml::to_string_pretty(link)?
     );
     std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?;
@@ -492,12 +492,10 @@ pub fn save_local_login(dir: &Path, cfg: &SavedLogin) -> anyhow::Result<PathBuf>
 /// What [`ensure_gitignore`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gitignore {
-    /// `.modula/` (or its token and secrets) was already ignored.
+    /// `.modula/.gitignore` already ignores the link, token and secrets.
     AlreadyIgnored(PathBuf),
     Appended(PathBuf),
     Created(PathBuf),
-    /// Not in a git repository and no .gitignore here: nothing to do.
-    NoRepository,
 }
 
 impl Gitignore {
@@ -505,28 +503,30 @@ impl Gitignore {
     pub fn describe(&self) -> Option<String> {
         match self {
             Self::Appended(p) => Some(format!(
-                "Updated {} to keep .modula/ out of git",
+                "Updated {} to keep the link, token and secrets out of git",
                 p.display()
             )),
-            Self::Created(p) => Some(format!("Created {} ignoring .modula/", p.display())),
-            Self::AlreadyIgnored(_) | Self::NoRepository => None,
+            Self::Created(p) => Some(format!(
+                "Created {} (keeps the link, token and secrets out of git)",
+                p.display()
+            )),
+            Self::AlreadyIgnored(_) => None,
         }
     }
 }
 
-const GITIGNORE_BLOCK: &str = "\
-# Modula Deploy: the directory link, a local API token (.modula/token) and
-# secrets (.modula/secrets.*). modula.toml at the repository root is meant to
-# be committed.
+const GITIGNORE_HEADER: &str = "\
+# Modula Deploy: the directory link, a local API token and secrets stay out
+# of git. The config (modula.ts, modula.toml or modula.json) is meant to be
+# committed.
 ";
 
-/// Keep `.modula/` (link, local token, secrets files) out of git. The
-/// `.gitignore` at the repository root (the nearest directory above `dir`
-/// with a `.git`) gets an annotated `.modula/` block unless it already
-/// ignores the directory, or names both `.modula/token` and
-/// `.modula/secrets.*` (a deliberate choice to commit the link); when it
-/// names some `.modula/` paths, only the missing sensitive ones are added.
-/// Outside a repository only an existing `<dir>/.gitignore` is updated.
+/// What `.modula/.gitignore` ignores.
+const GITIGNORED: &[&str] = &[LINK_FILE, TOKEN_FILE, "secrets.*"];
+
+/// Keep the link, a local token and secrets files in `<dir>/.modula/` out
+/// of git with a `.modula/.gitignore` (created, or completed with the
+/// missing entries), so the config next to them can be committed.
 pub fn ensure_gitignore(dir: &Path) -> anyhow::Result<Gitignore> {
     update_gitignore(dir, true)
 }
@@ -541,53 +541,56 @@ pub fn gitignore_pending(dir: &Path) -> bool {
 }
 
 fn update_gitignore(dir: &Path, write: bool) -> anyhow::Result<Gitignore> {
-    let root = dir.ancestors().find(|d| d.join(".git").exists());
-    let path = root.unwrap_or(dir).join(".gitignore");
+    let path = dir.join(LINK_DIR).join(".gitignore");
     let existing = match std::fs::read_to_string(&path) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
     };
-    if root.is_none() && existing.is_none() {
-        return Ok(Gitignore::NoRepository);
-    }
     let text = existing.clone().unwrap_or_default();
     let lines: Vec<&str> = text
         .lines()
-        .map(|l| l.trim().trim_start_matches("**/").trim_start_matches('/'))
+        .map(|l| l.trim().trim_start_matches('/'))
         .collect();
-    let has = |entry: &str| lines.contains(&entry);
-    if has(".modula") || has(".modula/") || has(".modula/*") {
-        return Ok(Gitignore::AlreadyIgnored(path));
-    }
-    let sensitive = [".modula/token", ".modula/secrets.*"];
-    let missing: Vec<&str> = sensitive.iter().copied().filter(|e| !has(e)).collect();
+    let missing: Vec<&str> = GITIGNORED
+        .iter()
+        .copied()
+        .filter(|e| !lines.contains(e) && !lines.contains(&"*"))
+        .collect();
     if missing.is_empty() {
         return Ok(Gitignore::AlreadyIgnored(path));
     }
-    let customized = lines.iter().any(|l| l.starts_with(".modula/"));
-    let entries = if customized {
-        missing.join("\n")
-    } else {
-        ".modula/".to_owned()
-    };
     let mut new = text;
-    if !new.is_empty() && !new.ends_with('\n') {
+    if new.is_empty() {
+        new.push_str(GITIGNORE_HEADER);
+    } else if !new.ends_with('\n') {
         new.push('\n');
     }
-    if !new.is_empty() {
+    for entry in missing {
+        new.push_str(entry);
         new.push('\n');
     }
-    new.push_str(GITIGNORE_BLOCK);
-    new.push_str(&entries);
-    new.push('\n');
     if write {
+        std::fs::create_dir_all(dir.join(LINK_DIR))
+            .with_context(|| format!("cannot create {}", dir.join(LINK_DIR).display()))?;
         std::fs::write(&path, new).with_context(|| format!("cannot write {}", path.display()))?;
     }
     Ok(match existing {
         Some(_) => Gitignore::Appended(path),
         None => Gitignore::Created(path),
     })
+}
+
+/// The repository's `.gitignore` (at the git root above `dir`) when it
+/// ignores all of `.modula/`, which would keep the config out of git too.
+pub fn gitignore_hides_modula_dir(dir: &Path) -> Option<PathBuf> {
+    let root = dir.ancestors().find(|d| d.join(".git").exists())?;
+    let path = root.join(".gitignore");
+    let text = std::fs::read_to_string(&path).ok()?;
+    text.lines()
+        .map(|l| l.trim().trim_start_matches("**/").trim_start_matches('/'))
+        .any(|l| matches!(l, ".modula" | ".modula/" | ".modula/*" | ".modula/**"))
+        .then_some(path)
 }
 
 #[cfg(test)]
@@ -772,64 +775,50 @@ mod tests {
     }
 
     #[test]
-    fn gitignore_gets_modula_once() {
-        // Outside a repository, without a .gitignore: nothing.
+    fn gitignore_keeps_secrets_but_not_the_config_out_of_git() {
         let dir = temp_dir();
-        assert_eq!(ensure_gitignore(&dir).unwrap(), Gitignore::NoRepository);
-        assert!(!gitignore_pending(&dir));
-
-        // In a repository: created at its root, from a subdirectory.
-        std::fs::create_dir_all(dir.join(".git")).unwrap();
-        let sub = dir.join("apps/api");
-        std::fs::create_dir_all(&sub).unwrap();
-        assert!(gitignore_pending(&sub));
-        assert!(!dir.join(".gitignore").exists(), "checking writes nothing");
-        let gi = dir.join(".gitignore");
+        let gi = dir.join(".modula/.gitignore");
+        assert!(gitignore_pending(&dir));
+        assert!(!gi.exists(), "checking writes nothing");
         assert_eq!(
-            ensure_gitignore(&sub).unwrap(),
+            ensure_gitignore(&dir).unwrap(),
             Gitignore::Created(gi.clone())
         );
         let text = std::fs::read_to_string(&gi).unwrap();
         assert!(
-            text.starts_with("# Modula Deploy") && text.ends_with("\n.modula/\n"),
+            text.starts_with("# Modula Deploy")
+                && text.ends_with("\nproject.toml\ntoken\nsecrets.*\n"),
             "{text}"
         );
         // Idempotent.
         assert_eq!(
-            ensure_gitignore(&sub).unwrap(),
+            ensure_gitignore(&dir).unwrap(),
             Gitignore::AlreadyIgnored(gi.clone())
         );
-        assert_eq!(std::fs::read_to_string(&gi).unwrap(), text);
+        assert!(!gitignore_pending(&dir));
 
-        // Appended after existing lines (with a missing final newline).
-        std::fs::write(&gi, "target/").unwrap();
+        // Only missing entries are added (a missing final newline is fine).
+        std::fs::write(&gi, "/token").unwrap();
         assert_eq!(
             ensure_gitignore(&dir).unwrap(),
             Gitignore::Appended(gi.clone())
         );
-        let text = std::fs::read_to_string(&gi).unwrap();
-        assert!(
-            text.starts_with("target/\n\n# Modula") && text.ends_with(".modula/\n"),
-            "{text}"
+        assert_eq!(
+            std::fs::read_to_string(&gi).unwrap(),
+            "/token\nproject.toml\nsecrets.*\n"
         );
 
-        // A deliberate per-file setup only gets the missing sensitive entry.
-        std::fs::write(&gi, "/.modula/token\n").unwrap();
-        ensure_gitignore(&dir).unwrap();
-        let text = std::fs::read_to_string(&gi).unwrap();
-        assert!(
-            text.ends_with("\n.modula/secrets.*\n") && !text.contains("\n.modula/\n"),
-            "{text}"
-        );
-        assert_eq!(
-            ensure_gitignore(&dir).unwrap(),
-            Gitignore::AlreadyIgnored(gi.clone())
-        );
-        for ignored in ["/.modula/\n", ".modula\n", "**/.modula/\n"] {
-            std::fs::write(&gi, ignored).unwrap();
+        // A repository .gitignore ignoring all of .modula/ hides the config.
+        assert_eq!(gitignore_hides_modula_dir(&dir), None);
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "target/\n").unwrap();
+        assert_eq!(gitignore_hides_modula_dir(&dir.join(".modula")), None);
+        for line in ["/.modula/\n", ".modula\n", "**/.modula/\n"] {
+            std::fs::write(dir.join(".gitignore"), line).unwrap();
             assert_eq!(
-                ensure_gitignore(&dir).unwrap(),
-                Gitignore::AlreadyIgnored(gi.clone())
+                gitignore_hides_modula_dir(&dir),
+                Some(dir.join(".gitignore")),
+                "{line}"
             );
         }
     }

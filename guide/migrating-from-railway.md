@@ -65,10 +65,12 @@ Not read: `build.watchPatterns` (set **watch paths** in service settings),
 `deploy.region`, and per-environment overrides (`environments.*`).
 
 To manage the whole project as code (Railway's `.railway/railway.ts` with
-`railway config plan/apply`), write a `modula.toml` and use
+`railway config plan/apply`), use `.modula/modula.ts`, which has the same
+shape (import from `"modula/iac"`), or `.modula/modula.toml`, with
 `modula config plan` / `config apply`: services, settings, variables,
-domains, volumes and per-environment overrides in one file. The key mapping
-from `railway.toml` is in [config as code → from Railway](config-as-code.md#from-railway).
+domains, volumes and per-environment differences in one file.
+`modula init` writes it from an existing project. The key mapping from
+`railway.ts` and `railway.toml` is in [config as code → from Railway](config-as-code.md#from-railway).
 
 ## Service names
 

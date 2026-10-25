@@ -1,18 +1,25 @@
-//! `modula.toml` (or `modula.json`): one project as code. Parsing goes
-//! through a generic value first so environment overlays can be deep-merged
-//! (see [`super::merge`]) before the strict, typed model rejects unknown keys.
+//! The project as code: `.modula/modula.ts`, `.modula/modula.toml` or
+//! `.modula/modula.json`. Parsing goes through a generic value first so
+//! environment overlays can be deep-merged (see [`super::merge`]) before the
+//! strict, typed model rejects unknown keys. A `modula.ts` is evaluated once
+//! per environment instead (see [`super::script`]), and its output goes
+//! through the same typed model.
 //!
 //! Service settings use the server's `ServiceConfig` keys exactly
 //! ([`CONFIG_KEYS`]); a test in the server crate keeps the two in step.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
-/// Candidate files at the repository root, highest precedence first.
-pub const FILES: &[&str] = &["modula.toml", "modula.json"];
+use super::script::{self, Runtime};
+use crate::config::LINK_DIR;
+
+/// Config files in `.modula/`; a directory may have only one of them.
+pub const FILES: &[&str] = &["modula.ts", "modula.toml", "modula.json"];
 
 /// The server's `ServiceConfig` keys (minus `source`, which has its own
 /// shape here). Keep in step with crates/server/src/deploy/config.rs.
@@ -291,19 +298,68 @@ impl VarSpec {
 }
 
 /// The parsed file: the base and the raw overlay of each environment.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ConfigFile {
     pub path: PathBuf,
-    /// Everything but `environments`.
+    /// Everything but `environments`. For a script, its output without an
+    /// environment.
     pub base: toml::Table,
-    /// `[environments.<name>]` tables, as written.
+    /// `[environments.<name>]` tables, as written. For a script, the names
+    /// it exports (`export const environments`), with empty overlays.
     pub environments: BTreeMap<String, toml::Table>,
+    script: Option<Script>,
+}
+
+/// A `modula.ts` and its evaluations so far.
+#[derive(Debug)]
+struct Script {
+    runtime: Runtime,
+    /// (environment, preview) → its spec.
+    cache: Mutex<BTreeMap<(String, bool), ProjectSpec>>,
+    /// Warnings already printed.
+    warned: Mutex<BTreeSet<String>>,
+}
+
+impl Script {
+    fn warn(&self, warnings: &[String]) {
+        let mut warned = self.warned.lock().unwrap_or_else(|e| e.into_inner());
+        for w in warnings {
+            if warned.insert(w.clone()) {
+                eprintln!("warning: {w}");
+            }
+        }
+    }
+}
+
+/// Whether `path` is evaluated (TypeScript or JavaScript) rather than parsed.
+pub fn is_script(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| matches!(e.to_str(), Some("ts" | "mts" | "js" | "mjs")))
+}
+
+/// A script's output as a table.
+fn to_table(label: &str, spec: serde_json::Value) -> anyhow::Result<toml::Table> {
+    let table = toml::Table::try_from(spec).with_context(|| format!("{label}: invalid output"))?;
+    if table.contains_key("environments") {
+        bail!("{label}: a modula.ts has no `environments`; use ctx.isEnvironment(...)");
+    }
+    Ok(table)
 }
 
 impl ConfigFile {
-    /// The directory holding the file (the repository root).
+    /// The repository root: the directory holding `.modula/` (or the file's
+    /// own directory, for a file elsewhere).
     pub fn dir(&self) -> &Path {
-        self.path.parent().unwrap_or(Path::new("."))
+        let parent = self.path.parent().unwrap_or(Path::new("."));
+        match parent.file_name() {
+            Some(n) if n == LINK_DIR => parent.parent().unwrap_or(Path::new(".")),
+            _ => parent,
+        }
+    }
+
+    /// Whether this is a `modula.ts` (evaluated rather than parsed).
+    pub fn is_script(&self) -> bool {
+        self.script.is_some()
     }
 
     /// The project named in the file.
@@ -345,31 +401,118 @@ impl ConfigFile {
             path: path.to_owned(),
             base: root,
             environments,
+            script: None,
         };
-        // Catch mistakes early: the base and every environment must resolve.
-        file.resolve(None)?;
-        for name in file.environments.keys() {
-            file.resolve(Some(name))?;
-        }
+        file.check()?;
         Ok(file)
     }
 
+    /// Catch mistakes early: the base and every environment must resolve.
+    fn check(&self) -> anyhow::Result<()> {
+        self.resolve(None)?;
+        for name in self.environments.keys() {
+            self.resolve(Some(name))?;
+        }
+        Ok(())
+    }
+
+    /// Evaluate a `modula.ts`: its base, then each environment it names.
+    pub fn evaluate(path: &Path, runtime: Runtime) -> anyhow::Result<Self> {
+        let mut file = Self {
+            path: path.to_owned(),
+            base: toml::Table::new(),
+            environments: BTreeMap::new(),
+            script: Some(Script {
+                runtime,
+                cache: Mutex::default(),
+                warned: Mutex::default(),
+            }),
+        };
+        let out = file.run(None, false)?;
+        file.base = to_table(&path.display().to_string(), out.spec)?;
+        file.environments = out
+            .environments
+            .iter()
+            .map(|e| (e.to_ascii_lowercase(), toml::Table::new()))
+            .collect();
+        file.check()?;
+        Ok(file)
+    }
+
+    fn run(&self, environment: Option<&str>, preview: bool) -> anyhow::Result<script::Evaluated> {
+        let s = self.script.as_ref().context("not a script")?;
+        let out = script::evaluate(&s.runtime, &self.path, self.dir(), environment, preview)?;
+        s.warn(&out.warnings);
+        Ok(out)
+    }
+
     pub fn load(path: &Path) -> anyhow::Result<Self> {
+        if is_script(path) {
+            if !path.is_file() {
+                bail!("cannot read {}: no such file", path.display());
+            }
+            return Self::evaluate(path, Runtime::detect()?);
+        }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("cannot read {}", path.display()))?;
         Self::parse(path, &text)
     }
 
-    /// The nearest `modula.toml`/`modula.json` at or above `start`.
-    pub fn find(start: &Path) -> Option<PathBuf> {
-        start
-            .ancestors()
-            .flat_map(|dir| FILES.iter().map(move |f| dir.join(f)))
-            .find(|p| p.is_file())
+    /// The config file in the nearest `.modula/` at or above `start` that
+    /// has one. Two config files in one `.modula/` are an error.
+    pub fn find(start: &Path) -> anyhow::Result<Option<PathBuf>> {
+        for dir in start.ancestors() {
+            let found: Vec<PathBuf> = FILES
+                .iter()
+                .map(|f| dir.join(LINK_DIR).join(f))
+                .filter(|p| p.is_file())
+                .collect();
+            match found.as_slice() {
+                [] => {}
+                [one] => return Ok(Some(one.clone())),
+                many => bail!(
+                    "{} has several config files ({}); keep one",
+                    dir.join(LINK_DIR).display(),
+                    many.iter()
+                        .filter_map(|p| p.file_name()?.to_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        }
+        Ok(None)
     }
 
     /// The spec for `environment` (None: the base alone).
     pub fn resolve(&self, environment: Option<&str>) -> anyhow::Result<ProjectSpec> {
+        self.resolve_for(environment, false)
+    }
+
+    /// The spec for `environment`, a pull request preview or not (only a
+    /// script can tell the difference).
+    pub fn resolve_for(
+        &self,
+        environment: Option<&str>,
+        preview: bool,
+    ) -> anyhow::Result<ProjectSpec> {
+        if let Some(s) = &self.script {
+            let Some(env) = environment else {
+                return parse_spec(self.base.clone())
+                    .with_context(|| self.path.display().to_string());
+            };
+            let key = (env.to_ascii_lowercase(), preview);
+            if let Some(spec) = s.cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+                return Ok(spec.clone());
+            }
+            let label = format!("{} (environment {env})", self.path.display());
+            let out = self.run(Some(&key.0), preview)?;
+            let spec = parse_spec(to_table(&label, out.spec)?).with_context(|| label)?;
+            s.cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, spec.clone());
+            return Ok(spec);
+        }
         let mut merged = self.base.clone();
         let label = match environment {
             Some(env) => {

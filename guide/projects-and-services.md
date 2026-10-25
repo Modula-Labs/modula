@@ -134,11 +134,12 @@ found in that order wins; files are not merged. Only these keys are read:
 | `deploy` | `preDeployCommand` | string or list of strings; a list runs as `a && b && …` in `/bin/sh -c` |
 
 Unknown keys (including `watchPatterns` and `environments`) are ignored: set
-watch paths in the dashboard. A `modula.toml` that describes the whole
-project for `modula config` (it has `project` or `services` and no
-`[build]`/`[deploy]`) is not read here, so a `railway.toml` next to it still
-applies; see [config as code](config-as-code.md) to manage every service's
-settings from one file. An invalid value is reported as a build-log
+watch paths in the dashboard. The project-wide config for `modula config`
+lives in `.modula/` (`modula.ts` or `modula.toml`) and is not read here; a
+root `modula.toml` with `project` or `services` and no `[build]`/`[deploy]`
+is skipped too, so a `railway.toml` next to it still applies. See
+[config as code](config-as-code.md) to manage every service's settings from
+one file. An invalid value is reported as a build-log
 warning and the dashboard setting is used instead. The build log says which
 file was used and what it set.
 

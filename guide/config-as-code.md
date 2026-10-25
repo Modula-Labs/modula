@@ -1,24 +1,127 @@
-# Config as code: `modula.toml`
+# Config as code: `.modula/modula.ts`
 
-Describe a whole project in one file at the root of your repository, review
-changes in pull requests, and apply them with the CLI:
+Describe a whole project in one file in your repository, review changes in
+pull requests, and apply them with the CLI:
 
 ```bash
-modula config init      # write modula.toml from the linked project (alias: config pull)
+modula init             # link the directory and write .modula/modula.ts
+modula config init      # (re)write it from the linked project (alias: config pull)
 modula config plan      # what would change (like terraform plan)
 modula config apply     # make it so (asks first; --yes for CI)
 ```
 
 The file describes services, their settings, variables, domains, volumes and
-TCP proxies, with per-environment overrides. Secret values never go in it.
+TCP proxies, with per-environment differences. Secret values never go in it.
+Write it in TypeScript (`modula.ts`, like Railway's `railway.ts`) or TOML
+(`modula.toml`); both describe the same thing.
 
 This is different from the build-time `[build]`/`[deploy]` file the builder
-reads (see [projects and services → config as code](projects-and-services.md#config-as-code)).
-A `modula.toml` with `project` or `services` and no `[build]`/`[deploy]` is
-this kind of file, and the builder skips it, so a `railway.toml` next to it
-still applies to builds.
+reads at the repository root (see [projects and services → config as code](projects-and-services.md#config-as-code)).
 
-## The file
+## The `.modula/` directory
+
+```
+.modula/
+  modula.ts            # the config: commit it (or modula.toml / modula.json)
+  .gitignore           # written by the CLI: keeps the next three out of git
+  project.toml         # the directory link (modula init / modula link)
+  token                # optional per-directory login (modula login --local)
+  secrets.<env>.env    # secret values for apply (dotenv)
+```
+
+The CLI uses the config file in the nearest `.modula/` in the current
+directory or a parent; a `.modula/` may hold only one of `modula.ts`,
+`modula.toml` and `modula.json`. `--file PATH` picks another file.
+
+## TypeScript: `modula.ts`
+
+```ts
+import { defineModula, github, postgres, preserve, project, ref, secret, service } from "modula/iac";
+
+// This repository describes only some of the project's services.
+export const partial = "anton-api";
+
+export default defineModula((ctx) => {
+  const db = postgres("postgres", { memory: 1024 });
+  const api = service("Anton API", {                     // → anton-api
+    source: github("acme/anton", { branch: ctx.isEnvironment("production") ? "main" : "staging" }),
+    preDeploy: "sh apps/api/scripts/predeploy.sh",
+    healthcheck: "/v1/ready",
+    healthcheckTimeout: 120,
+    replicas: 1,
+    deploy: { restartPolicyMaxRetries: 5 },
+    drainingSeconds: 30,
+    domains: ctx.isEnvironment("production") ? ["api.example.com"] : [],
+    variables: {
+      DATABASE_URL: ref("postgres", "DATABASE_URL"),    // ${{postgres.DATABASE_URL}}
+      LEGACY_FLAG: preserve(),                         // on the server only; never deleted
+      BETTER_AUTH_SECRET: secret(),                    // value from .modula/secrets.<env>.env
+      STRIPE_KEY: secret({ sealed: true }),
+      NODE_ENV: ctx.isPreview ? "preview" : "production",
+    },
+  });
+  return project("anton", { resources: [api, db], variables: { REGION: "eu" } });
+});
+```
+
+**Running it.** The CLI runs the file with your Node.js (22.18 or newer,
+which runs TypeScript itself) or, if Node is missing or older, Bun
+(`MODULA_JS_RUNTIME=node|bun|PATH` picks one). It runs it once per
+environment it plans, and once without an environment for `config validate`
+and to read `project`. Nothing needs installing: the CLI has `modula/iac`
+built in and resolves the import itself. The file is loaded as an ES module
+even under a `"type": "commonjs"` package.json, runs with the repository
+root as its working directory, and can import your own modules and read
+`process.env`. `console.log` output goes to stderr. When it throws, the
+command fails with the error and its stack.
+
+**The context** passed to the function:
+
+| | |
+|---|---|
+| `ctx.environment` | The environment's name, lowercase (`undefined` without one). |
+| `ctx.isEnvironment(...names)` | Whether it is one of `names` (case-insensitive). |
+| `ctx.isPreview` | Whether it is a pull request preview environment. |
+
+`export const environments = ["staging"]` names environments that
+`config plan --all-envs` should create if missing (a TOML file does that
+with `[environments.staging]`). `export const partial = true` (or any
+string, as in Railway) is `partial = true`.
+
+**Helpers** (`modula/iac`):
+
+| Helper | Gives |
+|---|---|
+| `project(name, { resources, variables, preserve, partial })` | The project; `resources` are services (`false`/`null` entries are skipped, so `ctx.isEnvironment("x") && svc` works). |
+| `service(name, options)` | A service. Names become slugs: `"Anton API"` → `anton-api`. |
+| `postgres(name?, options?)`, `mysql`, `redis`, `mongo`, `bucket`, `r2`, `database(template, name?, options?)` | A template service (`template = …`). |
+| `github("owner/name", { branch, rootDir })`, `image("ref")`, `local(".")` | A `source`. |
+| `secret()`, `secret({ sealed: true })` | `{ secret = true }` / sealed. |
+| `preserve()` | The variable stays as it is on the server (added to `preserve`). |
+| `ref("Service", "VAR")` | `"${{service.VAR}}"` (`ref("shared", "X")` for shared ones). |
+
+Service options are the settings and keys of the TOML file below, plus
+Railway's names: `start`/`startCommand`, `preDeploy`/`preDeployCommand`,
+`healthcheck`, `healthcheckTimeout` (seconds), `numReplicas`,
+`restartPolicyType` (`ON_FAILURE` is accepted), `watchPatterns`, `cron`,
+`cronTimeout`, `memory` (MB), `cpu` (millicores), `sleepApplication`
+(→ `serverless: {}`), and `deploy: {…}`/`build: {…}` groups whose keys merge
+into the service. A command string without shell syntax is split on spaces
+(`"sh migrate.sh"` → `["sh", "migrate.sh"]`); one with quotes, `$`, `&&`,
+pipes and the like runs as `["sh", "-c", "…"]`; an array is used as is.
+Values that are `undefined` or `null` are left out, so
+`ctx.isEnvironment("staging") ? 2 : undefined` sets a value in one
+environment only. What comes out is checked exactly like a TOML file
+(unknown keys, names, sources), and `RAILWAY_*` variables get a warning
+(`RAILWAY_DEPLOYMENT_DRAINING_SECONDS` → `drainingSeconds`).
+
+**Editor types.** The types are `packages/iac/iac.d.ts` in the Modula
+Deploy repository, packaged as the npm package `modula-deploy` (export
+`modula-deploy/iac`; not published yet). Installed under the name `modula`
+so the import matches (`npm i -D modula@npm:modula-deploy`), it gives your
+editor autocomplete; the CLI never uses it.
+
+## TOML: `modula.toml`
 
 ```toml
 project = "anton"                     # name or id (-p overrides it)
@@ -57,9 +160,9 @@ services.api.domains = []
 services.api.variables.BETTER_AUTH_URL = "https://staging.example.com"
 ```
 
-`modula.json` with the same structure is accepted too (`modula.toml` wins if
-both exist). `--file PATH` picks another file; by default the CLI uses the
-nearest one in the current directory or a parent.
+`.modula/modula.json` with the same structure is accepted too. The keys
+below are also the keys of a `modula.ts` service's options and of
+`project()`'s output.
 
 ### Services
 
@@ -101,8 +204,8 @@ Besides settings, a service can have:
 A variable is a string (references like `${{postgres.DATABASE_URL}}` are
 kept as written), a number or a boolean, or a **secret**:
 
-- `{ secret = true }`: the value stays out of the file. `apply` takes it from
-  `.modula/secrets.<environment>.env` next to `modula.toml` (dotenv lines,
+- `{ secret = true }` (`secret()` in TypeScript): the value stays out of the
+  file. `apply` takes it from `.modula/secrets.<environment>.env` (dotenv lines,
   `KEY=value`), from `--secrets-file PATH`, or with `--from-env` from an
   environment variable of the same name (which wins). If there's no local
   value, the variable must already exist on the server; it is then left as
@@ -135,13 +238,21 @@ All take `--file PATH`; `plan` and `apply` also take `-p`, `-e`,
 
 ### `config init` (alias `config pull`)
 
-Writes `modula.toml` (or `--file`) from the project (`-p` or the linked one):
-all environments, the base from `production`, what differs in
-`[environments.*]`. Refuses to overwrite without `--force`. Never writes a
-secret value: sealed variables become `{ secret = true, sealed = true }`,
-variables whose names look like credentials (`PASSWORD`, `SECRET`, `TOKEN`,
-`KEY`, `PRIVATE`, `CREDENTIAL`) become `{ secret = true }` (listed on
-stderr), and template variables are left out.
+Writes `.modula/modula.ts` (`--format toml`: `.modula/modula.toml`; or
+`--file PATH`, whose extension picks the format) in the linked directory
+from the project (`-p` or the linked one), covering all environments. The base comes
+from `production`. In TOML what differs goes in `[environments.*]`; in
+TypeScript it becomes `ctx.isEnvironment("staging") ? … : …`, and a service
+that exists in only some environments is listed as
+`ctx.isEnvironment(…) && svc`. Refuses to overwrite without `--force`, which
+also replaces a config file in the other format. `--only SERVICE`
+(repeatable) writes just those services as a `partial` file, without shared
+variables. Never writes a secret value: sealed variables become
+`{ secret = true, sealed = true }` (`secret({ sealed: true })`), variables
+whose names look like credentials (`PASSWORD`, `SECRET`, `TOKEN`, `KEY`,
+`PRIVATE`, `CREDENTIAL`) become secrets (listed on stderr), and template
+variables are left out. A written `modula.ts` is run once to check it,
+when Node or Bun is available.
 
 ### `config plan [-e ENV | --all-envs] [--json]`
 
@@ -197,19 +308,19 @@ with a `local` source must be created first. Environments are never deleted.
 
 Parses the file and resolves every environment without contacting the
 server: unknown keys, bad names, invalid sources, secrets without
-`secret = true`.
+`secret = true`. A `modula.ts` is run without an environment and for each
+name in its `environments` export.
 
 ## Secrets, tokens and git
 
-- Commit `modula.toml`. Keep `.modula/` out of git: it holds the directory
-  link (`project.toml`), an optional per-directory token (`token`) and
-  secrets files (`secrets.<env>.env`). Whenever the CLI writes into
-  `.modula/` it makes sure the repository's `.gitignore` (at the git root;
-  created if missing) ignores `.modula/`, appending an annotated block and
-  saying so on stderr. If your `.gitignore` already names `.modula/token`
-  and `.modula/secrets.*` (because you chose to commit `project.toml`), it is
-  left alone. `config apply` does the same when it reads a secrets file;
-  `config plan` only warns.
+- Commit the config (`.modula/modula.ts`). The rest of `.modula/` stays out
+  of git: whenever the CLI writes into `.modula/` it makes sure
+  `.modula/.gitignore` lists `project.toml` (the directory link), `token`
+  (a per-directory login) and `secrets.*` (secret values), creating it or
+  adding the missing lines, and says so on stderr. `config apply` does the
+  same when it reads a secrets file; `config plan` only warns. When the
+  repository's own `.gitignore` ignores all of `.modula/`, writing a config
+  warns that it won't be committed.
 - Reading the environment for `plan` and `pull` uses
   `GET /api/environments/{id}/config` (Member role). It returns the values of
   non-sealed variables (so plans can show value changes), never sealed ones,
@@ -231,23 +342,36 @@ server: unknown keys, bad names, invalid sources, secrets without
 
 ## From Railway
 
+**`railway.ts` → `modula.ts`.** Railway's `.railway/railway.ts` describes a
+whole project; `.modula/modula.ts` is the same idea with the same shape:
+change the import to `"modula/iac"`, move the file to `.modula/modula.ts`,
+and check the names below. `railway init` / `railway config plan` /
+`railway config apply` are `modula init` / `modula config plan` /
+`modula config apply` (unlisted variables are deleted unless preserved, as
+there). Service names become slugs (`"Anton API"` → `anton-api`), so a
+`partial` file keeps Railway's string as is but services are matched by
+slug.
+
 Railway's `railway.toml`/`railway.json` describe one service's build and
 deploy settings; they keep working at build time. To manage the whole
-project, move their keys into the service's table here:
+project, move their keys into the service:
 
-| Railway | `modula.toml` (in `[services.<name>]`) |
-|---|---|
-| `build.builder` (`DOCKERFILE`, `RAILPACK`, `NIXPACKS`) | `builder = "dockerfile"` / `"railpack"` |
-| `build.buildCommand` | `buildCommand` |
-| `build.dockerfilePath` | `dockerfilePath` |
-| `build.watchPatterns` | `watchPaths` |
-| `deploy.startCommand` (shell string) | `startCommand = ["sh", "-c", "…"]` or an argv list |
-| `deploy.preDeployCommand` | `preDeployCommand` (argv list) |
-| `deploy.healthcheckPath` / `healthcheckTimeout` | `healthcheckPath` / `healthcheckTimeoutSecs` |
-| `deploy.restartPolicyType` / `restartPolicyMaxRetries` | `restartPolicy = "on_failure"` (lowercase) / `restartPolicyMaxRetries` |
-| `deploy.numReplicas` | `replicas` (1 for now) |
-| `environments.<env>.…` | `[environments.<env>] services.<name>.…` |
-
-Railway's `.railway/railway.ts` maps to the whole file; `railway config
-plan/apply` to `modula config plan/apply` (unlisted variables are
-deleted unless in `preserve`, as there).
+| Railway | `modula.ts` (service options) | `modula.toml` (in `[services.<name>]`) |
+|---|---|---|
+| `import … from "railway/iac"` | `import … from "modula/iac"` | |
+| `.railway/railway.ts` | `.modula/modula.ts` | `.modula/modula.toml` |
+| `export const partial = "…"` | the same | `partial = true` |
+| `build.builder` (`DOCKERFILE`, `RAILPACK`) | `builder: "DOCKERFILE"` or `build: { builder }` | `builder = "dockerfile"` / `"railpack"` |
+| `build.builder = "NIXPACKS"` | use `"RAILPACK"` | `builder = "railpack"` |
+| `build.buildCommand` | `buildCommand` | `buildCommand` |
+| `build.dockerfilePath` | `dockerfilePath` | `dockerfilePath` |
+| `build.watchPatterns` | `watchPatterns` or `watchPaths` | `watchPaths` |
+| `deploy.startCommand` (shell string) | `startCommand: "…"` or `start` | `startCommand = ["sh", "-c", "…"]` or an argv list |
+| `deploy.preDeployCommand` | `preDeployCommand: "…"` or `preDeploy` | `preDeployCommand` (argv list) |
+| `deploy.healthcheckPath` / `healthcheckTimeout` | `healthcheck` / `healthcheckTimeout` | `healthcheckPath` / `healthcheckTimeoutSecs` |
+| `deploy.restartPolicyType` / `restartPolicyMaxRetries` | the same (`deploy: { … }` works) | `restartPolicy = "on_failure"` (lowercase) / `restartPolicyMaxRetries` |
+| `deploy.numReplicas` | `numReplicas` or `replicas` | `replicas` |
+| `deploy.sleepApplication` | the same | `serverless = {}` |
+| `deploy.overlapSeconds` | ignored (warning) | |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` variable | `drainingSeconds` | `drainingSeconds` |
+| `environments.<env>.…` | `ctx.isEnvironment("<env>") ? … : …` | `[environments.<env>] services.<name>.…` |

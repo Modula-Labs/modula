@@ -1,5 +1,5 @@
-//! Projects and the directory link: `list`, `init`, `link`, `unlink`,
-//! `status`, `open`, `service`.
+//! Projects and the directory link: `list`, `link`, `unlink`, `status`,
+//! `open`, `service` (`init` is in [`super::init`]).
 
 use serde::Serialize;
 use url::Url;
@@ -46,24 +46,6 @@ pub async fn list(ctx: &Ctx) -> anyhow::Result<()> {
             ]);
         }
         o.table(&t);
-    })
-}
-
-pub async fn init(ctx: &mut Ctx, name: &str, workspace: Option<&str>) -> anyhow::Result<()> {
-    let api = ctx.api()?;
-    let me = api.me().await?;
-    let ws = resolve::pick_workspace(&me.workspaces, workspace)?;
-    let p = api.create_project(&ws.id, name).await?;
-    let env = resolve::pick_environment(&p.environments, None)?;
-    // Link here, not in a parent's linked directory.
-    ctx.link = None;
-    let file = ctx.save_link(Link::new(&p.id, &p.name, env))?;
-    ctx.out.either(&p, |o| {
-        o.line(format!(
-            "Created {} in {} and linked it ({})",
-            p.name, ws.name, env.name
-        ));
-        o.note(format!("Wrote {}", file.display()));
     })
 }
 

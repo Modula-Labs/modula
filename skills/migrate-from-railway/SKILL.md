@@ -52,14 +52,14 @@ used: `build.builder` (RAILPACK/NIXPACKS → Railpack, DOCKERFILE),
 in the service config instead), `deploy.numReplicas`, `deploy.cronSchedule`,
 `deploy.sleepApplication`, `environments.*` overrides.
 
-**Prefer one project file:** write `modula.toml` at the repo root (guide:
+**Prefer one project file:** write `.modula/modula.toml` (or `.modula/modula.ts`, the same shape as `railway.ts`; guide:
 `guide/config-as-code.md`) and apply it with `modula config plan` /
 `config apply`. It covers every service, settings, variables, domains,
 volumes and per-environment overrides, which Railway spreads over
 `railway.toml` (one service's build/deploy), `.railway/railway.ts` (IaC) and
 the dashboard. Mapping into `[services.<name>]`:
 
-| Railway | `modula.toml` |
+| Railway | `.modula/modula.toml` |
 |---|---|
 | `build.builder` `DOCKERFILE` / `RAILPACK` / `NIXPACKS` | `builder = "dockerfile"` / `"railpack"` / `"railpack"` |
 | `build.buildCommand`, `build.dockerfilePath` | `buildCommand`, `dockerfilePath` |
@@ -79,15 +79,15 @@ the dashboard. Mapping into `[services.<name>]`:
 
 Rules that bite: settings left out reset to defaults; keys are camelCase
 (`healthcheck_path` is rejected with a hint); service names lowercase. Once
-the build/deploy keys live in `modula.toml`, delete them from `railway.toml`
-so there's one source of truth (a project `modula.toml` doesn't stop the
+the build/deploy keys live in `.modula/`, delete them from `railway.toml`
+so there's one source of truth (the project file doesn't stop the
 builder from reading `railway.toml`, and `railway.toml` settings override the
 service's at build time). Run `modula config validate`, then `plan`
 until it shows exactly the intended changes.
 
 ## 3. Recreate
 
-With `modula.toml` (preferred): `modula init <project>`, write the
+With `.modula/modula.toml` (preferred): `modula init <project>`, write the
 file, put secret values in `.modula/secrets.<env>.env` (names only in chat),
 `modula config plan --all-envs`, review with the user, then
 `config apply --all-envs --yes` and deploy (`--deploy`, or step 6). Apply
@@ -149,7 +149,7 @@ kill $TUNNEL; rm -f /tmp/tunnel.log /tmp/railway.dump
 
 - Services created and their status per environment.
 - Variables that still need values from the user (names only).
-- The `modula.toml` you wrote, and `config plan` output showing no changes.
+- The `.modula/modula.toml` you wrote, and `config plan` output showing no changes.
 - Railway features without an equivalent and what you did instead.
 - Data migration row-count check results.
 - DNS records the user must create.
