@@ -964,6 +964,26 @@ CREATE TABLE api_tokens (
 );
 CREATE INDEX api_tokens_user_idx ON api_tokens (user_id, created_at);
 
+-- `modula login` in a browser (OAuth device-authorization style): the CLI
+-- holds device_code (only its hash is stored) and polls with it; the user
+-- types or follows user_code (8 letters, shown as XXXX-XXXX) in the
+-- dashboard and approves. The API token is minted when the CLI collects it
+-- (status approved -> consumed), so no plaintext token is ever stored.
+CREATE TABLE cli_logins (
+    id                  id PRIMARY KEY,
+    device_code_hash    bytea NOT NULL UNIQUE,
+    user_code           text NOT NULL UNIQUE,
+    hostname            text NOT NULL,
+    ip                  text NOT NULL,
+    user_agent          text,
+    status              text NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'approved', 'denied', 'consumed')),
+    approved_by         id REFERENCES users (id) ON DELETE CASCADE,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    expires_at          timestamptz NOT NULL
+);
+CREATE INDEX cli_logins_expires_idx ON cli_logins (expires_at);
+
 ---------------------------------------------------------------------------
 -- Integrations (Hetzner, Cloudflare): one per kind per workspace
 ---------------------------------------------------------------------------

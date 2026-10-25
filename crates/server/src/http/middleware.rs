@@ -15,6 +15,14 @@ const SIGNED: &[(Method, &str)] = &[
     (Method::PUT, crate::deploy::output::UPLOAD_PATH),
 ];
 
+/// The CLI's browser login (`api::cli_login`), called without cookies or
+/// Origin: starting one grants nothing, and collecting the token needs the
+/// secret device code from the body, which a cross-site page doesn't have.
+const CLI_LOGIN: &[(Method, &str)] = &[
+    (Method::POST, crate::api::cli_login::START_PATH),
+    (Method::POST, crate::api::cli_login::TOKEN_PATH),
+];
+
 /// CSRF defence: every state-changing request must come from our exact origin.
 /// Browsers always send `Origin` on cross-origin and same-origin non-GET fetches,
 /// so a missing header on a mutation is rejected too.
@@ -32,6 +40,7 @@ pub async fn require_same_origin(
     let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
     let signed = SIGNED
         .iter()
+        .chain(CLI_LOGIN)
         .any(|(m, p)| req.method() == m && req.uri().path() == *p);
     if signed {
         return next.run(req).await;

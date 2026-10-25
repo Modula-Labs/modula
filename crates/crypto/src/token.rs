@@ -24,6 +24,8 @@ pub mod prefix {
     pub const NODE_JOIN: &str = "mcj";
     /// Workspace invite links.
     pub const INVITE: &str = "mci";
+    /// The secret half of a browser `modula login` (polled for the API token).
+    pub const CLI_LOGIN: &str = "mdc";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

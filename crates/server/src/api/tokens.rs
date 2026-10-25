@@ -125,31 +125,9 @@ pub async fn create(
             return Err(AppError::NotFound);
         }
     }
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM api_tokens WHERE user_id = $1")
-        .bind(actor.user_id)
-        .fetch_one(&state.db)
-        .await?;
-    if count >= MAX_TOKENS_PER_USER {
-        return Err(AppError::Conflict(format!(
-            "at most {MAX_TOKENS_PER_USER} API tokens per account; delete unused ones first"
-        )));
-    }
-
-    let t = token::generate(prefix::API_TOKEN)?;
-    let id = Id::new();
     let mut tx = state.db.begin().await?;
-    sqlx::query(
-        "INSERT INTO api_tokens (id, user_id, workspace_id, name, token_hash, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(id)
-    .bind(actor.user_id)
-    .bind(req.workspace_id)
-    .bind(&name)
-    .bind(t.hash.as_bytes())
-    .bind(expires_at)
-    .execute(&mut *tx)
-    .await?;
+    let (id, plaintext) =
+        insert(&mut tx, actor.user_id, req.workspace_id, &name, expires_at).await?;
     let mut entry = Entry::new("account.token_created", &meta)
         .actor(&actor)
         .target("api_token", id)
@@ -166,8 +144,52 @@ pub async fn create(
         .await?;
     Ok(Json(CreatedToken {
         info,
-        token: t.plaintext.expose_secret().to_owned(),
+        token: plaintext,
     }))
+}
+
+/// Store a new token for `user` (within the per-account cap); returns its id
+/// and the plaintext, which exists nowhere else. The caller audits.
+pub async fn insert(
+    tx: &mut sqlx::PgConnection,
+    user: Id,
+    workspace: Option<Id>,
+    name: &str,
+    expires_at: Option<OffsetDateTime>,
+) -> AppResult<(Id, String)> {
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM api_tokens WHERE user_id = $1")
+        .bind(user)
+        .fetch_one(&mut *tx)
+        .await?;
+    if count >= MAX_TOKENS_PER_USER {
+        return Err(AppError::Conflict(format!(
+            "at most {MAX_TOKENS_PER_USER} API tokens per account; delete unused ones first"
+        )));
+    }
+    let t = token::generate(prefix::API_TOKEN)?;
+    let id = Id::new();
+    sqlx::query(
+        "INSERT INTO api_tokens (id, user_id, workspace_id, name, token_hash, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(id)
+    .bind(user)
+    .bind(workspace)
+    .bind(name)
+    .bind(t.hash.as_bytes())
+    .bind(expires_at)
+    .execute(&mut *tx)
+    .await?;
+    Ok((id, t.plaintext.expose_secret().to_owned()))
+}
+
+/// Whether `user` may hold another token (checked before approving a CLI login).
+pub async fn below_cap(db: &PgPool, user: Id) -> AppResult<bool> {
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM api_tokens WHERE user_id = $1")
+        .bind(user)
+        .fetch_one(db)
+        .await?;
+    Ok(count < MAX_TOKENS_PER_USER)
 }
 
 pub async fn revoke(
