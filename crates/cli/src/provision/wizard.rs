@@ -169,7 +169,8 @@ pub async fn run(
         Step::Type => args.server_type.is_none(),
         Step::Name => args.name.is_none(),
         Step::Domain => args.domain.is_none(),
-        Step::Dns => !args.cloudflare_dns,
+        // Interactively the address question settles DNS too.
+        Step::Dns => args.domain.is_some() && !args.cloudflare_dns,
         Step::Email => args.email.is_none(),
         Step::Ssh => args.ssh_key_file.is_none() && args.ssh_key_id.is_none() && !args.no_ssh_key,
         Step::Confirm => !ctx.global.yes,
@@ -182,7 +183,7 @@ pub async fn run(
             Step::Location => location_step(out, &mut d, args)?,
             Step::Type => type_step(&mut d, args)?,
             Step::Name => name_step(&mut d, args)?,
-            Step::Domain => domain_step(&mut d, args)?,
+            Step::Domain => domain_step(out, &mut d, settings, args).await?,
             Step::Dns => dns_step(out, &mut d, settings, args).await?,
             Step::Email => email_step(&mut d, args)?,
             Step::Ssh => ssh_step(&mut d, args)?,
@@ -431,39 +432,222 @@ fn name_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
     }
 }
 
-fn domain_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
+/// A Cloudflare API token that can edit DNS, prefilled on Cloudflare's
+/// "Create token" page.
+const CLOUDFLARE_TOKEN_URL: &str = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%5D&name=Modula%20Deploy";
+
+#[derive(Clone, Copy, PartialEq)]
+enum Address {
+    Cloudflare,
+    OwnDomain,
+    Ip,
+}
+
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Address::Cloudflare => {
+                "A domain on Cloudflare: pick it, the DNS record is created for you"
+            }
+            Address::OwnDomain => "Another domain: I'll add the DNS record myself",
+            Address::Ip => "No domain yet: https://<server-ip> (add one later in the dashboard)",
+        })
+    }
+}
+
+/// Where the dashboard lives: a Cloudflare domain (connect, pick the zone,
+/// then a subdomain), a domain whose DNS the user handles, or the bare IP.
+async fn domain_step(
+    out: &Output,
+    d: &mut Draft,
+    settings: &Settings,
+    args: &ServerCreateArgs,
+) -> anyhow::Result<Nav> {
     if args.domain.is_some() {
         return Ok(Nav::Next);
     }
-    let mut t = Text::new("Dashboard domain")
-        .with_help_message(
-            "e.g. deploy.example.com, pointed at the server once it exists · empty: none yet, https://<ip> · Esc: back",
-        )
-        .with_validator(validator(|v: &str| {
-            if v.trim().is_empty() || is_auto(v) {
-                Ok(String::new())
-            } else {
-                valid_domain(v)
+    loop {
+        let options = vec![Address::Cloudflare, Address::OwnDomain, Address::Ip];
+        let start = match d.dns {
+            Some(DnsPlan::Manual) => 1,
+            Some(DnsPlan::Instant) => 2,
+            _ => 0,
+        };
+        let r = Select::new("Dashboard address", options)
+            .with_starting_cursor(start)
+            .without_filtering()
+            .with_help_message("Esc: back")
+            .prompt();
+        let Some(choice) = answer(r)? else {
+            return Ok(Nav::Back);
+        };
+        match choice {
+            Address::Ip => {
+                d.domain = Some(String::new());
+                d.dns = Some(DnsPlan::Instant);
+                return Ok(Nav::Next);
             }
-        }));
-    if let Some(dom) = &d.domain {
-        t = t.with_initial_value(dom);
+            Address::OwnDomain => {
+                let mut t = Text::new("Dashboard domain")
+                    .with_help_message(
+                        "e.g. deploy.example.com; you'll add its A record once the server has its IP · Esc: back",
+                    )
+                    .with_validator(validator(valid_domain));
+                if let (Some(dom), Some(DnsPlan::Manual)) = (&d.domain, &d.dns) {
+                    t = t.with_initial_value(dom);
+                }
+                if let Some(dom) = answer(t.prompt())? {
+                    d.domain = Some(valid_domain(&dom).map_err(anyhow::Error::msg)?);
+                    d.dns = Some(DnsPlan::Manual);
+                    return Ok(Nav::Next);
+                }
+            }
+            Address::Cloudflare => {
+                if cloudflare_domain(out, d, settings, args).await? {
+                    return Ok(Nav::Next);
+                }
+            }
+        }
     }
-    match answer(t.prompt())? {
-        Some(dom) if dom.trim().is_empty() || is_auto(&dom) => {
-            d.domain = Some(String::new());
-            d.dns = Some(DnsPlan::Instant);
-            Ok(Nav::Next)
-        }
-        Some(dom) => {
-            let dom = valid_domain(&dom).map_err(anyhow::Error::msg)?;
-            if d.domain.as_deref() != Some(&dom) || matches!(d.dns, Some(DnsPlan::Instant)) {
-                d.dns = None;
+}
+
+/// Connect Cloudflare, pick a zone and a subdomain. `false` when the user
+/// backed out (to the address question).
+async fn cloudflare_domain(
+    out: &Output,
+    d: &mut Draft,
+    settings: &Settings,
+    args: &ServerCreateArgs,
+) -> anyhow::Result<bool> {
+    // Connect: a token from the environment or this session, else ask.
+    let (cf, zones) = loop {
+        let token = match d.cloudflare.clone() {
+            Some(t) => t,
+            None => {
+                say(
+                    out,
+                    &format!(
+                        "Create a Cloudflare API token with {} (opening Cloudflare):",
+                        out.accent("Zone → Read and DNS → Edit")
+                    ),
+                );
+                say(out, &out.dim(CLOUDFLARE_TOKEN_URL));
+                crate::commands::project::open_in_browser(CLOUDFLARE_TOKEN_URL);
+                let r = Password::new("Cloudflare API token")
+                    .with_display_mode(PasswordDisplayMode::Masked)
+                    .without_confirmation()
+                    .with_help_message("kept in memory only · Esc: back")
+                    .prompt();
+                match answer(r)? {
+                    Some(t) if !t.trim().is_empty() => SecretString::from(t.trim().to_owned()),
+                    Some(_) => continue,
+                    None => return Ok(false),
+                }
             }
-            d.domain = Some(dom);
-            Ok(Nav::Next)
+        };
+        let cf = cloudflare::Client::new(settings.cloudflare_api.clone(), token.clone())?;
+        let listed = async {
+            cf.verify().await?;
+            cf.zones().await
         }
-        None => Ok(Nav::Back),
+        .await;
+        match listed {
+            Ok(zones) if !zones.is_empty() => {
+                d.cloudflare = Some(token);
+                break (cf, zones);
+            }
+            Ok(_) => out.note(format!(
+                "  ✗ {}",
+                "the token can't see any domain (give it Zone → Read for your domains)"
+            )),
+            Err(e) => out.note(format!("  ✗ {e:#}")),
+        }
+        d.cloudflare = None;
+        if std::env::var_os(super::ENV_CLOUDFLARE).is_some() {
+            anyhow::bail!(
+                "{} can't list your Cloudflare domains",
+                super::ENV_CLOUDFLARE
+            );
+        }
+    };
+
+    loop {
+        let names: Vec<String> = zones.iter().map(|z| z.name.clone()).collect();
+        let start = d
+            .domain
+            .as_deref()
+            .and_then(|dom| {
+                names
+                    .iter()
+                    .position(|z| dom == z || dom.ends_with(&format!(".{z}")))
+            })
+            .unwrap_or(0);
+        let r = Select::new("Domain", names)
+            .with_starting_cursor(start)
+            .with_page_size(12)
+            .with_help_message("your Cloudflare domains · type to filter · Esc: back")
+            .prompt();
+        let Some(zone_name) = answer(r)? else {
+            return Ok(false);
+        };
+        let zone = zones
+            .iter()
+            .find(|z| z.name == zone_name)
+            .expect("listed")
+            .clone();
+
+        let default_sub = d
+            .domain
+            .as_deref()
+            .and_then(|dom| dom.strip_suffix(&format!(".{zone_name}")))
+            .unwrap_or("deploy")
+            .to_owned();
+        let r = Text::new("Subdomain")
+            .with_default(&default_sub)
+            .with_help_message(&format!(
+                "the dashboard at <subdomain>.{zone_name} · a single - : {zone_name} itself · Esc: back"
+            ))
+            .with_validator(validator(|v: &str| {
+                let v = v.trim();
+                if v.is_empty() || v == "-" {
+                    Ok(String::new())
+                } else {
+                    valid_domain(&format!("{v}.example.com"))
+                }
+            }))
+            .prompt();
+        let Some(sub) = answer(r)? else {
+            continue;
+        };
+        let sub = sub.trim().trim_end_matches('.').to_ascii_lowercase();
+        let domain = if sub.is_empty() || sub == "-" {
+            zone_name.clone()
+        } else {
+            format!("{sub}.{zone_name}")
+        };
+
+        let records = match cf.address_records(&zone.id, &domain).await {
+            Ok(r) => r,
+            Err(e) => {
+                out.note(format!("  ✗ {e:#}"));
+                continue;
+            }
+        };
+        if !records.is_empty() && !args.replace_dns {
+            let q = format!(
+                "{domain} already has {} at Cloudflare. Replace with the new server's IP?",
+                describe_records(&records)
+            );
+            if answer(Confirm::new(&q).with_default(false).prompt())? != Some(true) {
+                continue;
+            }
+        }
+        d.domain = Some(domain);
+        d.dns = Some(DnsPlan::Cloudflare {
+            zone,
+            replace: records,
+        });
+        return Ok(true);
     }
 }
 

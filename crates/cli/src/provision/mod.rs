@@ -1,5 +1,6 @@
 //! `modula server create` and `modula server options`: a Modula server on
-//! Hetzner Cloud, created from a laptop.
+//! Hetzner Cloud, created from a laptop. (`server update` lives in
+//! [`crate::commands::update`].)
 //!
 //! The answers come from a wizard ([`wizard`]) or, for scripts and agents,
 //! from flags and environment variables (checked all at once up front, so
@@ -116,6 +117,7 @@ pub async fn run(ctx: &mut Ctx, command: ServerCommand) -> anyhow::Result<i32> {
             options_with(ctx, &args, &env, &settings).await?;
             Ok(0)
         }
+        ServerCommand::Update { check } => crate::commands::update::server(ctx, check).await,
     }
 }
 

@@ -127,6 +127,29 @@ impl Client {
         Ok(())
     }
 
+    /// The active zones the token can see, by name.
+    pub async fn zones(&self) -> anyhow::Result<Vec<Zone>> {
+        let mut out = Vec::new();
+        for page in 1..=20 {
+            let page = page.to_string();
+            let zones: Vec<Zone> = self
+                .call(
+                    Method::GET,
+                    "zones",
+                    &[("status", "active"), ("per_page", "50"), ("page", &page)],
+                    None,
+                )
+                .await?;
+            let done = zones.len() < 50;
+            out.extend(zones);
+            if done {
+                break;
+            }
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
     /// The deepest zone `host` lives in (`a.b.example.com` → `example.com`).
     pub async fn find_zone(&self, host: &str) -> anyhow::Result<Option<Zone>> {
         let host = host.trim_end_matches('.').to_ascii_lowercase();
