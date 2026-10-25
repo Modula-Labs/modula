@@ -1,20 +1,19 @@
-# modula-deploy
+# @modula-labs/iac
 
 Types and helpers for [Modula Deploy](../../guide/config-as-code.md) config as
 code in TypeScript (`.modula/modula.ts`).
 
 You don't need this package to run a `modula.ts`: the `modula` CLI has the
-same code built in and resolves `modula/iac` itself. Install it for editor
-autocomplete and type checking, under the name `modula` so the import in your
-file matches:
+same code built in and resolves `@modula-labs/iac` itself. Install it for
+editor autocomplete and type checking:
 
 ```bash
-npm i -D modula@npm:modula-deploy
-# or: bun add -d modula@npm:modula-deploy
+npm i -D @modula-labs/iac
+# or: bun add -d @modula-labs/iac
 ```
 
 ```ts
-import { defineModula, github, project, service } from "modula/iac";
+import { defineModula, github, project, service } from "@modula-labs/iac";
 
 export default defineModula((ctx) =>
   project("shop", {

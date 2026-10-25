@@ -1,4 +1,4 @@
-// Types for modula/iac: .modula/modula.ts (Modula Deploy config as code).
+// Types for @modula-labs/iac: .modula/modula.ts (Modula Deploy config as code).
 
 /** What the CLI passes to the config function, once per environment. */
 export interface ModulaContext {

@@ -1,6 +1,6 @@
-// modula/iac: helpers for .modula/modula.ts (Modula Deploy config as code).
+// @modula-labs/iac: helpers for .modula/modula.ts (Modula Deploy config as code).
 //
-// The CLI embeds this file and resolves `modula/iac` to it when it runs
+// The CLI embeds this file and resolves `@modula-labs/iac` to it when it runs
 // modula.ts, so nothing has to be installed. The helpers build the same
 // structure as .modula/modula.toml (see guide/config-as-code.md); the CLI
 // validates it.

@@ -2,7 +2,7 @@
 //! with the user's Node (22.18 or newer, which strips types itself) or Bun,
 //! once per environment, and reads the project as JSON from stdout.
 //!
-//! `import … from "modula/iac"` needs nothing installed: the module
+//! `import … from "@modula-labs/iac"` needs nothing installed: the module
 //! (`packages/iac/iac.js`) is embedded here, and a prelude maps the import
 //! to it, a `module.registerHooks` resolve hook on Node and a `Bun.plugin`
 //! on Bun. [`RUNNER`] then imports the file, calls its default export with
@@ -15,12 +15,11 @@ use anyhow::{Context as _, bail};
 use base64::Engine as _;
 use serde::Deserialize;
 
-/// The `modula/iac` module.
+/// The `@modula-labs/iac` module.
 pub const MODULE: &str = include_str!("../../../../packages/iac/iac.js");
 const RUNNER: &str = include_str!("runner.mjs");
 
-/// The import specifiers that resolve to [`MODULE`]: `modula/iac`, and the
-/// npm package's own name (`modula-deploy/iac`).
+/// `@modula-labs/iac` resolves to [`MODULE`].
 /// The config file itself always loads as an ES module, even under a
 /// `package.json` with `"type": "commonjs"`.
 const NODE_PRELUDE: &str = r#"import { registerHooks } from "node:module";
@@ -29,7 +28,7 @@ const configUrl = fileUrl(process.env.MODULA_IAC_FILE).href;
 const configFormat = /\.m?ts$/.test(configUrl) ? "module-typescript" : "module";
 registerHooks({
   resolve(specifier, context, next) {
-    if (specifier === "modula/iac" || specifier === "modula-deploy/iac") {
+    if (specifier === "@modula-labs/iac") {
       return { url: process.env.MODULA_IAC_MODULE_URL, shortCircuit: true };
     }
     return next(specifier, context);
@@ -48,8 +47,7 @@ const BUN_PRELUDE: &str = r#"Bun.plugin({
   name: "modula-iac",
   setup(build) {
     const iac = () => ({ contents: process.env.MODULA_IAC_MODULE_SOURCE, loader: "js" });
-    build.module("modula/iac", iac);
-    build.module("modula-deploy/iac", iac);
+    build.module("@modula-labs/iac", iac);
   },
 });
 "#;
@@ -282,7 +280,7 @@ pub(crate) mod tests {
 
     /// The user's real file, adapted from Railway's railway.ts.
     const ANTON: &str = r#"
-import { defineModula, github, preserve, project, service } from "modula/iac";
+import { defineModula, github, preserve, project, service } from "@modula-labs/iac";
 export const partial = "anton-api";
 export default defineModula((ctx) => {
   console.log("logging is fine");
@@ -379,7 +377,7 @@ export default defineModula((ctx) => {
         let path = temp_file(
             "modula.ts",
             r#"
-import { defineModula, image, postgres, project, ref, secret, service, local, redis } from "modula/iac";
+import { defineModula, image, postgres, project, ref, secret, service, local, redis } from "@modula-labs/iac";
 export const environments = ["staging"];
 export default defineModula(async (ctx) => project("shop", {
   resources: [
@@ -467,18 +465,18 @@ export default defineModula(async (ctx) => project("shop", {
         let e = err("export const x = 1;\n");
         assert!(e.contains("no default export"), "{e}");
         let e = err(
-            "import { project } from \"modula/iac\";\nexport default project(\"p\", { resources: [{}] });\n",
+            "import { project } from \"@modula-labs/iac\";\nexport default project(\"p\", { resources: [{}] });\n",
         );
         assert!(e.contains("resources are service()"), "{e}");
         // The model still validates what comes out.
         let e = err(
-            "import { project, service, image } from \"modula/iac\";\nexport default project(\"p\", { resources: [service(\"api\", { source: image(\"x\"), prot: 1 })] });\n",
+            "import { project, service, image } from \"@modula-labs/iac\";\nexport default project(\"p\", { resources: [service(\"api\", { source: image(\"x\"), prot: 1 })] });\n",
         );
         assert!(e.contains("unknown key `prot`"), "{e}");
         // A plain object works as the default export.
         let path = temp_file(
             "modula.ts",
-            "import { project, service, image } from \"modula/iac\";\nexport default project(\"p\", { resources: [service(\"api\", { source: image(\"nginx\") })] });\n",
+            "import { project, service, image } from \"@modula-labs/iac\";\nexport default project(\"p\", { resources: [service(\"api\", { source: image(\"nginx\") })] });\n",
         );
         let file = ConfigFile::evaluate(&path, rt.clone()).unwrap();
         assert!(

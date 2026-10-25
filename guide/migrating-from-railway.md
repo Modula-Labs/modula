@@ -66,7 +66,7 @@ Not read: `build.watchPatterns` (set **watch paths** in service settings),
 
 To manage the whole project as code (Railway's `.railway/railway.ts` with
 `railway config plan/apply`), use `.modula/modula.ts`, which has the same
-shape (import from `"modula/iac"`), or `.modula/modula.toml`, with
+shape (import from `"@modula-labs/iac"`), or `.modula/modula.toml`, with
 `modula config plan` / `config apply`: services, settings, variables,
 domains, volumes and per-environment differences in one file.
 `modula init` writes it from an existing project. The key mapping from

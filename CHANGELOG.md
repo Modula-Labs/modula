@@ -22,7 +22,7 @@ may break things).
   from a list instead of failing.
 - **Config as code in TypeScript:** `.modula/modula.ts`, shaped like
   Railway's `railway.ts` (`import { project, service, github } from
-  "modula/iac"`, `ctx.isEnvironment(...)`, `ctx.isPreview`). The CLI runs it
+  "@modula-labs/iac"`, `ctx.isEnvironment(...)`, `ctx.isPreview`). The CLI runs it
   with Node 22.18+ or Bun; nothing to install.
 - **`modula init` like `railway init`:** pick the workspace, create a
   project or link an existing one, pick the environment and write

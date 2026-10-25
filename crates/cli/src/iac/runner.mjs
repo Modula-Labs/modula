@@ -1,6 +1,6 @@
 // Evaluates .modula/modula.ts for one environment and prints the result as
 // JSON on stdout (see script.rs). Runs after a prelude that makes
-// `modula/iac` resolve to the embedded module.
+// `@modula-labs/iac` resolve to the embedded module.
 //
 // In: MODULA_IAC_FILE (absolute path), MODULA_IAC_ENVIRONMENT (absent for
 // the base), MODULA_IAC_PREVIEW ("1" for a pull request preview).

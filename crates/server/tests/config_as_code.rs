@@ -425,7 +425,7 @@ async fn apply_plan_edit_and_pull(pool: PgPool) {
     );
     assert!(!s.dir.join(".modula/modula.toml").exists());
     let ts = std::fs::read_to_string(s.dir.join(".modula/modula.ts")).unwrap();
-    assert!(ts.contains("from \"modula/iac\""), "{ts}");
+    assert!(ts.contains("from \"@modula-labs/iac\""), "{ts}");
     let plan = s.json(&["config", "plan", "--all-envs"]).await;
     assert_eq!(plan["changes"], false, "{plan:#}\n{ts}");
 }

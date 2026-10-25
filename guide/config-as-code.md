@@ -36,7 +36,7 @@ directory or a parent; a `.modula/` may hold only one of `modula.ts`,
 ## TypeScript: `modula.ts`
 
 ```ts
-import { defineModula, github, postgres, preserve, project, ref, secret, service } from "modula/iac";
+import { defineModula, github, postgres, preserve, project, ref, secret, service } from "@modula-labs/iac";
 
 // This repository describes only some of the project's services.
 export const partial = "anton-api";
@@ -68,7 +68,7 @@ export default defineModula((ctx) => {
 which runs TypeScript itself) or, if Node is missing or older, Bun
 (`MODULA_JS_RUNTIME=node|bun|PATH` picks one). It runs it once per
 environment it plans, and once without an environment for `config validate`
-and to read `project`. Nothing needs installing: the CLI has `modula/iac`
+and to read `project`. Nothing needs installing: the CLI has `@modula-labs/iac`
 built in and resolves the import itself. The file is loaded as an ES module
 even under a `"type": "commonjs"` package.json, runs with the repository
 root as its working directory, and can import your own modules and read
@@ -88,7 +88,7 @@ command fails with the error and its stack.
 with `[environments.staging]`). `export const partial = true` (or any
 string, as in Railway) is `partial = true`.
 
-**Helpers** (`modula/iac`):
+**Helpers** (`@modula-labs/iac`):
 
 | Helper | Gives |
 |---|---|
@@ -115,11 +115,9 @@ environment only. What comes out is checked exactly like a TOML file
 (unknown keys, names, sources), and `RAILWAY_*` variables get a warning
 (`RAILWAY_DEPLOYMENT_DRAINING_SECONDS` → `drainingSeconds`).
 
-**Editor types.** The types are `packages/iac/iac.d.ts` in the Modula
-Deploy repository, packaged as the npm package `modula-deploy` (export
-`modula-deploy/iac`; not published yet). Installed under the name `modula`
-so the import matches (`npm i -D modula@npm:modula-deploy`), it gives your
-editor autocomplete; the CLI never uses it.
+**Editor types.** `npm i -D @modula-labs/iac` (or `bun add -d
+@modula-labs/iac`) gives your editor autocomplete and type checking; the
+CLI never uses it.
 
 ## TOML: `modula.toml`
 
@@ -344,7 +342,7 @@ name in its `environments` export.
 
 **`railway.ts` → `modula.ts`.** Railway's `.railway/railway.ts` describes a
 whole project; `.modula/modula.ts` is the same idea with the same shape:
-change the import to `"modula/iac"`, move the file to `.modula/modula.ts`,
+change the import to `"@modula-labs/iac"`, move the file to `.modula/modula.ts`,
 and check the names below. `railway init` / `railway config plan` /
 `railway config apply` are `modula init` / `modula config plan` /
 `modula config apply` (unlisted variables are deleted unless preserved, as
@@ -358,7 +356,7 @@ project, move their keys into the service:
 
 | Railway | `modula.ts` (service options) | `modula.toml` (in `[services.<name>]`) |
 |---|---|---|
-| `import … from "railway/iac"` | `import … from "modula/iac"` | |
+| `import … from "railway/iac"` | `import … from "@modula-labs/iac"` | |
 | `.railway/railway.ts` | `.modula/modula.ts` | `.modula/modula.toml` |
 | `export const partial = "…"` | the same | `partial = true` |
 | `build.builder` (`DOCKERFILE`, `RAILPACK`) | `builder: "DOCKERFILE"` or `build: { builder }` | `builder = "dockerfile"` / `"railpack"` |

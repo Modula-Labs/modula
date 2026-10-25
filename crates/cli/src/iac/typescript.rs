@@ -132,7 +132,7 @@ pub fn generate(
     let helpers: Vec<&str> = g.helpers.iter().copied().collect();
     writeln!(
         text,
-        "import {{ {} }} from \"modula/iac\";\n",
+        "import {{ {} }} from \"@modula-labs/iac\";\n",
         helpers.join(", ")
     )?;
     if partial {
