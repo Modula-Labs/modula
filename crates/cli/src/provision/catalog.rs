@@ -54,22 +54,19 @@ impl LocationOption {
         self.types.first()
     }
 
-    /// `€6.49+  2 vCPU 4 GB arm 20 TB`: the cheapest server here, compactly.
+    /// `€6.49+  2 vCPU  4 GB RAM  40 GB disk arm`: the cheapest server here.
     pub fn offer(&self) -> String {
         let Some(t) = self.cheapest() else {
             return String::new();
         };
-        let arch = if t.arch == "arm64" { "arm" } else { "x86" };
-        let mut text = format!(
-            "{:>7}+  {} vCPU {:>2} GB {arch}",
+        format!(
+            "{:>7}+  {} vCPU {:>2} GB RAM {:>3} GB disk {}",
             t.monthly,
             t.cores,
-            format_gb(t.memory_gb)
-        );
-        if let Some(tb) = t.traffic_tb {
-            text.push_str(&format!(" {:>2} TB", format_gb(tb)));
-        }
-        text
+            format_gb(t.memory_gb),
+            t.disk_gb,
+            if t.arch == "arm64" { "arm" } else { "x86" }
+        )
     }
 }
 
@@ -88,13 +85,11 @@ pub struct TypeOption {
     pub monthly_cents: i64,
     /// `€8.21`.
     pub monthly: String,
-    /// Outgoing traffic included per month, in TB.
-    pub traffic_tb: Option<f64>,
     pub recommended: bool,
 }
 
 impl TypeOption {
-    /// `cx33   €8.21  4 vCPU  8 GB  80 GB disk x86 20 TB  ★ recommended`
+    /// `cx33   €8.21  4 vCPU  8 GB  80 GB disk x86  ★ recommended`
     pub fn label(&self) -> String {
         let mut text = format!(
             "{:<6} {:>7}  {:>2} vCPU {:>3} GB {:>4} GB disk {:<3}",
@@ -105,9 +100,6 @@ impl TypeOption {
             self.disk_gb,
             if self.arch == "arm64" { "arm" } else { "x86" }
         );
-        if let Some(tb) = self.traffic_tb {
-            text.push_str(&format!(" {:>2} TB", format_gb(tb)));
-        }
         if self.cpu_type == "dedicated" {
             text.push_str(" dedicated");
         }
@@ -153,9 +145,6 @@ pub fn flag(country: &str) -> String {
 }
 
 /// 821 → `€8.21`.
-/// Hetzner's traffic allowances are binary (20 TiB), which it sells as "20 TB".
-const TIB: f64 = 1_099_511_627_776.0;
-
 pub fn format_eur(cents: i64) -> String {
     format!("€{}.{:02}", cents / 100, cents % 100)
 }
@@ -192,9 +181,6 @@ pub fn build(locations: &[Location], types: &[ServerType]) -> Vec<LocationOption
                         cpu_type: t.cpu_type.clone(),
                         monthly_cents: cents,
                         monthly: format_eur(cents),
-                        traffic_tb: t
-                            .included_traffic_in(&loc.name)
-                            .map(|b| (b as f64 / TIB * 10.0).round() / 10.0),
                         recommended: false,
                     })
                 })
@@ -306,8 +292,7 @@ mod tests {
         assert_eq!(fsn1.types[0].arch, "arm64");
         assert_eq!(fsn1.types[0].monthly, "€7.25");
         assert_eq!(fsn1.recommended.as_deref(), Some("cax21"));
-        assert_eq!(fsn1.types[0].traffic_tb, Some(20.0));
-        assert_eq!(fsn1.offer(), "  €7.25+  4 vCPU  8 GB arm 20 TB");
+        assert_eq!(fsn1.offer(), "  €7.25+  4 vCPU  8 GB RAM  80 GB disk arm");
 
         let hel1 = at("hel1");
         assert_eq!(hel1.types.len(), 1);
@@ -344,7 +329,6 @@ mod tests {
             cpu_type: cpu.into(),
             monthly_cents: cents,
             monthly: format_eur(cents),
-            traffic_tb: None,
             recommended: false,
         };
         let list = vec![
@@ -369,10 +353,7 @@ mod tests {
         let c = build(&locations(), &types());
         let fsn1 = c.iter().find(|l| l.name == "fsn1").unwrap();
         let label = fsn1.types[1].label();
-        assert_eq!(
-            label,
-            "cx33     €7.49   4 vCPU   8 GB   80 GB disk x86 20 TB"
-        );
+        assert_eq!(label, "cx33     €7.49   4 vCPU   8 GB   80 GB disk x86");
         assert!(fsn1.types[0].label().ends_with("★ recommended"));
         assert_eq!(
             fsn1.types[1].summary(),

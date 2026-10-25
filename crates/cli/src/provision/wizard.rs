@@ -327,7 +327,7 @@ fn location_step(out: &Output, d: &mut Draft, args: &ServerCreateArgs) -> anyhow
     say(
         out,
         &out.dim(
-            "Cheapest server per location (€/mo incl. VAT, traffic included). Outside Europe costs more,\n  with less traffic and no Arm. You pick the size next.",
+            "Cheapest server per location (€/mo incl. VAT). Outside Europe costs more and has no Arm.\n  You pick the size next.",
         ),
     );
     let r = Select::new("Where should it run?", options)
