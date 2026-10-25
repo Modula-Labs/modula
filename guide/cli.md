@@ -11,7 +11,8 @@ Services     add  variables  environment  domain  volume  tcp-proxy
 Deploying    up  deploy  redeploy  restart  down  rollback
 Databases    db query  db tables  connect
 Shell        completion  docs  guide
-Servers      server create  server options
+Servers      server create  server options  server update
+Updates      update  server update
 ```
 
 `modula --help`, `modula <command> --help`, `--version`, and
@@ -20,8 +21,14 @@ binary itself) work everywhere.
 
 ## Install
 
-Prebuilt CLI binaries aren't published yet. Build it from the repository
-(Rust toolchain required):
+Linux and macOS (amd64/arm64), no root needed (installs to `~/.local/bin`):
+
+```bash
+curl -fsSL https://usemodula.org/install-cli.sh | bash
+```
+
+Then `modula update` keeps it current. Elsewhere, build it from the
+repository (Rust toolchain required):
 
 ```bash
 cargo install --path crates/cli      # installs the `modula` binary
@@ -626,6 +633,59 @@ Prints just [the guide for people and agents](cli-for-humans-and-agents.md):
 install, creating a server on Hetzner, logging in, deploying, non-interactive
 use (flags, env vars, `--json`, exit codes) and troubleshooting.
 
+## Updates
+
+### `update [--check]`
+
+Updates this `modula` to the newest release, checked the way
+`install-cli.sh` checks it: `SHA256SUMS` must carry a valid signature from
+the release key, and the binary for this OS and CPU (downloaded by its
+checksum) must match it. Then the running executable is replaced in place
+(symlinks are followed). Shows the current and new version and the
+release's page. `--check` only reports; with `--json`,
+`{current, latest, updateAvailable, releaseNotesUrl}`.
+
+When the executable's directory isn't writable (installed under
+`/usr/local/bin`, say), it says so before downloading: run
+`sudo modula update`, or reinstall with `install-cli.sh`. A build from
+source (`target/debug`, `target/release`) is only replaced after asking.
+`MODULA_RELEASE_URL` and `MODULA_RELEASE_PUBKEY` work as for
+`install-cli.sh`.
+
+### `server update [--check]`
+
+Updates the logged-in instance (`modula whoami`; `--login` picks another) to
+the newest Modula Deploy release, like **Settings → Updates → Update now**:
+the control plane upgrades itself (signature checks, health check,
+automatic rollback), then its other servers follow one at a time. It asks
+the instance to check for a release, shows its version, the available one,
+the update mode, the last upgrade and each server's version, asks to
+confirm (`--yes` skips), starts the upgrade and follows it until every
+server is done (exit 1 when the upgrade fails or rolls back, or a server
+fails to follow, with the end of the installer's log). When the instance is
+current but servers failed to follow, it retries them. `--check` only
+reports (`--json`: the dashboard's update status). Needs an **instance
+admin**. Ctrl-C stops watching; the upgrade continues.
+
+Starting an upgrade needs a recently re-authenticated dashboard session,
+which API tokens never have. At a terminal, the dashboard's Updates
+section opens: click **Update now** there and the command follows the
+upgrade it starts. Without a terminal it prints that URL and exits 1; run
+`modula server update` afterwards to follow (it picks up an upgrade
+already under way). An instance installed without the upgrade units is
+upgraded on the server instead (the command prints how).
+
+### The update notice
+
+At a terminal, `modula` prints a dim line on stderr after a command when a
+newer CLI exists ("modula 0.1.4 is available (you have 0.1.3): run
+`modula update`") and, when logged in, when the instance can update ("…
+run `modula server update`"). The check runs at most once a day in a
+detached background process, so it never slows a command; its result is
+kept in `update-check.toml` next to the config. There is no notice with
+`--json`, when stdout, stderr or stdin isn't a terminal, in CI (`CI` set), or
+with `MODULA_NO_UPDATE_CHECK=1`.
+
 ## Servers
 
 ### `server create` (alias `server new`)
@@ -665,4 +725,4 @@ Editing one service setting directly (start command, health check, builder,
 resources: use [`config apply`](config-as-code.md), the dashboard or
 `PATCH /api/service-instances/{id}`), deleting services, environments and
 projects, backups, cron, metrics, `run`/`shell`/`ssh`, scaling, and server
-management. Use the dashboard or the [HTTP API](api.md) with the same token.
+management (beyond `server update`). Use the dashboard or the [HTTP API](api.md) with the same token.

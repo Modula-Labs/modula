@@ -183,8 +183,9 @@ Set in `/etc/modula/server.env`; restart `modula-server` after a change.
 ## Upgrade
 
 The easy way is the dashboard: **Settings → Updates → Update now** (instance
-admins, re-authentication required). The same from a shell, on the main
-server:
+admins, re-authentication required). From your laptop, `modula server update`
+shows the versions and follows the upgrade (see the [CLI guide](cli.md#server-update---check)).
+The same from a shell, on the main server:
 
 ```bash
 curl -fsSL https://usemodula.org/install.sh \

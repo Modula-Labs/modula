@@ -18,3 +18,4 @@ pub mod provision;
 pub mod resolve;
 pub mod shell;
 pub mod tunnel;
+pub mod update;

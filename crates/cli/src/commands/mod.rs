@@ -19,6 +19,7 @@ pub mod shell;
 pub mod source;
 pub mod storage;
 pub mod up;
+pub mod update;
 pub mod variables;
 
 use crate::cli::{Cli, Command};
@@ -38,7 +39,27 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
     );
     let mut ctx = Ctx::new(session, cli.global, out)?;
     let ctx = &mut ctx;
-    match cli.command {
+    // The daily "a newer version is available" notice (not around updating).
+    let notifier = match &cli.command {
+        Command::Update { .. }
+        | Command::UpdateCheck
+        | Command::Server {
+            command: crate::cli::ServerCommand::Update { .. },
+        }
+        | Command::Completion { .. }
+        | Command::Docs
+        | Command::Guide => None,
+        _ => crate::update::Notifier::start(ctx),
+    };
+    let result = dispatch(ctx, cli.command).await;
+    if let (Some(n), Ok(_)) = (notifier, &result) {
+        n.finish(&ctx.out);
+    }
+    result
+}
+
+async fn dispatch(ctx: &mut Ctx, command: Command) -> anyhow::Result<i32> {
+    match command {
         Command::Login { args, command } => auth::run(ctx, args, command).await?,
         Command::Logins => auth::list(ctx)?,
         Command::Logout { name, all } => auth::logout(ctx, name, all)?,
@@ -102,6 +123,8 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
             members::run(ctx, workspace.as_deref(), command).await?
         }
         Command::Cron { command } => return cron::run(ctx, command).await,
+        Command::Update { check } => return update::cli(ctx, check).await,
+        Command::UpdateCheck => crate::update::background_check(ctx).await,
     }
     Ok(0)
 }

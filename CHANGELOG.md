@@ -7,6 +7,20 @@ may break things).
 
 ## [Unreleased]
 
+### Added
+
+- **`modula update`** updates the CLI to the newest release (signature and
+  checksum verified like `install-cli.sh`, then the executable is replaced in
+  place); `--check` only reports.
+- **`modula server update`** shows the logged-in instance's version and the
+  available one, starts the upgrade (or opens the dashboard's Updates section
+  when it needs a recent sign-in, which API tokens never have) and follows it
+  until the control plane and every server are done; `--check` only reports.
+- **Update notice:** at a terminal, a dim line after a command when a newer
+  CLI exists or the instance can update. Checked at most once a day in the
+  background (never slows a command); off in CI, with `--json`, or with
+  `MODULA_NO_UPDATE_CHECK=1`.
+
 ## [0.1.3] - 2026-10-25
 
 ### Added

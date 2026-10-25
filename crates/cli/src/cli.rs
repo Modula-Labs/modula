@@ -290,8 +290,18 @@ pub enum Command {
     /// Print the guide for people and AI agents: install, create a server,
     /// log in, deploy, non-interactive use, troubleshooting (Markdown).
     Guide,
-    /// Create a new Modula server at a cloud provider (Hetzner), or list
-    /// what can be created.
+    /// The daily update check in the background (see `update::Notifier`).
+    #[command(name = "__update-check", hide = true)]
+    UpdateCheck,
+    /// Update this CLI to the newest release (signature and checksum
+    /// verified); --check only reports.
+    Update {
+        /// Only report whether a newer version exists.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Create a new Modula server at a cloud provider (Hetzner), list what
+    /// can be created, or update the logged-in instance.
     Server {
         #[command(subcommand)]
         command: ServerCommand,
@@ -765,7 +775,28 @@ pub enum ServerCommand {
     /// (read-only; needs HCLOUD_TOKEN).
     #[command(long_about = SERVER_OPTIONS_ABOUT, after_help = SERVER_OPTIONS_EXAMPLES)]
     Options(ServerOptionsArgs),
+    /// Update the logged-in instance to the newest Modula Deploy release
+    /// (its other servers follow) and follow the upgrade; --check only
+    /// reports. Needs an instance admin.
+    #[command(long_about = SERVER_UPDATE_ABOUT)]
+    Update {
+        /// Only report the instance's version and whether a newer one exists.
+        #[arg(long)]
+        check: bool,
+    },
 }
+
+const SERVER_UPDATE_ABOUT: &str = "\
+Update the logged-in instance (see `modula whoami`) to the newest Modula
+Deploy release, like Settings → Updates in the dashboard: the control plane
+upgrades itself (signature checks, health check, automatic rollback), then
+its other servers follow one at a time. This command asks the instance to
+check for a release, shows the versions, starts the upgrade and follows it
+until every server is done. --check only reports.
+
+Starting an upgrade needs a recently re-authenticated dashboard session,
+which API tokens never have: at a terminal the dashboard opens so you can
+click Update now there, and this command follows the upgrade it starts.";
 
 const SERVER_CREATE_ABOUT: &str = "\
 Create a Modula server on Hetzner Cloud from your laptop, end to end: a
@@ -963,6 +994,16 @@ mod tests {
         assert!(parse(&["server", "create", "--ssh-key-id", "1", "--no-ssh-key"]).is_err());
         assert!(parse(&["server", "create", "--replace-dns"]).is_err());
         assert!(parse(&["server", "options", "--location", "hel1"]).is_ok());
+        assert!(matches!(
+            parse(&["server", "update", "--check"]).unwrap().command,
+            Command::Server {
+                command: ServerCommand::Update { check: true }
+            }
+        ));
+        assert!(matches!(
+            parse(&["update"]).unwrap().command,
+            Command::Update { check: false }
+        ));
     }
 
     #[test]

@@ -184,12 +184,14 @@ function Settings({ workspace }: { workspace: Membership }) {
       ) : null}
 
       {me?.user.isInstanceAdmin ? (
-        <Section
-          title="Updates"
-          description="Modula Deploy versions for this instance. Instance admins only."
-        >
-          <UpdatesSection />
-        </Section>
+        <div id="updates" className="scroll-mt-4">
+          <Section
+            title="Updates"
+            description="Modula Deploy versions for this instance. Instance admins only."
+          >
+            <UpdatesSection />
+          </Section>
+        </div>
       ) : null}
 
       {isAdmin ? (
