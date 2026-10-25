@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
-use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
+use inquire::{Confirm, InquireError, MultiSelect, Text};
 use serde::Serialize;
 
 use crate::api::{Environment, Me, ProjectDetail, Workspace};
@@ -47,14 +47,31 @@ fn answer<T>(r: Result<T, InquireError>) -> anyhow::Result<T> {
 
 /// One of `items`, picked from a list (type to filter).
 fn choose<T: Clone>(prompt: &str, items: &[T], label: impl Fn(&T) -> String) -> anyhow::Result<T> {
-    let labels: Vec<String> = items.iter().map(&label).collect();
-    let picked = answer(
-        Select::new(prompt, labels.clone())
-            .with_page_size(12)
-            .prompt(),
-    )?;
-    let i = labels.iter().position(|l| *l == picked).unwrap_or(0);
-    Ok(items[i].clone())
+    resolve::choose(prompt, items, label).cloned()
+}
+
+/// With several saved logins and none named (`--login`, `MODULA_TOKEN`, a
+/// directory token), which instance to set up the project on.
+fn pick_login(ctx: &mut Ctx) -> anyhow::Result<()> {
+    if ctx.global.login.is_some()
+        || ctx.session.env_token.is_some()
+        || ctx.local_login.is_some()
+        || ctx.cfg.logins.len() < 2
+    {
+        return Ok(());
+    }
+    let names: Vec<&String> = ctx.cfg.logins.keys().collect();
+    let current = ctx.cfg.current.clone();
+    let name = choose("Modula server", &names, |n| {
+        let url = &ctx.cfg.logins[n.as_str()].url;
+        if current.as_deref() == Some(n.as_str()) {
+            format!("{n} ({url}, current)")
+        } else {
+            format!("{n} ({url})")
+        }
+    })?;
+    ctx.global.login = Some(name.clone());
+    Ok(())
 }
 
 pub async fn run(
@@ -69,6 +86,9 @@ pub async fn run(
     }
     if !relink_ok(ctx, interactive)? {
         return Ok(());
+    }
+    if interactive {
+        pick_login(ctx)?;
     }
     let api = ctx.api()?;
     let me = api.me().await?;
