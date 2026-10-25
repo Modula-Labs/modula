@@ -39,7 +39,7 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
     );
     let mut ctx = Ctx::new(session, cli.global, out)?;
     let ctx = &mut ctx;
-    // The daily "a newer version is available" notice (not around updating).
+    // Offers a newer CLI or server after the command (not around updating).
     let notifier = match &cli.command {
         Command::Update { .. }
         | Command::UpdateCheck
@@ -53,7 +53,7 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
     };
     let result = dispatch(ctx, cli.command).await;
     if let (Some(n), Ok(_)) = (notifier, &result) {
-        n.finish(&ctx.out);
+        n.finish(ctx).await;
     }
     result
 }

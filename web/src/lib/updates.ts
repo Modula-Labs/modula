@@ -25,3 +25,51 @@ export function logTail(log: string | null, n = 60): string {
   const lines = log.trimEnd().split("\n");
   return lines.slice(-n).join("\n");
 }
+
+export const SNOOZE_KEY = "modula.updates.snooze";
+export const SNOOZE_MS = 24 * 60 * 60 * 1000;
+
+/** Hide the update prompt for `version` for 24h. Storage failures are ignored. */
+export function snoozeUpdate(version: string, now = Date.now(), storage?: Pick<Storage, "setItem">): void {
+  try {
+    (storage ?? localStorage).setItem(SNOOZE_KEY, JSON.stringify({ version, until: now + SNOOZE_MS }));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/** True while `version` is snoozed. A newer version is never snoozed by an older snooze. */
+export function isUpdateSnoozed(version: string, now = Date.now(), storage?: Pick<Storage, "getItem">): boolean {
+  try {
+    const raw = (storage ?? localStorage).getItem(SNOOZE_KEY);
+    if (!raw) return false;
+    const v = JSON.parse(raw) as { version?: unknown; until?: unknown };
+    return v.version === version && typeof v.until === "number" && v.until > now;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether the shell should offer the update prompt (before snooze/active-run handling). */
+export function shouldOfferUpdate(s: UpdateStatus | undefined): boolean {
+  return !!s && s.updateAvailable && !!s.latestVersion && s.canUpgrade;
+}
+
+export const SKIP_KEY = "modula.updates.skip";
+
+/** Never prompt for `version` again (a newer version prompts again). */
+export function skipUpdate(version: string, storage?: Pick<Storage, "setItem">): void {
+  try {
+    (storage ?? localStorage).setItem(SKIP_KEY, version);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+export function isUpdateSkipped(version: string, storage?: Pick<Storage, "getItem">): boolean {
+  try {
+    return (storage ?? localStorage).getItem(SKIP_KEY) === version;
+  } catch {
+    return false;
+  }
+}

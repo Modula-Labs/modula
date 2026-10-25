@@ -270,7 +270,18 @@ pub struct CheckCache {
     /// Per instance URL.
     #[serde(default)]
     pub servers: BTreeMap<String, ServerCheck>,
+    /// "Skip this version": the version not offered again, by [`CLI_KEY`]
+    /// or instance URL.
+    #[serde(default)]
+    pub skipped: BTreeMap<String, String>,
+    /// "Remind me tomorrow": unix seconds until which nothing is offered.
+    #[serde(default)]
+    pub snoozed_until: BTreeMap<String, u64>,
 }
+
+/// The key of the CLI's own entries in [`CheckCache::skipped`] and
+/// [`CheckCache::snoozed_until`].
+pub const CLI_KEY: &str = "cli";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerCheck {
@@ -313,28 +324,106 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
-/// The notice lines for what `cache` knows (for the instance `server`, when
-/// logged in).
-pub fn notices(cache: &CheckCache, server: Option<&str>) -> Vec<String> {
-    let mut lines = Vec::new();
+/// An update to offer after a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Offer {
+    Cli {
+        version: String,
+    },
+    Server {
+        url: String,
+        version: String,
+        current: Option<String>,
+    },
+}
+
+impl Offer {
+    fn key(&self) -> &str {
+        match self {
+            Offer::Cli { .. } => CLI_KEY,
+            Offer::Server { url, .. } => url,
+        }
+    }
+
+    fn version(&self) -> &str {
+        match self {
+            Offer::Cli { version } | Offer::Server { version, .. } => version,
+        }
+    }
+
+    pub fn question(&self) -> String {
+        match self {
+            Offer::Cli { version } => {
+                format!("modula {version} is available (you have {VERSION}). Update?")
+            }
+            Offer::Server {
+                url,
+                version,
+                current,
+            } => {
+                let from = current
+                    .as_deref()
+                    .map(|c| format!(" (it runs {c})"))
+                    .unwrap_or_default();
+                format!("Modula Deploy {version} is available for {url}{from}. Update the server?")
+            }
+        }
+    }
+}
+
+/// The updates `cache` knows of (for the instance `server`, when logged in),
+/// minus skipped versions and postponed ones.
+pub fn offers(cache: &CheckCache, server: Option<&str>, now: u64) -> Vec<Offer> {
+    let mut out = Vec::new();
     if let Some(v) = cache.cli_latest.as_deref().filter(|v| is_newer(v, VERSION)) {
-        lines.push(format!(
-            "modula {v} is available (you have {VERSION}): run `modula update`"
-        ));
+        out.push(Offer::Cli { version: v.into() });
     }
     if let Some((url, s)) = server.and_then(|u| cache.servers.get(u).map(|s| (u, s)))
         && let Some(v) = s.available.as_deref()
     {
-        let from = s
-            .current
-            .as_deref()
-            .map(|c| format!(" (it runs {c})"))
-            .unwrap_or_default();
-        lines.push(format!(
-            "Modula Deploy {v} is available for {url}{from}: run `modula server update`"
-        ));
+        out.push(Offer::Server {
+            url: url.into(),
+            version: v.into(),
+            current: s.current.clone(),
+        });
     }
-    lines
+    out.retain(|o| {
+        cache.skipped.get(o.key()).map(String::as_str) != Some(o.version())
+            && cache.snoozed_until.get(o.key()).is_none_or(|&t| now >= t)
+    });
+    out
+}
+
+/// The answer to an offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    Update,
+    Tomorrow,
+    Skip,
+}
+
+impl std::fmt::Display for Answer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Answer::Update => "Update now",
+            Answer::Tomorrow => "Remind me tomorrow",
+            Answer::Skip => "Skip this version",
+        })
+    }
+}
+
+/// Remember "tomorrow" or "skip" for `offer`.
+pub fn record(cache: &mut CheckCache, offer: &Offer, answer: Answer, now: u64) {
+    let key = offer.key().to_owned();
+    match answer {
+        Answer::Update => {}
+        Answer::Tomorrow => {
+            cache.snoozed_until.insert(key, now + CHECK_EVERY_SECS);
+        }
+        Answer::Skip => {
+            cache.skipped.insert(key, offer.version().to_owned());
+        }
+    }
 }
 
 /// The `GET /api/instance/updates` fields the notice needs.
@@ -354,7 +443,8 @@ pub const CHECK_COMMAND: &str = "__update-check";
 /// is a day old, starts a detached `modula __update-check` that refreshes the
 /// cache for next time, so no command ever waits on it.
 pub struct Notifier {
-    lines: Vec<String>,
+    offers: Vec<Offer>,
+    cache: PathBuf,
 }
 
 impl Notifier {
@@ -390,14 +480,44 @@ impl Notifier {
             spawn_check(ctx);
         }
         Some(Self {
-            lines: notices(&cache, server.as_deref()),
+            offers: offers(&cache, server.as_deref(), now),
+            cache: path,
         })
     }
 
-    /// Print the notice (dim, on stderr).
-    pub fn finish(self, out: &crate::output::Output) {
-        for line in self.lines {
-            eprintln!("{}", out.dim(&line));
+    /// Offer each update: now, tomorrow, or skip this version. Updating
+    /// runs `modula update` / `modula server update` right here.
+    pub async fn finish(self, ctx: &mut crate::context::Ctx) {
+        for offer in self.offers {
+            let r = inquire::Select::new(
+                &offer.question(),
+                vec![Answer::Update, Answer::Tomorrow, Answer::Skip],
+            )
+            .with_render_config(crate::provision::wizard::theme())
+            .without_filtering()
+            .with_help_message("Esc: remind me tomorrow")
+            .prompt();
+            let answer = match r {
+                Ok(a) => a,
+                Err(inquire::InquireError::OperationInterrupted) => return,
+                Err(_) => Answer::Tomorrow,
+            };
+            if answer == Answer::Update {
+                // The offer was the confirmation.
+                let yes = std::mem::replace(&mut ctx.global.yes, true);
+                let done = match &offer {
+                    Offer::Cli { .. } => crate::commands::update::cli(ctx, false).await,
+                    Offer::Server { .. } => crate::commands::update::server(ctx, false).await,
+                };
+                ctx.global.yes = yes;
+                if let Err(e) = done {
+                    ctx.out.note(format!("✗ {e:#}"));
+                }
+                continue;
+            }
+            let mut cache = load_cache(&self.cache);
+            record(&mut cache, &offer, answer, now());
+            save_cache(&self.cache, &cache);
         }
     }
 }
@@ -617,13 +737,13 @@ mod tests {
     }
 
     #[test]
-    fn notices_only_for_newer_versions() {
+    fn offers_newer_versions_unless_skipped_or_postponed() {
         let url = "https://deploy.example.com/";
         let mut cache = CheckCache {
             cli_latest: Some(VERSION.into()),
             ..Default::default()
         };
-        assert!(notices(&cache, Some(url)).is_empty());
+        assert!(offers(&cache, Some(url), 100).is_empty());
         cache.cli_latest = Some("999.0.0".into());
         cache.servers.insert(
             url.into(),
@@ -633,13 +753,25 @@ mod tests {
                 current: Some("0.1.0".into()),
             },
         );
-        let lines = notices(&cache, Some(url));
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("modula 999.0.0 is available"));
-        assert!(lines[1].contains("999.0.1") && lines[1].contains("modula server update"));
-        // Another instance (or none) gets only the CLI line.
-        assert_eq!(notices(&cache, Some("https://other/")).len(), 1);
-        assert_eq!(notices(&cache, None).len(), 1);
+        let found = offers(&cache, Some(url), 100);
+        assert_eq!(found.len(), 2);
+        assert!(
+            found[0]
+                .question()
+                .starts_with("modula 999.0.0 is available")
+        );
+        assert!(found[1].question().contains("999.0.1") && found[1].question().contains(url));
+        // Another instance (or none) gets only the CLI.
+        assert_eq!(offers(&cache, Some("https://other/"), 100).len(), 1);
+        assert_eq!(offers(&cache, None, 100).len(), 1);
+
+        // Tomorrow: hidden for a day. Skip: hidden until a newer version.
+        record(&mut cache, &found[0], Answer::Tomorrow, 100);
+        record(&mut cache, &found[1], Answer::Skip, 100);
+        assert!(offers(&cache, Some(url), 200).is_empty());
+        assert_eq!(offers(&cache, Some(url), 100 + CHECK_EVERY_SECS).len(), 1);
+        cache.servers.get_mut(url).unwrap().available = Some("999.0.2".into());
+        assert_eq!(offers(&cache, Some(url), 200).len(), 1);
     }
 
     #[test]

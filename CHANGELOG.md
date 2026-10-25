@@ -7,19 +7,29 @@ may break things).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-25
+
 ### Added
 
 - **`modula update`** updates the CLI to the newest release (signature and
   checksum verified like `install-cli.sh`, then the executable is replaced in
   place); `--check` only reports.
 - **`modula server update`** shows the logged-in instance's version and the
-  available one, starts the upgrade (or opens the dashboard's Updates section
-  when it needs a recent sign-in, which API tokens never have) and follows it
-  until the control plane and every server are done; `--check` only reports.
-- **Update notice:** at a terminal, a dim line after a command when a newer
-  CLI exists or the instance can update. Checked at most once a day in the
-  background (never slows a command); off in CI, with `--json`, or with
-  `MODULA_NO_UPDATE_CHECK=1`.
+  available one, starts the upgrade (API tokens no longer need a recent
+  sign-in for it) and follows it until the control plane and every server
+  are done; `--check` only reports.
+- **Update offers:** at a terminal, after a command, the CLI offers a newer
+  CLI or server version: update now, remind me tomorrow, or skip this
+  version. Checked at most once a day in the background (never slows a
+  command); off in CI, with `--json`, or with `MODULA_NO_UPDATE_CHECK=1`.
+- **Dashboard update banner** for instance admins: update now, later, or skip
+  this version.
+- **`modula server create` connects Cloudflare:** pick one of your domains
+  and a subdomain; the DNS record is created for you.
+
+### Changed
+
+- `modula server create` shows each server's disk instead of its traffic.
 
 ## [0.1.3] - 2026-10-25
 
@@ -169,7 +179,8 @@ environments and staged deploys, licensed AGPL-3.0-only.
 - **CLI:** `modula` for projects, deployments, logs, variables, metrics,
   `modula.toml` infrastructure as code, and `modula server create`.
 
-[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/Modula-Labs/modula/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Modula-Labs/modula/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Modula-Labs/modula/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Modula-Labs/modula/compare/v0.1.0...v0.1.1

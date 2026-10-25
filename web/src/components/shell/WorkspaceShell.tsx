@@ -1,15 +1,16 @@
 import * as Popover from "@radix-ui/react-popover";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { Check, ChevronDown, DotsVertical, LayoutGrid, Logout, Moon, Plus, Server, Settings, ShieldLock, Sun } from "@/components/ui/icons";
 import { useState, type ReactNode } from "react";
+import { isRunActive, isUpdateSkipped, isUpdateSnoozed, shouldOfferUpdate, skipUpdate, snoozeUpdate } from "@/lib/updates";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
 import { Logo } from "@/components/ui/Logo";
 import { Modal } from "@/components/ui/Modal";
 import { Alert } from "@/components/ui/misc";
-import { api, type Membership } from "@/lib/api";
+import { api, type Membership, type UpdateStatus } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
 import { useCurrentWorkspace, useMe } from "@/lib/workspace";
 
@@ -80,6 +81,46 @@ function NewWorkspaceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
   );
 }
 
+function UpdateBanner({ status }: { status: UpdateStatus }) {
+  const qc = useQueryClient();
+  const [snoozed, setSnoozed] = useState(false);
+  const run = useMutation({
+    mutationFn: api.runUpdate,
+    onSuccess: (s) => qc.setQueryData(["instance-updates"], s),
+  });
+  const active = isRunActive(status) || run.isPending;
+  const version = status.latestVersion ?? "";
+  if (!active && (!shouldOfferUpdate(status) || snoozed || isUpdateSnoozed(version) || isUpdateSkipped(version))) return null;
+  return (
+    <div role="status" className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-border bg-card px-4 py-2.5 text-sm">
+      <span className="min-w-0 flex-1">
+        {active ? (
+          "Updating… the dashboard reconnects when it's done."
+        ) : (
+          <>
+            Modula Deploy <span className="font-mono">{version}</span> is available (you're on{" "}
+            <span className="font-mono">{status.currentVersion}</span>).
+            {status.releaseNotesUrl ? (
+              <>
+                {" "}
+                <a href={status.releaseNotesUrl} target="_blank" rel="noreferrer" className="underline underline-offset-2">What's new</a>
+              </>
+            ) : null}
+            {run.error ? <span className="ml-2 text-error">{run.error.message}</span> : null}
+          </>
+        )}
+      </span>
+      {active ? null : (
+        <span className="flex shrink-0 gap-2">
+          <Button variant="ghost" onClick={() => { skipUpdate(version); setSnoozed(true); }}>Skip this version</Button>
+          <Button variant="ghost" onClick={() => { snoozeUpdate(version); setSnoozed(true); }}>Later</Button>
+          <Button variant="primary" onClick={() => run.mutate()}>Update now</Button>
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function WorkspaceShell() {
   const { data: me } = useMe();
   const [current, select] = useCurrentWorkspace(me);
@@ -96,6 +137,7 @@ export function WorkspaceShell() {
     enabled: !!me?.user.isInstanceAdmin,
     staleTime: 5 * 60_000,
     retry: false,
+    refetchInterval: (query) => (isRunActive(query.state.data) ? 5000 : false),
   });
   const updateBadge = me?.user.isInstanceAdmin && updates.data?.updateAvailable ? <span className="ml-auto text-xs text-info">Update</span> : null;
 
@@ -193,6 +235,7 @@ export function WorkspaceShell() {
 
       <main className="min-h-0 overflow-auto border-l border-border bg-background">
         <div className="mx-auto max-w-[880px] px-8 py-8">
+          {me.user.isInstanceAdmin && updates.data ? <UpdateBanner status={updates.data} /> : null}
           <Outlet />
         </div>
       </main>

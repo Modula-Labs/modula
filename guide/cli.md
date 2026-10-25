@@ -667,24 +667,23 @@ current but servers failed to follow, it retries them. `--check` only
 reports (`--json`: the dashboard's update status). Needs an **instance
 admin**. Ctrl-C stops watching; the upgrade continues.
 
-Starting an upgrade needs a recently re-authenticated dashboard session,
-which API tokens never have. At a terminal, the dashboard's Updates
-section opens: click **Update now** there and the command follows the
-upgrade it starts. Without a terminal it prints that URL and exits 1; run
-`modula server update` afterwards to follow (it picks up an upgrade
-already under way). An instance installed without the upgrade units is
+API tokens start it directly (the dashboard asks for a recent sign-in
+instead), and every start is audited. An instance installed without the upgrade units is
 upgraded on the server instead (the command prints how).
 
-### The update notice
+### Update offers
 
-At a terminal, `modula` prints a dim line on stderr after a command when a
-newer CLI exists ("modula 0.1.4 is available (you have 0.1.3): run
-`modula update`") and, when logged in, when the instance can update ("…
-run `modula server update`"). The check runs at most once a day in a
-detached background process, so it never slows a command; its result is
-kept in `update-check.toml` next to the config. There is no notice with
-`--json`, when stdout, stderr or stdin isn't a terminal, in CI (`CI` set), or
-with `MODULA_NO_UPDATE_CHECK=1`.
+At a terminal, after a command, `modula` offers what's newer: the CLI
+("modula 0.1.4 is available (you have 0.1.3). Update?") and, when logged in,
+the instance ("Modula Deploy 0.1.4 is available for … Update the server?").
+Pick **Update now** (runs `modula update` or `modula server update` right
+there), **Remind me tomorrow** (Esc does the same) or **Skip this version**
+(not offered again until a newer one). The dashboard shows the same offer
+to instance admins. The check runs at most once a day in a detached
+background process, so it never slows a command; what it found and what you
+skipped are kept in `update-check.toml` next to the config. Nothing is
+offered with `--json`, when stdout, stderr or stdin isn't a terminal, in CI
+(`CI` set), or with `MODULA_NO_UPDATE_CHECK=1`.
 
 ## Servers
 

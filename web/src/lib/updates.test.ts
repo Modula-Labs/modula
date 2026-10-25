@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { UpdateStatus } from "@/lib/api";
-import { canUpdateNow, formatWindow, logTail } from "./updates";
+import { canUpdateNow, formatWindow, isUpdateSkipped, isUpdateSnoozed, logTail, skipUpdate, shouldOfferUpdate, snoozeUpdate, SNOOZE_MS } from "./updates";
 
 const base: UpdateStatus = {
   currentVersion: "1.0.0", latestVersion: "1.1.0", updateAvailable: true, releaseNotesUrl: null, checkedAt: null, checkError: null,
@@ -28,5 +28,43 @@ describe("updates helpers", () => {
   it("tails logs", () => {
     expect(logTail(null)).toBe("");
     expect(logTail("a\nb\nc\n", 2)).toBe("b\nc");
+  });
+});
+
+describe("update snooze", () => {
+  const mem = () => {
+    const m = new Map<string, string>();
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v) };
+  };
+  it("snoozes a version for 24h only", () => {
+    const st = mem();
+    expect(isUpdateSnoozed("1.1.0", 0, st)).toBe(false);
+    snoozeUpdate("1.1.0", 1000, st);
+    expect(isUpdateSnoozed("1.1.0", 1001, st)).toBe(true);
+    expect(isUpdateSnoozed("1.1.0", 1000 + SNOOZE_MS + 1, st)).toBe(false);
+    expect(isUpdateSnoozed("1.2.0", 1001, st)).toBe(false);
+  });
+  it("tolerates broken storage", () => {
+    const bad = { getItem: () => { throw new Error("x"); }, setItem: () => { throw new Error("x"); } };
+    expect(() => snoozeUpdate("1.1.0", 0, bad)).not.toThrow();
+    expect(isUpdateSnoozed("1.1.0", 0, bad)).toBe(false);
+    expect(isUpdateSnoozed("1.1.0", 0, { getItem: () => "{nope" })).toBe(false);
+  });
+  it("offers only when upgradable", () => {
+    expect(shouldOfferUpdate(base)).toBe(true);
+    expect(shouldOfferUpdate({ ...base, canUpgrade: false })).toBe(false);
+    expect(shouldOfferUpdate({ ...base, updateAvailable: false })).toBe(false);
+  });
+});
+
+describe("update skip", () => {
+  it("skips one version only", () => {
+    const m = new Map<string, string>();
+    const st = { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v) };
+    expect(isUpdateSkipped("1.1.0", st)).toBe(false);
+    skipUpdate("1.1.0", st);
+    expect(isUpdateSkipped("1.1.0", st)).toBe(true);
+    expect(isUpdateSkipped("1.2.0", st)).toBe(false);
+    expect(() => skipUpdate("x", { setItem: () => { throw new Error("x"); } })).not.toThrow();
   });
 });

@@ -498,7 +498,9 @@ impl Action {
             | Self::BackupRestore
             | Self::BackupDelete
             | Self::SelfBackupUpdate => true,
-            Self::UpdatesUpdate | Self::UpdatesRun => true,
+            Self::UpdatesUpdate => true,
+            // Sudo for dashboard sessions only: see `session_sudo`.
+            Self::UpdatesRun => false,
             Self::UpdatesRead => false,
             Self::PrivateAccessUpdate => true,
             Self::PrivateAccessRead => false,
@@ -554,11 +556,15 @@ impl Action {
         }
     }
 
-    /// Secret-revealing actions the CLI needs: a cookie session must be
-    /// recently re-authenticated, while API tokens (which never have sudo)
-    /// pass and every use is audited instead.
+    /// Actions the CLI needs that a cookie session must be recently
+    /// re-authenticated for, while API tokens (which never have sudo) pass
+    /// and every use is audited instead: revealing secrets, and starting an
+    /// upgrade (`modula server update`; only signed releases install).
     pub fn session_sudo(self) -> bool {
-        matches!(self, Self::DeploymentExec | Self::RunEnvRead)
+        matches!(
+            self,
+            Self::DeploymentExec | Self::RunEnvRead | Self::UpdatesRun
+        )
     }
 }
 
@@ -871,6 +877,8 @@ mod tests {
             Some(ResourceKind::ServiceInstance)
         );
         assert!(!Action::TunnelOpen.session_sudo());
+        // `modula server update`: the dashboard asks for a recent sign-in.
+        assert!(Action::UpdatesRun.session_sudo() && !Action::UpdatesRun.requires_sudo());
     }
 
     #[test]
