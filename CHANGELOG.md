@@ -7,6 +7,8 @@ may break things).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-25
+
 ### Added
 
 - **Browser login for the CLI:** `modula login` asks for the server, opens the
@@ -37,6 +39,12 @@ may break things).
   `modula.json`); a root `modula.toml` is only the build-time file now.
   `.modula/.gitignore` keeps the link, token and secrets out of git instead
   of the repository ignoring all of `.modula/`.
+
+### Fixed
+
+- `install.sh` stops with a clear message off Linux instead of failing on
+  macOS's bash 3.2.
+- Prompts started from `install-cli.sh`'s menu read the keyboard on macOS.
 
 ## [0.1.1] - 2026-10-25
 
@@ -124,6 +132,7 @@ environments and staged deploys, licensed AGPL-3.0-only.
 - **CLI:** `modula` for projects, deployments, logs, variables, metrics,
   `modula.toml` infrastructure as code, and `modula server create`.
 
-[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Modula-Labs/modula/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/Modula-Labs/modula/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Modula-Labs/modula/releases/tag/v0.1.0
