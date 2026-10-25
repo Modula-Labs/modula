@@ -125,14 +125,29 @@ impl Api {
         })
     }
 
+    /// A client without an API token (Cloudflare Access headers only), for
+    /// starting a browser login and collecting its token.
+    pub fn anonymous(url: Url, access: Option<crate::access::CfAccess>) -> anyhow::Result<Self> {
+        Self::new(Login {
+            url,
+            token: String::new(),
+            access,
+        })
+    }
+
     /// The Cloudflare Access credentials currently in use.
     pub fn access(&self) -> Option<crate::access::CfAccess> {
         self.access.lock().expect("access lock").clone()
     }
 
-    /// API token and Access headers.
+    /// API token and Access headers. An empty token sends no Authorization
+    /// (the public routes of the browser login, see [`Self::anonymous`]).
     fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let mut req = req.bearer_auth(&self.login.token);
+        let mut req = if self.login.token.is_empty() {
+            req
+        } else {
+            req.bearer_auth(&self.login.token)
+        };
         if let Some(a) = self.access() {
             for (k, v) in a.headers() {
                 req = req.header(k, v);

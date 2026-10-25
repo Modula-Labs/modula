@@ -519,3 +519,173 @@ async fn add_template_creates_and_deploys_an_app(pool: PgPool) {
         + created["warnings"].as_array().unwrap().len();
     assert_eq!(tried, 2, "{created}");
 }
+
+/// Run `modula <args>` with nothing in the environment: the saved logins
+/// in `dir/config.toml` decide.
+async fn run_saved(dir: &std::path::Path, args: &[&str]) -> (anyhow::Result<i32>, String) {
+    let cli = Cli::try_parse_from(std::iter::once("modula").chain(args.iter().copied()))
+        .expect("valid arguments");
+    let (out, buf) = Output::capture(cli.global.json);
+    let session = Session {
+        config_path: dir.join("config.toml"),
+        cwd: dir.to_path_buf(),
+        env_url: None,
+        env_token: None,
+        interactive: false,
+    };
+    let r = commands::run(cli, session, out).await;
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    (r, text)
+}
+
+async fn saved_json(dir: &std::path::Path, args: &[&str]) -> Value {
+    let mut all = vec!["--json"];
+    all.extend_from_slice(args);
+    let (r, text) = run_saved(dir, &all).await;
+    match r {
+        Ok(0) => serde_json::from_str(&text).unwrap_or_else(|e| panic!("{args:?}: {e}: {text}")),
+        other => panic!("{args:?}: {other:?}\n{text}"),
+    }
+}
+
+/// `login` with a token and in the browser, named logins, `--login`, and the
+/// login a linked directory remembers.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn named_logins_token_and_browser(pool: PgPool) {
+    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}/", http.local_addr().unwrap());
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let router = app.router.clone();
+    tokio::spawn(async move {
+        axum::serve(
+            http,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut tokens = Vec::new();
+    for name in ["a", "b"] {
+        let r = app
+            .call(
+                Method::POST,
+                "/api/account/tokens",
+                Some(&admin),
+                Some(json!({ "name": name })),
+            )
+            .await;
+        tokens.push(r.json["token"].as_str().unwrap().to_owned());
+    }
+    let (ta, tb) = (&tokens[0], &tokens[1]);
+    let dir = std::env::temp_dir().join(format!("modula-cli-logins-{}", Id::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Two logins with tokens (the CI path); the newest is the default.
+    let a = saved_json(&dir, &["login", &api_url, "--token", ta, "--name", "a"]).await;
+    assert_eq!(a["login"], "a");
+    assert_eq!(a["user"]["email"], "admin@example.com");
+    saved_json(&dir, &["login", &api_url, "--token", tb, "--name", "b"]).await;
+    let cfg = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+    assert!(cfg.starts_with("current = \"b\""), "{cfg}");
+    assert!(
+        cfg.contains("[logins.a]") && cfg.contains(ta.as_str()),
+        "{cfg}"
+    );
+    assert_eq!(saved_json(&dir, &["whoami"]).await["login"], "b");
+    assert_eq!(
+        saved_json(&dir, &["--login", "a", "whoami"]).await["login"],
+        "a"
+    );
+    let (r, _) = run_saved(&dir, &["--login", "nope", "whoami"]).await;
+    assert!(format!("{:#}", r.unwrap_err()).contains("no login named nope"));
+    let listed = saved_json(&dir, &["logins"]).await;
+    assert_eq!(listed[0]["name"], "a");
+    assert_eq!(listed[1]["current"], true);
+    let (r, text) = run_saved(&dir, &["login", "list"]).await;
+    assert_eq!(r.unwrap(), 0);
+    let current = text.lines().find(|l| l.contains('*')).unwrap_or_default();
+    assert!(
+        current.contains(" b ") && current.contains(&api_url),
+        "{text}"
+    );
+    saved_json(&dir, &["login", "use", "a"]).await;
+    assert_eq!(saved_json(&dir, &["whoami"]).await["login"], "a");
+    // A malformed token is refused before anything is saved.
+    let (r, _) = run_saved(&dir, &["login", &api_url, "--token", "nope", "--name", "x"]).await;
+    assert!(r.unwrap_err().downcast_ref::<UsageError>().is_some());
+
+    // The browser flow: approved in the dashboard while the CLI polls.
+    let cli_dir = dir.clone();
+    let url = api_url.clone();
+    let login = tokio::spawn(async move {
+        run_saved(&cli_dir, &["login", &url, "--browserless", "--name", "c"]).await
+    });
+    let mut code = None;
+    for _ in 0..100 {
+        code = sqlx::query_scalar::<_, String>(
+            "SELECT user_code FROM cli_logins WHERE status = 'pending'",
+        )
+        .fetch_optional(app.db())
+        .await
+        .unwrap();
+        if code.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let r = app
+        .call(
+            Method::POST,
+            "/api/cli/login/approve",
+            Some(&admin),
+            Some(json!({ "userCode": code.expect("a pending login") })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let (r, text) = login.await.unwrap();
+    assert_eq!(r.unwrap(), 0, "{text}");
+    assert!(text.contains("saved as c"), "{text}");
+    let listed = app
+        .call(Method::GET, "/api/account/tokens", Some(&admin), None)
+        .await;
+    assert!(
+        listed.json[0]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("CLI on "),
+        "{}",
+        listed.json
+    );
+    assert_eq!(saved_json(&dir, &["whoami"]).await["login"], "c");
+
+    // Linking records the login in use; the directory keeps using it.
+    let ws = app.create_workspace(&admin, "team").await;
+    let r = app
+        .call(
+            Method::POST,
+            &format!("/api/workspaces/{ws}/projects"),
+            Some(&admin),
+            Some(json!({ "name": "shop" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    saved_json(&dir, &["--login", "a", "link", "-p", "shop"]).await;
+    let link = std::fs::read_to_string(dir.join(".modula/project.toml")).unwrap();
+    assert!(link.contains("login = \"a\""), "{link}");
+    assert_eq!(saved_json(&dir, &["whoami"]).await["login"], "a");
+    assert_eq!(
+        saved_json(&dir, &["--login", "b", "whoami"]).await["login"],
+        "b"
+    );
+    // Once that login is gone, the directory says so.
+    let out = saved_json(&dir, &["logout", "a"]).await;
+    assert_eq!(out["loggedOut"], "a");
+    let (r, _) = run_saved(&dir, &["status"]).await;
+    let e = format!("{:#}", r.unwrap_err());
+    assert!(e.contains("linked with the login a"), "{e}");
+
+    saved_json(&dir, &["logout", "--all"]).await;
+    assert_eq!(saved_json(&dir, &["logins"]).await, json!([]));
+    let _ = std::fs::remove_dir_all(&dir);
+}

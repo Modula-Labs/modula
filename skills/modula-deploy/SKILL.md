@@ -20,9 +20,11 @@ troubleshooting); `modula docs` adds the full command reference.
 ## Auth
 
 - Expect `MODULA_URL` (e.g. `https://deploy.example.com`) and `MODULA_TOKEN`
-  (`mdt_…`) in the environment, or a saved login: this directory's
-  `.modula/token` (from `login --local`) or `~/.config/modula/config.toml`,
-  in that order after `MODULA_TOKEN`. Check with `modula whoami`.
+  (`mdt_…`) in the environment, or a saved login: `--login <name>`, this
+  directory's `.modula/token` (from `login --local`), the login the
+  directory was linked with, or the default one in
+  `~/.config/modula/config.toml`, in that order after `MODULA_TOKEN`. Check
+  with `modula whoami` (it names the login in use; `modula logins` lists them).
   Never commit `.modula/` (the CLI adds it to `.gitignore` itself).
 - If there's no token, ask the user to create one (it needs their dashboard
   session with re-authentication; you cannot mint one) and to export it
@@ -197,7 +199,7 @@ serving HTTPS, then proxied with SSL mode Full (strict).
 
 | Symptom | Do |
 |---|---|
-| `not logged in` | Set `MODULA_URL` and `MODULA_TOKEN`, or ask the user to `modula login`. |
+| `not logged in` | Set `MODULA_URL` and `MODULA_TOKEN`, or ask the user to run `modula login` (it opens their browser to approve). |
 | Exit code 2, "Pass --yes to confirm" | A destructive command without a terminal: confirm with the user, then add `--yes`. |
 | "pass --service" | The project has several services: add `-s <name>` or run `modula service <name>`. |
 | `401 unauthorized` | Token wrong, expired or deleted. Ask for a new one. |

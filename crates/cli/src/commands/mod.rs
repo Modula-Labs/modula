@@ -27,11 +27,20 @@ use crate::output::Output;
 /// Run one command; returns the process exit code.
 pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32> {
     crate::config::set_allow_insecure_http(cli.global.allow_insecure_http);
+    // Pickers only for a person at a terminal (not scripts, agents or CI).
+    crate::resolve::set_interactive(
+        session.interactive
+            && !cli.global.yes
+            && !cli.global.json
+            && std::io::IsTerminal::is_terminal(&std::io::stdout())
+            && std::env::var_os("CI").is_none(),
+    );
     let mut ctx = Ctx::new(session, cli.global, out)?;
     let ctx = &mut ctx;
     match cli.command {
-        Command::Login { url, token, local } => auth::login(ctx, url, token, local).await?,
-        Command::Logout => auth::logout(ctx)?,
+        Command::Login { args, command } => auth::run(ctx, args, command).await?,
+        Command::Logins => auth::list(ctx)?,
+        Command::Logout { name, all } => auth::logout(ctx, name, all)?,
         Command::Whoami => auth::whoami(ctx).await?,
         Command::List => project::list(ctx).await?,
         Command::Init { name, workspace } => {
@@ -56,7 +65,7 @@ pub async fn run(cli: Cli, session: Session, out: Output) -> anyhow::Result<i32>
         Command::Restart => return deploy::rollout(ctx, "restart", false).await,
         Command::Down => return deploy::down(ctx).await,
         Command::Rollback { deployment, wait } => {
-            return deploy::rollback(ctx, &deployment, wait).await;
+            return deploy::rollback(ctx, deployment.as_deref(), wait).await;
         }
         Command::Deployment { command } => return deploy::deployment(ctx, command).await,
         Command::Logs(args) => return logs::run(ctx, args).await,

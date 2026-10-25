@@ -95,10 +95,11 @@ function CreateDialog({
             <CopyButton value={created} label="Copy token" />
           </div>
           <div className="text-sm text-muted-foreground">
-            Use it with the CLI:
+            Use it in CI or scripts as <code className="font-mono text-[13px]">MODULA_TOKEN</code>, with:
             <code className="mt-1 block rounded-lg bg-muted p-2 font-mono text-[13px]">
-              modula login --url {window.location.origin}
+              MODULA_URL={window.location.origin}
             </code>
+            <span className="mt-2 block">On your own machine, <code className="font-mono text-[13px]">modula login</code> signs in through the browser instead.</span>
           </div>
           <div className="flex justify-end">
             <Button variant="primary" onClick={() => close(false)}>

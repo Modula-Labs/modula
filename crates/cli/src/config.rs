@@ -1,8 +1,9 @@
-//! Where the CLI keeps state: the login (`~/.config/modula/config.toml`,
+//! Where the CLI keeps state: named logins (`~/.config/modula/config.toml`,
 //! mode 0600), per-directory project links (`.modula/project.toml`) and an
 //! optional per-directory login (`.modula/token`, mode 0600). `.modula/` is
 //! kept out of git: see [`ensure_gitignore`].
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
@@ -13,20 +14,141 @@ use crate::api::Environment;
 
 pub const LINK_DIR: &str = ".modula";
 pub const LINK_FILE: &str = "project.toml";
-/// A login for one directory (`login --local`): the same format as the
-/// global config file.
+/// A login for one directory (`login --local`): one [`SavedLogin`].
 pub const TOKEN_FILE: &str = "token";
 
-/// The saved login.
+/// The user config: logins by a local name of the user's choosing, and the
+/// one commands use by default.
+///
+/// ```toml
+/// current = "work"
+///
+/// [logins.work]
+/// url = "https://deploy.example.com/"
+/// token = "mdt_…"
+/// ```
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
-    /// The instance, e.g. `https://cloud.example.com`.
-    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    #[serde(default)]
+    pub logins: BTreeMap<String, SavedLogin>,
+}
+
+/// One instance and the API token for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedLogin {
+    /// The instance, e.g. `https://cloud.example.com/`.
+    pub url: String,
     /// An API token (`mdt_…`).
-    pub token: Option<String>,
+    pub token: String,
     /// Cloudflare Access credentials, for instances in private mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<crate::access::CfAccess>,
+}
+
+impl Config {
+    /// Save `login` as `name`, making it the default.
+    pub fn set(&mut self, name: &str, login: SavedLogin) {
+        self.logins.insert(name.to_owned(), login);
+        self.current = Some(name.to_owned());
+    }
+
+    /// Forget `name`; when it was the default and one login is left, that
+    /// one becomes the default. Returns whether it existed.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let had = self.logins.remove(name).is_some();
+        if self.current.as_deref() == Some(name) || self.current.is_none() {
+            self.current = match self.logins.keys().collect::<Vec<_>>()[..] {
+                [only] => Some(only.clone()),
+                _ => None,
+            };
+        }
+        had
+    }
+
+    /// The default login: `current`, else the only one.
+    pub fn default_name(&self) -> Option<&str> {
+        match &self.current {
+            Some(c) if self.logins.contains_key(c) => Some(c),
+            _ => match self.logins.keys().collect::<Vec<_>>()[..] {
+                [only] => Some(only),
+                _ => None,
+            },
+        }
+    }
+
+    pub fn names(&self) -> String {
+        if self.logins.is_empty() {
+            "none".into()
+        } else {
+            self.logins.keys().cloned().collect::<Vec<_>>().join(", ")
+        }
+    }
+
+    /// The login a command uses: `explicit` (`--login` / `MODULA_LOGIN`),
+    /// else the one the directory was linked with, else the default. Naming
+    /// a login that doesn't exist is an error either way.
+    pub fn select(
+        &self,
+        explicit: Option<&str>,
+        linked: Option<&str>,
+    ) -> anyhow::Result<Option<(&str, &SavedLogin)>> {
+        if let Some(name) = explicit {
+            return match self.logins.get_key_value(name) {
+                Some((k, v)) => Ok(Some((k, v))),
+                None => bail!("no login named {name} (logins: {})", self.names()),
+            };
+        }
+        if let Some(name) = linked {
+            return match self.logins.get_key_value(name) {
+                Some((k, v)) => Ok(Some((k, v))),
+                None => bail!(
+                    "this directory was linked with the login {name}, which no longer exists \
+                     (logins: {}); run `modula login <url> --name {name}`, pass --login, \
+                     or link again",
+                    self.names()
+                ),
+            };
+        }
+        Ok(self
+            .default_name()
+            .and_then(|n| self.logins.get_key_value(n))
+            .map(|(k, v)| (k.as_str(), v)))
+    }
+}
+
+/// Local login names: letters, digits, `.`, `-` and `_`, up to 64.
+pub fn check_login_name(name: &str) -> anyhow::Result<()> {
+    let ok = (1..=64).contains(&name.len())
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if !ok {
+        bail!("login names are 1–64 letters, digits, '.', '-' or '_' (got {name:?})");
+    }
+    Ok(())
+}
+
+/// The name a login gets by default: its host, plus the port if any
+/// (`deploy.example.com`, `localhost-8080`).
+pub fn default_login_name(url: &Url) -> String {
+    let host: String = url
+        .host_str()
+        .unwrap_or_default()
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' => c.to_ascii_lowercase(),
+            _ => '-',
+        })
+        .collect();
+    let host = host.trim_matches(|c| c == '-' || c == '.');
+    let host = if host.is_empty() { "modula" } else { host };
+    match url.port() {
+        Some(p) => format!("{host}-{p}"),
+        None => host.to_owned(),
+    }
 }
 
 /// What every API call needs.
@@ -60,8 +182,8 @@ pub fn load(path: &Path) -> anyhow::Result<Config> {
     }
 }
 
-/// Write the config readable by the owner only (it holds a token).
-pub fn save(path: &Path, cfg: &Config) -> anyhow::Result<()> {
+/// Write the config readable by the owner only (it holds tokens).
+pub fn save<T: Serialize>(path: &Path, cfg: &T) -> anyhow::Result<()> {
     let dir = path.parent().context("config path has no directory")?;
     std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let tmp = path.with_extension("toml.tmp");
@@ -109,25 +231,26 @@ pub fn parse_url(raw: &str) -> anyhow::Result<Url> {
     Ok(url)
 }
 
-/// The effective login: `MODULA_URL` / `MODULA_TOKEN` override the file.
+/// The effective login: `MODULA_URL` / `MODULA_TOKEN` override the saved one.
 pub fn login(
-    cfg: &Config,
+    saved: Option<&SavedLogin>,
     env_url: Option<String>,
     env_token: Option<String>,
 ) -> anyhow::Result<Login> {
     let url = env_url
         .filter(|v| !v.is_empty())
-        .or_else(|| cfg.url.clone())
-        .context("not logged in: run `modula login --url https://your-instance`")?;
+        .or_else(|| saved.map(|s| s.url.clone()))
+        .context("not logged in: run `modula login` (or set MODULA_URL and MODULA_TOKEN)")?;
     let token = env_token
         .filter(|v| !v.is_empty())
-        .or_else(|| cfg.token.clone())
+        .or_else(|| saved.map(|s| s.token.clone()))
         .context("not logged in: run `modula login` (or set MODULA_TOKEN)")?;
     Ok(Login {
         url: parse_url(&url)?,
         token,
         // A service token in the environment (CI) wins over the saved login.
-        access: crate::access::CfAccess::from_process_env().or_else(|| cfg.access.clone()),
+        access: crate::access::CfAccess::from_process_env()
+            .or_else(|| saved.and_then(|s| s.access.clone())),
     })
 }
 
@@ -150,6 +273,10 @@ pub struct Link {
     pub service: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_name: Option<String>,
+    /// The local login name the directory was linked with; commands here
+    /// use it unless `--login` says otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
 }
 
 impl Link {
@@ -161,6 +288,7 @@ impl Link {
             environment_name: Some(environment.name.clone()),
             service: None,
             service_name: None,
+            login: None,
         }
     }
 }
@@ -215,7 +343,10 @@ pub fn find_local_login(start: &Path) -> anyhow::Result<LocalLogin> {
                 )),
             });
         }
-        let cfg = load(&path)?;
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        let cfg =
+            toml::from_str(&text).with_context(|| format!("{} is invalid", path.display()))?;
         return Ok(LocalLogin {
             found: Some((path, cfg)),
             warning: None,
@@ -228,7 +359,7 @@ pub fn find_local_login(start: &Path) -> anyhow::Result<LocalLogin> {
 #[derive(Debug, Default)]
 pub struct LocalLogin {
     /// The token file and the login in it.
-    pub found: Option<(PathBuf, Config)>,
+    pub found: Option<(PathBuf, SavedLogin)>,
     /// Why a token file was ignored.
     pub warning: Option<String>,
 }
@@ -352,7 +483,7 @@ fn check_transport_with(url: &Url, allow: bool) -> anyhow::Result<Option<String>
 }
 
 /// Write `<dir>/.modula/token` (mode 0600); returns its path.
-pub fn save_local_login(dir: &Path, cfg: &Config) -> anyhow::Result<PathBuf> {
+pub fn save_local_login(dir: &Path, cfg: &SavedLogin) -> anyhow::Result<PathBuf> {
     let path = dir.join(LINK_DIR).join(TOKEN_FILE);
     save(&path, cfg)?;
     Ok(path)
@@ -473,18 +604,36 @@ mod tests {
         dir
     }
 
+    fn saved(url: &str, token: &str) -> SavedLogin {
+        SavedLogin {
+            url: url.into(),
+            token: token.into(),
+            access: None,
+        }
+    }
+
     #[test]
     fn config_round_trips_privately() {
         let dir = temp_dir();
         let path = dir.join("modula/config.toml");
         assert_eq!(load(&path).unwrap(), Config::default());
-        let cfg = Config {
-            url: Some("https://cloud.example.com/".into()),
-            token: Some("mdt_x".into()),
-            ..Default::default()
-        };
+        let mut cfg = Config::default();
+        cfg.set("work", saved("https://deploy.example.com/", "mdt_w"));
+        // Default names are hosts: dotted keys must stay one key.
+        cfg.set(
+            "deploy.example.com",
+            saved("https://deploy.example.com/", "mdt_d"),
+        );
+        cfg.set("home", saved("https://10.0.0.5:8443/", "mdt_h"));
         save(&path, &cfg).unwrap();
         assert_eq!(load(&path).unwrap(), cfg);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("current = \"home\"\n"), "{text}");
+        assert!(text.contains("[logins.\"deploy.example.com\"]"), "{text}");
+        assert!(
+            text.contains("[logins.work]\nurl = \"https://deploy.example.com/\""),
+            "{text}"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -494,17 +643,91 @@ mod tests {
     }
 
     #[test]
-    fn environment_overrides_the_file() {
-        let cfg = Config {
-            url: Some("cloud.example.com".into()),
-            token: Some("mdt_file".into()),
-            ..Default::default()
-        };
-        let l = login(&cfg, None, None).unwrap();
+    fn the_config_file_is_parsed_by_hand_written_shape() {
+        let cfg: Config = toml::from_str(
+            r#"
+            current = "prod"
+            [logins.prod]
+            url = "https://deploy.example.com/"
+            token = "mdt_p"
+            [logins."dev.local"]
+            url = "http://localhost:8080/"
+            token = "mdt_d"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.default_name(), Some("prod"));
+        assert_eq!(cfg.logins["dev.local"].token, "mdt_d");
+        assert_eq!(toml::from_str::<Config>("").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn logins_are_selected_explicit_then_linked_then_default() {
+        let mut cfg = Config::default();
+        assert_eq!(cfg.select(None, None).unwrap(), None);
+        cfg.set("a", saved("https://a.example.com/", "mdt_a"));
+        // The only login is the default even without `current`.
+        cfg.current = None;
+        assert_eq!(cfg.select(None, None).unwrap().unwrap().0, "a");
+        cfg.set("b", saved("https://b.example.com/", "mdt_b"));
+        assert_eq!(cfg.select(None, None).unwrap().unwrap().0, "b");
+        assert_eq!(cfg.select(None, Some("a")).unwrap().unwrap().0, "a");
+        assert_eq!(cfg.select(Some("b"), Some("a")).unwrap().unwrap().0, "b");
+        let e = cfg.select(Some("c"), None).unwrap_err().to_string();
+        assert!(e.contains("no login named c (logins: a, b)"), "{e}");
+        let e = cfg.select(None, Some("gone")).unwrap_err().to_string();
+        assert!(e.contains("linked with the login gone"), "{e}");
+        // Two logins and no `current`: no default.
+        cfg.current = None;
+        assert_eq!(cfg.select(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn removing_the_default_falls_back_to_the_only_one_left() {
+        let mut cfg = Config::default();
+        cfg.set("a", saved("https://a.example.com/", "mdt_a"));
+        cfg.set("b", saved("https://b.example.com/", "mdt_b"));
+        cfg.set("c", saved("https://c.example.com/", "mdt_c"));
+        assert!(cfg.remove("c"));
+        assert_eq!(cfg.current, None, "two left: no guess");
+        assert!(cfg.remove("b"));
+        assert_eq!(cfg.current.as_deref(), Some("a"));
+        assert!(!cfg.remove("b"));
+        assert!(cfg.remove("a"));
+        assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn login_names_default_to_the_host() {
+        let name = |u: &str| default_login_name(&parse_url(u).unwrap());
+        assert_eq!(name("deploy.example.com"), "deploy.example.com");
+        assert_eq!(name("https://Deploy.Example.com/x"), "deploy.example.com");
+        assert_eq!(name("http://localhost:8080"), "localhost-8080");
+        assert_eq!(name("1.2.3.4"), "1.2.3.4");
+        assert_eq!(name("http://[::1]:3000"), "1-3000");
+        for u in [
+            "deploy.example.com",
+            "http://[::1]:3000",
+            "http://localhost:8080",
+        ] {
+            check_login_name(&name(u)).unwrap();
+        }
+        for ok in ["work", "deploy.example.com", "a_b-1"] {
+            check_login_name(ok).unwrap();
+        }
+        for bad in ["", "-x", "a b", "a/b", &"x".repeat(65)] {
+            assert!(check_login_name(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn environment_overrides_the_saved_login() {
+        let s = saved("cloud.example.com", "mdt_file");
+        let l = login(Some(&s), None, None).unwrap();
         assert_eq!(l.url.as_str(), "https://cloud.example.com/");
         assert_eq!(l.token, "mdt_file");
         let l = login(
-            &cfg,
+            Some(&s),
             Some("http://localhost:8080/app".into()),
             Some("mdt_env".into()),
         )
@@ -513,12 +736,13 @@ mod tests {
         assert_eq!(l.token, "mdt_env");
         // Empty variables don't count.
         assert_eq!(
-            login(&cfg, Some(String::new()), Some(String::new()))
+            login(Some(&s), Some(String::new()), Some(String::new()))
                 .unwrap()
                 .token,
             "mdt_file"
         );
-        assert!(login(&Config::default(), None, None).is_err());
+        assert!(login(None, None, None).is_err());
+        assert!(login(None, None, Some("mdt_env".into())).is_err(), "no URL");
         assert!(parse_url("ftp://x").is_err());
     }
 
@@ -534,8 +758,14 @@ mod tests {
             environment_name: Some("staging".into()),
             service: Some("1123456789abcdef".into()),
             service_name: Some("api".into()),
+            login: Some("work".into()),
         };
         let path = write_link(&root, &link).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("login = \"work\"")
+        );
         let (found, got) = find_link(&nested).unwrap().unwrap();
         assert_eq!(found, path);
         assert_eq!(got, link);
@@ -610,11 +840,7 @@ mod tests {
         let nested = root.join("a/b");
         std::fs::create_dir_all(&nested).unwrap();
         assert!(find_local_login(&nested).unwrap().found.is_none());
-        let cfg = Config {
-            url: Some("https://cloud.example.com/".into()),
-            token: Some("mdt_local".into()),
-            ..Default::default()
-        };
+        let cfg = saved("https://cloud.example.com/", "mdt_local");
         let path = save_local_login(&root, &cfg).unwrap();
         assert_eq!(path, root.join(".modula/token"));
         let local = find_local_login(&nested).unwrap();
@@ -629,12 +855,7 @@ mod tests {
     }
 
     fn local_token(root: &Path) -> PathBuf {
-        let cfg = Config {
-            url: Some("https://evil.example.com/".into()),
-            token: Some("mdt_local".into()),
-            ..Default::default()
-        };
-        save_local_login(root, &cfg).unwrap()
+        save_local_login(root, &saved("https://evil.example.com/", "mdt_local")).unwrap()
     }
 
     fn ignored_because(root: &Path) -> String {

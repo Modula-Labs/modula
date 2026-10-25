@@ -213,9 +213,30 @@ pub async fn down(ctx: &Ctx) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-pub async fn rollback(ctx: &Ctx, deployment: &str, wait_for: bool) -> anyhow::Result<i32> {
+pub async fn rollback(ctx: &Ctx, deployment: Option<&str>, wait_for: bool) -> anyhow::Result<i32> {
     let api = ctx.api()?;
-    let from = api.deployment(deployment).await?;
+    let from = match deployment {
+        Some(id) => api.deployment(id).await?,
+        None if crate::resolve::interactive() => {
+            let t = ctx.target().await?;
+            let deployments = api.deployments(&t.instance).await?;
+            if deployments.is_empty() {
+                anyhow::bail!("{} has no deployments yet", t.label());
+            }
+            crate::resolve::choose(
+                &format!("Roll {} back to", t.label()),
+                &deployments,
+                crate::resolve::deployment_label,
+            )?
+            .clone()
+        }
+        None => {
+            return Err(crate::output::usage(
+                "name the deployment to roll back to (see `modula deployment list`)",
+            ));
+        }
+    };
+    let deployment = from.id.as_str();
     let commit = from
         .commit_sha
         .as_deref()

@@ -5,6 +5,7 @@ pub mod app_templates;
 pub mod auth;
 pub mod backups;
 pub mod buckets;
+pub mod cli_login;
 pub mod cron;
 pub mod database;
 pub mod deployments;
@@ -68,6 +69,13 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/account/tokens", Authenticated, tokens::list)
         .post("/api/account/tokens", Sudo, tokens::create)
         .delete("/api/account/tokens/{token_id}", Resource(Action::TokenRevoke), tokens::revoke)
+        // `modula login` in a browser: the CLI starts a login and polls for its token with a
+        // secret device code; a signed-in user approves it (sudo, mints a token) or denies it.
+        .post(cli_login::START_PATH, Public, cli_login::start)
+        .post(cli_login::TOKEN_PATH, Public, cli_login::poll)
+        .post("/api/cli/login/lookup", Authenticated, cli_login::lookup)
+        .post("/api/cli/login/approve", Sudo, cli_login::approve)
+        .post("/api/cli/login/deny", Authenticated, cli_login::deny)
         // Workspaces
         .get("/api/workspaces", Authenticated, workspaces::list)
         .post("/api/workspaces", Authenticated, workspaces::create)

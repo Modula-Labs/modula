@@ -35,6 +35,21 @@ impl Api {
         self.get("/api/auth/me").await
     }
 
+    /// Start a browser login (no token needed; see [`Api::anonymous`]).
+    pub async fn start_cli_login(&self, hostname: &str) -> anyhow::Result<CliLoginStart> {
+        self.post("/api/cli/login", &json!({ "hostname": hostname }))
+            .await
+    }
+
+    /// Whether the browser login was approved, and its token once it was.
+    pub async fn poll_cli_login(&self, device_code: &str) -> anyhow::Result<CliLoginPoll> {
+        self.post(
+            "/api/cli/login/token",
+            &json!({ "device_code": device_code }),
+        )
+        .await
+    }
+
     pub async fn projects(&self, workspace: &str) -> anyhow::Result<Vec<Project>> {
         self.get(&format!("/api/workspaces/{workspace}/projects"))
             .await

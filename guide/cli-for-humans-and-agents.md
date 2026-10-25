@@ -96,7 +96,8 @@ admin password stay in memory and are wiped when the command ends; they
 never go to disk, logs or the server. The server gets a one-time setup token
 (generated on your machine; only its hash is stored on the server) that the
 CLI uses minutes later to create your admin. The only thing written to disk
-is the new instance's API token, exactly like `modula login`.
+is the new instance's API token, saved as a login named after the domain
+(and made the default), exactly like `modula login`.
 
 If anything fails after the server exists, you see the failing step and the
 installer's hint, and you're asked whether to delete the server and its
@@ -111,17 +112,26 @@ HCLOUD_TOKEN=… modula server options --location fsn1 --json
 
 ## Log in to an existing server
 
-Create an API token in the dashboard (Account → API tokens; it starts with
-`mdt_`), then:
-
 ```bash
-modula login --url https://deploy.example.com      # asks for the token, hidden
+modula login                       # asks for the server and a name for the login
+modula login deploy.example.com    # or name the server right away
 ```
 
-Without a terminal: `modula login --url … --token …`, or skip `login` and
-set `MODULA_URL` and `MODULA_TOKEN` for every command. `modula whoami`
-checks it. Instances in private mode (Cloudflare Access) also need
-`MODULA_CF_ACCESS_CLIENT_ID` / `MODULA_CF_ACCESS_CLIENT_SECRET`.
+Your browser opens the dashboard's approval page; sign in if needed, check
+that it shows the same code as your terminal, and approve. The CLI gets its
+own API token (`CLI on <your machine>`, revocable under Account → Security).
+Over SSH, `--browserless` prints the URL to open elsewhere.
+
+Logins are saved by name, so several instances work side by side:
+`modula login list`, `modula login use <name>` to switch the default,
+`--login <name>` for one command. A directory you `link` keeps using the
+login it was linked with.
+
+Without a terminal (CI, agents): skip `login` and set `MODULA_URL` and
+`MODULA_TOKEN` (a token from Account → Security → API tokens, `mdt_…`) for
+every command, or save one with `modula login <url> --token …`.
+`modula whoami` checks it. Instances in private mode (Cloudflare Access)
+also need `MODULA_CF_ACCESS_CLIENT_ID` / `MODULA_CF_ACCESS_CLIENT_SECRET`.
 
 ## Deploy an app
 
@@ -190,6 +200,7 @@ modula server create --provider hetzner \
 | `CLOUDFLARE_API_TOKEN` | `server create --cloudflare-dns` |
 | `MODULA_ADMIN_PASSWORD` | `server create` without a terminal |
 | `MODULA_URL`, `MODULA_TOKEN` | every other command (instead of `login`) |
+| `MODULA_LOGIN` | which saved login to use (like `--login`) |
 | `MODULA_PROJECT`, `MODULA_ENVIRONMENT`, `MODULA_SERVICE` | defaults for `-p`, `-e`, `-s` |
 
 Everything is checked before anything is created: all missing flags and
@@ -251,7 +262,12 @@ it has `"ok":false`, `exitCode`, `error`, `hint`, and `serverKept` with the
 
 ### Other commands without a terminal
 
-- `login` needs `--url` and `--token` (or `MODULA_URL`/`MODULA_TOKEN`).
+- `login` needs the URL and `--token` (or `MODULA_URL`/`MODULA_TOKEN`);
+  otherwise it prints the approval URL and waits up to 10 minutes for a
+  person to approve it.
+- Nothing is ever picked from a list: a missing or ambiguous project,
+  service, workspace, deployment or login is an error naming the choices
+  (the same holds with `--json`, `--yes` or `CI` set).
 - Destructive commands (`down`, `domain delete`, `variables set --sealed`,
   `db query --write`, `config apply`, …) need `--yes`.
 - `variables set --stdin` reads `KEY=VALUE` lines from stdin, keeping values

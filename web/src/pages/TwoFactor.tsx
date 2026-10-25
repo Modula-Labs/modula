@@ -7,9 +7,10 @@ import { Field, Input } from "@/components/ui/Input";
 import { OtpInput } from "@/components/ui/OtpInput";
 import { Alert } from "@/components/ui/misc";
 import { ApiError, api } from "@/lib/api";
+import { type ReturnTo, goBack } from "./Login";
 
-/** `invite`: the invite token to return to after the second factor. */
-export function TwoFactorPage({ invite }: { invite?: string }) {
+/** `back`: where to return after the second factor. */
+export function TwoFactorPage({ back }: { back: ReturnTo }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [recovery, setRecovery] = useState(false);
@@ -25,7 +26,7 @@ export function TwoFactorPage({ invite }: { invite?: string }) {
     try {
       const me = await api.mfa(recovery ? { backupCode: value } : { totpCode: value });
       qc.setQueryData(["me"], me);
-      await (invite ? navigate({ to: "/invite/$token", params: { token: invite } }) : navigate({ to: "/projects" }));
+      await goBack(navigate, back);
     } catch (err) {
       const ae = err instanceof ApiError ? err : null;
       if (ae?.code === "rate_limited" || ae?.code === "unauthorized") {
@@ -44,7 +45,7 @@ export function TwoFactorPage({ invite }: { invite?: string }) {
     <AuthCard
       title="Two-factor authentication"
       subtitle={recovery ? "Enter one of your recovery codes. Each code works once." : "Enter the 6-digit code from your authenticator app."}
-      footer={<Link to="/login" search={invite ? { invite } : {}} className="hover:text-foreground">← Back to sign in</Link>}
+      footer={<Link to="/login" search={back} className="hover:text-foreground">← Back to sign in</Link>}
     >
       <form
         className="flex flex-col gap-4"
@@ -62,7 +63,7 @@ export function TwoFactorPage({ invite }: { invite?: string }) {
           <OtpInput value={code} onChange={setCode} onComplete={(v) => void submit(v)} autoFocus disabled={busy || expired} invalid={!!error} />
         )}
         {expired ? (
-          <Button type="button" variant="primary" onClick={() => void navigate({ to: "/login", search: invite ? { invite } : {} })}>
+          <Button type="button" variant="primary" onClick={() => void navigate({ to: "/login", search: back })}>
             Sign in again
           </Button>
         ) : (

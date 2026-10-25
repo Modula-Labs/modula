@@ -11,15 +11,19 @@ event and exit code); trust them over this file if they differ.
 
 | Variable | Effect |
 |---|---|
-| `MODULA_URL` | Instance URL; overrides the saved login; default for `login --url`. |
+| `MODULA_URL` | Instance URL; overrides the saved login; default for `login`'s URL. |
 | `MODULA_TOKEN` | API token `mdt_…`; overrides the saved login; default for `login --token`. |
+| `MODULA_LOGIN` | Saved login name to use (like `--login`). |
 | `MODULA_PROJECT` / `MODULA_ENVIRONMENT` / `MODULA_SERVICE` | Defaults for `-p` / `-e` / `-s`. |
 | `NO_COLOR` | No colors (also off when stdout isn't a terminal). |
-| `XDG_CONFIG_HOME` | Config dir (default `~/.config`). Login saved to `modula/config.toml`, mode 0600. |
+| `XDG_CONFIG_HOME` | Config dir (default `~/.config`). Logins saved to `modula/config.toml`, mode 0600. |
 
-With `MODULA_URL` and `MODULA_TOKEN` set, no `login` is needed. Token order:
-`MODULA_TOKEN` → nearest `.modula/token` (`login --local`, same TOML format,
-mode 0600; its URL, else the global one) → the global config.
+With `MODULA_URL` and `MODULA_TOKEN` set, no `login` is needed. Saved logins
+are named: `current = "<name>"` plus `[logins.<name>] url, token`. Token order:
+`MODULA_TOKEN` (URL from `MODULA_URL`, else the login below) → `--login` /
+`MODULA_LOGIN` → nearest `.modula/token` (`login --local`: one `url`/`token`,
+mode 0600) → the login named in `.modula/project.toml` (`login = …`; error if
+it no longer exists) → `current`.
 
 ## Global flags (any position)
 
@@ -28,6 +32,12 @@ mode 0600; its URL, else the global one) → the global config.
 - `-e, --environment <name|id>`: default the linked one, else `production`.
 - `-s, --service <name|id>`: default the linked one, else the project's only service.
 - `-y, --yes`: skip confirmations. Without a terminal, destructive commands **require** it (else exit 2).
+- `--login <name>`: which saved login to use.
+
+At a terminal (stdin+stdout TTY, no `--yes`/`--json`/`CI`), a missing or
+ambiguous workspace/project/service/database/deployment/member/login is picked
+from a list; otherwise it's an error listing the choices (agents never see a
+prompt).
 
 Confirming commands: `down`, `rollback`, `variables delete`,
 `variables set --sealed`, `domain delete`, `volume delete`,
@@ -38,7 +48,8 @@ Exit codes: 0 ok; 1 error (`error: …` on stderr); 2 usage (bad flags, bad
 deployment fails/crashes. `connect` returns the client's exit code.
 
 Link file `.modula/project.toml` (nearest in cwd or a parent): `project`,
-`project_name`, `environment`, `service`, `service_name`. A `-p` for another
+`project_name`, `environment`, `service`, `service_name`, `login` (the saved
+login it was linked with; used by commands there). A `-p` for another
 project ignores the linked environment/service. Whenever the CLI writes into
 `.modula/` (link, token, secrets) it ensures the repo-root `.gitignore`
 ignores `.modula/` (appends an annotated block, creates the file in a git
@@ -47,12 +58,13 @@ repo; leaves alone a file naming `.modula/token` and `.modula/secrets.*`).
 ## Commands
 
 Setup:
-- `login [--url URL] [--token T] [--local]`: verifies via `GET /api/auth/me`, saves (globally, or `--local` in `.modula/token`). Token prompted (no echo) if omitted and stdin is a TTY.
-- `logout`: forgets the token in effect (`.modula/token` if any, else global; it stays valid server-side).
-- `whoami`: user, instance, workspaces with roles.
+- `login [URL] [--name N] [--browserless] [--local] [--token T]`: browser approval (device flow: `POST /api/cli/login`, user approves `<dashboard>/cli/login?code=XXXX-XXXX`, CLI polls `POST /api/cli/login/token`; mints a token `CLI on <host>`). Asks for URL/name at a TTY (name defaults to the host). `--token`/`MODULA_TOKEN` = non-interactive (CI). Saves as `[logins.<name>]` and makes it current, or `--local` in `.modula/token`.
+- `login list` / `logins`: saved logins (`*` = current). `login use NAME`: switch the default.
+- `logout [NAME] [--all]`: forget a login (default: `.modula/token` if any, else the one in use; tokens stay valid server-side).
+- `whoami`: user, instance, login name, workspaces with roles (`--json`: `login`, `url`, `user`, `workspaces`).
 - `list` / `ls`: projects (workspace, name, id, linked).
 - `init NAME [-w WORKSPACE]`: create project (+ `production`) and link it.
-- `link [--token T]`: link cwd to `-p`/`-e` (and `-s` as default service); `--token` also saves it in `.modula/token`.
+- `link [--token T]`: link cwd to `-p`/`-e` (and `-s` as default service), recording the login in use; `--token` also saves it in `.modula/token`.
 - `unlink`: remove the nearest link.
 - `service [NAME]`: set the default service; no name = list services.
 - `open`: print the dashboard URL (`/projects/{id}?env=…&service=…`); opens a browser on a TTY.

@@ -76,11 +76,30 @@ pub async fn run(
         }
         MembersCommand::Remove { email } => {
             let members: Vec<Member> = api.get(&members_path).await?;
-            let wanted = email.trim().to_lowercase();
-            let m = members
-                .iter()
-                .find(|m| m.email == wanted)
-                .with_context(|| format!("{email} is not a member of {}", ws.name))?;
+            let m = match email {
+                Some(email) => {
+                    let wanted = email.trim().to_lowercase();
+                    members
+                        .iter()
+                        .find(|m| m.email == wanted)
+                        .with_context(|| format!("{email} is not a member of {}", ws.name))?
+                }
+                None if resolve::interactive() => {
+                    resolve::choose("Remove which member?", &members, |m| {
+                        format!("{} <{}> ({})", m.name, m.email, m.role)
+                    })?
+                }
+                None => {
+                    return Err(crate::output::usage(format!(
+                        "name the member's email (members: {})",
+                        members
+                            .iter()
+                            .map(|m| m.email.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+            };
             ctx.confirm(&format!(
                 "Remove {} ({}) from {}?",
                 m.name, m.email, ws.name

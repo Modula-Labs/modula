@@ -136,7 +136,7 @@ impl Instance {
                     "the server rejected the setup token (was it restarted by hand with another one?)"
                 ),
                 404 => bail!(
-                    "setup was already completed on this server; log in with `modula login --url {}`",
+                    "setup was already completed on this server; log in with `modula login {}`",
                     self.origin
                 ),
                 _ => bail!("setup failed (HTTP {status}): {}", api_message(&text)),

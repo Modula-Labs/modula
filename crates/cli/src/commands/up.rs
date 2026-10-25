@@ -125,6 +125,12 @@ async fn target(ctx: &mut Ctx, dir: &Path) -> anyhow::Result<crate::context::Tar
             match apps[..] {
                 [only] => Some(only.clone()),
                 [] => None,
+                _ if crate::resolve::interactive() => Some(
+                    (*crate::resolve::choose("Deploy to which service?", &apps, |s| {
+                        crate::resolve::service_label(s)
+                    })?)
+                    .clone(),
+                ),
                 _ => {
                     return Err(usage(format!(
                         "pass --service or run `modula service <name>` (app services: {})",

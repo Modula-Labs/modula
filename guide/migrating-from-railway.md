@@ -209,7 +209,7 @@ the Railway project read-only for a few days before deleting it.
 
 | Railway | Modula Deploy |
 |---|---|
-| `railway login` | `modula login --url https://deploy.example.com` (or `MODULA_URL` + `MODULA_TOKEN`) |
+| `railway login` | `modula login deploy.example.com` (approve in the browser; or `MODULA_URL` + `MODULA_TOKEN`) |
 | `railway logout` / `whoami` | `modula logout` / `whoami` |
 | `railway link` / `unlink` | `modula link [--project P] [-e ENV]` / `unlink` |
 | `railway connect [service]` | `modula connect [service] [-e ENV]` |

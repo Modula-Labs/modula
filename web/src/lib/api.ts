@@ -116,6 +116,14 @@ export interface Invite {
   createdAt: string;
   expiresAt: string;
 }
+/** A pending `modula login`, shown before approving it. */
+export interface CliLoginRequest {
+  userCode: string;
+  hostname: string;
+  ip: string;
+  createdAt: string;
+  expiresAt: string;
+}
 /** What an invite link offers, shown before joining. */
 export interface InvitePreview {
   workspaceName: string;
@@ -1201,6 +1209,14 @@ export const api = {
   revokeInvite: (id: string) => del<{ ok: true }>(`/api/invites/${enc(id)}`),
   lookupInvite: (token: string) =>
     post<InvitePreview>("/api/invites/lookup", { token }),
+  /** A pending `modula login` by the code the terminal shows (404 once used or expired). */
+  lookupCliLogin: (userCode: string) =>
+    post<CliLoginRequest>("/api/cli/login/lookup", { userCode }),
+  /** Needs sudo: mints an API token the CLI collects. */
+  approveCliLogin: (userCode: string) =>
+    post<{ ok: true }>("/api/cli/login/approve", { userCode }),
+  denyCliLogin: (userCode: string) =>
+    post<{ ok: true }>("/api/cli/login/deny", { userCode }),
   acceptInvite: (token: string) =>
     post<InviteJoined>("/api/invites/accept", { token }),
   /** Creates the account, joins the workspace and signs in (session cookie). */

@@ -70,7 +70,7 @@ pub async fn init(ctx: &mut Ctx, name: &str, workspace: Option<&str>) -> anyhow:
 pub async fn link(ctx: &mut Ctx) -> anyhow::Result<()> {
     let api = ctx.api()?;
     let p = resolve::project(api, ctx.global.project.as_deref()).await?;
-    let env = resolve::pick_environment(&p.environments, ctx.global.environment.as_deref())?;
+    let env = resolve::ask_environment(&p.environments, ctx.global.environment.as_deref())?;
     let mut link = Link::new(&p.id, &p.name, env);
     if let Some(s) = ctx.global.service.as_deref() {
         let s = resolve::pick_service(&p.services, Some(s))?;
@@ -273,7 +273,7 @@ pub async fn open(ctx: &Ctx) -> anyhow::Result<()> {
 }
 
 /// Best effort; the URL is printed either way.
-fn open_in_browser(url: &str) {
+pub(crate) fn open_in_browser(url: &str) {
     let program = if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {

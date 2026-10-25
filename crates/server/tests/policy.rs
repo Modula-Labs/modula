@@ -34,6 +34,11 @@ const PUBLIC_ROUTES: &[(&str, &str)] = &[
     // function's bundle): a signed token bound to a deployment that must
     // still be building (deploy::output).
     ("PUT", "/api/build-output"),
+    // `modula login` in a browser: starting a login grants nothing; its token
+    // is collected only with the secret device code, once, after a signed-in
+    // user approved it with sudo (api::cli_login). Rate-limited per IP.
+    ("POST", "/api/cli/login"),
+    ("POST", "/api/cli/login/token"),
 ];
 
 fn fill(path: &str, id: Id) -> String {

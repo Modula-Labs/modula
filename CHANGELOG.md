@@ -7,6 +7,25 @@ may break things).
 
 ## [Unreleased]
 
+### Added
+
+- **Browser login for the CLI:** `modula login` asks for the server, opens the
+  dashboard to approve the login (compare the code, approve with a recent
+  sign-in) and saves a token named `CLI on <machine>`. `--browserless` prints
+  the URL; `--token`/`MODULA_TOKEN` remain for CI.
+- **Several instances at once:** logins are saved under a local name
+  (`--name`); `modula login list`, `modula login use`, `--login <name>` /
+  `MODULA_LOGIN`, `modula logout [<name>|--all]`. A linked directory keeps
+  using the login it was linked with.
+- **CLI pickers:** at a terminal, a missing or ambiguous project, service,
+  workspace, database, deployment (`rollback`), member or login is chosen
+  from a list instead of failing.
+
+### Changed
+
+- The CLI config file holds named logins (`current` plus `[logins.<name>]`);
+  `modula login` takes the URL as an argument instead of `--url`.
+
 ## [0.1.1] - 2026-10-25
 
 ### Added
