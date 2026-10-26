@@ -520,6 +520,7 @@ async fn cloudflare_domain(
     args: &ServerCreateArgs,
 ) -> anyhow::Result<bool> {
     // Connect: a token from the environment or this session, else ask.
+    let mut opened = false;
     let (cf, zones) = loop {
         let token = match d.cloudflare.clone() {
             Some(t) => t,
@@ -527,12 +528,17 @@ async fn cloudflare_domain(
                 say(
                     out,
                     &format!(
-                        "Create a Cloudflare API token with {} (opening Cloudflare):",
-                        out.accent("Zone → Read and DNS → Edit")
+                        "Create a Cloudflare API token with {}{}:",
+                        out.accent("Zone → Read and DNS → Edit"),
+                        if opened { "" } else { " (opening Cloudflare)" }
                     ),
                 );
                 say(out, &out.dim(CLOUDFLARE_TOKEN_URL));
-                crate::commands::project::open_in_browser(CLOUDFLARE_TOKEN_URL);
+                // Once: a retry shouldn't pop another tab.
+                if !opened {
+                    crate::commands::project::open_in_browser(CLOUDFLARE_TOKEN_URL);
+                    opened = true;
+                }
                 let r = Password::new("Cloudflare API token")
                     .with_display_mode(PasswordDisplayMode::Masked)
                     .without_confirmation()
@@ -560,6 +566,22 @@ async fn cloudflare_domain(
                 "  ✗ {}",
                 "the token can't see any domain (give it Zone → Read for your domains)"
             )),
+            // A network problem isn't the token's fault: keep it and retry.
+            Err(e) if e.downcast_ref::<cloudflare::Unreachable>().is_some() => {
+                out.note(format!("  ✗ {e:#}"));
+                let r = Confirm::new("Try again?")
+                    .with_default(true)
+                    .with_help_message("same token · Esc: back")
+                    .prompt();
+                match answer(r)? {
+                    Some(true) => {
+                        d.cloudflare = Some(token);
+                        continue;
+                    }
+                    Some(false) => {}
+                    None => return Ok(false),
+                }
+            }
             Err(e) => out.note(format!("  ✗ {e:#}")),
         }
         d.cloudflare = None;

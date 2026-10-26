@@ -47,6 +47,19 @@ struct Message {
     message: String,
 }
 
+/// Cloudflare couldn't be reached at all (network, DNS): worth retrying
+/// with the same token.
+#[derive(Debug)]
+pub struct Unreachable(pub String);
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cannot reach Cloudflare: {}", self.0)
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
 pub struct Client {
     http: reqwest::Client,
     base: Url,
@@ -86,10 +99,18 @@ impl Client {
         if let Some(b) = body {
             req = req.json(b);
         }
-        let res = req
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("cannot reach Cloudflare: {}", e.without_url()))?;
+        let res = req.send().await.map_err(|e| {
+            // reqwest's own message is just "error sending request"; the
+            // cause (DNS, TLS, timeout) is in its sources.
+            let e = e.without_url();
+            let mut why = e.to_string();
+            let mut source = std::error::Error::source(&e);
+            while let Some(s) = source {
+                why = format!("{why}: {s}");
+                source = s.source();
+            }
+            anyhow::Error::new(Unreachable(why))
+        })?;
         let status = res.status();
         let bytes = res.bytes().await?;
         let env: Envelope<T> = serde_json::from_slice(&bytes)
@@ -212,5 +233,24 @@ impl Client {
             Some(&body),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod unreachable_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_network_failure_is_unreachable_with_its_cause() {
+        // Nothing listens on port 1.
+        let cf = Client::new(
+            "http://127.0.0.1:1/client/v4".parse().unwrap(),
+            SecretString::from("t".to_owned()),
+        )
+        .unwrap();
+        let e = cf.verify().await.unwrap_err();
+        let u = e.downcast_ref::<Unreachable>().expect("unreachable");
+        // More than reqwest's bare "error sending request".
+        assert!(u.0.len() > "error sending request".len(), "{u}");
     }
 }
