@@ -30,8 +30,8 @@ dependencies:
     specifier: 5.104.5
     version: 5.104.5(@types/react@19.3.0)(react@19.3.1)
   '@tanstack/react-router':
-    specifier: 1.170.45
-    version: 1.170.45(react-dom@19.3.1)(react@19.3.1)
+    specifier: 1.170.46
+    version: 1.170.46(react-dom@19.3.1)(react@19.3.1)
   '@xterm/addon-fit':
     specifier: 0.11.0
     version: 0.11.0
@@ -1157,8 +1157,8 @@ packages:
       react: 19.3.1
     dev: false
 
-  /@tanstack/react-router@1.170.45(react-dom@19.3.1)(react@19.3.1):
-    resolution: {integrity: sha512-6tuiIAFb82zsk/YxveJRyGjbsm6kIfgUuoH7qCp2R2aSHveW6W0t/6j+Sn4m1iIlA2lLU4cvooqks08/YMOThw==}
+  /@tanstack/react-router@1.170.46(react-dom@19.3.1)(react@19.3.1):
+    resolution: {integrity: sha512-ez1iNIhsPjGlaDHg3BXWs67EWVIYzB2tbopEHYDESdkO7owgkGb5de52+5Kv2v1fxdkggcNzo35bdk4arTVGQw==}
     engines: {node: '>=20.19'}
     peerDependencies:
       react: '>=18.0.0 || >=19.0.0'
@@ -1166,7 +1166,7 @@ packages:
     dependencies:
       '@tanstack/history': 1.162.5
       '@tanstack/react-store': 0.11.2(react-dom@19.3.1)(react@19.3.1)
-      '@tanstack/router-core': 1.171.38
+      '@tanstack/router-core': 1.171.39
       isbot: 5.2.2
       react: 19.3.1
       react-dom: 19.3.1(react@19.3.1)
@@ -1184,14 +1184,14 @@ packages:
       use-sync-external-store: 1.7.0(react@19.3.1)
     dev: false
 
-  /@tanstack/router-core@1.171.38:
-    resolution: {integrity: sha512-XRZVxiO6BIexICmEo3XfPmpoyyLhbjgaMJsONz4gIf5oYys0UiaG1BJGRyj9x8QZPDZcBhvAMuTYN70wSxV0gA==}
+  /@tanstack/router-core@1.171.39:
+    resolution: {integrity: sha512-qUhoJ0meuSUqGYQbHbcJYdASr06YtK+bulbj6vtrhKYFkLgkSsZ6tXmMyym7sFxiSJSPYgasgozrL01LyyR/6A==}
     engines: {node: '>=20.19'}
     dependencies:
       '@tanstack/history': 1.162.5
       cookie-es: 3.1.1
-      seroval: 1.7.0
-      seroval-plugins: 1.6.12(seroval@1.7.0)
+      seroval: 1.7.2
+      seroval-plugins: 1.7.2(seroval@1.7.2)
     dev: false
 
   /@tanstack/store@0.11.2:
@@ -2390,17 +2390,17 @@ packages:
   /scheduler@0.28.0:
     resolution: {integrity: sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==}
 
-  /seroval-plugins@1.6.12(seroval@1.7.0):
-    resolution: {integrity: sha512-+reiwp/lYxiyctSrdvX7OQ1YLrcbWYgBiZrhSFL+V43b0/DGRLNVSDyZINbQe+tWplPOI2fw2dPrdv6hcc09kQ==}
-    engines: {node: '>=10'}
+  /seroval-plugins@1.7.2(seroval@1.7.2):
+    resolution: {integrity: sha512-ud8kMCGLHmGkW9YtVDluJtqTukSx/4YBqtmPAvAz/HxbIwhwMeZU52imxeyZ1zoAXtqBDiaLwSasbnK9DptrDg==}
+    engines: {node: '>=20'}
     peerDependencies:
       seroval: ^1.0
     dependencies:
-      seroval: 1.7.0
+      seroval: 1.7.2
     dev: false
 
-  /seroval@1.7.0:
-    resolution: {integrity: sha512-FU+LUkmDzWNsJ6oubZFN3dGPKny53DRhPJG6nftEaXDL8MIn19+kEE1Gvc+63Go+qPOwVUlKIdKhsu2HN6tksw==}
+  /seroval@1.7.2:
+    resolution: {integrity: sha512-NPOYrDVbvtuTo5m9InqKE7O6wBASON46OabjyqLUGPvoXNDYp0pReuFYkqOQwGsoj1OpZVj6mIdnRRgt5O1/gQ==}
     engines: {node: '>=20'}
     dev: false
 
