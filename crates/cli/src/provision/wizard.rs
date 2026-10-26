@@ -680,7 +680,8 @@ async fn dns_step(
     args: &ServerCreateArgs,
 ) -> anyhow::Result<Nav> {
     let domain = d.domain.clone().expect("domain first");
-    if matches!(d.dns, Some(DnsPlan::Instant)) {
+    // Without --domain, the address question already settled DNS.
+    if args.domain.is_none() || matches!(d.dns, Some(DnsPlan::Instant)) {
         return Ok(Nav::Next);
     }
     loop {
