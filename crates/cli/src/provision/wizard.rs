@@ -618,31 +618,35 @@ async fn cloudflare_domain(
             .expect("listed")
             .clone();
 
-        let default_sub = d
+        // Empty means the domain itself; a previous answer is filled back in.
+        let previous = d
             .domain
             .as_deref()
             .and_then(|dom| dom.strip_suffix(&format!(".{zone_name}")))
-            .unwrap_or("deploy")
-            .to_owned();
-        let r = Text::new("Subdomain")
-            .with_default(&default_sub)
-            .with_help_message(&format!(
-                "the dashboard at <subdomain>.{zone_name} · a single - : {zone_name} itself · Esc: back"
-            ))
+            .map(str::to_owned);
+        let help = format!(
+            "e.g. deploy → deploy.{zone_name} · leave empty for {zone_name} itself · Esc: back"
+        );
+        let mut t = Text::new("Subdomain")
+            .with_placeholder("deploy")
+            .with_help_message(&help)
             .with_validator(validator(|v: &str| {
                 let v = v.trim();
-                if v.is_empty() || v == "-" {
+                if v.is_empty() {
                     Ok(String::new())
                 } else {
                     valid_domain(&format!("{v}.example.com"))
                 }
-            }))
-            .prompt();
+            }));
+        if let Some(p) = &previous {
+            t = t.with_initial_value(p);
+        }
+        let r = t.prompt();
         let Some(sub) = answer(r)? else {
             continue;
         };
         let sub = sub.trim().trim_end_matches('.').to_ascii_lowercase();
-        let domain = if sub.is_empty() || sub == "-" {
+        let domain = if sub.is_empty() {
             zone_name.clone()
         } else {
             format!("{sub}.{zone_name}")
@@ -892,15 +896,14 @@ fn confirm_step(out: &Output, d: &Draft) -> anyhow::Result<Nav> {
     row(
         "DNS",
         match &d.dns {
-            Some(DnsPlan::Cloudflare { zone, replace }) if !replace.is_empty() => {
+            Some(DnsPlan::Cloudflare { replace, .. }) if !replace.is_empty() => {
                 format!(
-                    "Cloudflare creates the A record in {} (replacing {})",
-                    zone.name,
+                    "Cloudflare: A record {domain} → the new server (replacing {})",
                     describe_records(replace)
                 )
             }
-            Some(DnsPlan::Cloudflare { zone, .. }) => {
-                format!("Cloudflare creates the A record in {}", zone.name)
+            Some(DnsPlan::Cloudflare { .. }) => {
+                format!("Cloudflare: A record {domain} → the new server")
             }
             Some(DnsPlan::Instant) => {
                 "nothing to set up yet: the dashboard uses the server's IP".into()
