@@ -1303,7 +1303,8 @@ wait_healthy() {
 enable_units() {
   local n
   for n in "$@"; do
-    systemctl enable --now "$n.socket" >/dev/null 2>&1
+    # Only some units have a socket (errexit is on: a missing one would end the step).
+    if [[ -f /etc/systemd/system/$n.socket ]]; then systemctl enable --now "$n.socket" >/dev/null 2>&1; fi
     systemctl enable --now "$n.service" >/dev/null 2>&1
   done
   return 0

@@ -93,7 +93,7 @@ pub fn friendly(name: &str) -> String {
         "Setting up the firewall" => "Setting up the firewall & hardening".into(),
         "Creating users and directories" => "Creating users and directories".into(),
         n if n.starts_with("Downloading release") => {
-            n.replacen("Downloading release", "Downloading Modula", 1)
+            n.replacen("Downloading release", "Installing Modula", 1)
         }
         n => n.to_owned(),
     }
@@ -131,7 +131,7 @@ mod tests {
     fn friendly_names() {
         assert_eq!(
             friendly("Downloading release (latest)"),
-            "Downloading Modula (latest)"
+            "Installing Modula (latest)"
         );
         assert_eq!(friendly("Setting up Redis"), "Setting up Redis");
     }
