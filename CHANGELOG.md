@@ -7,6 +7,17 @@ may break things).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-26
+
+### Fixed
+
+- **Fresh installs stopped at "Starting the node and edge"**: the node never
+  started (a missing socket unit ended the step). Fixed in `install.sh`.
+- `modula server create`: a network error talking to Cloudflare keeps the
+  token and offers to retry (and says why); the DNS question isn't asked
+  again after picking a Cloudflare domain; an empty subdomain means the
+  domain itself; the summary names the record it creates.
+
 ## [0.1.4] - 2026-10-25
 
 ### Added
@@ -179,7 +190,8 @@ environments and staged deploys, licensed AGPL-3.0-only.
 - **CLI:** `modula` for projects, deployments, logs, variables, metrics,
   `modula.toml` infrastructure as code, and `modula server create`.
 
-[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/Modula-Labs/modula/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/Modula-Labs/modula/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/Modula-Labs/modula/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/Modula-Labs/modula/compare/v0.1.1...v0.1.2
