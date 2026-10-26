@@ -21,7 +21,7 @@ modula-hetzner = { path = "crates/hetzner" }
 anyhow = "1"
 # Backups: age encryption (x25519 recipients, streaming) and S3 request signing.
 age = { version = "0.12", features = ["async"] }
-bech32 = "0.11"
+bech32 = "0.12"
 bytes = "1"
 percent-encoding = "2"
 rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto", "xml"] }
