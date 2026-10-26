@@ -378,7 +378,7 @@ async fn creates_a_server_and_logs_in(pool: PgPool) {
         "Checking the server",
         "Updating packages, installing Docker, Postgres & Redis",
         "Setting up the firewall & hardening",
-        "Downloading Modula (latest)",
+        "Installing Modula (latest)",
         "Starting services",
     ] {
         assert!(steps.iter().any(|d| d == s), "step {s} not done: {steps:?}");

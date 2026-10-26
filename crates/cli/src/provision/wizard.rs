@@ -624,24 +624,7 @@ async fn cloudflare_domain(
             .as_deref()
             .and_then(|dom| dom.strip_suffix(&format!(".{zone_name}")))
             .map(str::to_owned);
-        let help = format!(
-            "e.g. deploy → deploy.{zone_name} · leave empty for {zone_name} itself · Esc: back"
-        );
-        let mut t = Text::new("Subdomain")
-            .with_placeholder("deploy")
-            .with_help_message(&help)
-            .with_validator(validator(|v: &str| {
-                let v = v.trim();
-                if v.is_empty() {
-                    Ok(String::new())
-                } else {
-                    valid_domain(&format!("{v}.example.com"))
-                }
-            }));
-        if let Some(p) = &previous {
-            t = t.with_initial_value(p);
-        }
-        let r = t.prompt();
+        let r = ask_subdomain(&zone_name, previous.as_deref());
         let Some(sub) = answer(r)? else {
             continue;
         };
@@ -766,6 +749,29 @@ async fn dns_step(
             }
         }
     }
+}
+
+/// The subdomain question, kept out of the async flow: inquire's prompts
+/// aren't `Send`, so none may live across an `.await`.
+fn ask_subdomain(zone_name: &str, previous: Option<&str>) -> inquire::error::InquireResult<String> {
+    let help = format!(
+        "e.g. deploy → deploy.{zone_name} · leave empty for {zone_name} itself · Esc: back"
+    );
+    let mut t = Text::new("Subdomain")
+        .with_placeholder("deploy")
+        .with_help_message(&help)
+        .with_validator(validator(|v: &str| {
+            let v = v.trim();
+            if v.is_empty() {
+                Ok(String::new())
+            } else {
+                valid_domain(&format!("{v}.example.com"))
+            }
+        }));
+    if let Some(p) = previous {
+        t = t.with_initial_value(p);
+    }
+    t.prompt()
 }
 
 fn email_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {

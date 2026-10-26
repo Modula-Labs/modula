@@ -7,6 +7,11 @@ updates:
     groups:
       cargo-minor-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # 10+ needs a crypto backend feature: rust_crypto pulls the rsa crate
+      # (timing advisory), aws_lc_rs is C. 9 uses ring like the rest.
+      - dependency-name: jsonwebtoken
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /web

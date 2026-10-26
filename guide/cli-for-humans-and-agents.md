@@ -67,7 +67,7 @@ and logs this CLI in. You're ready for `modula init` and `modula up`.
   ✓ Setting up the firewall & hardening                    4s
   ✓ deploy.example.com points at 203.0.113.10
   ✓ Turning on security updates                            12s
-  ✓ Downloading Modula (latest)                            9s
+  ✓ Installing Modula (latest)                            9s
   ✓ Setting up Postgres                                    3s
   ⠼ Starting services  14s · connection refused
   ✓ Services started                                       21s
