@@ -674,12 +674,17 @@ async fn servers_are_upgraded_one_at_a_time(pool: PgPool) {
     assert_eq!(a_reqs.len(), 1);
     assert_eq!(b_reqs.len(), 1);
     assert_eq!(a_reqs[0].0, v);
-    // worker-b was asked only after worker-a came back on the new version:
-    // its reconnect alone takes at least the node's 1 s backoff.
+    // Whichever went first, the other was asked only after it came back on
+    // the new version: its reconnect alone takes at least the node's 1 s backoff.
+    let (first, second) = if a_reqs[0].1 <= b_reqs[0].1 {
+        (a_reqs[0].1, b_reqs[0].1)
+    } else {
+        (b_reqs[0].1, a_reqs[0].1)
+    };
     assert!(
-        b_reqs[0].1.duration_since(a_reqs[0].1) >= Duration::from_secs(1),
-        "worker-b was asked {:?} after worker-a",
-        b_reqs[0].1.duration_since(a_reqs[0].1)
+        second.duration_since(first) >= Duration::from_secs(1),
+        "the second server was asked {:?} after the first",
+        second.duration_since(first)
     );
     wait_for("both upgrades recorded as done", 10, || async {
         let done: i64 = sqlx::query_scalar(
