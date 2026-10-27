@@ -1,0 +1,198 @@
+@import "tailwindcss";
+@import "./theme.css";
+
+/* Kobra / shadcn tokens live in theme.css (four knobs: --brand-h/c, --tint-h/c).
+   Dark is the default: <html class="dark">. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme inline {
+  /* Kobra ships two weights: medium reads as regular, semibold as bold. */
+  --font-weight-medium: 400;
+  --font-weight-semibold: 700;
+  --color-badge-blue-bg: var(--badge-blue-bg);
+  --color-badge-blue-fg: var(--badge-blue-fg);
+  --color-badge-green-bg: var(--badge-green-bg);
+  --color-badge-green-fg: var(--badge-green-fg);
+  --color-badge-amber-bg: var(--badge-amber-bg);
+  --color-badge-amber-fg: var(--badge-amber-fg);
+  --color-badge-red-bg: var(--badge-red-bg);
+  --color-badge-red-fg: var(--badge-red-fg);
+  --color-badge-violet-bg: var(--badge-violet-bg);
+  --color-badge-violet-fg: var(--badge-violet-fg);
+  --color-badge-neutral-bg: var(--badge-neutral-bg);
+  --color-badge-neutral-fg: var(--badge-neutral-fg);
+  /* Kobra: menus shadow-md, dialogs shadow-2xl, each with a 1px foreground ring at 10%. */
+  --shadow-menu: 0 0 0 1px color-mix(in oklch, var(--foreground) 10%, transparent), 0 4px 6px -1px oklch(0 0 0 / 0.1), 0 2px 4px -2px oklch(0 0 0 / 0.1);
+  --shadow-submenu: 0 0 0 1px color-mix(in oklch, var(--foreground) 10%, transparent), 0 10px 15px -3px oklch(0 0 0 / 0.1), 0 4px 6px -4px oklch(0 0 0 / 0.1);
+  --shadow-modal: 0 0 0 1px color-mix(in oklch, var(--foreground) 10%, transparent), 0 25px 50px -12px oklch(0 0 0 / 0.25);
+  /* Our tactile "raise" for filled buttons: a light top edge and a soft contact shadow. */
+  --shadow-raise: inset 0 1px 0 oklch(1 0 0 / 0.16), 0 1px 2px oklch(0 0 0 / 0.12), 0 0 0 1px oklch(0 0 0 / 0.04);
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 20px;
+    -webkit-font-smoothing: antialiased;
+  }
+  * {
+    border-color: var(--border);
+  }
+  ::selection {
+    background: color-mix(in oklch, var(--foreground) 18%, transparent);
+  }
+  /* Slim, rounded scrollbars that sit inside their container (Railway-like). */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklch, var(--muted-foreground) 35%, transparent) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    border: 4px solid transparent;
+    border-radius: 9999px;
+    background: color-mix(in oklch, var(--muted-foreground) 35%, transparent) padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklch, var(--muted-foreground) 60%, transparent) padding-box;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  /* Kobra focus: a 2px ring 1px out (controls with their own ring opt out with outline-none). */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
+}
+
+@layer components {
+  .dotgrid {
+    background-image: radial-gradient(var(--canvas-dot) 1px, transparent 1px);
+    background-size: 16px 16px;
+  }
+  /* Section eyebrow (Kobra has no caps style; kept small, muted, regular). */
+  .text-caps {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 400;
+    color: var(--muted-foreground);
+  }
+}
+
+@keyframes mc-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes mc-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes mc-slide-in {
+  from {
+    transform: translateX(32px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes mc-slide-out {
+  from {
+    transform: none;
+    opacity: 1;
+  }
+  to {
+    transform: translateX(32px);
+    opacity: 0;
+  }
+}
+.anim-modal {
+  animation: mc-fade-in 160ms var(--ease-out);
+}
+.anim-pop {
+  animation: mc-pop-in 120ms var(--ease-out);
+}
+.anim-sheet {
+  animation: mc-slide-in 240ms var(--ease-out);
+}
+.anim-sheet-out {
+  animation: mc-slide-out 200ms var(--ease-out) forwards;
+  pointer-events: none;
+}
+/* Context menus grow from the cursor (Radix sets the origin) and shrink back. */
+@keyframes mc-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@keyframes mc-menu-out {
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+.anim-menu {
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin);
+}
+.anim-menu[data-state="open"] {
+  animation: mc-menu-in 120ms var(--ease-out);
+}
+.anim-menu[data-state="closed"] {
+  animation: mc-menu-out 100ms var(--ease-out) forwards;
+}
+/* Points at a control a link led to (a warning's fix): a ring that pulses out twice. */
+@keyframes mc-pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 10px color-mix(in oklch, var(--primary) 0%, transparent);
+  }
+}
+.anim-pulse-ring {
+  border-radius: 0.75rem;
+  animation: mc-pulse-ring 900ms var(--ease-out) 2;
+}
+@media (prefers-reduced-motion: reduce) {
+  .anim-pulse-ring {
+    animation: none;
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  .anim-modal,
+  .anim-pop,
+  .anim-sheet,
+  .anim-sheet-out,
+  .anim-menu[data-state] {
+    animation: none;
+  }
+}

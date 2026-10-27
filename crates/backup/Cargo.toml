@@ -1,0 +1,24 @@
+[package]
+name = "modula-backup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Streaming age encryption and S3 multipart uploads for Modula Deploy backups"
+
+[dependencies]
+age.workspace = true
+anyhow.workspace = true
+bech32.workspace = true
+bytes.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+rusty-s3.workspace = true
+tokio = { workspace = true, features = ["net", "time", "fs", "io-util"] }
+tokio-util = { workspace = true, features = ["io"] }
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

@@ -1,0 +1,296 @@
+//! Starting a deployment: snapshot the instance's config and variables, place
+//! it on a node, supersede anything still rolling out, and bump the nodes.
+//! Shared by manual deploys, pushes (webhooks) and rollbacks.
+
+use modula_id::Id;
+
+use super::config::ServiceConfig;
+use super::{bump, env, placement};
+use crate::error::AppResult;
+use crate::github::Commit;
+use crate::state::AppState;
+
+/// Why a deployment exists (shown in the UI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    Manual,
+    Push,
+    Redeploy,
+    Rollback,
+    /// `modula up`: files uploaded from a developer's machine.
+    Upload,
+}
+
+impl Trigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Push => "push",
+            Self::Redeploy => "redeploy",
+            Self::Rollback => "rollback",
+            Self::Upload => "upload",
+        }
+    }
+}
+
+pub struct NewDeployment {
+    pub instance: Id,
+    pub config: ServiceConfig,
+    pub trigger: Trigger,
+    pub created_by: Option<Id>,
+    /// The commit to build (repository sources).
+    pub commit: Option<Commit>,
+    /// Uploaded sources: the local Git state the CLI reported.
+    pub local_git: Option<LocalGit>,
+    /// Run this exact, already-built image instead of building.
+    pub prebuilt: Option<Prebuilt>,
+    /// The deployment a redeploy or rollback repeats.
+    pub source_deployment: Option<Id>,
+}
+
+/// Where an uploaded source came from, as the CLI saw it (display only;
+/// stored in the commit columns, which never drive a build for uploads).
+#[derive(Debug, Clone, Default)]
+pub struct LocalGit {
+    /// Full lowercase hex sha of the local HEAD.
+    pub commit: Option<String>,
+    /// `up -m`, else the local commit's subject.
+    pub message: Option<String>,
+    pub branch: Option<String>,
+    /// Uncommitted changes were included.
+    pub dirty: Option<bool>,
+}
+
+pub struct Prebuilt {
+    pub image: String,
+    pub digest: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct Started {
+    pub id: Id,
+    pub node: Id,
+    /// Nodes whose desired state changed; kick them after the commit.
+    pub kick: Vec<Id>,
+}
+
+/// Node-local tag for an image built from source. Never pulled.
+pub fn build_tag(service_id: Id, deployment_id: Id) -> String {
+    format!("{BUILD_PREFIX}{service_id}:{deployment_id}")
+}
+pub const BUILD_PREFIX: &str = "modula-build/";
+
+pub async fn start(
+    state: &AppState,
+    tx: &mut sqlx::PgConnection,
+    env_id: Id,
+    d: NewDeployment,
+) -> AppResult<Started> {
+    d.config.validate()?;
+    if !d.config.deployable() {
+        return Err(crate::error::AppError::bad_request(
+            "an R2 bucket runs at Cloudflare: there is nothing to deploy",
+        ));
+    }
+    if d.config.cloudflare().is_some() {
+        crate::integrations::cloudflare::publish::preflight(state, d.instance).await?;
+    }
+    let id = Id::new();
+    let resolved = env::resolve_for_deployment(
+        &state.keys,
+        &state.db,
+        state.cfg.tcp_proxy_host.as_deref(),
+        env_id,
+        d.instance,
+        Some(id),
+    )
+    .await?;
+    let env_sealed = env::seal_snapshot(&state.keys, &state.db, env_id, id, &resolved.vars).await?;
+    let raw = env::raw_variables(&state.keys, &state.db, env_id, d.instance).await?;
+    let vars_sealed = env::seal_vars_snapshot(&state.keys, &state.db, env_id, id, &raw).await?;
+    let service_id: Id =
+        sqlx::query_scalar("SELECT service_id FROM service_instances WHERE id = $1 FOR UPDATE")
+            .bind(d.instance)
+            .fetch_one(&mut *tx)
+            .await?;
+
+    // What runs: an image as configured, a rebuilt-before image, or a build
+    // (held back until CI passes for a push with `waitForCi`).
+    let waits_for_ci = d.trigger == Trigger::Push && d.config.wait_for_ci && d.commit.is_some();
+    let (status, image, digest) = match (&d.prebuilt, d.config.builds_from_source()) {
+        (Some(p), _) => ("deploying", p.image.clone(), p.digest.clone()),
+        (None, true) if waits_for_ci => ("waiting_ci", build_tag(service_id, id), None),
+        (None, true) => ("building", build_tag(service_id, id), None),
+        (None, false) => ("deploying", d.config.source_label(), None),
+    };
+    let node = placement::choose(&mut *tx, d.instance).await?;
+    // Volume-backed services can't run twice on the same data.
+    let has_volume: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM volumes WHERE service_instance_id = $1)")
+            .bind(d.instance)
+            .fetch_one(&mut *tx)
+            .await?;
+    if has_volume && d.config.function().is_some() {
+        return Err(crate::error::AppError::Conflict(
+            "a function has no disk: remove the volume, or keep state in a database".into(),
+        ));
+    }
+    if has_volume && d.config.replicas > 1 {
+        return Err(crate::error::AppError::Conflict(
+            "a service with a volume runs one replica: raise its CPU and memory instead".into(),
+        ));
+    }
+    if has_volume && d.config.serverless.is_some() {
+        return Err(crate::error::AppError::Conflict(
+            "a service with a volume can't be serverless: its data must stay with one running container".into(),
+        ));
+    }
+    let extra = placement::choose_replicas(&mut *tx, d.instance, node, d.config.replicas).await?;
+    // A newer deployment supersedes any still in progress or waiting for CI
+    // (the running one keeps serving until the new one is healthy).
+    let superseded: Vec<Option<Id>> = sqlx::query_scalar(
+        "WITH gone AS (
+             UPDATE deployments SET status = 'cancelled', finished_at = now(), updated_at = now()
+             WHERE service_instance_id = $1 AND status IN ('waiting_ci', 'queued', 'building', 'deploying')
+             RETURNING id)
+         SELECT r.node_id FROM deployment_replicas r JOIN gone ON gone.id = r.deployment_id",
+    )
+    .bind(d.instance)
+    .fetch_all(&mut *tx)
+    .await?;
+    // A service with a volume can't run twice on the same data: an image
+    // deployment retires the serving one now (a build does so once built,
+    // see state.rs), and the node stops it before starting the new one.
+    let retired = if status == "deploying" {
+        retire_for_volume(&mut *tx, d.instance, None).await?
+    } else {
+        Vec::new()
+    };
+    let commit = d.commit.as_ref();
+    let local = d.local_git.as_ref();
+    sqlx::query(
+        "INSERT INTO deployments (id, service_instance_id, node_id, status, image, image_digest, config,
+                                  env_sealed, trigger, created_by, commit_sha, commit_message, commit_author,
+                                  commit_author_login, source_deployment_id, upload_id, source_branch,
+                                  source_dirty, vars_sealed)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
+    )
+    .bind(id)
+    .bind(d.instance)
+    .bind(node)
+    .bind(status)
+    .bind(&image)
+    .bind(&digest)
+    .bind(serde_json::to_value(&d.config).map_err(anyhow::Error::from)?)
+    .bind(&env_sealed)
+    .bind(d.trigger.as_str())
+    .bind(d.created_by)
+    .bind(commit.map(|c| &c.sha).or(local.and_then(|g| g.commit.as_ref())))
+    .bind(commit.map(|c| &c.message).or(local.and_then(|g| g.message.as_ref())))
+    .bind(commit.map(|c| &c.author))
+    .bind(commit.and_then(|c| c.author_login.as_ref()))
+    .bind(d.source_deployment)
+    .bind(d.config.upload())
+    .bind(local.and_then(|g| g.branch.as_ref()))
+    .bind(local.and_then(|g| g.dirty))
+    .bind(&vars_sealed)
+    .execute(&mut *tx)
+    .await?;
+    // Addresses on the private network (the trigger created replica 0), and
+    // the service's virtual IP the first time it runs there.
+    let mesh_ip = crate::mesh::allocate_ip(&mut *tx, node).await?;
+    if mesh_ip.is_some() {
+        crate::mesh::ensure_vip(&mut *tx, d.instance).await?;
+    }
+    sqlx::query(
+        "UPDATE deployment_replicas SET mesh_ip = $2 WHERE deployment_id = $1 AND ordinal = 0",
+    )
+    .bind(id)
+    .bind(&mesh_ip)
+    .execute(&mut *tx)
+    .await?;
+    for (i, n) in extra.iter().enumerate() {
+        let ip = crate::mesh::allocate_ip(&mut *tx, *n).await?;
+        sqlx::query(
+            "INSERT INTO deployment_replicas (deployment_id, ordinal, node_id, mesh_ip) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(i as i16 + 1)
+        .bind(n)
+        .bind(&ip)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let what = match (commit, d.config.upload()) {
+        (Some(c), None) if status == "waiting_ci" => format!(
+            "Waiting for CI on {} before building {}",
+            &c.sha[..7],
+            d.config.source_label()
+        ),
+        (_, Some(_)) if d.prebuilt.is_none() => "Building uploaded files".to_owned(),
+        (Some(c), None) => format!("Building {} at {}", d.config.source_label(), &c.sha[..7]),
+        _ if d.config.function().is_some() => "Deploying the function's code".to_owned(),
+        _ => format!("Deploying {image}"),
+    };
+    sqlx::query(
+        "INSERT INTO deployment_events (deployment_id, phase, message) VALUES ($1, 'queued', $2)",
+    )
+    .bind(id)
+    .bind(what)
+    .execute(&mut *tx)
+    .await?;
+    if status == "waiting_ci" {
+        crate::github::ci::schedule_timeout(&mut *tx, id).await?;
+    }
+    // Code written in the dashboard goes to Cloudflare as it is: no node
+    // takes part.
+    if status == "deploying" && d.config.cloudflare().is_some() && d.config.function().is_some() {
+        crate::integrations::cloudflare::publish::enqueue(&mut *tx, id, "").await?;
+    }
+
+    if !resolved.missing.is_empty() {
+        sqlx::query(
+            "INSERT INTO deployment_events (deployment_id, phase, message) VALUES ($1, 'warning', $2)",
+        )
+        .bind(id)
+        .bind(format!(
+            "These referenced variables don't exist and were left empty: {}",
+            resolved.missing.join(", ")
+        ))
+        .execute(&mut *tx)
+        .await?;
+    }
+    let mut kick: Vec<Id> = superseded.into_iter().flatten().chain(retired).collect();
+    kick.push(node);
+    kick.extend(extra);
+    // The rest of the environment lets the new replicas in (a database on
+    // another server must accept the new API before it is healthy).
+    kick.extend(crate::mesh::bump_environment(&mut *tx, env_id).await?);
+    kick.sort();
+    kick.dedup();
+    for n in &kick {
+        bump(&mut *tx, *n).await?;
+    }
+    Ok(Started { id, node, kick })
+}
+
+/// For a service with a volume, mark its serving deployment removed (other
+/// than `keep`). Returns the nodes to kick. No-op without a volume.
+pub async fn retire_for_volume(
+    tx: &mut sqlx::PgConnection,
+    instance: Id,
+    keep: Option<Id>,
+) -> AppResult<Vec<Id>> {
+    let nodes: Vec<Option<Id>> = sqlx::query_scalar(
+        "UPDATE deployments SET status = 'removed', finished_at = now(), updated_at = now()
+         WHERE service_instance_id = $1 AND status IN ('active', 'sleeping', 'crashed')
+           AND id IS DISTINCT FROM $2
+           AND EXISTS (SELECT 1 FROM volumes WHERE service_instance_id = $1)
+         RETURNING node_id",
+    )
+    .bind(instance)
+    .bind(keep)
+    .fetch_all(&mut *tx)
+    .await?;
+    Ok(nodes.into_iter().flatten().collect())
+}

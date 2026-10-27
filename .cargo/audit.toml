@@ -1,0 +1,13 @@
+# Same exceptions as deny.toml (keep the two in sync).
+[advisories]
+ignore = [
+    # basic-toml is unmaintained (no vulnerability), reached only through
+    # age's compile-time i18n macro.
+    "RUSTSEC-2026-0374",
+    # crypto-bigint timing: reachable through age's p256/hpke plugin
+    # recipients (backups use x25519 only) and webauthn-rs, which only
+    # verifies signatures over public keys and data.
+    "RUSTSEC-2026-0387",
+    # rsa (Marvin) via webauthn-rs: public-key verification only.
+    "RUSTSEC-2023-0071",
+]

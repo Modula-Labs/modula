@@ -1,0 +1,319 @@
+pub mod account;
+pub mod activity;
+pub mod alerts;
+pub mod app_templates;
+pub mod auth;
+pub mod backups;
+pub mod buckets;
+pub mod cli_login;
+pub mod cron;
+pub mod database;
+pub mod deployments;
+pub mod domains;
+pub mod env_config;
+pub mod github;
+pub mod http_logs;
+pub mod install;
+pub mod instance;
+pub mod logs;
+pub mod members;
+pub mod metrics;
+pub mod nodes;
+pub mod pitr;
+pub mod placement;
+pub mod projects;
+pub mod replicas;
+pub mod repo_detect;
+pub mod services;
+pub mod storage;
+pub mod tokens;
+pub mod updates;
+pub mod uploads;
+pub mod variables;
+pub mod warnings;
+pub mod webhooks;
+pub mod workspaces;
+
+use crate::authz::Action;
+use crate::http::{Access, ApiRouter};
+use crate::integrations::cloudflare::api as cloudflare;
+use crate::integrations::hetzner::api as hetzner;
+use crate::migrate::api as migrate;
+use crate::provision;
+use crate::state::AppState;
+
+/// Every API route, with its access policy. Keep this table readable: it is
+/// the security review surface.
+#[rustfmt::skip]
+pub fn routes(state: AppState) -> ApiRouter {
+    use Access::{Authenticated, Instance, MfaPending, Public, Resource, Sudo};
+    ApiRouter::new(state)
+        .get("/api/health", Public, instance::health)
+        .get("/api/maintenance", Public, crate::migrate::maintenance::status)
+        .get("/api/instance", Public, instance::status)
+        // Installer and release files for servers joining this instance
+        .get("/api/install.sh", Public, install::install_script)
+        .get("/api/releases", Public, install::release_file)
+        // Auth
+        .post("/api/auth/setup", Public, auth::setup)
+        .post("/api/auth/login", Public, auth::login)
+        .get("/api/auth/mfa", MfaPending, auth::mfa_methods)
+        .post("/api/auth/mfa", MfaPending, auth::mfa_verify)
+        .post("/api/auth/mfa/passkey", MfaPending, auth::mfa_passkey)
+        .post("/api/auth/sudo", Authenticated, auth::sudo)
+        .post("/api/auth/sudo/passkey", Authenticated, auth::sudo_passkey)
+        .post("/api/auth/logout", Authenticated, auth::logout)
+        .get("/api/auth/me", Authenticated, auth::me)
+        // Own account
+        .get("/api/account/security", Authenticated, account::security)
+        .post("/api/account/totp", Sudo, account::totp_begin)
+        .post("/api/account/totp/confirm", Sudo, account::totp_confirm)
+        .delete("/api/account/totp", Sudo, account::totp_disable)
+        .post("/api/account/backup-codes", Sudo, account::backup_codes_regenerate)
+        .post("/api/account/passkeys", Sudo, account::passkey_begin)
+        .post("/api/account/passkeys/confirm", Sudo, account::passkey_confirm)
+        .patch("/api/account/passkeys/{passkey_id}", Resource(Action::PasskeyRename), account::passkey_rename)
+        .delete("/api/account/passkeys/{passkey_id}", Resource(Action::PasskeyDelete), account::passkey_delete)
+        .post("/api/account/password", Sudo, account::change_password)
+        .get("/api/account/sessions", Authenticated, account::sessions)
+        .delete("/api/account/sessions/{session_id}", Resource(Action::SessionRevoke), account::session_revoke)
+        // API tokens (Authorization: Bearer mdt_…); creating one needs sudo, so tokens can't mint tokens.
+        .get("/api/account/tokens", Authenticated, tokens::list)
+        .post("/api/account/tokens", Sudo, tokens::create)
+        .delete("/api/account/tokens/{token_id}", Resource(Action::TokenRevoke), tokens::revoke)
+        // `modula login` in a browser: the CLI starts a login and polls for its token with a
+        // secret device code; a signed-in user approves it (sudo, mints a token) or denies it.
+        .post(cli_login::START_PATH, Public, cli_login::start)
+        .post(cli_login::TOKEN_PATH, Public, cli_login::poll)
+        .post("/api/cli/login/lookup", Authenticated, cli_login::lookup)
+        .post("/api/cli/login/approve", Sudo, cli_login::approve)
+        .post("/api/cli/login/deny", Authenticated, cli_login::deny)
+        // Workspaces
+        .get("/api/workspaces", Authenticated, workspaces::list)
+        .post("/api/workspaces", Authenticated, workspaces::create)
+        .get("/api/workspaces/{workspace_id}", Resource(Action::WorkspaceRead), workspaces::get)
+        .patch("/api/workspaces/{workspace_id}", Resource(Action::WorkspaceUpdate), workspaces::update)
+        .delete("/api/workspaces/{workspace_id}", Resource(Action::WorkspaceDelete), workspaces::delete)
+        // Members and invite links (no email: admins share the link themselves)
+        .get("/api/workspaces/{workspace_id}/members", Resource(Action::MemberList), members::list)
+        .patch("/api/members/{member_id}", Resource(Action::MemberUpdate), members::update)
+        .delete("/api/members/{member_id}", Resource(Action::MemberRemove), members::remove)
+        .post("/api/workspaces/{workspace_id}/leave", Resource(Action::MemberLeave), members::leave)
+        .get("/api/workspaces/{workspace_id}/invites", Resource(Action::MemberInvite), members::list_invites)
+        .post("/api/workspaces/{workspace_id}/invites", Resource(Action::MemberInvite), members::create_invite)
+        .delete("/api/invites/{invite_id}", Resource(Action::InviteRevoke), members::revoke_invite)
+        // The invite token in the body is the credential; rate-limited per IP.
+        .post("/api/invites/lookup", Public, members::lookup)
+        .post("/api/invites/signup", Public, members::signup)
+        .post("/api/invites/accept", Authenticated, members::accept)
+        // Projects and environments
+        .get("/api/workspaces/{workspace_id}/projects", Resource(Action::WorkspaceRead), projects::list)
+        .post("/api/workspaces/{workspace_id}/projects", Resource(Action::ProjectCreate), projects::create)
+        .get("/api/projects/{project_id}", Resource(Action::ProjectRead), projects::get)
+        .patch("/api/projects/{project_id}", Resource(Action::ProjectUpdate), projects::update)
+        .delete("/api/projects/{project_id}", Resource(Action::ProjectDelete), projects::delete)
+        .post("/api/projects/{project_id}/environments", Resource(Action::EnvironmentCreate), projects::create_environment)
+        .patch("/api/environments/{environment_id}", Resource(Action::EnvironmentUpdate), projects::update_environment)
+        .delete("/api/environments/{environment_id}", Resource(Action::EnvironmentDelete), projects::delete_environment)
+        .post("/api/environments/{environment_id}/sync", Resource(Action::EnvironmentSync), projects::sync_environment)
+        .get("/api/projects/{project_id}/activity", Resource(Action::ProjectRead), activity::list)
+        // Config as code: the whole environment, with non-sealed values (audited).
+        .get("/api/environments/{environment_id}/config", Resource(Action::EnvironmentConfigRead), env_config::get)
+        .get("/api/environments/{environment_id}/pending", Resource(Action::SharedVariablesRead), activity::pending)
+        .get("/api/environments/{environment_id}/warnings", Resource(Action::SharedVariablesRead), warnings::list)
+        .get("/api/environments/{environment_id}/placement-suggestion", Resource(Action::SharedVariablesRead), placement::suggestion)
+        .post("/api/environments/{environment_id}/deploy", Resource(Action::EnvironmentDeploy), activity::deploy)
+        .post("/api/environments/{environment_id}/discard", Resource(Action::EnvironmentDiscard), activity::discard)
+        // Services, per-environment config, variables
+        .post("/api/projects/{project_id}/services", Resource(Action::ServiceCreate), services::create)
+        // App templates: several services (an app and its databases) at once
+        .get("/api/app-templates", Authenticated, app_templates::list)
+        .post("/api/projects/{project_id}/app-templates", Resource(Action::ServiceCreate), app_templates::create)
+        .delete("/api/services/{service_id}", Resource(Action::ServiceDelete), services::delete)
+        .patch("/api/services/{service_id}", Resource(Action::ServiceUpdate), services::update)
+        .get("/api/services/{service_id}/rename-preview", Resource(Action::ServiceUpdate), services::rename_preview)
+        .get("/api/service-instances/{instance_id}", Resource(Action::InstanceRead), services::get_instance)
+        .patch("/api/service-instances/{instance_id}", Resource(Action::InstanceUpdate), services::update_instance)
+        .patch("/api/service-instances/{instance_id}/server", Resource(Action::InstanceUpdate), services::move_instance)
+        // Moving a service with its volumes' data, and migrating a worker server (migrate/)
+        .post("/api/service-instances/{instance_id}/move", Resource(Action::InstanceMove), migrate::move_instance)
+        .get("/api/instance-moves/{move_id}", Resource(Action::InstanceMoveRead), migrate::get_move)
+        .post("/api/instance-moves/{move_id}/abort", Resource(Action::InstanceMoveAbort), migrate::abort_move)
+        .get("/api/nodes/{node_id}/migration-preview", Resource(Action::NodeMigrationRead), migrate::preview)
+        .get("/api/nodes/{node_id}/migrations", Resource(Action::NodeMigrationRead), migrate::list)
+        .post("/api/nodes/{node_id}/migrate", Resource(Action::NodeMigrate), migrate::migrate)
+        .get("/api/server-migrations/{migration_id}", Resource(Action::ServerMigrationRead), migrate::get)
+        .post("/api/server-migrations/{migration_id}/abort", Resource(Action::ServerMigrationAbort), migrate::abort)
+        .get("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesRead), variables::instance_variables)
+        .patch("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesWrite), variables::update_instance_variables)
+        .get("/api/environments/{environment_id}/variables", Resource(Action::SharedVariablesRead), variables::shared_variables)
+        .patch("/api/environments/{environment_id}/variables", Resource(Action::SharedVariablesWrite), variables::update_shared_variables)
+        .get("/api/environments/{environment_id}/variable-names", Resource(Action::SharedVariablesRead), variables::names)
+        .post("/api/variables/{variable_id}/reveal", Resource(Action::VariableReveal), variables::reveal)
+        // Deployments
+        .post("/api/service-instances/{instance_id}/deployments", Resource(Action::DeploymentCreate), deployments::create)
+        .get("/api/service-instances/{instance_id}/deployments", Resource(Action::InstanceRead), deployments::list)
+        .get("/api/service-instances/{instance_id}/metrics", Resource(Action::InstanceRead), metrics::get)
+        .get("/api/projects/{project_id}/metrics", Resource(Action::ProjectRead), metrics::project)
+        .get("/api/service-instances/{instance_id}/uptime", Resource(Action::InstanceRead), metrics::uptime)
+        .get("/api/projects/{project_id}/uptime", Resource(Action::ProjectRead), metrics::project_uptime)
+        .get("/api/environments/{environment_id}/logs", Resource(Action::EnvironmentLogsRead), logs::search)
+        // HTTP requests served by the edge (access logs) and request charts
+        .get("/api/environments/{environment_id}/http-logs", Resource(Action::EnvironmentLogsRead), http_logs::search)
+        .get("/api/service-instances/{instance_id}/http-metrics", Resource(Action::InstanceRead), http_logs::instance_metrics)
+        .get("/api/projects/{project_id}/http-metrics", Resource(Action::ProjectRead), http_logs::project_metrics)
+        .get("/api/projects/{project_id}/webhooks", Resource(Action::WebhookList), webhooks::list)
+        .post("/api/projects/{project_id}/webhooks", Resource(Action::WebhookCreate), webhooks::create)
+        .delete("/api/webhooks/{webhook_id}", Resource(Action::WebhookDelete), webhooks::delete)
+        .post("/api/webhooks/{webhook_id}/test", Resource(Action::WebhookTest), webhooks::test)
+        // Alerts: channels (Slack, Discord, webhooks), rules, history
+        .get("/api/workspaces/{workspace_id}/notification-channels", Resource(Action::NotificationChannelList), alerts::list_channels)
+        .post("/api/workspaces/{workspace_id}/notification-channels", Resource(Action::NotificationChannelCreate), alerts::create_channel)
+        .delete("/api/notification-channels/{notification_channel_id}", Resource(Action::NotificationChannelDelete), alerts::delete_channel)
+        .post("/api/notification-channels/{notification_channel_id}/test", Resource(Action::NotificationChannelTest), alerts::test_channel)
+        .get("/api/workspaces/{workspace_id}/alert-rules", Resource(Action::AlertRuleList), alerts::list_rules)
+        .post("/api/workspaces/{workspace_id}/alert-rules", Resource(Action::AlertRuleCreate), alerts::create_rule)
+        .patch("/api/alert-rules/{alert_rule_id}", Resource(Action::AlertRuleUpdate), alerts::update_rule)
+        .delete("/api/alert-rules/{alert_rule_id}", Resource(Action::AlertRuleDelete), alerts::delete_rule)
+        .get("/api/projects/{project_id}/alert-rules", Resource(Action::ProjectAlertRuleList), alerts::project_rules)
+        .get("/api/workspaces/{workspace_id}/alert-history", Resource(Action::AlertHistoryRead), alerts::history)
+        .get("/api/deployments/{deployment_id}", Resource(Action::DeploymentRead), deployments::get)
+        .delete("/api/deployments/{deployment_id}", Resource(Action::DeploymentRemove), deployments::remove)
+        .get("/api/deployments/{deployment_id}/logs", Resource(Action::DeploymentRead), deployments::logs)
+        .post("/api/deployments/{deployment_id}/redeploy", Resource(Action::DeploymentRollout), deployments::redeploy)
+        .post("/api/deployments/{deployment_id}/rollback", Resource(Action::DeploymentRollout), deployments::rollback)
+        .post("/api/deployments/{deployment_id}/restart", Resource(Action::DeploymentRollout), deployments::restart)
+        // Cron services: next due times and runs; run now (see crate::cron)
+        .get("/api/service-instances/{instance_id}/cron-runs", Resource(Action::CronRunsRead), cron::list)
+        .post("/api/service-instances/{instance_id}/cron-runs", Resource(Action::CronRunCreate), cron::run_now)
+        .get("/api/cron/preview", Authenticated, cron::preview)
+        // Source uploads (`modula up`): gzipped tarball in, deployed with
+        // POST …/deployments {source: {upload}}. Never downloadable by clients.
+        .post("/api/service-instances/{instance_id}/uploads", Resource(Action::DeploymentCreate), uploads::create)
+        // Nodes fetch an upload they are building; authorized by a signed,
+        // deployment-bound token from their desired state (see deploy::upload).
+        .get(crate::deploy::upload::DOWNLOAD_PATH, Public, uploads::download)
+        // …and upload the output of a static site hosted elsewhere, with a
+        // signed token of the same kind (see deploy::output).
+        .put(crate::deploy::output::UPLOAD_PATH, Public, uploads::receive_output)
+        // Domains
+        .get("/api/service-instances/{instance_id}/domains", Resource(Action::InstanceRead), domains::list)
+        .post("/api/service-instances/{instance_id}/domains", Resource(Action::DomainCreate), domains::generate)
+        .post("/api/service-instances/{instance_id}/custom-domains", Resource(Action::DomainCreate), domains::create_custom)
+        .post("/api/domains/{domain_id}/check", Resource(Action::DomainUpdate), domains::check)
+        .patch("/api/domains/{domain_id}", Resource(Action::DomainUpdate), domains::update)
+        .delete("/api/domains/{domain_id}", Resource(Action::DomainDelete), domains::delete)
+        // Databases: templates, volumes, TCP proxies
+        .get("/api/templates", Authenticated, storage::templates)
+        .post("/api/service-instances/{instance_id}/volume", Resource(Action::VolumeCreate), storage::create_volume)
+        .delete("/api/volumes/{volume_id}", Resource(Action::VolumeDelete), storage::delete_volume)
+        .post("/api/service-instances/{instance_id}/tcp-proxy", Resource(Action::TcpProxyCreate), storage::create_tcp_proxy)
+        .delete("/api/tcp-proxies/{tcp_proxy_id}", Resource(Action::TcpProxyDelete), storage::delete_tcp_proxy)
+        // Cloudflare R2 buckets (services with no container; see api/buckets)
+        .post("/api/projects/{project_id}/buckets", Resource(Action::ServiceCreate), buckets::create)
+        .post("/api/service-instances/{instance_id}/r2", Resource(Action::BucketProvision), buckets::provision_instance)
+        .delete("/api/service-instances/{instance_id}/r2", Resource(Action::BucketUnlink), buckets::unlink)
+        .post("/api/service-instances/{instance_id}/r2/delete-bucket", Resource(Action::BucketDelete), buckets::delete_bucket)
+        // Private TCP tunnel to the running container (WebSocket; `modula connect`)
+        .get("/api/service-instances/{instance_id}/tunnel", Resource(Action::TunnelOpen), crate::tunnel::open)
+        // Shell / command in a running container (WebSocket; `modula ssh`, Shell tab)
+        .get("/api/deployments/{deployment_id}/exec", Resource(Action::DeploymentExec), crate::exec::open)
+        // Resolved variables for a local command (`modula run`)
+        .get("/api/service-instances/{instance_id}/run-env", Resource(Action::RunEnvRead), variables::run_env)
+        // Backups: storage targets per workspace, schedules and backups per database
+        .get("/api/workspaces/{workspace_id}/backup-targets", Resource(Action::BackupTargetList), backups::list_targets)
+        .post("/api/workspaces/{workspace_id}/backup-targets", Resource(Action::BackupTargetCreate), backups::create_target)
+        .delete("/api/backup-targets/{backup_target_id}", Resource(Action::BackupTargetDelete), backups::delete_target)
+        .get("/api/service-instances/{instance_id}/backups", Resource(Action::BackupRead), backups::list)
+        .post("/api/service-instances/{instance_id}/backups", Resource(Action::BackupCreate), backups::create)
+        .put("/api/service-instances/{instance_id}/backup-schedule", Resource(Action::BackupScheduleUpdate), backups::put_schedule)
+        .get("/api/service-instances/{instance_id}/backup-destinations", Resource(Action::BackupRead), backups::destinations)
+        // Point-in-time recovery (Postgres, WAL-G; see backup::pitr)
+        .get("/api/service-instances/{instance_id}/pitr", Resource(Action::BackupRead), pitr::get)
+        .put("/api/service-instances/{instance_id}/pitr", Resource(Action::BackupScheduleUpdate), pitr::put)
+        .post("/api/service-instances/{instance_id}/pitr/base-backups", Resource(Action::BackupCreate), pitr::base_backup)
+        .post("/api/service-instances/{instance_id}/pitr/restore", Resource(Action::PitrRestore), pitr::restore)
+        // Read replicas (Postgres; see api/replicas.rs)
+        .get("/api/service-instances/{instance_id}/replication", Resource(Action::DatabaseRead), replicas::get)
+        .post("/api/service-instances/{instance_id}/replicas", Resource(Action::ReplicaCreate), replicas::create)
+        .post("/api/service-instances/{instance_id}/promote", Resource(Action::ReplicaPromote), replicas::promote)
+        .post("/api/backups/{backup_id}/restore", Resource(Action::BackupRestore), backups::restore)
+        .delete("/api/backups/{backup_id}", Resource(Action::BackupDelete), backups::delete)
+        .get("/api/instance/self-backup", Instance(Action::SelfBackupRead), backups::get_self_backup)
+        .put("/api/instance/self-backup", Instance(Action::SelfBackupUpdate), backups::put_self_backup)
+        // Updates: versions, mode and maintenance window; "Update now" hands the upgrade to install.sh (modula-upgrade unit)
+        .get("/api/instance/domain", Instance(Action::InstanceDomainRead), crate::instance_domain::get)
+        .put("/api/instance/domain", Instance(Action::InstanceDomainUpdate), crate::instance_domain::put)
+        .get("/api/instance/updates", Instance(Action::UpdatesRead), updates::get)
+        .put("/api/instance/updates", Instance(Action::UpdatesUpdate), updates::put)
+        .post("/api/instance/updates/check", Instance(Action::UpdatesRead), updates::check)
+        .post("/api/instance/updates/run", Instance(Action::UpdatesRun), updates::run)
+        // Private dashboard (Cloudflare Tunnel + Access); see crate::private
+        .get("/api/instance/private-access", Instance(Action::PrivateAccessRead), crate::private::api::get)
+        .get("/api/instance/private-access/check", Instance(Action::PrivateAccessRead), crate::private::api::check)
+        .put("/api/instance/private-access", Instance(Action::PrivateAccessUpdate), crate::private::api::put)
+        // Cloudflare integration (token is write-only; see integrations/cloudflare)
+        .get("/api/workspaces/{workspace_id}/integrations/cloudflare", Resource(Action::CloudflareRead), cloudflare::status)
+        .post("/api/workspaces/{workspace_id}/integrations/cloudflare/verify", Resource(Action::CloudflareConnect), cloudflare::verify)
+        .put("/api/workspaces/{workspace_id}/integrations/cloudflare", Resource(Action::CloudflareConnect), cloudflare::connect)
+        .delete("/api/workspaces/{workspace_id}/integrations/cloudflare", Resource(Action::CloudflareDisconnect), cloudflare::disconnect)
+        .get("/api/workspaces/{workspace_id}/integrations/cloudflare/zones", Resource(Action::CloudflareRead), cloudflare::zones)
+        .get("/api/workspaces/{workspace_id}/integrations/cloudflare/r2", Resource(Action::CloudflareRead), cloudflare::r2_info)
+        .post("/api/workspaces/{workspace_id}/integrations/cloudflare/r2-targets", Resource(Action::BackupTargetCreate), cloudflare::create_r2_target)
+        .get("/api/workspaces/{workspace_id}/integrations/cloudflare/r2/buckets", Resource(Action::CloudflareRead), buckets::list)
+        // Read through DomainUpdate (Member): only members can act on the answer.
+        .get("/api/domains/{domain_id}/ingress", Resource(Action::DomainUpdate), cloudflare::ingress)
+        .put("/api/domains/{domain_id}/ingress", Resource(Action::DomainUpdate), cloudflare::set_ingress)
+        // Database tab (Postgres services; run by the node, see api/database.rs)
+        .get("/api/service-instances/{instance_id}/database/tables", Resource(Action::DatabaseRead), database::tables)
+        .get("/api/service-instances/{instance_id}/database/rows", Resource(Action::DatabaseRead), database::rows)
+        .post("/api/service-instances/{instance_id}/database/rows", Resource(Action::DatabaseWrite), database::insert_row)
+        .patch("/api/service-instances/{instance_id}/database/rows", Resource(Action::DatabaseWrite), database::update_row)
+        .delete("/api/service-instances/{instance_id}/database/rows", Resource(Action::DatabaseWrite), database::delete_row)
+        // Read-only queries need DatabaseRead; the handler requires DatabaseWrite otherwise.
+        .post("/api/service-instances/{instance_id}/database/query", Resource(Action::DatabaseRead), database::query)
+        .get("/api/service-instances/{instance_id}/database/stats", Resource(Action::DatabaseRead), database::stats)
+        .post("/api/service-instances/{instance_id}/database/vacuum", Resource(Action::DatabaseWrite), database::vacuum)
+        .get("/api/service-instances/{instance_id}/database/extensions", Resource(Action::DatabaseRead), database::extensions)
+        .post("/api/service-instances/{instance_id}/database/extensions", Resource(Action::DatabaseWrite), database::extension)
+        .get("/api/service-instances/{instance_id}/database/credentials", Resource(Action::DatabaseCredentials), database::credentials)
+        .post("/api/service-instances/{instance_id}/database/password", Resource(Action::DatabasePassword), database::regenerate_password)
+        // Servers (instance admins)
+        .get("/api/nodes", Instance(Action::NodeList), nodes::list)
+        .get("/api/nodes/network", Instance(Action::NodeList), nodes::network)
+        .post("/api/nodes/join-tokens", Instance(Action::NodeJoinTokenCreate), nodes::create_join_token)
+        .patch("/api/nodes/{node_id}", Resource(Action::NodeUpdate), nodes::update)
+        .delete("/api/nodes/{node_id}", Resource(Action::NodeRevoke), nodes::revoke)
+        // In-place resize through the server's cloud provider (provision/resize.rs)
+        .get("/api/nodes/{node_id}/resize-options", Resource(Action::NodeResizeOptions), provision::resize::options)
+        .get("/api/nodes/{node_id}/resize", Resource(Action::NodeResizeOptions), provision::resize::status)
+        .post("/api/nodes/{node_id}/resize", Resource(Action::NodeResize), provision::resize::start)
+        .get("/api/nodes/{node_id}/metrics", Resource(Action::NodeRead), nodes::metrics)
+        .get("/api/locations", Authenticated, nodes::locations)
+        // Hetzner integration and servers created through it (token is write-only; see integrations/hetzner)
+        .get("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::HetznerRead), hetzner::status)
+        .put("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::HetznerConnect), hetzner::connect)
+        .patch("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::HetznerConnect), hetzner::update_caps)
+        .delete("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::HetznerDisconnect), hetzner::disconnect)
+        .get("/api/workspaces/{workspace_id}/integrations/hetzner/catalog", Resource(Action::HetznerCatalog), hetzner::catalog)
+        .get("/api/workspaces/{workspace_id}/integrations/hetzner/ssh-keys", Resource(Action::HetznerCatalog), hetzner::ssh_keys)
+        .get("/api/workspaces/{workspace_id}/servers", Resource(Action::ServerList), provision::api::list)
+        .post("/api/workspaces/{workspace_id}/servers/provision", Resource(Action::ServerProvision), provision::api::provision)
+        .get("/api/workspaces/{workspace_id}/servers/suggest", Resource(Action::ServerSuggest), provision::suggest::suggest)
+        .get("/api/servers/{server_id}", Resource(Action::ServerRead), provision::api::get)
+        .delete("/api/servers/{server_id}", Resource(Action::ServerDelete), provision::api::delete)
+        // GitHub App: one per instance (admins), installed per workspace.
+        .get("/api/github/apps", Authenticated, github::apps)
+        .post("/api/github/apps/remove", Instance(Action::GithubAppDelete), github::delete_app)
+        .post("/api/github/app/manifest", Instance(Action::GithubAppCreate), github::manifest)
+        // Bound to the admin's session by the single-use state, so not Public.
+        .get("/api/github/app/callback", Authenticated, github::app_callback)
+        .post("/api/workspaces/{workspace_id}/github/install", Resource(Action::GithubInstall), github::install)
+        .get("/api/github/install/callback", Authenticated, github::install_callback)
+        .get("/api/workspaces/{workspace_id}/github/repos", Resource(Action::GithubRepoList), github::repos)
+        .get("/api/workspaces/{workspace_id}/github/branches", Resource(Action::GithubRepoList), github::branches)
+        .get("/api/workspaces/{workspace_id}/github/detect", Resource(Action::GithubRepoList), repo_detect::detect)
+        .get("/api/workspaces/{workspace_id}/github/installations", Resource(Action::GithubRepoList), github::installations)
+        // Authenticated by HMAC signature; the only path exempt from the Origin check.
+        .post(github::WEBHOOK_PATH, Public, github::webhook)
+}

@@ -1,0 +1,1198 @@
+// Control plane <-> node daemon (modula-node) protocol, version 1.
+//
+// Transport: gRPC over TLS on the dedicated node port (never the browser API).
+//  * Discovery/Enroll: server-auth TLS only; Enroll is gated by a single-use join
+//    token, and the node pins the CA fingerprint from the join command.
+//  * Attach: mutual TLS; the node identity comes from the client certificate.
+//
+// The server pushes full desired-state snapshots with a monotonically increasing
+// generation; the node reconciles to the newest one it has seen. There is no
+// "run arbitrary command" message by design.
+
+syntax = "proto3";
+
+package modula.node.v1;
+
+service Node {
+  // Returns the CA chain so a joining node can check it against the pinned
+  // fingerprint before trusting the server. Unauthenticated, read-only.
+  rpc GetCaBundle(GetCaBundleRequest) returns (CaBundle);
+  // Exchange a join token + CSR for a node certificate.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  // Long-lived bidirectional stream. Requires the node's client certificate.
+  rpc Attach(stream NodeMessage) returns (stream ServerMessage);
+  // Migrating the main server: the new server fetches the control plane's
+  // promotion bundle with its client certificate and the single-use ticket
+  // from PromoteRequest. See "main server migration" below.
+  rpc FetchPromotion(PromotionFetch) returns (stream PromotionChunk);
+}
+
+message GetCaBundleRequest {}
+
+message CaBundle {
+  bytes root_der = 1;
+  bytes intermediate_der = 2;
+}
+
+message EnrollRequest {
+  string join_token = 1;
+  bytes csr_der = 2;
+  string hostname = 3;
+  string node_version = 4;
+}
+
+message EnrollResponse {
+  string node_id = 1;
+  bytes cert_der = 2;
+  bytes intermediate_der = 3;
+  bytes root_der = 4;
+}
+
+// ---------------------------------------------------------------- node → server
+
+message NodeMessage {
+  oneof msg {
+    Hello hello = 1;
+    StateReport report = 2;
+    DeploymentEvent event = 3;
+    LogChunk log = 4;
+    RenewRequest renew = 5;
+    Heartbeat heartbeat = 6;
+    MetricsReport metrics = 7;
+    LogBatch log_batch = 8;
+    BackupResult backup_result = 20;
+    BackupDeleted backup_deleted = 21;
+    WalgResult walg_result = 22;
+    DbResponse db_result = 30;
+    TunnelOpened tunnel_opened = 31;
+    TunnelData tunnel_data = 32;
+    TunnelClose tunnel_close = 33;
+    ExecOpened exec_opened = 40;
+    ExecData exec_data = 41;
+    ExecClose exec_close = 43;
+    UpgradeStatus upgrade_status = 60;
+    AccessStatus access_status = 70;
+    MeshReport mesh_report = 80;
+    CronResult cron_result = 90;
+    HttpLogBatch http_log_batch = 100;
+    DiskReport disk = 91;
+    VolumeData volume_data = 110;
+    VolumeClose volume_close = 111;
+    PromoteStatus promote_status = 120;
+    ServerAddressStatus server_address_status = 121;
+  }
+}
+
+message Hello {
+  uint32 protocol = 1;
+  string node_version = 2;
+  repeated string capabilities = 3;
+  // Highest desired-state generation the node has applied (0 = none).
+  uint64 applied_generation = 4;
+  NodeInfo info = 5;
+}
+
+message NodeInfo {
+  string hostname = 1;
+  string os = 2;
+  string arch = 3;
+  uint32 cpus = 4;
+  uint64 memory_bytes = 5;
+  string runtime_version = 6;
+  // Where the server runs, from its cloud's metadata service when it has one
+  // (e.g. "hetzner" / "fsn1-dc14"), else empty.
+  string cloud_provider = 7;
+  string cloud_region = 8;
+  // The nearest Cloudflare edge (IATA code), a fallback for the location.
+  string edge_colo = 9;
+  // The public IPv4 the node reaches the internet from (Cloudflare trace).
+  string public_ip = 10;
+  // Private networking (capability "mesh"): the node's WireGuard public key
+  // (base64; the private key never leaves the node) and UDP port.
+  string wg_public_key = 11;
+  uint32 wg_port = 12;
+  // The node's own IPv4 interface addresses as "ip/prefix" (loopback,
+  // container bridges and the mesh excluded). Two nodes with an address in
+  // the same subnet (a provider private network) peer over it.
+  repeated string addresses = 13;
+}
+
+message Heartbeat {
+  int64 at_unix_ms = 1;
+}
+
+// Resource usage of the node's running workloads and of the server itself,
+// sampled every 30s (capability "metrics").
+message MetricsReport {
+  repeated WorkloadMetrics workloads = 1;
+  // The whole server (Linux only; unset on the first sample, which has no
+  // previous one to measure CPU and network against).
+  HostStats host = 2;
+}
+
+message HostStats {
+  int64 at_unix_ms = 1;
+  // Busy share of all cores since the previous sample (100 = every core).
+  double cpu_percent = 2;
+  // MemTotal - MemAvailable.
+  uint64 memory_used_bytes = 3;
+  uint64 memory_total_bytes = 4;
+  // 1-minute load average.
+  double load1 = 5;
+  // Summed over the physical interfaces (not loopback, Docker, the mesh)
+  // since the previous sample.
+  double net_rx_bytes_per_sec = 6;
+  double net_tx_bytes_per_sec = 7;
+}
+
+message WorkloadMetrics {
+  string deployment_id = 1;
+  int64 at_unix_ms = 2;
+  // Percent of one CPU over the last second (100 = one full core).
+  double cpu_percent = 3;
+  // Memory in use, page cache excluded.
+  uint64 memory_bytes = 4;
+  // Network throughput since the previous sample.
+  double net_rx_bytes_per_sec = 5;
+  double net_tx_bytes_per_sec = 6;
+}
+
+// Disk usage, sent every 5 minutes (capability "disk"): the filesystems
+// holding the node's data dir and Docker's data (where volumes live), and
+// the size of each of the node's volumes.
+message DiskReport {
+  repeated FilesystemUsage filesystems = 1;
+  repeated VolumeUsage volumes = 2;
+}
+
+message FilesystemUsage {
+  string path = 1;
+  uint64 total_bytes = 2;
+  uint64 free_bytes = 3;
+}
+
+message VolumeUsage {
+  // The Docker volume's name (modula-vol-<volume id>).
+  string name = 1;
+  uint64 used_bytes = 2;
+}
+
+enum DeploymentPhase {
+  PHASE_UNSPECIFIED = 0;
+  BUILDING = 9;
+  // The build finished; `message` carries the image id (sha256:…), or for
+  // a build with an output directory, the uploaded archive's hex SHA-256.
+  BUILT = 10;
+  PULLING = 1;
+  CREATING = 2;
+  STARTING = 3;
+  HEALTHCHECKING = 4;
+  ACTIVE = 5;
+  FAILED = 6;
+  CRASHED = 7;
+  STOPPED = 8;
+  // A serverless deployment stopped its idle container; the edge sends its
+  // next request to the node's wake proxy, which starts it again (ACTIVE).
+  SLEEPING = 11;
+}
+
+message DeploymentEvent {
+  string deployment_id = 1;
+  DeploymentPhase phase = 2;
+  string message = 3;
+  int64 at_unix_ms = 4;
+  uint64 generation = 5;
+  // BUILT only: how the repository's config file changed the runtime settings.
+  // The server folds this into the deployment's config snapshot, so restarts
+  // and rollbacks run the same way.
+  BuildOutput build = 6;
+  // ACTIVE after a serverless wake: how long the start took, from the first
+  // held request to a passing health check.
+  uint32 cold_start_ms = 7;
+}
+
+message BuildOutput {
+  // Set when the start command was overridden (an empty command = image default).
+  bool has_command = 1;
+  repeated string command = 2;
+  string healthcheck_path = 3;
+  uint32 healthcheck_timeout_secs = 4;
+  RestartPolicy restart = 5;
+  // The app's stack guessed from the source (e.g. "nextjs"); empty = unknown.
+  string stack = 6;
+  // Set when the file has a pre-deploy command (as the container argv).
+  bool has_pre_deploy = 45;
+  repeated string pre_deploy_command = 46;
+  // restartPolicyMaxRetries from the file (0 = not set).
+  uint32 restart_max_retries = 47;
+}
+
+message StateReport {
+  uint64 generation = 1;
+  repeated WorkloadStatus workloads = 2;
+  // Edge rule actions this node's Caddy can't run (its module is missing),
+  // as EdgeRule action names ("rate_limit", "cache"). Rules with them are
+  // left out of its config; everything else is served.
+  repeated string edge_unsupported = 90;
+}
+
+message WorkloadStatus {
+  string deployment_id = 1;
+  string container_id = 2;
+  bool running = 3;
+  bool healthy = 4;
+  int32 exit_code = 5;
+  uint32 restart_count = 6;
+}
+
+message LogChunk {
+  string request_id = 1;
+  repeated LogLine lines = 2;
+  // True on the final chunk (tail complete, follow cancelled, or container gone).
+  bool done = 3;
+  string error = 4;
+}
+
+message LogLine {
+  int64 ts_unix_ms = 1;
+  bool stderr = 2;
+  string text = 3;
+}
+
+message RenewRequest {
+  bytes csr_der = 1;
+}
+
+// ---------------------------------------------------------------- server → node
+
+message ServerMessage {
+  oneof msg {
+    HelloAck hello_ack = 1;
+    DesiredState desired = 2;
+    LogRequest logs = 3;
+    LogCancel log_cancel = 4;
+    RenewResponse renewed = 5;
+    BackupRequest backup = 20;
+    RestoreRequest restore = 21;
+    BackupDelete backup_delete = 22;
+    WalgRequest walg = 23;
+    DbRequest db = 30;
+    TunnelOpen tunnel_open = 31;
+    TunnelData tunnel_data = 32;
+    TunnelClose tunnel_close = 33;
+    ExecOpen exec_open = 40;
+    ExecData exec_data = 41;
+    ExecResize exec_resize = 42;
+    ExecClose exec_close = 43;
+    UpgradeRequest upgrade = 60;
+    AccessConfig access = 70;
+    CronRun cron_run = 90;
+    VolumeData volume_data = 110;
+    VolumeClose volume_close = 111;
+    VolumeExport volume_export = 112;
+    VolumeImport volume_import = 113;
+    PromoteRequest promote = 120;
+    ServerAddress server_address = 121;
+  }
+}
+
+message HelloAck {
+  uint32 protocol = 1;
+  string node_id = 2;
+}
+
+message DesiredState {
+  uint64 generation = 1;
+  repeated Network networks = 2;
+  repeated Workload workloads = 3;
+  // Public hostnames served by this node's edge (Caddy).
+  repeated Route routes = 4;
+  EdgeSettings edge = 5;
+  repeated TcpProxy tcp_proxies = 6;
+  // Volumes to delete from this node (their service or volume was deleted).
+  repeated string volume_removals = 7;
+  // Private networking between servers; absent = this node is not in a mesh.
+  Mesh mesh = 8;
+}
+
+// ---------------------------------------------------------------- private network (80–89)
+//
+// Every node joins one WireGuard mesh. The server allocates each node a /24
+// of 10.80.0.0/16; the node's host address on the mesh is its .1 and its
+// containers get server-assigned addresses from the rest. Containers keep
+// their per-environment bridge (and Docker's names for local services) and
+// are also attached to the node's `modula-mesh` network with that address.
+// nftables on every node only lets addresses of the same environment talk.
+
+message Mesh {
+  // This node's /24, e.g. "10.80.3.0/24"; its host address is the .1.
+  string subnet = 1;
+  uint32 listen_port = 2;
+  repeated MeshPeer peers = 3;
+  // Environments with workloads on this node, with every mesh address of
+  // theirs on any node (isolation and discovery).
+  repeated MeshEnvironment environments = 4;
+  // This node is the relay: it forwards between peers that can't reach
+  // each other directly (one of them behind NAT).
+  bool relay_hub = 5;
+}
+
+message MeshPeer {
+  string node_id = 1;
+  string name = 2;
+  string public_key = 3;
+  // "ip:port" to send to; empty = wait for the peer to reach us.
+  string endpoint = 4;
+  // The peer's /24.
+  string subnet = 5;
+  // The endpoint is on a private network shared with this node.
+  bool private_path = 6;
+  // No tunnel of its own: its /24 is reached through the relay peer.
+  bool relayed = 7;
+  // The relay (the main server): relayed peers' /24s go through its tunnel.
+  bool hub = 8;
+}
+
+message MeshEnvironment {
+  string environment_id = 1;
+  repeated MeshMember members = 2;
+  // Its services' virtual IPs (10.80.255.0/24, per environment): the
+  // resolver answers `<name>.modula.internal` with the VIP, and every node
+  // DNATs new connections from the environment to a healthy member.
+  repeated MeshService services = 3;
+}
+
+message MeshService {
+  string name = 1;
+  string vip = 2;
+}
+
+message MeshMember {
+  string ip = 1;
+  string service_name = 2;
+  string deployment_id = 3;
+  string node_id = 4;
+  // Serving (its deployment is the live one) and reported healthy: the
+  // resolver answers `<service_name>.modula.internal` with these.
+  bool healthy = 5;
+}
+
+// Sent every 30s by nodes in a mesh.
+message MeshReport {
+  repeated PeerStatus peers = 1;
+}
+
+message PeerStatus {
+  string node_id = 1;
+  // Round trip over the tunnel (0 = no answer).
+  uint32 latency_us = 2;
+  int64 last_handshake_unix = 3;
+  uint64 rx_bytes = 4;
+  uint64 tx_bytes = 5;
+}
+
+// hostname → the container of one deployment on this node.
+message Route {
+  string hostname = 1;
+  string deployment_id = 2;
+  uint32 port = 3;
+  // Healthy replicas of the deployment on other nodes, as "mesh-ip:port";
+  // load-balanced together with the local one.
+  repeated string remote_upstreams = 4;
+  // Edge (90–99).
+  // The service's edge rules, in order (enabled ones only).
+  repeated EdgeRule rules = 90;
+  // The domain is proxied by Cloudflare: client IP and country come from
+  // CF-Connecting-IP / CF-IPCountry when the connection is from Cloudflare.
+  bool proxied = 91;
+}
+
+// One edge rule: when `any` of the groups matches (all of a group's
+// conditions; no groups = every request), the action runs. Block, redirect
+// and allow end the evaluation; the others don't.
+message EdgeRule {
+  repeated EdgeMatchGroup any = 1;
+  oneof action {
+    EdgeRateLimit rate_limit = 10;
+    EdgeBlock block = 11;
+    EdgeAllow allow = 12;
+    EdgeRedirect redirect = 13;
+    EdgeHeaders headers = 14;
+    EdgeCache cache = 15;
+  }
+}
+
+message EdgeMatchGroup {
+  repeated EdgeCondition all = 1;
+}
+
+message EdgeCondition {
+  bool negate = 1;
+  oneof kind {
+    EdgePath path = 2;
+    EdgeList method = 3;
+    EdgeHeader header = 4;
+    // Client IP in any of these CIDRs (or addresses).
+    EdgeList ip = 5;
+    // ISO country codes; matches only through Cloudflare (proxied domains).
+    EdgeList country = 6;
+  }
+}
+
+enum EdgePathOp {
+  PATH_MATCHES = 0;
+  PATH_PREFIX = 1;
+  PATH_EQUALS = 2;
+}
+
+message EdgePath {
+  EdgePathOp op = 1;
+  string value = 2;
+}
+
+message EdgeList {
+  repeated string values = 1;
+}
+
+enum EdgeHeaderOp {
+  HEADER_EXISTS = 0;
+  HEADER_EQUALS = 1;
+  HEADER_CONTAINS = 2;
+}
+
+message EdgeHeader {
+  string name = 1;
+  EdgeHeaderOp op = 2;
+  string value = 3;
+}
+
+message EdgeRateLimit {
+  uint32 requests = 1;
+  uint32 window_secs = 2;
+  // Count per request header value instead of per client IP.
+  string header = 3;
+}
+
+message EdgeBlock {
+  uint32 status = 1;
+  string body = 2;
+}
+
+message EdgeAllow {}
+
+message EdgeRedirect {
+  uint32 status = 1;
+  // May contain {host}, {path} and {query}.
+  string target = 2;
+}
+
+message EdgeHeaders {
+  // Response headers.
+  map<string, string> set = 1;
+  repeated string remove = 2;
+}
+
+message EdgeCache {
+  uint32 ttl_secs = 1;
+}
+
+enum TlsMode {
+  TLS_UNSPECIFIED = 0;
+  // Publicly trusted certificates (ACME), issued on demand only for
+  // hostnames the node's ask endpoint approves.
+  TLS_ACME = 1;
+  // Caddy's internal CA (local development, *.localhost).
+  TLS_INTERNAL = 2;
+  // Plain HTTP only (local development behind something else).
+  TLS_OFF = 3;
+}
+
+message EdgeSettings {
+  TlsMode tls = 1;
+  string acme_email = 2;
+  // The dashboard's domain(s) set in the dashboard: the node that serves the
+  // dashboard (its own --route) serves it under these names too.
+  repeated string dashboard_hosts = 3;
+}
+
+// One isolated bridge network per environment.
+message Network {
+  string environment_id = 1;
+}
+
+message Workload {
+  string deployment_id = 1;
+  string service_id = 2;
+  string environment_id = 3;
+  // DNS name of the service inside its environment network.
+  string service_name = 4;
+  string image = 5;
+  // Start command override as argv (empty = image default). Never a shell string.
+  repeated string command = 6;
+  repeated EnvVar env = 7;
+  // Port the app listens on (also injected as PORT).
+  uint32 port = 8;
+  HealthCheck health = 9;
+  Limits limits = 10;
+  RestartPolicy restart = 11;
+  // Set when the image must be built on this node first; `image` is then the
+  // node-local tag the build produces.
+  Build build = 12;
+  // Bumped by the server to restart the running container in place. The node
+  // restarts when it sees a higher value than it last applied.
+  uint32 restart_generation = 13;
+  // Persistent storage mounted into the container. A workload with a volume
+  // never overlaps with another deployment of its service: the node stops
+  // the old container before starting the new one.
+  Volume volume = 14;
+  // Deploy settings (45–49).
+  // Run once from the new image, with this workload's env on its network,
+  // before its container starts (argv; empty = none). A non-zero exit fails
+  // the deployment and the previous one keeps serving.
+  repeated string pre_deploy_command = 45;
+  // SIGTERM → SIGKILL grace when the container is stopped (0 = node default).
+  uint32 draining_seconds = 46;
+  // ON_FAILURE only: give up after this many restarts (0 = unlimited).
+  uint32 restart_max_retries = 47;
+  // The container's address on the node's mesh network (empty = none).
+  string mesh_ip = 80;
+  // A cron service: the rollout ends ACTIVE once the image is built or
+  // pulled (and the pre-deploy command ran), with no container started.
+  // Runs come as CronRun.
+  bool cron = 90;
+  // Point-in-time recovery (Postgres with WAL-G); absent = none.
+  Pitr pitr = 95;
+  // Scale to zero; absent = always running.
+  Serverless serverless = 96;
+  // A JavaScript function the node runs in workerd instead of a container
+  // (image, command, limits, volume and health are unused); absent = a
+  // container. `env` becomes its text bindings.
+  Function function = 100;
+  // Where `command` came from, for startup errors: "the dashboard", a config
+  // file's name, or "" (the image's own CMD/ENTRYPOINT).
+  string command_source = 101;
+}
+
+// The node stops the container after `idle_secs` without requests and starts
+// it again on the next one (see the node's `edge::wake`). Single replica, no
+// volume. Only requests through the edge wake it.
+message Serverless {
+  uint32 idle_secs = 1;
+}
+
+message Function {
+  // The module worker (`export default { fetch(request, env, ctx) }`) for
+  // code written in the dashboard. Empty: the bundle a FUNCTION build made
+  // (the workload then has a Build).
+  string code = 1;
+  // workerd's compatibility date, YYYY-MM-DD.
+  string compatibility_date = 2;
+}
+
+// The node bind-mounts its own WAL-G binary read-only at /usr/local/bin/wal-g
+// (never one the server names). WAL-G's settings (WALG_*) are in the
+// workload's env.
+message Pitr {
+  // WAL-G's file storage on this node: `<workspace>/<instance>/wal-g` under
+  // the backup directory, mounted at /var/lib/modula-wal-g. Empty = none.
+  string local_dir = 1;
+}
+
+message Volume {
+  // The Docker volume name (modula-vol-<volume id>).
+  string name = 1;
+  string mount_path = 2;
+}
+
+// node:public_port (all interfaces) → one deployment's container:target_port.
+message TcpProxy {
+  uint32 public_port = 1;
+  string deployment_id = 2;
+  uint32 target_port = 3;
+}
+
+// Build one deployment from source. The node downloads the source archive,
+// builds it in its sandboxed BuildKit and tags the result as Workload.image.
+// User variables reach the build only as BuildKit secrets (Workload.env).
+message Build {
+  // A gzipped tarball of the source: one commit (GitHub's tarball endpoint)
+  // or files uploaded with `modula up` (served by the server).
+  string source_url = 1;
+  // Authorization header value for source_url; empty for public sources.
+  string source_auth = 2;
+  // Directory inside the repository to build from ("" = repository root).
+  string root_dir = 3;
+  Builder builder = 4;
+  // Dockerfile builds: path relative to root_dir ("" = Dockerfile).
+  string dockerfile_path = 5;
+  // Overrides for the detected build and start commands (shell strings run
+  // inside the build/app container, never on the node).
+  string build_command = 6;
+  string start_command = 7;
+  // Prefix for BuildKit cache mounts (per workspace).
+  string cache_key = 8;
+  // Changes when variable values change, so cached layers that used them rebuild.
+  string secrets_hash = 9;
+  // Hex SHA-256 the downloaded archive must match (uploaded sources); empty =
+  // not checked (GitHub tarballs come over TLS from GitHub itself).
+  string source_sha256 = 55;
+  // Output hosted elsewhere (a static site, or a function on Cloudflare):
+  // instead of running the image, the node packs this directory of it
+  // (relative to the image's working directory, or absolute) as a gzipped
+  // tarball and PUTs it to output_url with output_auth as the Authorization
+  // header, then reports BUILT with the archive's hex SHA-256. Empty = run
+  // the image as usual.
+  string output_dir = 56;
+  string output_url = 57;
+  string output_auth = 58;
+  // FUNCTION builds: the function's entry module, relative to root_dir. The
+  // build installs the repository's dependencies and bundles the entry with
+  // esbuild into `<FUNCTION_OUTPUT_DIR>/<FUNCTION_MODULE>` of its image.
+  string function_entry = 59;
+  // start_command was filled in by detection, not by the user: a Dockerfile
+  // image then runs its own CMD/ENTRYPOINT instead.
+  bool start_command_detected = 60;
+}
+
+enum Builder {
+  BUILDER_RAILPACK = 0;
+  BUILDER_DOCKERFILE = 1;
+  // Bundles a JavaScript/TypeScript function (see Build.function_entry).
+  BUILDER_FUNCTION = 2;
+  // Dockerfile when one is at the build root (or dockerfile_path), else
+  // Railpack; the node decides once the source is unpacked.
+  BUILDER_AUTO = 3;
+}
+
+message EnvVar {
+  string name = 1;
+  string value = 2;
+}
+
+message HealthCheck {
+  // Empty path = no HTTP check (container running is enough).
+  string path = 1;
+  uint32 timeout_secs = 2;
+}
+
+message Limits {
+  uint64 memory_bytes = 1;
+  uint64 nano_cpus = 2;
+  int64 pids = 3;
+}
+
+enum RestartPolicy {
+  RESTART_UNSPECIFIED = 0;
+  ON_FAILURE = 1;
+  ALWAYS = 2;
+  NEVER = 3;
+}
+
+message LogRequest {
+  string request_id = 1;
+  string deployment_id = 2;
+  uint32 tail = 3;
+  bool follow = 4;
+  LogKind kind = 5;
+}
+
+enum LogKind {
+  // Container stdout/stderr.
+  LOG_RUNTIME = 0;
+  // The deployment's build output.
+  LOG_BUILD = 1;
+}
+
+// Every running workload's output, shipped as it happens (batched every few
+// seconds) so the server can keep it after the container is gone and search
+// across an environment.
+message LogBatch {
+  repeated ShippedLine lines = 1;
+  // Lines dropped on the node since the last batch (buffer full).
+  uint32 dropped = 2;
+}
+
+message ShippedLine {
+  string deployment_id = 1;
+  int64 at_unix_ms = 2;
+  bool stderr = 3;
+  string text = 4;
+}
+
+// HTTP requests served by the node's edge (its access log), shipped like
+// LogBatch. Only requests to deployments' routes; the client IP is the
+// connecting address, or Cloudflare's CF-Connecting-IP on proxied domains.
+message HttpLogBatch {
+  repeated HttpRequestLog requests = 1;
+  // Requests dropped on the node since the last batch (buffer full).
+  uint32 dropped = 2;
+}
+
+message HttpRequestLog {
+  string deployment_id = 1;
+  int64 at_unix_ms = 2;
+  string host = 3;
+  string method = 4;
+  // Without the query string.
+  string path = 5;
+  uint32 status = 6;
+  uint32 duration_us = 7;
+  uint64 bytes = 8;
+  string client_ip = 9;
+  // The upstream that served it ("ip:port"), empty if none did.
+  string upstream = 10;
+  string user_agent = 11;
+}
+
+message LogCancel {
+  string request_id = 1;
+}
+
+message RenewResponse {
+  bytes cert_der = 1;
+}
+
+// ---------------------------------------------------------------- backups
+//
+// Database dumps run on the node that runs the database, inside its container
+// (a fixed command per engine, never one sent by the server). The dump is
+// age-encrypted on the node as it streams and goes straight to storage:
+// S3-compatible storage the control plane reaches through presigned URLs
+// (the node holds no credentials), a self-hosted bucket on the private
+// network (the node gets that bucket's credentials), or this node's disk.
+// Plaintext never leaves the node.
+
+enum DatabaseEngine {
+  ENGINE_UNSPECIFIED = 0;
+  ENGINE_POSTGRES = 1;
+  ENGINE_MYSQL = 2;
+  ENGINE_REDIS = 3;
+  ENGINE_MONGO = 4;
+}
+
+message BackupRequest {
+  string backup_id = 1;
+  // The deployment whose running container holds the database.
+  string deployment_id = 2;
+  DatabaseEngine engine = 3;
+  // The age X25519 recipient (age1…) the dump is encrypted to.
+  string age_recipient = 4;
+  // Presigned UploadPart URLs of one multipart upload, in part order. Every
+  // part except the last is exactly part_size bytes (of ciphertext).
+  repeated string part_urls = 5;
+  uint64 part_size = 6;
+  // Instead of part_urls, a self-hosted bucket this node uploads to itself
+  // (multipart, object_key; aborted on failure).
+  S3Access s3 = 7;
+  string object_key = 8;
+  // Instead of part_urls, a file under this node's backup directory
+  // (`<workspace>/<instance>/<name>`), written whole and then renamed.
+  string local_path = 9;
+}
+
+// A self-hosted bucket service, which only the private network reaches. Sent
+// only to the node that uses it, and never logged.
+message S3Access {
+  // `http://ip:port`; empty = the address of deployment_id's container (on
+  // this node) on environment_id's network, at `port`.
+  string endpoint = 1;
+  string region = 2;
+  string bucket = 3;
+  string access_key_id = 4;
+  string secret_access_key = 5;
+  string deployment_id = 6;
+  string environment_id = 7;
+  uint32 port = 8;
+}
+
+message RestoreRequest {
+  string restore_id = 1;
+  string deployment_id = 2;
+  DatabaseEngine engine = 3;
+  // Presigned GET URL of the encrypted backup.
+  string object_url = 4;
+  // The age identity (AGE-SECRET-KEY-1…) that decrypts it. Only ever sent
+  // over this stream; never logged or written to disk.
+  string age_identity = 5;
+  // Instead of object_url: the object in a self-hosted bucket, or a file
+  // under this node's backup directory.
+  S3Access s3 = 6;
+  string object_key = 7;
+  string local_path = 8;
+}
+
+// Delete one backup from a self-hosted bucket (s3 + object_key) or this
+// node's backup directory (local_path). Answered with BackupDeleted.
+message BackupDelete {
+  string backup_id = 1;
+  S3Access s3 = 2;
+  string object_key = 3;
+  string local_path = 4;
+}
+
+message BackupDeleted {
+  string backup_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+// A WAL-G command run inside a Postgres container with PITR (as the postgres
+// user, with the container's WALG_* settings). Answered with WalgResult.
+message WalgRequest {
+  // backup-push: the backup's id; delete-before: any id, echoed back.
+  string request_id = 1;
+  string deployment_id = 2;
+  WalgOp op = 3;
+  // delete-before: the oldest base backup to keep (WAL-G's name).
+  string backup_name = 4;
+}
+
+enum WalgOp {
+  WALG_UNSPECIFIED = 0;
+  // Take a base backup of PGDATA.
+  WALG_BACKUP_PUSH = 1;
+  // Delete base backups and WAL older than backup_name.
+  WALG_DELETE_BEFORE = 2;
+}
+
+message WalgResult {
+  string request_id = 1;
+  WalgOp op = 2;
+  bool ok = 3;
+  string error = 4;
+  // backup-push: the base backup taken (WAL-G's name, times, compressed size).
+  string backup_name = 5;
+  int64 start_unix = 6;
+  int64 finish_unix = 7;
+  uint64 size_bytes = 8;
+}
+
+// The outcome of a BackupRequest or RestoreRequest.
+message BackupResult {
+  // The backup id, or the restore id when `restore` is set.
+  string id = 1;
+  bool restore = 2;
+  bool ok = 3;
+  // Encrypted bytes uploaded (backups).
+  uint64 size_bytes = 4;
+  string error = 5;
+  // ETags of the uploaded parts, in part order (backups).
+  repeated string etags = 6;
+}
+
+// ---------------------------------------------------------------- tunnels
+//
+// Private TCP tunnels (`modula connect`): a user's WebSocket on the
+// control plane is relayed over this stream to the node, which dials the
+// container of one deployment it runs (its address on the environment network,
+// never an arbitrary host) and pipes raw bytes both ways.
+//
+// Flow control is credit-based, per tunnel and per direction: a sender may have
+// at most TUNNEL_WINDOW (256 KiB) of data in flight; the receiver returns
+// credit (TunnelData.credit, usually without data) as it hands bytes on to its
+// side. Chunks are at most 64 KiB. A peer that exceeds its window has the
+// tunnel closed. One slow client therefore never stalls the shared stream.
+
+message TunnelOpen {
+  string tunnel_id = 1;
+  // The deployment whose running container is dialled.
+  string deployment_id = 2;
+  uint32 port = 3;
+}
+
+// The node's answer to TunnelOpen: connected, or why not.
+message TunnelOpened {
+  string tunnel_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+message TunnelData {
+  string tunnel_id = 1;
+  // Raw TCP bytes (at most 64 KiB); may be empty when only returning credit.
+  bytes data = 2;
+  // Bytes the sender of this message has consumed since its last credit.
+  uint32 credit = 3;
+}
+
+// Either side: the tunnel is gone (the other side forgets it too).
+message TunnelClose {
+  string tunnel_id = 1;
+  string reason = 2;
+}
+
+// ---------------------------------------------------------------- exec
+//
+// Interactive shells and commands in a running container (`modula ssh`, the
+// dashboard's Shell tab): a user's WebSocket on the control plane is relayed
+// over this stream to the node, which runs the command with `docker exec` in
+// the container of one deployment it runs. Flow control is the tunnels'
+// (credit per exec and direction, 256 KiB window, 64 KiB chunks).
+
+message ExecOpen {
+  string exec_id = 1;
+  // The deployment whose running container the command runs in.
+  string deployment_id = 2;
+  // argv; empty = a login shell (bash when the image has it, else sh).
+  repeated string cmd = 3;
+  // Allocate a terminal (stdout and stderr arrive merged).
+  bool tty = 4;
+  // Initial terminal size (tty only; 0 = Docker's default).
+  uint32 cols = 5;
+  uint32 rows = 6;
+}
+
+// The node's answer to ExecOpen: the command started, or why not.
+message ExecOpened {
+  string exec_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+// Server → node: the command's stdin. Node → server: its output.
+message ExecData {
+  string exec_id = 1;
+  // At most 64 KiB; may be empty when only returning credit.
+  bytes data = 2;
+  // Bytes the sender of this message has consumed since its last credit.
+  uint32 credit = 3;
+  // Node → server: `data` is stderr (only without a tty).
+  bool stderr = 4;
+  // Server → node: stdin ends after `data`.
+  bool eof = 5;
+}
+
+message ExecResize {
+  string exec_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+// Either side: the exec is gone. From the node once the command exited
+// (`exited` and its code) or failed; from the server when the user went
+// away (the node then drops the command's connection, hanging it up).
+message ExecClose {
+  string exec_id = 1;
+  bool exited = 2;
+  int32 exit_code = 3;
+  string reason = 4;
+}
+
+// ---------------------------------------------------------------- database tab
+//
+// Browsing and querying a Postgres service. The node connects to the
+// database container over its environment network with the credentials from
+// the deployment's own environment; the server never connects to user
+// databases. One request, one response, correlated by request_id.
+
+message DbRequest {
+  string request_id = 1;
+  // The deployment whose running container holds the database.
+  string deployment_id = 2;
+  // The operation (`tables`, `rows`, `query`, …) and its arguments as JSON.
+  string op = 3;
+  string json_args = 4;
+  // Also the session's statement_timeout.
+  uint32 timeout_ms = 5;
+}
+
+message DbResponse {
+  string request_id = 1;
+  // The result as JSON, when `error` is empty.
+  string json = 2;
+  string error = 3;
+  // The error is the request's fault (a Postgres error or bad arguments),
+  // not the node's or the database's availability.
+  bool bad_request = 4;
+}
+
+// ---------------------------------------------------------------- upgrades (60–69)
+//
+// Rolling upgrades: after the control plane itself was upgraded, it asks each
+// node that advertises the "upgrade" capability, one at a time, to install the
+// server's own version. The node never runs the upgrade itself: it hands the
+// version to the root-owned modula-upgrade unit, which runs the installer's
+// `upgrade` (fetched from this instance), verifies the signed release, switches
+// to it and restarts modula-node. Success is the node's next Hello with the new
+// version; UpgradeStatus reports only what happened before that.
+
+message UpgradeRequest {
+  string request_id = 1;
+  // The version to install (the server's own), e.g. "0.2.0".
+  string version = 2;
+}
+
+message UpgradeStatus {
+  string request_id = 1;
+  // True once the upgrade was handed over (a restart follows); false when it
+  // could not start or the installer failed (and rolled back).
+  bool ok = 2;
+  string error = 3;
+}
+
+// ---------------------------------------------------------------- private dashboard (70–79)
+//
+// Private mode puts the dashboard and the node endpoint behind Cloudflare
+// Tunnel + Access (see the server's crate::private). The main server runs
+// `cloudflared tunnel run` and stops serving the dashboard on its edge; the
+// other servers reach the node endpoint through a local
+// `cloudflared access tcp` listener. The node (root) installs cloudflared and
+// writes its systemd units; AccessStatus reports the outcome.
+
+message AccessConfig {
+  string request_id = 1;
+  // Which half applies: the main server (tunnel, edge, firewall) or another server.
+  bool main = 2;
+
+  // Main server: run the tunnel with this token; empty = stop and remove it.
+  string tunnel_token = 3;
+  // Main server: hostnames its edge stops serving (the dashboard).
+  repeated string hidden_routes = 4;
+  // Main server: close the public node port in ufw (reopened when false).
+  bool close_node_port = 5;
+  uint32 node_port = 6;
+
+  // Other servers: reach the node endpoint through Cloudflare Access at
+  // node_host with this service token; empty node_host = dial direct_server again.
+  string node_host = 7;
+  string client_id = 8;
+  string client_secret = 9;
+  // Where to dial without the tunnel, and through the local listener.
+  string direct_server = 10;
+  string tunneled_server = 11;
+}
+
+message AccessStatus {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+// ---------------------------------------------------------------- cron (90–99)
+//
+// A cron service runs nothing continuously. At each due time the server sends
+// CronRun to the server that built its serving deployment; the node runs the
+// workload once (like a pre-deploy command: its image, env and network, the
+// workload's start command or the image's default), ships its output as
+// LogBatch lines of that deployment, and reports CronResult through the
+// outbox (so it survives reconnects).
+
+message CronRun {
+  string run_id = 1;
+  Workload workload = 2;
+  // Stop it after this long (reported as timed_out).
+  uint32 timeout_secs = 3;
+}
+
+message CronResult {
+  string run_id = 1;
+  int64 exit_code = 2;
+  bool timed_out = 3;
+  // Set when it could not run (or the runtime failed); exit_code is then 0.
+  string error = 4;
+}
+
+// ---------------------------------------------------------------- volume copies (110–119)
+//
+// Moving a volume's data to another server (migrating a server). The control
+// plane relays one transfer between two nodes over their existing streams:
+// VolumeImport to the destination, VolumeExport to the source; the source
+// streams a gzipped tar of the volume as VolumeData, which the server
+// forwards to the destination, and the destination's credit back. Flow
+// control is the tunnels' (credit per transfer, 256 KiB window, 64 KiB
+// chunks), end to end between the two nodes. Both sides refuse a volume that
+// a container still mounts. The destination empties the volume before
+// unpacking, so a repeated transfer starts over cleanly.
+
+// Server → source node: stream volume `volume` (e.g. modula-vol-…).
+message VolumeExport {
+  string transfer_id = 1;
+  string volume = 2;
+}
+
+// Server → destination node: create volume `volume` (emptied when it
+// exists) and unpack the VolumeData that follows into it.
+message VolumeImport {
+  string transfer_id = 1;
+  string volume = 2;
+}
+
+// Source → server → destination: the archive. Destination → server →
+// source: credit only.
+message VolumeData {
+  string transfer_id = 1;
+  // At most 64 KiB; may be empty when only returning credit.
+  bytes data = 2;
+  // Bytes the sender of this message has consumed since its last credit.
+  uint32 credit = 3;
+  // Source only: the archive ends after `data`.
+  bool eof = 4;
+}
+
+// Node → server: the transfer finished on this side. From the destination
+// once everything is unpacked (`ok`, with the archive's size); from the
+// source only on failure. Server → node: give the transfer up.
+message VolumeClose {
+  string transfer_id = 1;
+  bool ok = 2;
+  string error = 3;
+  // Archive bytes handled.
+  uint64 bytes = 4;
+}
+
+// ---------------------------------------------------------------- main server migration (120–129)
+//
+// Moving the control plane to a new server (capability "promote"): the new
+// server joined as an ordinary node and got every service. With the
+// dashboard in maintenance, the control plane sends it PromoteRequest; the
+// node fetches the bundle (FetchPromotion: database dump, master key,
+// uploads, settings) and has the installer set up the control plane from it
+// (`install.sh main --restore`). PromoteStatus reports progress and the
+// outcome. Then every node is told the new address with ServerAddress
+// (capability "server-address"): it connects there with its own identity
+// first and only switches when that works.
+
+message PromoteRequest {
+  // The migration's id.
+  string request_id = 1;
+  // Single use; FetchPromotion only accepts it from this node.
+  string ticket = 2;
+}
+
+message PromoteStatus {
+  string request_id = 1;
+  // False: progress only (`step`); true: finished with `ok`/`error`.
+  bool done = 2;
+  bool ok = 3;
+  string error = 4;
+  string step = 5;
+}
+
+message PromotionFetch {
+  string request_id = 1;
+  string ticket = 2;
+}
+
+message PromotionChunk {
+  // At most 1 MiB.
+  bytes data = 1;
+  // Last chunk only: the whole bundle's SHA-256 (hex) and size.
+  string sha256 = 2;
+  uint64 total_bytes = 3;
+}
+
+// Dial the control plane at `server` (https://host:port) from now on, once a
+// connection there with this node's identity worked. `restart`: restart
+// modula-node afterwards (its unit changed, e.g. it now serves the dashboard).
+message ServerAddress {
+  string request_id = 1;
+  string server = 2;
+  bool restart = 3;
+}
+
+// Sent on the old connection before switching.
+message ServerAddressStatus {
+  string request_id = 1;
+  bool ok = 2;
+  string error = 3;
+}

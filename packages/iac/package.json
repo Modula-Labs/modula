@@ -1,0 +1,21 @@
+{
+  "name": "@modula-labs/iac",
+  "version": "0.1.1",
+  "description": "Types and helpers for Modula Deploy config as code (.modula/modula.ts)",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "files": ["iac.js", "iac.d.ts", "README.md"],
+  "exports": {
+    ".": {
+      "types": "./iac.d.ts",
+      "default": "./iac.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "sideEffects": false
+}

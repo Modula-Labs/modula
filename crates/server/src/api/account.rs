@@ -1,0 +1,324 @@
+//! The caller's own account: 2FA (TOTP, passkeys), backup codes, sessions, password.
+
+use axum::Json;
+use axum::extract::State;
+use modula_crypto::password;
+use modula_id::Id;
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use time::OffsetDateTime;
+use webauthn_rs::prelude::{CreationChallengeResponse, RegisterPublicKeyCredential};
+
+use crate::audit::Entry;
+use crate::auth::session::{self, Actor};
+use crate::auth::{mfa, passkey};
+use crate::authz::Grant;
+use crate::error::{AppError, AppResult};
+use crate::http::meta::RequestMeta;
+use crate::state::AppState;
+use crate::validate;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Security {
+    pub totp_enabled: bool,
+    pub passkeys: Vec<passkey::PasskeyInfo>,
+    /// The domain new passkeys are made for and which ones can sign in;
+    /// None = passkeys unavailable (the dashboard has no domain).
+    pub passkey_rp_id: Option<String>,
+    pub backup_codes_remaining: i64,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub sudo_until: Option<OffsetDateTime>,
+}
+
+pub async fn security(State(state): State<AppState>, actor: Actor) -> AppResult<Json<Security>> {
+    Ok(Json(Security {
+        totp_enabled: mfa::totp_enabled(&state.db, actor.user_id).await?,
+        passkeys: passkey::list(&state.db, actor.user_id).await?,
+        passkey_rp_id: passkey::relying_party(&state).map(|(rp_id, _)| rp_id),
+        backup_codes_remaining: mfa::backup_codes_remaining(&state.db, actor.user_id).await?,
+        sudo_until: actor.sudo_until.filter(|_| actor.sudo_active()),
+    }))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrollResponse {
+    pub otpauth_url: String,
+    pub secret: String,
+}
+
+pub async fn totp_begin(
+    State(state): State<AppState>,
+    actor: Actor,
+) -> AppResult<Json<EnrollResponse>> {
+    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(actor.user_id)
+        .fetch_one(&state.db)
+        .await?;
+    let e = mfa::begin_enrollment(&state, actor.user_id, &email).await?;
+    Ok(Json(EnrollResponse {
+        otpauth_url: e.otpauth_url.to_string(),
+        secret: e.secret_base32.to_string(),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfirmRequest {
+    pub code: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupCodes {
+    /// Shown exactly once.
+    pub backup_codes: Vec<String>,
+}
+
+pub async fn totp_confirm(
+    State(state): State<AppState>,
+    actor: Actor,
+    meta: RequestMeta,
+    Json(req): Json<ConfirmRequest>,
+) -> AppResult<Json<BackupCodes>> {
+    let codes = mfa::confirm_enrollment(&state, actor.user_id, &req.code).await?;
+    Entry::new("account.totp_enabled", &meta)
+        .actor(&actor)
+        .record(&state.db)
+        .await?;
+    Ok(Json(BackupCodes {
+        backup_codes: codes.iter().map(|c| c.to_string()).collect(),
+    }))
+}
+
+pub async fn totp_disable(
+    State(state): State<AppState>,
+    actor: Actor,
+    meta: RequestMeta,
+) -> AppResult<Json<Value>> {
+    mfa::disable(&state, actor.user_id).await?;
+    Entry::new("account.totp_disabled", &meta)
+        .actor(&actor)
+        .record(&state.db)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn backup_codes_regenerate(
+    State(state): State<AppState>,
+    actor: Actor,
+    meta: RequestMeta,
+) -> AppResult<Json<BackupCodes>> {
+    let codes = mfa::regenerate_backup_codes(&state, actor.user_id).await?;
+    Entry::new("account.backup_codes_regenerated", &meta)
+        .actor(&actor)
+        .record(&state.db)
+        .await?;
+    Ok(Json(BackupCodes {
+        backup_codes: codes.iter().map(|c| c.to_string()).collect(),
+    }))
+}
+
+/// Start adding a passkey: options for `navigator.credentials.create`.
+pub async fn passkey_begin(
+    State(state): State<AppState>,
+    actor: Actor,
+) -> AppResult<Json<CreationChallengeResponse>> {
+    let ccr = passkey::begin_registration(&state, actor.user_id, actor.session_id).await?;
+    Ok(Json(ccr))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PasskeyConfirm {
+    pub name: String,
+    pub credential: Box<RegisterPublicKeyCredential>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyAdded {
+    pub id: Id,
+    /// Set when this is the account's first second factor; shown exactly once.
+    pub backup_codes: Vec<String>,
+}
+
+pub async fn passkey_confirm(
+    State(state): State<AppState>,
+    actor: Actor,
+    meta: RequestMeta,
+    Json(req): Json<PasskeyConfirm>,
+) -> AppResult<Json<PasskeyAdded>> {
+    let name = validate::display_name(&req.name, "passkey name")?;
+    let mut tx = state.db.begin().await?;
+    let id = passkey::finish_registration(
+        &state,
+        &mut tx,
+        actor.user_id,
+        actor.session_id,
+        &name,
+        &req.credential,
+    )
+    .await?;
+    let codes = mfa::ensure_backup_codes(&state, &mut tx, actor.user_id).await?;
+    Entry::new("account.passkey_added", &meta)
+        .actor(&actor)
+        .target("passkey", id)
+        .metadata(json!({ "name": name }))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(PasskeyAdded {
+        id,
+        backup_codes: codes.iter().map(|c| c.to_string()).collect(),
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PasskeyRename {
+    pub name: String,
+}
+
+pub async fn passkey_rename(
+    State(state): State<AppState>,
+    grant: Grant,
+    Json(req): Json<PasskeyRename>,
+) -> AppResult<Json<Value>> {
+    let name = validate::display_name(&req.name, "passkey name")?;
+    sqlx::query("UPDATE passkeys SET name = $2 WHERE id = $1")
+        .bind(grant.resource.id)
+        .bind(&name)
+        .execute(&state.db)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn passkey_delete(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+) -> AppResult<Json<Value>> {
+    let mut tx = state.db.begin().await?;
+    sqlx::query("DELETE FROM passkeys WHERE id = $1")
+        .bind(grant.resource.id)
+        .execute(&mut *tx)
+        .await?;
+    mfa::drop_backup_codes_if_unprotected(&mut tx, actor.user_id).await?;
+    Entry::new("account.passkey_removed", &meta)
+        .actor(&actor)
+        .target("passkey", grant.resource.id)
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    pub id: Id,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_seen_at: OffsetDateTime,
+    #[sqlx(skip)]
+    pub current: bool,
+}
+
+pub async fn sessions(
+    State(state): State<AppState>,
+    actor: Actor,
+) -> AppResult<Json<Vec<SessionInfo>>> {
+    let mut rows: Vec<SessionInfo> = sqlx::query_as(
+        "SELECT id, ip, user_agent, created_at, last_seen_at FROM sessions
+         WHERE user_id = $1 AND kind = 'full' AND expires_at > now()
+           AND last_seen_at > $2
+         ORDER BY last_seen_at DESC",
+    )
+    .bind(actor.user_id)
+    .bind(OffsetDateTime::now_utc() - session::IDLE_TTL)
+    .fetch_all(&state.db)
+    .await?;
+    for r in &mut rows {
+        r.current = r.id == actor.session_id;
+    }
+    Ok(Json(rows))
+}
+
+pub async fn session_revoke(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+) -> AppResult<Json<Value>> {
+    session::revoke(&state.db, grant.resource.id).await?;
+    Entry::new("account.session_revoked", &meta)
+        .actor(&actor)
+        .target("session", grant.resource.id)
+        .record(&state.db)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PasswordChange {
+    pub new_password: SecretString,
+    /// Keep the account's API tokens working (they're revoked by default).
+    #[serde(default)]
+    pub keep_tokens: bool,
+}
+
+/// Requires sudo. In one transaction: the new hash, every other session
+/// signed out and, unless `keepTokens`, every API token revoked, so a
+/// password change locks out whoever else had the account.
+pub async fn change_password(
+    State(state): State<AppState>,
+    actor: Actor,
+    meta: RequestMeta,
+    Json(req): Json<PasswordChange>,
+) -> AppResult<Json<Value>> {
+    validate::password(req.new_password.expose_secret())?;
+    let pw = req.new_password;
+    let hash = tokio::task::spawn_blocking(move || password::hash(pw.expose_secret()))
+        .await
+        .map_err(|e| AppError::Internal(e.into()))??;
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")
+        .bind(actor.user_id)
+        .bind(hash)
+        .execute(&mut *tx)
+        .await?;
+    let revoked = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
+        .bind(actor.user_id)
+        .bind(actor.session_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    let tokens_revoked = if req.keep_tokens {
+        0
+    } else {
+        sqlx::query("DELETE FROM api_tokens WHERE user_id = $1")
+            .bind(actor.user_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    };
+    Entry::new("account.password_changed", &meta)
+        .actor(&actor)
+        .metadata(json!({ "sessionsRevoked": revoked, "tokensRevoked": tokens_revoked }))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(json!({
+        "ok": true,
+        "sessionsRevoked": revoked,
+        "tokensRevoked": tokens_revoked,
+    })))
+}

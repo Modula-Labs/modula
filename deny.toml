@@ -1,0 +1,50 @@
+# cargo-deny: licenses, advisories, banned/duplicate crates, and sources.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # basic-toml is unmaintained (no vulnerability). It is only reached through
+    # age's i18n proc macro, which reads age's own bundled i18n.toml at compile
+    # time; it never parses input at runtime. Drop once age moves off it.
+    { id = "RUSTSEC-2026-0374", reason = "compile-time only, via age's i18n-embed-fl macro" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint timing: reachable through age's p256/hpke plugin recipients (we use x25519 only) and webauthn-rs, which only verifies signatures over public keys and data. Drop when both move to elliptic-curve 0.14" },
+    # rsa (Marvin): timing leaks of private-key operations. webauthn-rs only
+    # verifies RS256 passkey signatures with public keys; we hold no RSA keys.
+    { id = "RUSTSEC-2023-0071", reason = "rsa via webauthn-rs: public-key verification only, no private-key operations" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "0BSD",
+    "BSL-1.0",
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

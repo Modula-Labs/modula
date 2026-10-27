@@ -1,0 +1,77 @@
+[package]
+name = "modula-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "modula-server"
+path = "src/main.rs"
+
+[dependencies]
+modula-crypto.workspace = true
+modula-id = { workspace = true, features = ["sqlx"] }
+modula-proto.workspace = true
+modula-backup.workspace = true
+modula-hetzner.workspace = true
+
+anyhow.workspace = true
+bytes.workspace = true
+percent-encoding.workspace = true
+rusty-s3.workspace = true
+axum = { workspace = true, features = ["ws"] }
+axum-extra.workspace = true
+clap.workspace = true
+futures.workspace = true
+http.workspace = true
+redis.workspace = true
+rcgen.workspace = true
+ring.workspace = true
+webauthn-rs.workspace = true
+semver.workspace = true
+jiff.workspace = true
+croner.workspace = true
+base64.workspace = true
+rustls.workspace = true
+reqwest.workspace = true
+hmac.workspace = true
+hickory-resolver.workspace = true
+globset.workspace = true
+jsonwebtoken.workspace = true
+x509-parser.workspace = true
+tonic.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
+sha2.workspace = true
+hex.workspace = true
+rust-embed.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["process", "io-util"] }
+tokio-util = { workspace = true, features = ["io"] }
+tokio-rustls.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+zeroize.workspace = true
+# Unpacking static-site build output before publishing it.
+tar.workspace = true
+flate2.workspace = true
+
+[dev-dependencies]
+time = { workspace = true, features = ["macros"] }
+modula-node.workspace = true
+modula-cli.workspace = true
+tokio-tungstenite.workspace = true
+http-body-util = "0.1"
+flate2.workspace = true
+data-encoding.workspace = true
+tower = { workspace = true }
+tokio-util.workspace = true

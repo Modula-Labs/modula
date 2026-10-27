@@ -1,0 +1,67 @@
+{
+	"defaultAction": "SCMP_ACT_ALLOW",
+	"archMap": [
+		{
+			"architecture": "SCMP_ARCH_X86_64",
+			"subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+		},
+		{
+			"architecture": "SCMP_ARCH_AARCH64",
+			"subArchitectures": ["SCMP_ARCH_ARM"]
+		}
+	],
+	"syscalls": [
+		{
+			"names": [
+				"acct",
+				"adjtimex",
+				"bpf",
+				"clock_adjtime",
+				"clock_adjtime64",
+				"clock_settime",
+				"clock_settime64",
+				"create_module",
+				"delete_module",
+				"finit_module",
+				"get_kernel_syms",
+				"init_module",
+				"ioperm",
+				"iopl",
+				"kcmp",
+				"kexec_file_load",
+				"kexec_load",
+				"lookup_dcookie",
+				"name_to_handle_at",
+				"nfsservctl",
+				"open_by_handle_at",
+				"perf_event_open",
+				"pidfd_getfd",
+				"process_vm_readv",
+				"process_vm_writev",
+				"query_module",
+				"quotactl",
+				"quotactl_fd",
+				"reboot",
+				"settimeofday",
+				"stime",
+				"swapoff",
+				"swapon",
+				"_sysctl",
+				"sysfs",
+				"syslog",
+				"uselib",
+				"userfaultfd",
+				"ustat",
+				"vm86",
+				"vm86old"
+			],
+			"action": "SCMP_ACT_ERRNO",
+			"errnoRet": 1
+		},
+		{
+			"names": ["add_key", "keyctl", "request_key"],
+			"action": "SCMP_ACT_ERRNO",
+			"errnoRet": 38
+		}
+	]
+}
