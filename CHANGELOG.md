@@ -7,6 +7,8 @@ may break things).
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-10-27
+
 ### Fixed
 
 - **Deleting a service from one environment no longer deletes it
@@ -364,7 +366,8 @@ environments and staged deploys, licensed AGPL-3.0-only.
 - **CLI:** `modula` for projects, deployments, logs, variables, metrics,
   `modula.toml` infrastructure as code, and `modula server create`.
 
-[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/Modula-Labs/modula/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/Modula-Labs/modula/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/Modula-Labs/modula/compare/v0.1.7...v0.1.8
 [0.1.5]: https://github.com/Modula-Labs/modula/compare/v0.1.4...v0.1.5
