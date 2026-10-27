@@ -1,5 +1,7 @@
 # Modula Deploy
 
+![The Modula Deploy dashboard: a project canvas with an API, a Postgres database and a service's deployments](.github/assets/dashboard.png)
+
 Self-hosted platform for deploying apps and databases on your own servers.
 Push to GitHub or pick an image, and Modula builds, deploys, routes and secures
 it. The workflow is modeled on Railway's: a project canvas, environments, staged
