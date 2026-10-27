@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
-import { Alert } from "@/components/ui/misc";
 import { api, type Instance, type ProjectDetail, type ServiceConfig } from "@/lib/api";
 import {
   codeError,
@@ -19,6 +18,7 @@ import { cloudflare } from "@/lib/integrations";
 import { DomainsSection } from "./DomainsSection";
 import { CodeEditor, CodeSize, TargetField } from "./FunctionFields";
 import { parseRepo } from "./NewServiceDialog";
+import { DeleteServiceDialog } from "./ProjectDialogs";
 import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
 import { projectReturnPath } from "@/lib/github";
 import { SectionRail } from "./SettingsParts";
@@ -139,13 +139,7 @@ export function FunctionSettings({
       void qc.invalidateQueries({ queryKey: ["pending", instance.environmentId] });
     },
   });
-  const remove = useMutation({
-    mutationFn: () => api.deleteService(instance.serviceId),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["project", instance.projectId] });
-      onDeleted();
-    },
-  });
+  const [deleting, setDeleting] = useState(false);
   const rail = ["Code", "Runtime", "Networking", ...(cloud ? [] : ["Deploy"]), ...(canDelete ? ["Danger zone"] : [])].map(
     (label) => ({ id: sectionId(label), label }),
   );
@@ -283,16 +277,34 @@ export function FunctionSettings({
 
         {canDelete ? (
           <Section title="Danger zone">
-            {remove.error ? <Alert>{remove.error.message}</Alert> : null}
             <div className="flex items-center justify-between gap-4 rounded-xl border border-destructive/40 p-4">
               <div className="text-sm">
-                <div className="font-bold">Delete service</div>
-                <div className="text-muted-foreground">Removes it from every environment and stops it everywhere it runs.</div>
+                <div className="font-bold">Delete service from {instance.environmentName}</div>
+                <div className="text-muted-foreground">
+                  Stops it in {instance.environmentName} and deletes its settings there. Other environments keep theirs.
+                </div>
               </div>
-              <Button variant="danger" loading={remove.isPending} onClick={() => remove.mutate()}>
+              <Button variant="danger" onClick={() => setDeleting(true)}>
                 Delete service
               </Button>
             </div>
+            <DeleteServiceDialog
+        service={
+          deleting
+            ? {
+                serviceId: instance.serviceId,
+                name: instance.serviceName,
+                environmentId: instance.environmentId,
+                instanceId: instance.id,
+                environmentName: instance.environmentName,
+                volume: !!instance.volume,
+              }
+            : undefined
+        }
+        onClose={() => setDeleting(false)}
+        projectId={instance.projectId}
+        onDeleted={() => onDeleted()}
+      />
           </Section>
         ) : null}
 

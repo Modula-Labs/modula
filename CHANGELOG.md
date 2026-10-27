@@ -7,6 +7,34 @@ may break things).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deleting a service from one environment no longer deletes it
+  everywhere.** Deleting a service in the dashboard while viewing `staging`
+  removed it from every environment, production's deployments and volume
+  data included. Deleting is now per environment, like Railway: the confirm
+  dialog says **Delete <name> from <environment>**, and only that
+  environment's deployments, volume data, domains, TCP proxy, variables and
+  cron schedule go. The service itself goes with its last environment.
+  Deleting from all environments is a separate option in the dialog that
+  asks for the service's name. The settings-tab Delete buttons (services,
+  functions, buckets) now confirm first, and the canvas and the project's
+  Danger settings only list the services of the environment being viewed.
+- Discarding a never-deployed service's pending changes removes it from that
+  environment only.
+
+### Changed
+
+- **API (breaking):** `DELETE /api/services/{id}` now requires
+  `?allEnvironments=true` and is refused without it, so an old client can't
+  delete a service everywhere by mistake. The new `DELETE
+  /api/service-instances/{id}` deletes a service from one environment
+  (Member + sudo); its response says whether the service itself was deleted
+  (`serviceDeleted`).
+- The `service.delete` audit entry records the environment
+  (`environment`, `environmentName`, `serviceDeleted`), or
+  `allEnvironments: true` and the environments for a delete everywhere.
+
 ## [0.1.9] - 2026-10-26
 
 ### Fixed

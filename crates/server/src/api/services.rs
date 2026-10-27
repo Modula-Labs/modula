@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use modula_id::Id;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -315,12 +315,31 @@ pub async fn create_service(
     })
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteServiceQuery {
+    /// Must be `true`: deleting one environment's instance is
+    /// `DELETE /api/service-instances/{id}`.
+    #[serde(default)]
+    pub all_environments: bool,
+}
+
+/// `DELETE /api/services/{id}?allEnvironments=true`: the service in every
+/// environment. Without the flag it is refused, so a client can never wipe
+/// production while looking at another environment by accident.
 pub async fn delete(
     State(state): State<AppState>,
     actor: Actor,
     grant: Grant,
     meta: RequestMeta,
+    Query(q): Query<DeleteServiceQuery>,
 ) -> AppResult<Json<buckets::Released>> {
+    if !q.all_environments {
+        return Err(AppError::bad_request(
+            "this deletes the service in every environment: pass ?allEnvironments=true, \
+             or DELETE /api/service-instances/{id} to delete it from one environment",
+        ));
+    }
     delete_service(&state, &actor, grant.workspace_id()?, &meta, grant.id())
         .await
         .map(Json)
@@ -340,19 +359,142 @@ pub(crate) async fn delete_service(
     let mut tx = state.db.begin().await?;
     let mut nodes = deploy::remove_live(&mut tx, LiveFilter::Service, id).await?;
     nodes.extend(deploy::queue_volume_removals(&mut tx, LiveFilter::Service, id).await?);
-    sqlx::query("DELETE FROM services WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
+    let environments: Vec<(Id, String)> = sqlx::query_as(
+        "SELECT e.id, e.name FROM service_instances i JOIN environments e ON e.id = i.environment_id
+         WHERE i.service_id = $1 ORDER BY e.created_at",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let name: Option<String> =
+        sqlx::query_scalar("DELETE FROM services WHERE id = $1 RETURNING name")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if name.is_none() {
+        return Err(AppError::NotFound);
+    }
     Entry::new("service.delete", meta)
         .actor(actor)
         .workspace(workspace)
         .target("service", id)
+        .metadata(json!({
+            "name": name,
+            "allEnvironments": true,
+            "environments": environments
+                .iter()
+                .map(|(id, name)| json!({ "id": id, "name": name }))
+                .collect::<Vec<_>>(),
+        }))
         .record(&mut *tx)
         .await?;
     tx.commit().await?;
     state.hub.kick_all(&nodes);
     Ok(buckets::Released { ok: true, warnings })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedInstance {
+    pub ok: bool,
+    pub environment_id: Id,
+    pub environment_name: String,
+    /// It was the service's last instance, so the service is gone too.
+    pub service_deleted: bool,
+    /// Tokens left at Cloudflare because it isn't connected any more.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// `DELETE /api/service-instances/{id}`: delete a service from one
+/// environment (like Railway): that instance's deployments stop and its
+/// volume, domains, TCP proxy, variables, cron schedule and the like go;
+/// other environments are untouched. With its last instance the service
+/// goes too. References to it from this environment's variables are left
+/// (they resolve to missing, which the warnings show).
+pub async fn delete_instance(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+) -> AppResult<Json<DeletedInstance>> {
+    delete_service_instance(&state, &actor, grant.workspace_id()?, &meta, grant.id())
+        .await
+        .map(Json)
+}
+
+pub(crate) async fn delete_service_instance(
+    state: &AppState,
+    actor: &Actor,
+    workspace: Id,
+    meta: &RequestMeta,
+    id: Id,
+) -> AppResult<DeletedInstance> {
+    let (service, name, environment, environment_name): (Id, String, Id, String) = sqlx::query_as(
+        "SELECT s.id, s.name, e.id, e.name FROM service_instances i
+             JOIN services s ON s.id = i.service_id
+             JOIN environments e ON e.id = i.environment_id
+             WHERE i.id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    // An R2 bucket's token is revoked first; the bucket stays.
+    let warnings = buckets::release(state, buckets::Scope::Instance(id)).await?;
+    let mut tx = state.db.begin().await?;
+    let mut nodes = deploy::remove_live(&mut tx, LiveFilter::Instance, id).await?;
+    nodes.extend(deploy::queue_volume_removals(&mut tx, LiveFilter::Instance, id).await?);
+    let gone = sqlx::query("DELETE FROM service_instances WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    if gone.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    let service_deleted = sqlx::query(
+        "DELETE FROM services s WHERE s.id = $1
+         AND NOT EXISTS (SELECT 1 FROM service_instances WHERE service_id = s.id)",
+    )
+    .bind(service)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if !service_deleted {
+        let deleted = [Change::new("service", "deleted", name.as_str())];
+        activity::record(
+            &mut tx,
+            environment,
+            Some(service),
+            Some(actor.user_id),
+            &deleted,
+        )
+        .await?;
+    }
+    Entry::new("service.delete", meta)
+        .actor(actor)
+        .workspace(workspace)
+        .target("service", service)
+        .metadata(json!({
+            "name": name,
+            "allEnvironments": false,
+            "instance": id,
+            "environment": environment,
+            "environmentName": environment_name,
+            "serviceDeleted": service_deleted,
+        }))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    state.hub.kick_all(&nodes);
+    Ok(DeletedInstance {
+        ok: true,
+        environment_id: environment,
+        environment_name,
+        service_deleted,
+        warnings,
+    })
 }
 
 #[derive(Deserialize)]

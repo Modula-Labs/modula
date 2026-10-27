@@ -225,7 +225,8 @@ pub struct PendingService {
     /// Never deployed in this environment: its first deploy creates it, and
     /// its changes are everything it is configured with.
     pub new: bool,
-    /// Never deployed anywhere: discarding it deletes the service.
+    /// Never deployed in this environment: discarding it deletes the service
+    /// from this environment (and the service itself with its last instance).
     pub removable: bool,
     pub changes: Vec<PendingChange>,
 }
@@ -368,15 +369,9 @@ async fn diffs(state: &AppState, environment: Id) -> AppResult<Vec<(PendingServi
         if diffs.is_empty() {
             continue;
         }
-        let removable = new
-            && !sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM deployments d
-                                JOIN service_instances i ON i.id = d.service_instance_id
-                                WHERE i.service_id = $1)",
-            )
-            .bind(head.service_id)
-            .fetch_one(&state.db)
-            .await?;
+        // Never deployed here: discarding it removes this environment's
+        // instance (nothing runs and its volume holds no data).
+        let removable = new;
         out.push((
             PendingService {
                 service_id: head.service_id,
@@ -692,20 +687,14 @@ pub async fn discard(
         return Err(AppError::NotFound);
     };
     if svc.new && req.changes.is_none() {
-        if !svc.removable {
-            return Err(AppError::Conflict(format!(
-                "{} is deployed in another environment; delete it from its settings",
-                svc.service_name
-            )));
-        }
-        // Never deployed anywhere: nothing runs and no volume holds data, so
-        // undoing it is undoing its creation.
-        crate::api::services::delete_service(
+        // Never deployed here: nothing runs and no volume holds data, so
+        // undoing it is removing it from this environment.
+        crate::api::services::delete_service_instance(
             &state,
             &actor,
             grant.workspace_id()?,
             &meta,
-            svc.service_id,
+            svc.instance_id,
         )
         .await?;
         return pending_with(&state, environment, false).await.map(Json);

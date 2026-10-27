@@ -478,6 +478,14 @@ export interface Instance {
   edgeUnsupported?: string[];
   updatedAt: string;
 }
+export interface DeletedInstance {
+  ok: true;
+  environmentId: string;
+  environmentName: string;
+  /** It was the service's last environment, so the service is gone too. */
+  serviceDeleted: boolean;
+  warnings?: string[];
+}
 export interface R2Link {
   bucket: string;
   accountId: string;
@@ -1496,8 +1504,16 @@ export const api = {
   renameService: (id: string, name: string) =>
     patch<{ id: string; name: string; rewrittenVariables: number }>(`/api/services/${enc(id)}`, { name }),
   renamePreview: (id: string) => get<RenamePreview>(`/api/services/${enc(id)}/rename-preview`),
-  /** `warnings`: R2 bucket tokens left at Cloudflare (it was disconnected). */
-  deleteService: (id: string) => del<{ ok: true; warnings?: string[] }>(`/api/services/${enc(id)}`),
+  /** Delete a service from one environment (its instance there): its
+   *  deployments, volume data, domains and variables in that environment go;
+   *  other environments are untouched. The last one takes the service.
+   *  `warnings`: R2 bucket tokens left at Cloudflare (it was disconnected). */
+  deleteInstance: (instanceId: string) =>
+    del<DeletedInstance>(`/api/service-instances/${enc(instanceId)}`),
+  /** Delete a service from every environment (explicit: the dashboard asks
+   *  for its name first). */
+  deleteServiceEverywhere: (id: string) =>
+    del<{ ok: true; warnings?: string[] }>(`/api/services/${enc(id)}?allEnvironments=true`),
   createBucket: (project: string, b: { name: string; environmentId: string } & BucketChoice) =>
     post<{ id: string; name: string; instances: Instance[] }>(`/api/projects/${enc(project)}/buckets`, b),
   provisionBucket: (instance: string, b: BucketChoice) => post<Instance>(`/api/service-instances/${enc(instance)}/r2`, b),

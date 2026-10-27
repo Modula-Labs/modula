@@ -50,6 +50,8 @@ pub async fn remove_live(
 #[derive(Debug, Clone, Copy)]
 pub enum LiveFilter {
     Deployment,
+    /// One environment's instance of a service.
+    Instance,
     Service,
     Environment,
     Project,
@@ -83,6 +85,7 @@ impl LiveFilter {
     fn sql(self) -> &'static str {
         match self {
             Self::Deployment => remove_live_sql!("d.id = $1"),
+            Self::Instance => remove_live_sql!("i.id = $1"),
             Self::Service => remove_live_sql!("s.id = $1"),
             Self::Environment => remove_live_sql!("i.environment_id = $1"),
             Self::Project => remove_live_sql!("s.project_id = $1"),
@@ -91,7 +94,7 @@ impl LiveFilter {
     }
 }
 
-/// Before deleting a service, environment or project: queue its volumes'
+/// Before deleting a service instance, service, environment or project: queue its volumes'
 /// data for deletion on their nodes (the rows go with the cascade). Returns
 /// the nodes to kick after commit.
 pub async fn queue_volume_removals(
@@ -100,6 +103,7 @@ pub async fn queue_volume_removals(
     id: Id,
 ) -> AppResult<Vec<Id>> {
     let sql = match filter {
+        LiveFilter::Instance => volume_removals_sql!("i.id = $1"),
         LiveFilter::Service => volume_removals_sql!("s.id = $1"),
         LiveFilter::Environment => volume_removals_sql!("i.environment_id = $1"),
         LiveFilter::Project => volume_removals_sql!("s.project_id = $1"),

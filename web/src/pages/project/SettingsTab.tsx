@@ -3,7 +3,6 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { Checkbox, Switch } from "@/components/ui/Controls";
 import { Field, Input, Select, Textarea } from "@/components/ui/Input";
-import { Alert } from "@/components/ui/misc";
 import { Segmented } from "@/components/ui/Tabs";
 import {
   api,
@@ -23,6 +22,7 @@ import { EdgeSection } from "./EdgeSection";
 import { FunctionSettings } from "./FunctionSettings";
 import { HostingFields } from "./HostingSection";
 import { parseRepo } from "./NewServiceDialog";
+import { DeleteServiceDialog } from "./ProjectDialogs";
 import { BranchField, RepoField, useRepoSuggestions } from "./RepoFields";
 import { ServiceNameSection } from "./ServiceNameSection";
 import { ResourceSliders, SectionRail, ServerPicker, useNodes } from "./SettingsParts";
@@ -381,13 +381,7 @@ function ServiceSettings({
       keepForm.current = null;
     },
   });
-  const remove = useMutation({
-    mutationFn: () => api.deleteService(instance.serviceId),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["project", instance.projectId] });
-      onDeleted();
-    },
-  });
+  const [deleting, setDeleting] = useState(false);
 
   return (
     <div className="@container flex items-start gap-8">
@@ -911,22 +905,35 @@ function ServiceSettings({
 
       {canDelete ? (
         <Section title="Danger zone">
-          {remove.error ? <Alert>{remove.error.message}</Alert> : null}
           <div className="flex items-center justify-between gap-4 rounded-xl border border-destructive/40 p-4">
             <div className="text-sm">
-              <div className="font-bold">Delete service</div>
+              <div className="font-bold">Delete service from {instance.environmentName}</div>
               <div className="text-muted-foreground">
-                Removes it from every environment and stops its containers.
+                Stops it in {instance.environmentName} and deletes its variables
+                {instance.volume ? ", domains and volume data" : " and domains"} there. Other environments keep theirs.
               </div>
             </div>
-            <Button
-              variant="danger"
-              loading={remove.isPending}
-              onClick={() => remove.mutate()}
-            >
+            <Button variant="danger" onClick={() => setDeleting(true)}>
               Delete service
             </Button>
           </div>
+          <DeleteServiceDialog
+        service={
+          deleting
+            ? {
+                serviceId: instance.serviceId,
+                name: instance.serviceName,
+                environmentId: instance.environmentId,
+                instanceId: instance.id,
+                environmentName: instance.environmentName,
+                volume: !!instance.volume,
+              }
+            : undefined
+        }
+        onClose={() => setDeleting(false)}
+        projectId={instance.projectId}
+        onDeleted={() => onDeleted()}
+      />
         </Section>
       ) : null}
 

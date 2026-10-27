@@ -556,7 +556,8 @@ pub async fn insert_environment(
     }
     let id = Id::new();
     let mut tx = state.db.begin().await?;
-    // Every service exists in every environment. A duplicate starts from its
+    // The new environment gets the services of its source (a service deleted
+    // from that environment isn't brought back). A duplicate starts from its
     // source's configs; an empty one from the default environment's.
     let source: Option<Id> = sqlx::query_scalar(
         "SELECT id FROM environments WHERE project_id = $1 AND ($2::text IS NULL OR id = $2)

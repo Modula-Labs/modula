@@ -226,8 +226,9 @@ a `source` naming `repo`/`image`/`local` replaces the base's source, while
 `source.branch = "dev"` alone just changes the branch). Environments without
 a section get the base as is.
 
-Every service exists in every environment of a project, so the base lists
-all of them.
+A new service is added to every environment of a project, so the base lists
+all of them. (A service deleted from one environment is still in the others;
+re-adding it to that environment from the file isn't supported yet.)
 
 ## Commands
 

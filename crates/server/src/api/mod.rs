@@ -134,6 +134,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/services/{service_id}/rename-preview", Resource(Action::ServiceUpdate), services::rename_preview)
         .get("/api/service-instances/{instance_id}", Resource(Action::InstanceRead), services::get_instance)
         .patch("/api/service-instances/{instance_id}", Resource(Action::InstanceUpdate), services::update_instance)
+        .delete("/api/service-instances/{instance_id}", Resource(Action::InstanceDelete), services::delete_instance)
         .patch("/api/service-instances/{instance_id}/server", Resource(Action::InstanceUpdate), services::move_instance)
         // Moving a service with its volumes' data, and migrating a worker server (migrate/)
         .post("/api/service-instances/{instance_id}/move", Resource(Action::InstanceMove), migrate::move_instance)

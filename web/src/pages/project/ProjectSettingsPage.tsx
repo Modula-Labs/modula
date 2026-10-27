@@ -88,7 +88,7 @@ export function ProjectSettingsPage({ projectId, section }: { projectId: string;
               label="Open workspace settings"
             />
           ) : (
-            <DangerSection project={p} canEdit={canEdit} canDelete={canAdmin} />
+            <DangerSection project={p} env={env} canEdit={canEdit} canDelete={canAdmin} />
           )}
         </div>
       </div>

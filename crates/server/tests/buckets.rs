@@ -563,7 +563,10 @@ async fn r2_buckets_get_their_own_scoped_credentials(pool: PgPool) {
     assert_eq!(c.cf.token_ids().len(), 1);
     c.ok(
         Method::DELETE,
-        &format!("/api/services/{}", created["id"].as_str().unwrap()),
+        &format!(
+            "/api/services/{}?allEnvironments=true",
+            created["id"].as_str().unwrap()
+        ),
         None,
     )
     .await;

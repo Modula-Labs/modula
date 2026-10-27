@@ -16,9 +16,10 @@ import { templateStack } from "@/lib/templates";
 import { ActivityPanel } from "./ActivityPanel";
 import { Canvas, type CanvasPoint, type CanvasService } from "./Canvas";
 import { DeploymentSheet } from "./DeploymentSheet";
+import { servicesIn } from "./environments";
 import { NewServiceDialog, type NewServiceStep } from "./NewServiceDialog";
 import { PendingBar, usePending } from "./PendingBar";
-import { DeleteServiceDialog } from "./ProjectDialogs";
+import { DeleteServiceDialog, type ServiceToDelete } from "./ProjectDialogs";
 import { useProject } from "./ProjectContext";
 import { SyncDialog } from "./SyncDialog";
 import { ServiceSheet, type ServiceTab } from "./ServiceSheet";
@@ -61,7 +62,7 @@ export function ProjectPage({
   const [initialRepo, setInitialRepo] = useState<string | undefined>();
   const [placeAt, setPlaceAt] = useState<{ x: number; y: number } | null>(null);
   const [menu, setMenu] = useState<{ at: CanvasPoint; serviceId?: string } | null>(null);
-  const [deletingService, setDeletingService] = useState<{ id: string; name: string }>();
+  const [deletingService, setDeletingService] = useState<ServiceToDelete>();
   const [notice, setNotice] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   // An explicit open/close is remembered in this browser. Until there is one, the panel follows
@@ -116,7 +117,8 @@ export function ProjectPage({
   };
   const services: CanvasService[] = useMemo(() => {
     if (!p || !env) return [];
-    return p.services.map((s) => {
+    // Only the services in this environment: one deleted from it has no instance here.
+    return servicesIn(p, env.id).map((s) => {
       const i = p.instances.find((x) => x.serviceId === s.id && x.environmentId === env.id);
       return {
         id: s.id,
@@ -329,7 +331,7 @@ export function ProjectPage({
                       {canEdit ? (
                         <>
                           <MenuSeparator />
-                          <MenuItem danger icon={<Trash />} onSelect={() => setDeletingService({ id, name: svc.name })}>
+                          <MenuItem danger icon={<Trash />} onSelect={() => env && setDeletingService({ serviceId: id, name: svc.name, environmentId: env.id })}>
                             Delete service…
                           </MenuItem>
                         </>
@@ -437,6 +439,7 @@ export function ProjectPage({
         onClose={() => setDeletingService(undefined)}
         projectId={projectId}
         onDeleted={(id) => {
+          // Gone from this environment either way.
           if (search.service === id) setSearch({ env: search.env });
         }}
       />

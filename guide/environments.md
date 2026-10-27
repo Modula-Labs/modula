@@ -1,8 +1,11 @@
 # Environments
 
 Every project starts with `production`. Add environments such as `staging` to
-run a full copy of the project: every service exists in every environment, with
-its own settings, variables, domains, volume and deployments. Environments are
+run a full copy of the project: each service has its own settings, variables,
+domains, volume and deployments in every environment it's in. A new service is
+added to every environment; deleting one from an environment removes it from
+that environment only (see
+[delete a service](projects-and-services.md#delete-a-service)). Environments are
 isolated: each has its own private network and its own encryption key, and
 services in one can't reach services in another.
 

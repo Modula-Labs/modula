@@ -9,6 +9,7 @@ import { api, type Instance, type ProjectDetail } from "@/lib/api";
 import { BUCKET_VARIABLES, suggestBucketName } from "@/lib/templates";
 import { R2ChoiceFields, r2Choice, type R2Mode } from "./BucketFields";
 import { ConnectRow } from "./ConnectDialog";
+import { DeleteServiceDialog } from "./ProjectDialogs";
 
 function Section({
   title,
@@ -48,16 +49,7 @@ export function BucketTab({
   onDeleted: () => void;
 }) {
   const r2 = instance.template === "r2";
-  const qc = useQueryClient();
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const remove = useMutation({
-    mutationFn: () => api.deleteService(instance.serviceId),
-    onSuccess: async (r) => {
-      setWarnings(r.warnings ?? []);
-      await qc.invalidateQueries({ queryKey: ["project", instance.projectId] });
-      if (!r.warnings?.length) onDeleted();
-    },
-  });
+  const [deleting, setDeleting] = useState(false);
 
   return (
     <div className="flex flex-col pb-20">
@@ -69,29 +61,36 @@ export function BucketTab({
       {!r2 || instance.r2 ? <ConnectSection instance={instance} /> : null}
       {canEdit ? (
         <Section title="Danger zone">
-          {remove.error ? <Alert>{remove.error.message}</Alert> : null}
-          {warnings.map((w) => (
-            <Alert key={w} tone="warn">
-              {w}
-            </Alert>
-          ))}
           <div className="flex items-center justify-between gap-4 rounded-lg border border-destructive/40 p-4">
             <div className="text-sm">
-              <div className="font-medium">Delete service</div>
+              <div className="font-medium">Delete service from {instance.environmentName}</div>
               <div className="text-muted-foreground">
                 {r2
-                  ? "Removes it from every environment and revokes its Cloudflare tokens. The buckets and their data stay in Cloudflare."
-                  : "Removes it from every environment, stops its containers and deletes the volume with the bucket's data."}
+                  ? `Removes it from ${instance.environmentName} and revokes its Cloudflare token there. The bucket and its data stay in Cloudflare.`
+                  : `Removes it from ${instance.environmentName}, stops its container there and deletes that volume with the bucket's data. Other environments keep theirs.`}
               </div>
             </div>
-            <Button
-              variant="danger"
-              loading={remove.isPending}
-              onClick={() => remove.mutate()}
-            >
+            <Button variant="danger" onClick={() => setDeleting(true)}>
               Delete service
             </Button>
           </div>
+          <DeleteServiceDialog
+        service={
+          deleting
+            ? {
+                serviceId: instance.serviceId,
+                name: instance.serviceName,
+                environmentId: instance.environmentId,
+                instanceId: instance.id,
+                environmentName: instance.environmentName,
+                volume: !!instance.volume,
+              }
+            : undefined
+        }
+        onClose={() => setDeleting(false)}
+        projectId={instance.projectId}
+        onDeleted={() => onDeleted()}
+      />
         </Section>
       ) : null}
     </div>

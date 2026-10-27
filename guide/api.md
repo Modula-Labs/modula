@@ -175,9 +175,10 @@ re-authentication is also required.
 | POST | `/api/projects/{project_id}/services` | Member |
 | PATCH | `/api/services/{service_id}` | Member |
 | GET | `/api/services/{service_id}/rename-preview` | Member |
-| DELETE | `/api/services/{service_id}` | Member + sudo |
+| DELETE | `/api/services/{service_id}?allEnvironments=true` (every environment; refused without the flag) | Member + sudo |
 | GET | `/api/service-instances/{instance_id}` | Viewer |
 | PATCH | `/api/service-instances/{instance_id}` | Member |
+| DELETE | `/api/service-instances/{instance_id}` (the service in one environment; the last one deletes it) | Member + sudo |
 | GET | `/api/service-instances/{instance_id}/variables` | Viewer |
 | PATCH | `/api/service-instances/{instance_id}/variables` | Deployer |
 | GET | `/api/environments/{environment_id}/variables` | Viewer |

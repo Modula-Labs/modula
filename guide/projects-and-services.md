@@ -221,6 +221,26 @@ and the number of variables rewritten.
 
 ## Delete a service
 
-**Settings → Delete service** removes it from every environment, stops its
-deployments and deletes its volumes' data. It needs the **Member** role and a
-recent re-authentication, so it can't be done with an API token.
+Like Railway, deleting a service is per environment. **Settings → Delete
+service** (or **Delete service…** in the canvas menu) asks to confirm
+**Delete <name> from <environment>**: it stops the service's deployments in
+the environment you're viewing and deletes its volume data, domains, TCP
+proxy, variables, cron schedule and settings there. Other environments keep
+theirs, untouched. Variables elsewhere in that environment that reference it
+(`${{name.VAR}}`) are left as they are and show up as missing references in
+the warnings panel. Deleting it from its last environment deletes the
+service.
+
+To delete it from every environment at once, use **Delete from all
+environments…** in the same dialog and type the service's name: every
+deployment stops and every environment's volume data is deleted,
+production's included.
+
+Both need the **Member** role and a recent re-authentication, so they can't
+be done with an API token. Over the API: `DELETE
+/api/service-instances/{instance_id}` deletes it from one environment;
+`DELETE /api/services/{service_id}?allEnvironments=true` from all of them
+(without `allEnvironments=true` the request is refused). The audit log
+records the environment (`service.delete` with `environment`,
+`environmentName` and `serviceDeleted`, or `allEnvironments: true` and the
+list of environments).

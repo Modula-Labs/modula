@@ -575,6 +575,8 @@ pub async fn delete_bucket(
 /// Whose bucket tokens [`release`] revokes.
 #[derive(Debug, Clone, Copy)]
 pub enum Scope {
+    /// One environment's instance of a service.
+    Instance(Id),
     Service(Id),
     Environment(Id),
     Project(Id),
@@ -587,6 +589,7 @@ pub enum Scope {
 /// connected gets warnings instead, since nothing can be revoked.
 pub async fn release(state: &AppState, scope: Scope) -> AppResult<Vec<String>> {
     let (kind, id) = match scope {
+        Scope::Instance(id) => ("instance", id),
         Scope::Service(id) => ("service", id),
         Scope::Environment(id) => ("environment", id),
         Scope::Project(id) => ("project", id),
@@ -597,7 +600,7 @@ pub async fn release(state: &AppState, scope: Scope) -> AppResult<Vec<String>> {
          JOIN service_instances i ON i.id = r.service_instance_id
          JOIN services s ON s.id = i.service_id
          JOIN projects p ON p.id = s.project_id
-         WHERE $1 = CASE $2 WHEN 'service' THEN s.id WHEN 'environment' THEN i.environment_id
+         WHERE $1 = CASE $2 WHEN 'instance' THEN i.id WHEN 'service' THEN s.id WHEN 'environment' THEN i.environment_id
                             WHEN 'project' THEN p.id ELSE p.workspace_id END",
     )
     .bind(id)

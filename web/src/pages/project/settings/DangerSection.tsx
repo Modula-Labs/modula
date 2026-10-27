@@ -4,15 +4,28 @@ import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { Alert } from "@/components/ui/misc";
-import { api, type ProjectDetail } from "@/lib/api";
-import { DeleteServiceDialog } from "../ProjectDialogs";
+import { api, type Environment, type ProjectDetail } from "@/lib/api";
+import { servicesIn } from "../environments";
+import { DeleteServiceDialog, type ServiceToDelete } from "../ProjectDialogs";
 import { ConfirmDelete, SettingsSection } from "./SettingsParts";
 
-export function DangerSection({ project, canEdit, canDelete }: { project: ProjectDetail; canEdit: boolean; canDelete: boolean }) {
+export function DangerSection({
+  project,
+  env,
+  canEdit,
+  canDelete,
+}: {
+  project: ProjectDetail;
+  /** The environment being viewed: services are removed from it only. */
+  env: Environment | undefined;
+  canEdit: boolean;
+  canDelete: boolean;
+}) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [confirming, setConfirming] = useState(false);
-  const [service, setService] = useState<{ id: string; name: string }>();
+  const [service, setService] = useState<ServiceToDelete>();
+  const services = env ? servicesIn(project, env.id) : [];
   const remove = useMutation({
     mutationFn: () => api.deleteProject(project.id),
     onSuccess: async () => {
@@ -25,17 +38,20 @@ export function DangerSection({ project, canEdit, canDelete }: { project: Projec
     <SettingsSection title="Danger" description="These can't be undone.">
       <div className="flex max-w-2xl flex-col gap-4">
         <Card>
-          <CardHeader title="Services" description="Remove a service and its deployments from this project." />
+          <CardHeader
+            title={env ? `Services in ${env.name}` : "Services"}
+            description={`Remove a service from ${env?.name ?? "this environment"}: its deployments, variables and volume data there. Other environments keep theirs.`}
+          />
           <CardContent>
-            {project.services.length === 0 ? (
+            {services.length === 0 ? (
               <p className="text-sm text-muted-foreground">No services.</p>
             ) : (
               <ul className="flex flex-col">
-                {project.services.map((s) => (
+                {services.map((s) => (
                   <li key={s.id} className="-mx-3 flex min-h-11 items-center gap-2 rounded-lg px-3 py-1.5 hover:bg-muted/50">
                     <span className="min-w-0 flex-1 truncate text-sm">{s.name}</span>
                     {canEdit ? (
-                      <Button variant="danger-outline" onClick={() => setService({ id: s.id, name: s.name })}>
+                      <Button variant="danger-outline" onClick={() => env && setService({ serviceId: s.id, name: s.name, environmentId: env.id })}>
                         Remove
                       </Button>
                     ) : null}

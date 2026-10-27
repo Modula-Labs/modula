@@ -1,4 +1,4 @@
-import type { Environment, ProjectDetail } from "@/lib/api";
+import type { Environment, ProjectDetail, ServiceSummary } from "@/lib/api";
 
 /** The environment to show: the one in the URL, else the one last used in this
  *  project, else the default (first) one. Unknown ids (deleted) are skipped. */
@@ -49,4 +49,35 @@ export function branchOverrides(services: RepoService[], edits: Record<string, s
     if (b && b !== s.branch) out[s.serviceId] = b;
   }
   return out;
+}
+
+/** The services that exist in `envId` (a service deleted from an environment
+ *  has no instance there and isn't shown in it). */
+export function servicesIn(project: ProjectDetail, envId: string): ServiceSummary[] {
+  return project.services.filter((s) => project.instances.some((i) => i.serviceId === s.id && i.environmentId === envId));
+}
+
+export interface ServiceDeletion {
+  /** The service's instance in the environment (absent: not in it). */
+  instanceId?: string;
+  environmentName?: string;
+  /** It has a volume there, whose data deleting it deletes. */
+  volume: boolean;
+  r2: boolean;
+  /** The names of every environment the service is in, this one included. */
+  environments: string[];
+}
+
+/** What deleting a service from one environment touches, for its confirmation. */
+export function serviceDeletion(project: ProjectDetail | undefined, serviceId: string, envId: string): ServiceDeletion {
+  const instances = project?.instances.filter((i) => i.serviceId === serviceId) ?? [];
+  const here = instances.find((i) => i.environmentId === envId);
+  const envName = (id: string) => project?.environments.find((e) => e.id === id)?.name ?? id;
+  return {
+    instanceId: here?.id,
+    environmentName: project?.environments.find((e) => e.id === envId)?.name,
+    volume: !!here?.volume,
+    r2: project?.services.find((s) => s.id === serviceId)?.template === "r2",
+    environments: instances.map((i) => envName(i.environmentId)),
+  };
 }

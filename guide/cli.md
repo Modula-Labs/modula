@@ -518,8 +518,11 @@ deployment in place: same deployment, same image.
 
 ### `down`
 
-Stops and removes the service's newest live deployment (asks first). The
-service stays; deploy again to bring it back.
+Stops and removes the service's newest live deployment in the linked (or
+`-e`) environment only (asks first). The service stays; deploy again to bring
+it back. The CLI has no command that deletes a service; that's done in the
+dashboard, one environment at a time
+([delete a service](projects-and-services.md#delete-a-service)).
 
 ### `rename <NAME>`
 

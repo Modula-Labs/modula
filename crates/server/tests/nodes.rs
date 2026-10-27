@@ -900,13 +900,181 @@ async fn database_templates_get_a_volume_a_proxy_and_stop_before_start(pool: PgP
 
     // Deleting the service deletes the volume's data on the node.
     let svc = r.json["serviceId"].as_str().unwrap().to_owned();
-    let d = call(Method::DELETE, format!("/api/services/{svc}"), None).await;
+    let d = call(
+        Method::DELETE,
+        format!("/api/services/{svc}?allEnvironments=true"),
+        None,
+    )
+    .await;
     assert_eq!(d.status, StatusCode::OK, "{:?}", d.json);
     wait_for("volume removed", || async {
         rt.removed_volumes()
             .contains(&format!("modula-vol-{volume_id}"))
     })
     .await;
+}
+
+/// Deleting a service from one environment (like Railway) removes only that
+/// environment's instance: its deployment stops and its volume's data is
+/// deleted, while production keeps running with its data. The last
+/// instance takes the service with it; deleting everywhere is explicit.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn deleting_a_service_from_one_environment_leaves_the_others(pool: PgPool) {
+    let c = cluster(pool).await;
+    let (_node, rt, _stop) = c.start_node().await;
+    let call = |m: Method, path: String, body: Option<Value>| {
+        let app = &c.app;
+        let admin = c.admin.clone();
+        async move { app.call(m, &path, Some(&admin), body).await }
+    };
+    let web = c.service("app:1").await;
+    let inst = call(Method::GET, format!("/api/service-instances/{web}"), None).await;
+    let project = inst.json["projectId"].as_str().unwrap().to_owned();
+    let web_service = inst.json["serviceId"].as_str().unwrap().to_owned();
+    let production = inst.json["environmentId"].as_str().unwrap().to_owned();
+    let r = call(
+        Method::POST,
+        format!("/api/projects/{project}/environments"),
+        Some(json!({ "name": "staging", "duplicateFrom": production })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let staging = r.json["id"].as_str().unwrap().to_owned();
+
+    // A database in both environments, each with its own volume, deployed.
+    let r = call(
+        Method::POST,
+        format!("/api/projects/{project}/services"),
+        Some(json!({ "name": "postgres", "template": "postgres" })),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let pg = r.json["id"].as_str().unwrap().to_owned();
+    let of = |env: &str| {
+        r.json["instances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["environmentId"] == env)
+            .unwrap()
+            .clone()
+    };
+    let (prod_pg, stg_pg) = (of(&production), of(&staging));
+    let prod_inst: Id = prod_pg["id"].as_str().unwrap().parse().unwrap();
+    let stg_inst: Id = stg_pg["id"].as_str().unwrap().parse().unwrap();
+    let prod_volume = format!("modula-vol-{}", prod_pg["volume"]["id"].as_str().unwrap());
+    let stg_volume = format!("modula-vol-{}", stg_pg["volume"]["id"].as_str().unwrap());
+    let prod_dep = c.deploy(prod_inst).await;
+    let stg_dep = c.deploy(stg_inst).await;
+    c.wait_status(prod_dep, "active").await;
+    c.wait_status(stg_dep, "active").await;
+
+    // Without the flag, deleting the service everywhere is refused.
+    let d = call(Method::DELETE, format!("/api/services/{pg}"), None).await;
+    assert_eq!(d.status, StatusCode::BAD_REQUEST, "{:?}", d.json);
+
+    // Delete it from staging: only staging's instance goes.
+    let d = call(
+        Method::DELETE,
+        format!("/api/service-instances/{stg_inst}"),
+        None,
+    )
+    .await;
+    assert_eq!(d.status, StatusCode::OK, "{:?}", d.json);
+    assert_eq!(d.json["serviceDeleted"], false);
+    assert_eq!(d.json["environmentName"], "staging");
+    // The deployment rows went with the instance; its container stops.
+    wait_for("staging container stopped", || async {
+        !rt.running_deployments().contains(&stg_dep.to_string())
+    })
+    .await;
+    wait_for("staging volume removed", || async {
+        rt.removed_volumes().contains(&stg_volume)
+    })
+    .await;
+    let queued: Vec<Id> = sqlx::query_scalar("SELECT volume_id FROM volume_removals")
+        .fetch_all(c.app.db())
+        .await
+        .unwrap();
+    assert_eq!(
+        queued,
+        [stg_pg["volume"]["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Id>()
+            .unwrap()]
+    );
+    assert!(!rt.removed_volumes().contains(&prod_volume));
+    assert_eq!(c.status(prod_dep).await, "active");
+    assert!(rt.running_deployments().contains(&prod_dep.to_string()));
+    let p = call(
+        Method::GET,
+        format!("/api/service-instances/{prod_inst}"),
+        None,
+    )
+    .await;
+    assert_eq!(p.status, StatusCode::OK);
+    assert_eq!(p.json["volume"]["id"], prod_pg["volume"]["id"]);
+    let s = call(
+        Method::GET,
+        format!("/api/service-instances/{stg_inst}"),
+        None,
+    )
+    .await;
+    assert_eq!(s.status, StatusCode::NOT_FOUND);
+    let services = |id: String| {
+        let db = c.app.db().clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM services WHERE id = $1")
+                .bind(id.parse::<Id>().unwrap())
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(services(pg.clone()).await, 1);
+    let audit: Value = sqlx::query_scalar(
+        "SELECT metadata FROM audit_log WHERE action = 'service.delete' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(c.app.db())
+    .await
+    .unwrap();
+    assert_eq!(audit["environment"], staging.as_str());
+    assert_eq!(audit["environmentName"], "staging");
+    assert_eq!(audit["allEnvironments"], false);
+
+    // Its last instance takes the service with it.
+    let d = call(
+        Method::DELETE,
+        format!("/api/service-instances/{prod_inst}"),
+        None,
+    )
+    .await;
+    assert_eq!(d.status, StatusCode::OK, "{:?}", d.json);
+    assert_eq!(d.json["serviceDeleted"], true);
+    assert_eq!(services(pg).await, 0);
+    wait_for("production volume removed", || async {
+        rt.removed_volumes().contains(&prod_volume)
+    })
+    .await;
+
+    // Deleting everywhere stays possible, explicitly.
+    let d = call(
+        Method::DELETE,
+        format!("/api/services/{web_service}?allEnvironments=true"),
+        None,
+    )
+    .await;
+    assert_eq!(d.status, StatusCode::OK, "{:?}", d.json);
+    assert_eq!(services(web_service).await, 0);
+    let audit: Value = sqlx::query_scalar(
+        "SELECT metadata FROM audit_log WHERE action = 'service.delete' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(c.app.db())
+    .await
+    .unwrap();
+    assert_eq!(audit["allEnvironments"], true);
+    assert_eq!(audit["environments"].as_array().unwrap().len(), 2);
 }
 
 /// Deploy settings end to end: a pre-deploy command runs from

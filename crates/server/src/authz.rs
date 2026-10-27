@@ -74,7 +74,10 @@ pub enum Action {
     ServiceCreate,
     /// Its display name.
     ServiceUpdate,
+    /// Every environment's instance and the service itself.
     ServiceDelete,
+    /// One environment's instance (the service goes with its last one).
+    InstanceDelete,
     InstanceRead,
     InstanceUpdate,
     /// Variable names and metadata (never values).
@@ -286,7 +289,7 @@ impl Action {
             | Self::EnvironmentDeploy
             | Self::EnvironmentDiscard => K::Environment,
             Self::ServiceUpdate | Self::ServiceDelete => K::Service,
-            Self::InstanceRead | Self::InstanceUpdate => K::ServiceInstance,
+            Self::InstanceRead | Self::InstanceUpdate | Self::InstanceDelete => K::ServiceInstance,
             Self::VariablesRead | Self::VariablesWrite | Self::DeploymentCreate => {
                 K::ServiceInstance
             }
@@ -393,6 +396,7 @@ impl Action {
             | Self::ServiceCreate
             | Self::ServiceUpdate
             | Self::ServiceDelete
+            | Self::InstanceDelete
             | Self::InstanceUpdate
             | Self::VariableReveal
             | Self::EnvironmentConfigRead
@@ -493,6 +497,7 @@ impl Action {
             | Self::ProjectDelete
             | Self::EnvironmentDelete
             | Self::ServiceDelete
+            | Self::InstanceDelete
             | Self::VolumeDelete
             | Self::BucketDelete
             | Self::VariableReveal

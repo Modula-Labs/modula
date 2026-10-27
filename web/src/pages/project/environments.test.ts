@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Environment, InstanceSummary, ProjectDetail } from "@/lib/api";
-import { branchOverrides, pickEnvironment, repoServices } from "./environments";
+import { branchOverrides, pickEnvironment, repoServices, serviceDeletion, servicesIn } from "./environments";
 
 const env = (id: string, isDefault = false): Environment => ({
   id,
@@ -57,5 +57,41 @@ describe("branches of a new environment", () => {
     expect(branchOverrides(services, { api: " main " })).toEqual({});
     expect(branchOverrides(services, { api: "" })).toEqual({});
     expect(branchOverrides(services, { api: "dev" })).toEqual({ api: "dev" });
+  });
+});
+
+describe("deleting a service from one environment", () => {
+  const inst = (id: string, serviceId: string, environmentId: string, volume = false) =>
+    ({
+      id,
+      serviceId,
+      environmentId,
+      volume: volume ? { id: `v-${id}`, mountPath: "/data", createdAt: "" } : null,
+    }) as unknown as InstanceSummary;
+  const project = {
+    environments: [env("prod", true), env("staging")],
+    services: [
+      { id: "pg", name: "postgres", icon: null, template: "postgres" },
+      { id: "web", name: "web", icon: null },
+    ],
+    // `web` was deleted from staging.
+    instances: [inst("pg-p", "pg", "prod", true), inst("pg-s", "pg", "staging", true), inst("web-p", "web", "prod")],
+  } as unknown as ProjectDetail;
+
+  it("shows only the services that exist in the environment", () => {
+    expect(servicesIn(project, "prod").map((s) => s.id)).toEqual(["pg", "web"]);
+    expect(servicesIn(project, "staging").map((s) => s.id)).toEqual(["pg"]);
+  });
+
+  it("names the environment's instance, its volume and every environment", () => {
+    expect(serviceDeletion(project, "pg", "staging")).toEqual({
+      instanceId: "pg-s",
+      environmentName: "staging",
+      volume: true,
+      r2: false,
+      environments: ["prod", "staging"],
+    });
+    expect(serviceDeletion(project, "web", "staging").instanceId).toBeUndefined();
+    expect(serviceDeletion(project, "web", "prod").environments).toEqual(["prod"]);
   });
 });
