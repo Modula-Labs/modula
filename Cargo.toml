@@ -54,7 +54,7 @@ tonic-prost-build = "0.14"
 # Release signatures (Ed25519) for update checks; already in the tree via rustls.
 ring = "0.17"
 # Pure-Rust (RustCrypto) line; 0.5 links OpenSSL.
-webauthn-rs = { version = "=0.6.1-dev", default-features = false, features = ["danger-allow-state-serialisation"] }
+webauthn-rs = { version = "=0.6.2", default-features = false, features = ["danger-allow-state-serialisation"] }
 # Update checks: release versions and the maintenance window's time zone.
 semver = "1"
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-always"] }
