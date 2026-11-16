@@ -134,6 +134,8 @@ pub enum Action {
     ServerMigrationRead,
     /// Stop a server migration and move its services back.
     ServerMigrationAbort,
+    /// Try a server migration's failed DNS step again.
+    ServerMigrationRetryDns,
     /// Move a service, its volumes' data included, to another server.
     InstanceMove,
     InstanceMoveRead,
@@ -205,13 +207,14 @@ pub enum Action {
     ReplicaCreate,
     /// Turn a read replica into a standalone primary.
     ReplicaPromote,
-    /// A workspace's Hetzner connection (never the token), caps and usage.
-    HetznerRead,
-    /// Verify and store (or replace) the Hetzner token; change the caps.
-    HetznerConnect,
-    HetznerDisconnect,
-    /// Hetzner locations, server types with prices, and SSH keys.
-    HetznerCatalog,
+    /// A workspace's connection to a cloud provider (never its credentials),
+    /// caps and usage.
+    ProviderRead,
+    /// Verify and store (or replace) a provider's credentials; change the caps.
+    ProviderConnect,
+    ProviderDisconnect,
+    /// A provider's locations, server types with prices, and SSH keys.
+    ProviderCatalog,
     /// Servers created through a provider, and their progress.
     ServerList,
     ServerRead,
@@ -309,7 +312,9 @@ impl Action {
             | Self::NodeResizeOptions
             | Self::NodeResize => K::Node,
             Self::NodeMigrationRead | Self::NodeMigrate => K::Node,
-            Self::ServerMigrationRead | Self::ServerMigrationAbort => K::ServerMigration,
+            Self::ServerMigrationRead
+            | Self::ServerMigrationAbort
+            | Self::ServerMigrationRetryDns => K::ServerMigration,
             Self::InstanceMove => K::ServiceInstance,
             Self::InstanceMoveRead | Self::InstanceMoveAbort => K::InstanceMove,
             Self::GithubInstall | Self::GithubRepoList => K::Workspace,
@@ -338,10 +343,10 @@ impl Action {
             | Self::PitrRestore
             | Self::ReplicaCreate
             | Self::ReplicaPromote => K::ServiceInstance,
-            Self::HetznerRead
-            | Self::HetznerConnect
-            | Self::HetznerDisconnect
-            | Self::HetznerCatalog
+            Self::ProviderRead
+            | Self::ProviderConnect
+            | Self::ProviderDisconnect
+            | Self::ProviderCatalog
             | Self::ServerList
             | Self::ServerProvision
             | Self::ServerSuggest => K::Workspace,
@@ -427,7 +432,10 @@ impl Action {
             | Self::NodeResize
             | Self::GithubAppCreate
             | Self::GithubAppDelete => Role::Admin,
-            Self::NodeMigrationRead | Self::NodeMigrate | Self::ServerMigrationAbort => Role::Admin,
+            Self::NodeMigrationRead
+            | Self::NodeMigrate
+            | Self::ServerMigrationAbort
+            | Self::ServerMigrationRetryDns => Role::Admin,
             Self::ServerMigrationRead | Self::InstanceMoveRead => Role::Viewer,
             // Like the move without data (services::move_instance).
             Self::InstanceMove | Self::InstanceMoveAbort => Self::InstanceUpdate.min_role(),
@@ -454,11 +462,11 @@ impl Action {
             Self::DatabaseRead | Self::DatabaseCredentials | Self::DatabasePassword => Role::Member,
             Self::DatabaseWrite => Role::Admin,
             Self::PitrRestore | Self::ReplicaCreate | Self::ReplicaPromote => Role::Member,
-            Self::HetznerRead | Self::ServerList | Self::ServerRead => Role::Viewer,
+            Self::ProviderRead | Self::ServerList | Self::ServerRead => Role::Viewer,
             Self::ServerSuggest => Role::Member,
-            Self::HetznerConnect
-            | Self::HetznerDisconnect
-            | Self::HetznerCatalog
+            Self::ProviderConnect
+            | Self::ProviderDisconnect
+            | Self::ProviderCatalog
             | Self::ServerProvision
             | Self::ServerDelete => Role::Admin,
             Self::InstanceDomainRead | Self::InstanceDomainUpdate => Role::Admin,
@@ -508,8 +516,8 @@ impl Action {
             // Connecting GitHub happens on GitHub (the App's owner approves
             // there), so no recent sign-in here.
             Self::GithubAppCreate => false,
-            // Spends money and takes services down for a while.
-            Self::NodeMigrate | Self::ServerMigrationAbort => true,
+            // Sudo for dashboard sessions only: see `session_sudo`.
+            Self::NodeMigrate | Self::ServerMigrationAbort | Self::ServerMigrationRetryDns => false,
             Self::NodeMigrationRead
             | Self::ServerMigrationRead
             | Self::InstanceMove
@@ -583,13 +591,13 @@ impl Action {
             // Both replace what the database serves.
             Self::PitrRestore | Self::ReplicaPromote => true,
             Self::ReplicaCreate => false,
-            Self::HetznerRead
-            | Self::HetznerCatalog
+            Self::ProviderRead
+            | Self::ProviderCatalog
             | Self::ServerList
             | Self::ServerRead
             | Self::ServerSuggest => false,
-            Self::HetznerConnect
-            | Self::HetznerDisconnect
+            Self::ProviderConnect
+            | Self::ProviderDisconnect
             | Self::ServerProvision
             | Self::ServerDelete => true,
             // Not destructive and reveals nothing; the CLI's API tokens set it.
@@ -621,12 +629,19 @@ impl Action {
 
     /// Actions the CLI needs that a cookie session must be recently
     /// re-authenticated for, while API tokens (which never have sudo) pass
-    /// and every use is audited instead: revealing secrets, and starting an
-    /// upgrade (`modula server update`; only signed releases install).
+    /// and every use is audited instead: revealing secrets, starting an
+    /// upgrade (`modula server update`; only signed releases install), and
+    /// migrating a server (`modula server migrate`; spends money and takes
+    /// services down for a while).
     pub fn session_sudo(self) -> bool {
         matches!(
             self,
-            Self::DeploymentExec | Self::RunEnvRead | Self::UpdatesRun
+            Self::DeploymentExec
+                | Self::RunEnvRead
+                | Self::UpdatesRun
+                | Self::NodeMigrate
+                | Self::ServerMigrationAbort
+                | Self::ServerMigrationRetryDns
         )
     }
 }

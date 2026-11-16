@@ -29,13 +29,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 
-use super::{ActionState, Phase, Power, ProviderServer, ServerProvider, ServerTypeOffer};
+use super::caps::{self, Caps};
+use super::{
+    ActionState, Phase, Power, ProviderServer, ServerProvider, ServerTypeOffer, provider_for,
+    provider_kinds,
+};
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
-use crate::integrations::hetzner::{self, Caps};
 use crate::jobs::{self, Job, NewJob};
 use crate::locations::{self, Location};
 use crate::state::AppState;
@@ -50,24 +53,8 @@ const POWERON_WAIT: time::Duration = time::Duration::minutes(5);
 const RECONNECT_WAIT: time::Duration = time::Duration::minutes(10);
 /// A resize still going after this (e.g. the provider unreachable) is given up.
 const RESIZE_MAX: time::Duration = time::Duration::hours(1);
-/// Integration kinds that are server providers.
-const PROVIDER_KINDS: &[&str] = &[hetzner::KIND];
 /// What the main server is resized with.
 pub const CLI_COMMAND: &str = "modula server resize";
-
-/// The workspace's provider of `kind`, or None when not connected.
-pub async fn provider_for(
-    state: &AppState,
-    workspace: Id,
-    kind: &str,
-) -> AppResult<Option<Box<dyn ServerProvider>>> {
-    Ok(match kind {
-        hetzner::KIND => hetzner::provider(state, workspace)
-            .await?
-            .map(|p| Box::new(p) as Box<dyn ServerProvider>),
-        _ => None,
-    })
-}
 
 #[derive(sqlx::FromRow)]
 struct NodeRow {
@@ -188,7 +175,7 @@ async fn resolve(state: &AppState, node_id: Id, node: &NodeRow, actor: Id) -> Ap
         "SELECT workspace_id, kind FROM integrations WHERE kind = ANY($1)
          ORDER BY workspace_id = $2 DESC NULLS LAST, created_at",
     )
-    .bind(PROVIDER_KINDS)
+    .bind(provider_kinds())
     .bind(node.workspace_id)
     .fetch_all(&state.db)
     .await?;
@@ -247,19 +234,28 @@ pub async fn link_node(state: &AppState, node_id: Id, actor: Id) -> AppResult<Re
     })
 }
 
-/// The monthly price of `server_type` in `location_id`, if it is sold there.
+/// The monthly price of `server_type` in `location_id` for the server `id`
+/// (whose root disk may differ from the type's default), if it is sold there.
 async fn price_of(
     provider: &dyn ServerProvider,
+    id: &str,
     server_type: &str,
     location_id: &str,
 ) -> Option<i64> {
-    provider
+    let price = provider
         .server_types()
         .await
         .ok()?
         .iter()
-        .find(|t| t.name == server_type)
-        .and_then(|t| t.price_in(location_id))
+        .find(|t| t.name == server_type)?
+        .price_in(location_id)?;
+    let disk = provider
+        .describe(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.disk_gb);
+    Some(provider.price_with_disk(price, disk).unwrap_or(price))
 }
 
 fn cents(v: Option<i64>, fallback: i32) -> i32 {
@@ -281,7 +277,10 @@ async fn adopt(
         .map(|l| l.id.to_owned())
         .or_else(|| node.location.clone())
         .unwrap_or_default();
-    let price = cents(price_of(provider, &server.server_type, &location).await, 0);
+    let price = cents(
+        price_of(provider, &server.id, &server.server_type, &location).await,
+        0,
+    );
     // A row created here for the same server (e.g. still joining) is linked
     // instead of duplicated.
     let id: Id = sqlx::query_scalar(
@@ -323,7 +322,7 @@ async fn refresh(
         return Ok(row);
     }
     let price = cents(
-        price_of(provider, &server.server_type, &row.location).await,
+        price_of(provider, &server.id, &server.server_type, &row.location).await,
         row.monthly_price_cents,
     );
     sqlx::query(
@@ -445,6 +444,13 @@ fn unmanaged(node: &NodeRow, reason: String) -> ResizeOptions {
     }
 }
 
+/// A catalog price for this server's actual disk: resizing keeps the disk.
+fn with_server_disk(provider: &dyn ServerProvider, server: &ProviderServer, price: i64) -> i64 {
+    provider
+        .price_with_disk(price, Some(server.disk_gb))
+        .unwrap_or(price)
+}
+
 fn type_option(
     provider: &dyn ServerProvider,
     server: &ProviderServer,
@@ -452,7 +458,9 @@ fn type_option(
     current_price: Option<i64>,
     t: &ServerTypeOffer,
 ) -> TypeOption {
-    let here = t.price_in(location_id);
+    let here = t
+        .price_in(location_id)
+        .map(|p| with_server_disk(provider, server, p));
     let current = t.name == server.server_type;
     let blocker = (!current)
         .then(|| provider.resize_blocker(server, t))
@@ -521,6 +529,7 @@ pub async fn options(
         .iter()
         .find(|t| t.name == server.server_type)
         .and_then(|t| t.price_in(&location_id))
+        .map(|p| with_server_disk(provider.as_ref(), &server, p))
         .or(Some(i64::from(row.monthly_price_cents)).filter(|c| *c > 0));
     let mut types: Vec<TypeOption> = offers
         .iter()
@@ -649,6 +658,9 @@ pub async fn start(
     if let Some(why) = provider.resize_blocker(&server, target) {
         return Err(AppError::bad_request(why));
     }
+    let price = provider
+        .price_with_disk(price, Some(server.disk_gb))
+        .unwrap_or(price);
     if row.origin == "provisioned" {
         check_caps(
             &state,
@@ -705,7 +717,7 @@ pub async fn start(
 
 /// A bigger server must stay within the workspace's spending cap.
 async fn check_caps(state: &AppState, workspace: Id, kind: &str, extra: i64) -> AppResult<()> {
-    if extra <= 0 || kind != hetzner::KIND {
+    if extra <= 0 {
         return Ok(());
     }
     let metadata: Option<serde_json::Value> = sqlx::query_scalar(
@@ -717,12 +729,12 @@ async fn check_caps(state: &AppState, workspace: Id, kind: &str, extra: i64) -> 
     .await?;
     let caps = metadata
         .as_ref()
-        .map(Caps::from_metadata)
+        .map(|m| Caps::from_metadata(m, state.cfg.eur_usd_rate))
         .unwrap_or_default();
-    let used = hetzner::usage(&state.db, workspace).await?;
+    let used = caps::usage(&state.db, workspace, kind).await?;
     if used.monthly_cents + extra > caps.max_monthly_cents {
         return Err(AppError::Conflict(format!(
-            "this size would bring the monthly total to €{:.2}, over the €{:.2} limit; raise it in settings",
+            "this size would bring the monthly total to ${:.2}, over the ${:.2} limit; raise it in settings",
             (used.monthly_cents + extra) as f64 / 100.0,
             caps.max_monthly_cents as f64 / 100.0
         )));
@@ -844,7 +856,7 @@ async fn fail(
                 }
                 if !s.server_type.is_empty() && s.server_type != row.server_type {
                     let price = cents(
-                        price_of(p, &s.server_type, &row.location).await,
+                        price_of(p, &s.id, &s.server_type, &row.location).await,
                         row.monthly_price_cents,
                     );
                     sqlx::query(
@@ -978,7 +990,7 @@ pub async fn poll_once(state: &AppState, id: Id) -> AppResult<bool> {
             };
             if back {
                 let price = cents(
-                    price_of(p, &to, &row.location).await,
+                    price_of(p, &pid, &to, &row.location).await,
                     row.monthly_price_cents,
                 );
                 sqlx::query(
@@ -998,7 +1010,7 @@ pub async fn poll_once(state: &AppState, id: Id) -> AppResult<bool> {
             if elapsed > RECONNECT_WAIT {
                 // The server runs at its new size; only the node is missing.
                 let price = cents(
-                    price_of(p, &to, &row.location).await,
+                    price_of(p, &pid, &to, &row.location).await,
                     row.monthly_price_cents,
                 );
                 sqlx::query(

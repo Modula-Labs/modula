@@ -22,7 +22,10 @@ a new one. Without a terminal it just prints both commands.
 
 From source: `cargo install --path crates/cli`.
 
-## Create a server on Hetzner
+## Create a server on Hetzner or AWS
+
+The steps below show Hetzner. For Amazon EC2, see
+[On AWS](#on-aws); the wizard asks which cloud unless you pass `--provider`.
 
 You need a Hetzner Cloud account and an API token with **Read & Write**
 (console.hetzner.cloud → your project → Security → API tokens), a domain for
@@ -81,7 +84,7 @@ and logs this CLI in. You're ready for `modula init` and `modula up`.
   │
   │  Dashboard     https://deploy.example.com
   │  Server        modula-main · cx33 · Falkenstein · 203.0.113.10
-  │  Cost          €8.21 per month, billed by Hetzner
+  │  Cost          ≈$8.87 per month, billed by Hetzner
   │  Admin         you@example.com (this CLI is logged in)
   │  SSH           ssh root@203.0.113.10
   │
@@ -106,12 +109,38 @@ If anything fails after the server exists, you see the failing step and the
 installer's hint, and you're asked whether to delete the server and its
 firewall, so nothing keeps billing (`--on-failure` decides without asking).
 
+All prices are in USD. Hetzner bills in euros, so its prices are converted at
+1.08 USD per EUR and shown as approximate (`≈$8.87`).
+
+### On AWS
+
+```bash
+export AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=…
+modula server create --provider aws
+```
+
+The access key's IAM user needs Modula's minimal policy; the wizard prints it,
+and so does the error when a permission is missing. What differs from Hetzner:
+
+- The server always gets an **Elastic IP**, so its address survives stop,
+  start and resize. EC2's location names are regions such as `eu-west-1`.
+- Log in as `ubuntu` (`ssh ubuntu@<ip>`), not `root`.
+- **Without an SSH key nobody can log in**: AWS has no emailed root password.
+- The region needs a default VPC; the error says how to create one.
+- Prices are 730 hours of compute, an 80 GB gp3 root disk and the Elastic IP.
+- If a step fails, cleanup terminates the instance and releases its Elastic
+  IP. The security groups stay: they are free and the next attempt with the
+  same `--name` reuses them.
+
 To see what you could create, without creating anything:
 
 ```bash
 HCLOUD_TOKEN=… modula server options                 # every location
 HCLOUD_TOKEN=… modula server options --location fsn1 --json
+modula server options --provider aws --location eu-west-1   # AWS_* set
 ```
+
+`--json` also lists `sshKeys`, whose ids `--ssh-key-id` takes.
 
 ## Log in to an existing server
 
@@ -186,20 +215,21 @@ modula server create --provider hetzner \
 
 | Flag | Meaning |
 |---|---|
-| `--provider hetzner` | The only provider so far (default). |
+| `--provider hetzner\|aws` | The cloud (default without a terminal: `hetzner`). Also on `server options` and `server resize`. |
 | `--location`, `--type` | From `server options`. |
 | `--name` | Server name, a DNS label (default `modula-main`). |
 | `--domain`, `--email` | Dashboard hostname (or `auto`: no domain yet, the dashboard at `https://<ip>` with an IP certificate); email for TLS and the admin. |
-| `--ssh-key-file PATH` / `--ssh-key-id ID` / `--no-ssh-key` | Exactly one is required without a terminal. A file's key is reused if Hetzner has it. |
+| `--ssh-key-file PATH` / `--ssh-key-id ID` / `--no-ssh-key` | Exactly one is required without a terminal. A file's key is reused if the provider has it. On AWS, `--no-ssh-key` means nobody can log in. |
 | `--cloudflare-dns` [`--replace-dns`] | Create the A record with Cloudflare; replace existing A/AAAA/CNAME records for the domain (otherwise their presence is an error). |
 | `--admin-name` | The admin's display name (default `Admin`). |
 | `--on-failure delete\|keep\|ask` | After the server exists. Default without a terminal: `delete`. |
 | `--dns-timeout`, `--install-timeout` | Minutes to wait (30 and 20). |
-| `--token-stdin` | Read the Hetzner token from stdin's first line instead of `HCLOUD_TOKEN`. |
+| `--token-stdin` | Read the Hetzner token from stdin's first line instead of `HCLOUD_TOKEN` (not for AWS). |
 
 | Variable | Used by |
 |---|---|
-| `HCLOUD_TOKEN` | `server create`, `server options` |
+| `HCLOUD_TOKEN` | `server create`, `server options`, `server resize` on Hetzner |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | the same with `--provider aws` |
 | `CLOUDFLARE_API_TOKEN` | `server create --cloudflare-dns` |
 | `MODULA_ADMIN_PASSWORD` | `server create` without a terminal |
 | `MODULA_URL`, `MODULA_TOKEN` | every other command (instead of `login`) |
@@ -226,7 +256,7 @@ is a `step` event when it starts (`"state":"running"`) and when it ends
 (`done` with `elapsedSecs`, `skipped`, or `failed`); milestones carry data:
 
 ```json
-{"event":"plan","provider":"hetzner","location":"fsn1","type":"cx33","name":"modula-main","domain":"deploy.example.com","monthlyCents":821,"monthly":"€8.21"}
+{"event":"plan","provider":"hetzner","location":"fsn1","type":"cx33","name":"modula-main","domain":"deploy.example.com","monthlyCents":887,"monthly":"≈$8.87"}
 {"event":"step","name":"Creating the firewall","state":"running"}
 {"event":"step","name":"Creating the firewall","state":"done","elapsedSecs":1}
 {"event":"firewall_created","id":1001,"name":"modula-modula-main","reused":false}
@@ -316,10 +346,11 @@ lost: `ssh root@<ip>`, remove `MODULA_SETUP_TOKEN_HASH` from
 
 **Something failed and the server was kept** — delete it (and the
 `modula-<name>` firewall) in the Hetzner console, or run the command again
-with the same `--name` (the firewall is reused).
+with the same `--name` (the firewall is reused). On AWS, terminate the
+instance and release its Elastic IP in the console.
 
 **"…isn't accepted: secrets in arguments…"** — pass secrets through
-`HCLOUD_TOKEN`, `CLOUDFLARE_API_TOKEN`, `MODULA_ADMIN_PASSWORD` or
+`HCLOUD_TOKEN`, the `AWS_*` variables, `CLOUDFLARE_API_TOKEN`, `MODULA_ADMIN_PASSWORD` or
 `--token-stdin`, never as flags.
 
 **"the API token was rejected"** on other commands — the `mdt_` token was

@@ -39,13 +39,24 @@ pub enum Event {
         monthly: String,
     },
     #[serde(rename_all = "camelCase")]
-    FirewallCreated { id: i64, name: String, reused: bool },
+    FirewallCreated {
+        id: serde_json::Value,
+        name: String,
+        reused: bool,
+    },
     #[serde(rename_all = "camelCase")]
-    SshKeyUploaded { id: i64, name: String },
+    SshKeyUploaded { id: serde_json::Value, name: String },
     #[serde(rename_all = "camelCase")]
-    ServerCreated { id: i64, name: String, ip: String },
+    ServerCreated {
+        id: serde_json::Value,
+        name: String,
+        ip: String,
+    },
     #[serde(rename_all = "camelCase")]
-    ServerRunning { id: i64, elapsed_secs: u64 },
+    ServerRunning {
+        id: serde_json::Value,
+        elapsed_secs: u64,
+    },
     #[serde(rename_all = "camelCase")]
     DnsRecordCreated {
         name: String,
@@ -81,7 +92,7 @@ pub enum Event {
     Ready {
         url: String,
         ip: String,
-        server_id: i64,
+        server_id: serde_json::Value,
         elapsed_secs: u64,
     },
     #[serde(rename_all = "camelCase")]
@@ -274,7 +285,7 @@ mod tests {
         let (out, buf) = Output::capture(true);
         let p = Progress::new(out);
         p.event(&Event::ServerCreated {
-            id: 7,
+            id: serde_json::json!(7),
             name: "modula-main".into(),
             ip: "203.0.113.10".into(),
         });

@@ -255,6 +255,98 @@ turned off still dials the tunnel. On it: set `"server"` in
 `systemctl disable --now modula-cloudflared-access` and restart
 `modula-node`.
 
+## AWS
+
+Optional. With an IAM user's access key connected, workspace admins can create
+EC2 servers from Modula Deploy, in every enabled region of the account. Servers
+are only ever created when you ask.
+
+### Connect
+
+Create an IAM user with this policy (nothing else is ever called):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AllocateAddress",
+        "ec2:AssociateAddress",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:CreateSecurityGroup",
+        "ec2:CreateTags",
+        "ec2:DescribeAddresses",
+        "ec2:DescribeImages",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceTypeOfferings",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeKeyPairs",
+        "ec2:DescribeRegions",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeVpcs",
+        "ec2:DisassociateAddress",
+        "ec2:ImportKeyPair",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:RebootInstances",
+        "ec2:ReleaseAddress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RunInstances",
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:TerminateInstances",
+        "pricing:GetProducts"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+then create an access key for it and (Admin + sudo):
+
+```bash
+PUT /api/workspaces/{id}/integrations/aws   { "accessKeyId": "AKIA…", "secretAccessKey": "…" }
+```
+
+The key is checked against EC2 and the Pricing API, sealed with the workspace
+data key and never shown again. `GET …/integrations/aws` also returns the policy
+as `iamPolicy`. `PATCH` sets the same `maxServers`/`maxMonthlyCents` caps as
+Hetzner, in USD.
+
+### Creating servers
+
+`GET …/integrations/aws/catalog` lists enabled regions (`aws:eu-west-1`) and
+the t4g, t3a, t3, m7g, m7i, c7g and c7i families. A monthly price is 730 hours
+of on-demand compute plus an 80 GB gp3 root disk ($0.08/GB-month) and the
+server's Elastic IP ($0.005/hour), so it matches the bill except for data
+transfer. Prices come from the AWS Price List API and are cached for a day.
+
+```bash
+POST /api/workspaces/{id}/servers/provision
+{ "location": "aws:eu-west-1", "serverType": "t4g.small", "name": "worker-1", "diskGb": 120 }
+```
+
+`diskGb` is the root disk (20–16384, default 80). `sshKeyIds` come from
+`GET …/integrations/aws/ssh-keys`; a key that exists in another region is
+imported into the server's region, and EC2's single launch key is extended
+with any others through the boot script.
+
+Modula uses the region's **default VPC**; a region without one reports
+`aws ec2 create-default-vpc --region <region>`, which creates it.
+
+Every server has an **Elastic IP**, kept across stops and resizes and released
+when the server is deleted. AWS allows 5 per region by default. Each worker
+gets a set of five security groups (per workspace, region and SSH choice): the
+web ports, the TCP proxy range, ping, optional SSH, and WireGuard from your
+other servers only, up to about 290 servers in the mesh.
+
+Resizing stops the server, changes its type and starts it; the disk is kept
+and a move between x86 and Arm is refused.
+
 ## Hetzner
 
 Optional. With a Hetzner Cloud token connected, workspace admins can create
@@ -271,7 +363,7 @@ PUT /api/workspaces/{id}/integrations/hetzner      { "token": "…" }
 ```
 
 The token is checked by listing locations. Spending caps (defaults: 5
-servers, €100.00 per month, gross) protect you from mistakes:
+servers, $100.00 per month, gross) protect you from mistakes:
 
 ```bash
 PATCH /api/workspaces/{id}/integrations/hetzner    { "maxServers": 10, "maxMonthlyCents": 20000 }

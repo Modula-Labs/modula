@@ -116,14 +116,44 @@ unused images and volumes, or resize the server).
 
 ## Migrate a server
 
-**Servers → a server → Migrate** creates a new server at the same provider
-(another location or size), waits for it to join, and moves every service on
-the old one to it, volume data included (a service with a volume is down
-while its data copies). The old server is then marked for deletion; delete
-it from Servers when you're happy. Abort moves everything back.
+**Servers → a server → Migrate** moves every service on a server to another
+one, volume data included (a service with a volume is down while its data
+copies). The target is either:
+
+- a **new server** at any provider the workspace has connected (Hetzner to
+  EC2 and back included), or
+- an **existing server** in the workspace, or a shared one, that is online,
+  has room for what moves, and isn't part of another migration. Aborting never
+  deletes it.
+
+A server added by hand can be migrated too: pick the workspace it migrates
+for (a server private to another workspace is refused, and so is one running
+another workspace's services). Before anything moves, Modula makes sure the
+providers' firewalls admit the new server on the private network.
+
+The preview warns about what the move changes: x86 to Arm (prebuilt images
+must publish that platform), backups and point-in-time recovery on the old
+server's local disk (they stay behind, and PITR stops until pointed elsewhere),
+TCP proxy addresses, and volumes that won't fit the target's disk (on EC2,
+give it a bigger root disk). The old server is then marked for deletion;
+delete it from Servers when you're happy. Abort moves everything back.
+
+From a terminal:
+
+```sh
+modula server migrate worker-1 --location aws:us-east-1 --server-type t3.small --disk-gb 120
+modula server migrate worker-1 --to worker-2
+modula server migrate worker-1 --to worker-2 --preview
+modula server migrate worker-1 --retry-dns   # after a failed DNS step
+```
+
+It previews, asks to confirm (`--yes` skips that; `--detach` doesn't wait) and
+follows the progress. `--workspace` names the workspace for a shared server
+added by hand; `--skip-dns <record>` leaves a record on the old address.
 
 The **main server** (the one running the dashboard) can be migrated the same
-way; the control plane moves with it:
+way, to a new server only (promotion installs onto a fresh machine); the
+control plane moves with it:
 
 1. Services move first, as above.
 2. The dashboard goes read-only for a few minutes ("Moving to the new
@@ -185,7 +215,7 @@ With [Hetzner connected](integrations.md#hetzner) to a workspace, workspace
 admins can create a server in a chosen location and type; it boots, installs
 everything and joins on its own within a few minutes (single-use 30-minute
 join token, CA pinned, firewall open on 80/443 only). Spending caps (servers
-and euros per month) apply, and servers are only created when you ask. See
+and dollars per month) apply, and servers are only created when you ask. See
 [integrations → Hetzner](integrations.md#hetzner).
 
 Without the integration, create the server in Hetzner (Ubuntu 24.04 or

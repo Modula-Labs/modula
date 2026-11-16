@@ -47,12 +47,16 @@ export interface ServerMigration {
   sourceServerId: string | null;
   sourceName: string;
   targetLocation: LocationOption | null;
-  targetServerType: string;
+  /** Unknown for an existing target that isn't at a provider. */
+  targetServerType: string | null;
+  /** Set only when this migration created the target server. */
   targetServerId: string | null;
+  /** The target already existed: aborting leaves it alone. */
+  targetExisting: boolean;
   targetName: string | null;
   targetNodeId: string | null;
   status: MigrationStatus;
-  step: "create" | "join" | "move" | "promote" | "finish";
+  step: "create" | "join" | "move" | "promote" | "dns" | "finish";
   /** The main server (control plane) is being moved. */
   main: boolean;
   /** Within `promote`: bundle (maintenance on, copying), install, verify, switch (handover). */
@@ -68,6 +72,63 @@ export interface ServerMigration {
   moves: InstanceMove[];
   /** TCP proxies' addresses on the new server. */
   tcpProxies: { service: string; host: string | null; publicPort: number; targetPort: number }[];
+  /** DNS records repointed so far. */
+  dnsChanges: { name: string; zone: string; type: string; from: string; to: string; action: string }[];
+  /** Services whose variables still hold a moved TCP address: they need a redeploy. */
+  staleTcp: {
+    instanceId: string;
+    service: string;
+    environment: string;
+    project: string;
+    variables: string[];
+  }[];
+}
+
+export interface DnsPreviewRecord {
+  id: string;
+  zone: string;
+  name: string;
+  content: string;
+  proxied: boolean;
+  /** Written by Modula; the others are the user's own. */
+  managed: boolean;
+}
+
+export interface MigrationWarning {
+  code: string;
+  message: string;
+  blocking: boolean;
+}
+
+export interface ExistingTarget {
+  nodeId: string;
+  name: string;
+  location: LocationOption | null;
+  arch: string | null;
+  freeCpuMillis: number;
+  freeMemoryMb: number;
+  /** Why it can't be chosen. */
+  blocker: string | null;
+}
+
+export type MigrationTarget =
+  | { kind: "new"; provider: string; location: string; serverType: string; diskGb?: number }
+  | { kind: "existing"; nodeId: string };
+
+/** What the preview should check the move against. */
+export interface PreviewParams {
+  workspaceId?: string;
+  location?: string;
+  serverType?: string;
+  diskGb?: number;
+  targetNodeId?: string;
+}
+
+function previewQuery(p: PreviewParams): string {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(p)) if (v !== undefined && v !== "") q.set(k, String(v));
+  const s = q.toString();
+  return s ? `?${s}` : "";
 }
 
 export interface MigrationPreview {
@@ -82,9 +143,18 @@ export interface MigrationPreview {
   ipBased: boolean;
   /** Hostnames whose DNS must point at the new server. */
   dashboardHosts: string[];
-  /** Set when the server is linked to Hetzner (required to migrate). */
+  /** The provider server it is linked to; null when added by hand. */
   serverId: string | null;
+  /** Whose providers and DNS zones are used. */
   workspaceId: string | null;
+  /** A shared server added by hand: the request must name the workspace. */
+  workspaceRequired: boolean;
+  connectedProviders: string[];
+  sourceArch: string | null;
+  /** What to know before starting; `blocking` ones refuse the migration. */
+  warnings: MigrationWarning[];
+  /** Servers it could move to instead; empty for the main server. */
+  existingTargets: ExistingTarget[];
   location: LocationOption | null;
   services: {
     instanceId: string;
@@ -97,15 +167,24 @@ export interface MigrationPreview {
   }[];
   totalVolumeBytes: number;
   activeMigrationId: string | null;
+  dns: {
+    connected: boolean;
+    records: DnsPreviewRecord[];
+    /** Names that also have AAAA records, which aren't changed. */
+    aaaaNames: string[];
+    error: string | null;
+  };
 }
 
 export const migrateApi = {
-  preview: (nodeId: string) => get<MigrationPreview>(`/api/nodes/${enc(nodeId)}/migration-preview`),
+  preview: (nodeId: string, params: PreviewParams = {}) =>
+    get<MigrationPreview>(`/api/nodes/${enc(nodeId)}/migration-preview${previewQuery(params)}`),
   migrations: (nodeId: string) => get<ServerMigration[]>(`/api/nodes/${enc(nodeId)}/migrations`),
-  migrate: (nodeId: string, req: { location: string; serverType: string }) =>
+  migrate: (nodeId: string, req: { workspaceId?: string; target: MigrationTarget; dnsSkip?: string[] }) =>
     post<ServerMigration>(`/api/nodes/${enc(nodeId)}/migrate`, req),
   migration: (id: string) => get<ServerMigration>(`/api/server-migrations/${enc(id)}`),
   abort: (id: string) => post<ServerMigration>(`/api/server-migrations/${enc(id)}/abort`),
+  retryDns: (id: string) => post<ServerMigration>(`/api/server-migrations/${enc(id)}/retry-dns`),
   moveInstance: (instanceId: string, nodeId: string) =>
     post<InstanceMove>(`/api/service-instances/${enc(instanceId)}/move`, { nodeId }),
   move: (id: string) => get<InstanceMove>(`/api/instance-moves/${enc(id)}`),

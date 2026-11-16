@@ -7,6 +7,7 @@
 //! control plane ([`promote`], with [`maintenance`] meanwhile).
 
 pub mod api;
+pub mod dns;
 pub mod maintenance;
 pub mod moves;
 pub mod promote;

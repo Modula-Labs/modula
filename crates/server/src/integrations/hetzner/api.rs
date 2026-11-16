@@ -9,13 +9,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 
-use super::{Caps, Hetzner, Usage, aad, provider, usage};
+use super::{Hetzner, KIND, aad, provider};
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
-use crate::provision::{ProviderError, ProviderLocation, ServerProvider, ServerTypeOffer};
+use crate::provision::caps::{Caps, Usage, usage};
+use crate::provision::{
+    ProviderError, ProviderLocation, ProviderSshKey, ServerProvider, ServerTypeOffer,
+};
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -40,13 +43,13 @@ async fn status_of(state: &AppState, workspace: Id) -> AppResult<Status> {
     .bind(workspace)
     .fetch_optional(&state.db)
     .await?;
-    let usage = usage(&state.db, workspace).await?;
+    let usage = usage(&state.db, workspace, KIND).await?;
     Ok(match row {
         Some((at, metadata, by)) => Status {
             connected: true,
             connected_at: Some(at),
             connected_by: by,
-            caps: Caps::from_metadata(&metadata),
+            caps: Caps::from_metadata(&metadata, state.cfg.eur_usd_rate),
             usage,
             token_url: super::TOKEN_HELP_URL,
         },
@@ -124,7 +127,7 @@ pub async fn connect(
     .bind(id)
     .bind(workspace)
     .bind(&sealed)
-    .bind(serde_json::to_value(Caps::default()).map_err(anyhow::Error::from)?)
+    .bind(Caps::default().to_metadata())
     .bind(actor.user_id)
     .execute(&mut *tx)
     .await?;
@@ -164,7 +167,7 @@ pub async fn update_caps(
     let Some((id, metadata)) = row else {
         return Err(AppError::Conflict("connect Hetzner first".into()));
     };
-    let mut caps = Caps::from_metadata(&metadata);
+    let mut caps = Caps::from_metadata(&metadata, state.cfg.eur_usd_rate);
     if let Some(n) = req.max_servers {
         if !(0..=Caps::MAX_SERVERS).contains(&n) {
             return Err(AppError::bad_request(format!(
@@ -184,7 +187,7 @@ pub async fn update_caps(
         "UPDATE integrations SET metadata = metadata || $2, updated_at = now() WHERE id = $1",
     )
     .bind(id)
-    .bind(serde_json::to_value(caps).map_err(anyhow::Error::from)?)
+    .bind(caps.to_metadata())
     .execute(&mut *tx)
     .await?;
     Entry::new("integration.hetzner.caps", &meta)
@@ -272,24 +275,10 @@ pub async fn catalog(State(state): State<AppState>, grant: Grant) -> AppResult<J
     }))
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SshKey {
-    pub id: i64,
-    pub name: String,
-    pub fingerprint: String,
-}
-
-pub async fn ssh_keys(State(state): State<AppState>, grant: Grant) -> AppResult<Json<Vec<SshKey>>> {
+pub async fn ssh_keys(
+    State(state): State<AppState>,
+    grant: Grant,
+) -> AppResult<Json<Vec<ProviderSshKey>>> {
     let hetzner = connected(&state, grant.id()).await?;
-    let keys = hetzner.client().ssh_keys().await?;
-    Ok(Json(
-        keys.into_iter()
-            .map(|k| SshKey {
-                id: k.id,
-                name: k.name,
-                fingerprint: k.fingerprint,
-            })
-            .collect(),
-    ))
+    Ok(Json(hetzner.ssh_keys().await?))
 }

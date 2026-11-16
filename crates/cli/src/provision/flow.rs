@@ -9,11 +9,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
-use modula_hetzner::{Client, CreateServer, FirewallRef, FirewallRule, ProviderError};
+use modula_provider::{ActionState, NewServer, Phase as CloudPhase, ProviderError};
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
 use super::catalog::{LocationOption, TypeOption};
+use super::cloud::{self, Cloud, CloudSecret};
 use super::cloud_init::MainBootstrap;
 use super::cloudflare::{self, DnsRecord, Zone};
 use super::dns::{self, Pointing, Resolver};
@@ -21,14 +22,16 @@ use super::install_progress::{self, InstallError, Report, Reporter, friendly};
 use super::instance::Instance;
 use super::progress::{Event, Progress, duration};
 use super::setup_token;
+use crate::cli::Provider;
 
 pub const IMAGE: &str = "ubuntu-24.04";
-/// The control plane's node port (MODULA_NODE_LISTEN in install.sh).
-pub const NODE_PORT: &str = "7101";
+/// How long a new server may take to get its public address.
+const ADDRESS_WAIT: Duration = Duration::from_secs(10 * 60);
 
 /// Everything `server create` needs, decided and checked (wizard or flags).
 #[derive(Debug, Clone)]
 pub struct Plan {
+    pub provider: Provider,
     pub location: LocationOption,
     pub server_type: TypeOption,
     pub name: String,
@@ -41,15 +44,15 @@ pub struct Plan {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SshChoice {
-    /// A key already in the Hetzner project.
-    Existing { id: i64, name: String },
+    /// A key already at the provider.
+    Existing { id: String, name: String },
     /// A local public key to upload first.
     Upload {
         name: String,
         public_key: String,
         path: PathBuf,
     },
-    /// No key: Hetzner emails a root password.
+    /// No key: Hetzner emails a root password; on AWS nobody can log in.
     None,
 }
 
@@ -68,6 +71,8 @@ pub enum DnsPlan {
 /// Where to talk to and how long to wait (tests shorten and redirect it).
 pub struct Settings {
     pub hetzner_api: Url,
+    /// Where EC2 requests go instead of AWS (tests).
+    pub aws_api: Option<Url>,
     pub cloudflare_api: Url,
     /// Send requests for the new instance here instead of `https://<domain>`
     /// pinned to the server's IP (tests).
@@ -85,6 +90,7 @@ impl Settings {
     pub fn production(dns_timeout: Duration, install_timeout: Duration) -> Self {
         Self {
             hetzner_api: modula_hetzner::API_URL.parse().expect("static url"),
+            aws_api: None,
             cloudflare_api: cloudflare::API_URL.parse().expect("static url"),
             instance_via: None,
             progress_via: None,
@@ -97,7 +103,7 @@ impl Settings {
 }
 
 pub struct Secrets {
-    pub hetzner: SecretString,
+    pub cloud: CloudSecret,
     pub cloudflare: Option<SecretString>,
 }
 
@@ -105,9 +111,12 @@ pub struct Secrets {
 #[derive(Debug, Default, Clone)]
 pub struct Created {
     /// Only when created by this run (a reused one stays).
-    pub firewall: Option<i64>,
-    pub ssh_key: Option<i64>,
-    pub server: Option<i64>,
+    pub firewall: Option<String>,
+    pub ssh_key: Option<String>,
+    pub server: Option<String>,
+    /// Labels the server; set just before asking for it, so an interrupted
+    /// or failed create can still be found and cleaned up.
+    pub modula_id: Option<String>,
     pub ip: Option<Ipv4Addr>,
     /// (zone id, record id).
     pub dns_record: Option<(String, String)>,
@@ -136,45 +145,25 @@ fn fail(error: anyhow::Error, hint: impl Into<String>) -> Failure {
     }
 }
 
-pub fn hetzner(settings: &Settings, token: &SecretString) -> anyhow::Result<Client> {
-    Client::new(settings.hetzner_api.clone(), token.clone())
-        .map_err(|e| anyhow::anyhow!("Hetzner: {e}"))
-}
-
-/// Hetzner errors, worded for this command.
-pub fn hetzner_error(e: ProviderError) -> anyhow::Error {
-    match e {
-        ProviderError::Unauthorized => anyhow::anyhow!(
-            "Hetzner rejected the API token (create one under Security → API tokens in your Hetzner Cloud project)"
-        ),
-        ProviderError::Forbidden => {
-            anyhow::anyhow!("the Hetzner API token is read-only; create one with Read & Write")
-        }
-        other => anyhow::anyhow!("Hetzner: {other}"),
-    }
-}
-
-/// Inbound what a main server serves, as install.sh opens it in ufw: SSH,
-/// HTTP(S) incl. HTTP/3, the TCP proxy range, the node port, and ping.
-pub fn firewall_rules() -> Vec<FirewallRule> {
-    let rule = FirewallRule::inbound_any;
-    vec![
-        rule("tcp", Some("22"), "SSH"),
-        rule("tcp", Some("80"), "HTTP"),
-        rule("tcp", Some("443"), "HTTPS"),
-        rule("udp", Some("443"), "HTTP/3"),
-        rule("tcp", Some("20000-29999"), "Modula TCP proxies"),
-        rule("tcp", Some(NODE_PORT), "Modula nodes"),
-        rule("icmp", None, "Ping"),
-    ]
-}
-
 fn labels(plan: &Plan) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("modula".to_owned(), "1".to_owned()),
         ("role".to_owned(), "main".to_owned()),
         ("server".to_owned(), plan.name.clone()),
     ])
+}
+
+/// A provider's id as `--json` shows it: a number when it is one.
+pub fn json_id(id: &str) -> serde_json::Value {
+    id.parse::<i64>()
+        .map_or_else(|_| serde_json::json!(id), |n| serde_json::json!(n))
+}
+
+/// A random `modula-id` label (fits Hetzner labels and EC2 client tokens).
+fn new_modula_id() -> anyhow::Result<String> {
+    let mut raw = [0u8; 16];
+    getrandom::fill(&mut raw).map_err(|e| anyhow::anyhow!("no randomness: {e}"))?;
+    Ok(hex::encode(raw))
 }
 
 /// The dashboard's address for [`DnsPlan::Instant`]: the server's IP (the
@@ -194,67 +183,57 @@ pub async fn provision(
     progress: &mut Progress,
     created: &mut Created,
 ) -> Result<Ipv4Addr, Failure> {
-    let hz = hetzner(settings, &secrets.hetzner)?;
-    let he = hetzner_error;
+    let cloud = Cloud::connect(&secrets.cloud, settings, &format!("cli-{}", plan.name))?;
+    let kind = cloud.kind();
+    let he = move |e: ProviderError| cloud::error(kind, e);
+    let provider = cloud.provider();
     let labels = labels(plan);
 
-    // Firewall: reuse ours from an earlier attempt with this name.
-    progress.start("Creating the firewall");
-    let selector = format!("modula=1,role=main,server={}", plan.name);
-    let rules = firewall_rules();
-    let existing = hz.firewalls(&selector).await.map_err(he)?;
-    let (firewall, reused) = match existing.into_iter().next() {
-        Some(fw) => {
-            // The control plane keeps the private network's rule up to date.
-            let mut rules = rules;
-            rules.extend(
-                fw.rules
-                    .iter()
-                    .filter(|r| r.description.as_deref() == Some(modula_hetzner::MESH_RULE))
-                    .cloned(),
-            );
-            hz.set_firewall_rules(fw.id, &rules).await.map_err(he)?;
-            (fw, true)
+    if cloud.firewall_before_server() {
+        // Firewall: reuse ours from an earlier attempt with this name.
+        progress.start("Creating the firewall");
+        let firewall = cloud.prepare_firewall(&plan.name, &labels).await?;
+        if !firewall.reused {
+            created.firewall = Some(firewall.id.clone());
         }
-        None => {
-            let fw = hz
-                .create_firewall(&format!("modula-{}", plan.name), &labels, &rules)
-                .await
-                .map_err(he)?;
-            created.firewall = Some(fw.id);
-            (fw, false)
-        }
-    };
-    progress.done(if reused {
-        "Firewall ready (reused)"
-    } else {
-        "Firewall created"
-    });
-    progress.event(&Event::FirewallCreated {
-        id: firewall.id,
-        name: firewall.name.clone(),
-        reused,
-    });
+        progress.done(if firewall.reused {
+            "Firewall ready (reused)"
+        } else {
+            "Firewall created"
+        });
+        progress.event(&Event::FirewallCreated {
+            id: json_id(&firewall.id),
+            name: firewall.name,
+            reused: firewall.reused,
+        });
+    }
 
     let ssh_keys = match &plan.ssh {
-        SshChoice::Existing { id, .. } => vec![*id],
+        SshChoice::Existing { id, .. } => vec![id.clone()],
         SshChoice::Upload {
             name, public_key, ..
         } => {
             progress.start("Uploading your SSH key");
-            let key = hz
-                .create_ssh_key(name, public_key, &BTreeMap::new())
+            let key = cloud
+                .upload_ssh_key(&plan.location.name, name, public_key)
                 .await
                 .map_err(he)?;
-            created.ssh_key = Some(key.id);
+            created.ssh_key = Some(key.id.clone());
             progress.done(&format!("SSH key uploaded ({name})"));
             progress.event(&Event::SshKeyUploaded {
-                id: key.id,
+                id: json_id(&key.id),
                 name: name.clone(),
             });
             vec![key.id]
         }
-        SshChoice::None => vec![],
+        SshChoice::None => {
+            if kind == Provider::Aws {
+                progress.note(
+                    "No SSH key: AWS has no emailed root password, so nobody can log in to this server. Pass --ssh-key-file to be able to.",
+                );
+            }
+            vec![]
+        }
     };
 
     progress.start("Spinning up the server");
@@ -269,38 +248,56 @@ pub async fn provision(
         key_only_ssh: !ssh_keys.is_empty(),
     }
     .render();
-    let req = CreateServer {
+    let modula_id = new_modula_id()?;
+    created.modula_id = Some(modula_id.clone());
+    let mut server_labels = labels.clone();
+    server_labels.insert("modula-id".to_owned(), modula_id);
+    let req = NewServer {
         name: plan.name.clone(),
+        region: plan.location.name.clone(),
         server_type: plan.server_type.name.clone(),
-        location: plan.location.name.clone(),
-        image: IMAGE.to_owned(),
-        ssh_keys,
         user_data,
-        labels,
-        firewalls: vec![FirewallRef {
-            firewall: firewall.id,
-        }],
-        start_after_create: true,
+        labels: server_labels,
+        ssh_key_ids: ssh_keys,
+        ssh: true,
+        disk_gb: None,
     };
-    let (server, action) = hz.create_server(&req).await.map_err(|e| match e {
+    let server = provider.create(&req).await.map_err(|e| match e {
         ProviderError::Api { code, message } if code == "uniqueness_error" => fail(
-            anyhow::anyhow!("Hetzner: {message}"),
+            anyhow::anyhow!("{}: {message}", kind.label()),
             format!(
-                "A server named {} already exists in this Hetzner project; pick another --name.",
-                plan.name
+                "A server named {} already exists in this {} project; pick another --name.",
+                plan.name,
+                kind.label()
             ),
         ),
         other => he(other).into(),
     })?;
     drop(req);
-    created.server = Some(server.id);
-    let ip: Ipv4Addr = server
-        .ipv4()
-        .and_then(|ip| ip.parse().ok())
-        .ok_or_else(|| {
-            anyhow::anyhow!("Hetzner created the server without a public IPv4 address")
-        })?;
+    created.server = Some(server.id.clone());
+    let ip: Ipv4Addr = match server.ipv4.as_deref().and_then(|ip| ip.parse().ok()) {
+        Some(ip) => ip,
+        None if kind == Provider::Hetzner => {
+            return Err(anyhow::anyhow!(
+                "Hetzner created the server without a public IPv4 address"
+            )
+            .into());
+        }
+        // EC2: its Elastic IP is attached once the instance runs.
+        None => wait_for_address(provider, &server.id, settings, progress, kind).await?,
+    };
     created.ip = Some(ip);
+    provider
+        .open_node_port(&server.id, &plan.name, cloud::NODE_PORT)
+        .await
+        .map_err(he)?;
+    if !cloud.firewall_before_server() {
+        progress.event(&Event::FirewallCreated {
+            id: json_id(&format!("modula-main-{}", plan.name)),
+            name: format!("modula-main-{}", plan.name),
+            reused: false,
+        });
+    }
     if matches!(plan.dns, DnsPlan::Instant) {
         plan.domain = instant_domain(ip);
     }
@@ -309,7 +306,7 @@ pub async fn provision(
         plan.name, plan.server_type.name
     ));
     progress.event(&Event::ServerCreated {
-        id: server.id,
+        id: json_id(&server.id),
         name: plan.name.clone(),
         ip: ip.to_string(),
     });
@@ -371,15 +368,58 @@ pub async fn provision(
     watch(
         plan,
         settings,
-        &hz,
-        server.id,
-        action,
+        &cloud,
+        &server.id,
+        server.action_id.clone(),
         ip,
         &progress_token,
         progress,
     )
     .await?;
     Ok(ip)
+}
+
+/// Poll until the provider reports the server's public address.
+async fn wait_for_address(
+    provider: &dyn modula_provider::ServerProvider,
+    id: &str,
+    settings: &Settings,
+    progress: &mut Progress,
+    kind: Provider,
+) -> Result<Ipv4Addr, Failure> {
+    let t = Instant::now();
+    loop {
+        let state = provider
+            .status(id, None)
+            .await
+            .map_err(|e| Failure::from(cloud::error(kind, e)))?;
+        if let Some(why) = state.error {
+            return Err(anyhow::anyhow!("{}: {why}", kind.label()).into());
+        }
+        if state.phase == CloudPhase::Gone {
+            return Err(anyhow::anyhow!("{} terminated the server", kind.label()).into());
+        }
+        if let Some(ip) = state.ipv4.as_deref().and_then(|ip| ip.parse().ok()) {
+            progress.event(&Event::ServerRunning {
+                id: json_id(id),
+                elapsed_secs: t.elapsed().as_secs(),
+            });
+            return Ok(ip);
+        }
+        if t.elapsed() > ADDRESS_WAIT {
+            return Err(anyhow::anyhow!(
+                "the server didn't get a public address within {}",
+                duration(ADDRESS_WAIT)
+            )
+            .into());
+        }
+        pause(
+            progress,
+            settings.poll,
+            Some("waiting for its public address"),
+        )
+        .await;
+    }
 }
 
 /// Where the install is, as far as the CLI can tell.
@@ -396,20 +436,20 @@ enum Phase {
 }
 
 /// Follow the server from boot to a dashboard answering over HTTPS: the
-/// Hetzner action, the installer's own steps, then the services and the
+/// provider's action, the installer's own steps, then the services and the
 /// certificate, with DNS checked alongside throughout.
 #[allow(clippy::too_many_arguments)]
 async fn watch(
     plan: &Plan,
     settings: &Settings,
-    hz: &Client,
-    server_id: i64,
-    mut action: Option<i64>,
+    cloud: &Cloud,
+    server_id: &str,
+    mut action: Option<String>,
     ip: Ipv4Addr,
     progress_token: &str,
     progress: &mut Progress,
 ) -> Result<(), Failure> {
-    let he = hetzner_error;
+    let kind = cloud.kind();
     let t = Instant::now();
     let reporter = Reporter::new(ip, progress_token, settings.progress_via.as_ref())?;
     let instance = Instance::new(&plan.domain, IpAddr::V4(ip), settings.instance_via.as_ref())?;
@@ -424,27 +464,29 @@ async fn watch(
     let mut detail = String::from("starting");
     progress.start("Booting Ubuntu");
     loop {
-        if let Some(id) = action {
-            let a = hz.action(id).await.map_err(he)?;
-            match a.status.as_str() {
-                "success" => {
+        if let Some(id) = action.clone() {
+            match cloud
+                .provider()
+                .action(&id)
+                .await
+                .map_err(|e| Failure::from(cloud::error(kind, e)))?
+            {
+                ActionState::Done => {
                     action = None;
                     progress.event(&Event::ServerRunning {
-                        id: server_id,
+                        id: json_id(server_id),
                         elapsed_secs: t.elapsed().as_secs(),
                     });
                     detail = "starting cloud-init".into();
                 }
-                "error" => {
-                    let why = a
-                        .error
-                        .map(|e| format!("{} ({})", e.message, e.code))
-                        .unwrap_or_else(|| "unknown error".into());
-                    return Err(
-                        anyhow::anyhow!("Hetzner could not create the server: {why}").into(),
-                    );
+                ActionState::Failed(why) => {
+                    return Err(anyhow::anyhow!(
+                        "{} could not create the server: {why}",
+                        kind.label()
+                    )
+                    .into());
                 }
-                _ => {}
+                ActionState::Running => {}
             }
         }
 
@@ -576,7 +618,10 @@ async fn watch(
                      Certificates need {} to point at {ip} and ports 80/443 open.",
                     match plan.ssh {
                         SshChoice::None => String::new(),
-                        _ => format!(" (ssh root@{ip} tail -f /var/log/cloud-init-output.log)"),
+                        _ => format!(
+                            " (ssh {}@{ip} tail -f /var/log/cloud-init-output.log)",
+                            kind.ssh_user()
+                        ),
                     },
                     plan.domain
                 ),
@@ -677,14 +722,17 @@ pub async fn finish_setup(
 
     // The tokens this run used become the workspace's integrations. Best
     // effort: the server works without them (Settings → Integrations).
-    progress.start("Saving your Hetzner and Cloudflare tokens to the server");
+    progress.start(&format!(
+        "Saving your {} and Cloudflare tokens to the server",
+        secrets.cloud.provider().label()
+    ));
     let account = match &plan.dns {
         DnsPlan::Cloudflare { zone, .. } => zone.account.as_ref().map(|a| a.id.as_str()),
         _ => None,
     };
     let cloudflare = secrets.cloudflare.as_ref().map(|t| (t, account));
     match instance
-        .save_integrations(&session, &secrets.hetzner, cloudflare)
+        .save_integrations(&session, &secrets.cloud, cloudflare)
         .await
     {
         Ok(saved) => {
@@ -709,7 +757,7 @@ pub async fn finish_setup(
         Err(e) => {
             progress.done("Tokens not saved");
             progress.note(&format!(
-                "couldn't save the tokens ({e:#}); connect Hetzner and Cloudflare in Settings → Integrations"
+                "couldn't save the tokens ({e:#}); connect them in Settings → Integrations"
             ));
         }
     }
@@ -739,24 +787,31 @@ pub struct Cleaned {
     pub dns_record: bool,
 }
 
-/// Delete what this run created: the server, then its firewall (Hetzner
-/// refuses while the server still holds it, so retry for a minute), then the
-/// DNS record. An uploaded SSH key stays: it's yours, and harmless.
+/// Delete what this run created: the server (on EC2 with its Elastic IP),
+/// then its firewall (Hetzner refuses while the server still holds it, so
+/// retry for a minute), then the DNS record. An uploaded SSH key stays: it's
+/// yours, and harmless. So do EC2 security groups: free, and reused by the
+/// next attempt with this name.
 pub async fn cleanup(
     created: &Created,
     secrets: &Secrets,
     settings: &Settings,
 ) -> anyhow::Result<Cleaned> {
-    let hz = hetzner(settings, &secrets.hetzner)?;
+    let cloud = Cloud::connect(&secrets.cloud, settings, "cli")?;
+    let kind = cloud.kind();
     let mut done = Cleaned::default();
-    if let Some(id) = created.server {
-        hz.delete_server(id).await.map_err(hetzner_error)?;
+    if let Some(id) = &created.server {
+        cloud
+            .provider()
+            .delete(id)
+            .await
+            .map_err(|e| cloud::error(kind, e))?;
         done.server = true;
     }
-    if let Some(id) = created.firewall {
+    if let Some(id) = &created.firewall {
         let t = Instant::now();
         loop {
-            match hz.delete_firewall(id).await {
+            match cloud.delete_firewall(id).await {
                 Ok(()) => {
                     done.firewall = true;
                     break;
@@ -766,7 +821,7 @@ pub async fn cleanup(
                 {
                     tokio::time::sleep(settings.poll.min(Duration::from_secs(3))).await;
                 }
-                Err(e) => bail!("deleting the firewall failed: {}", hetzner_error(e)),
+                Err(e) => bail!("deleting the firewall failed: {}", cloud::error(kind, e)),
             }
         }
     }
@@ -778,6 +833,21 @@ pub async fn cleanup(
     Ok(done)
 }
 
+/// A failed or interrupted create may still have made the server (or, on
+/// EC2, taken an Elastic IP): find it by its label so it can be deleted.
+/// `find` also releases an Elastic IP left without a server. Best effort.
+pub async fn recover(created: &mut Created, secrets: &Secrets, settings: &Settings) {
+    let (None, Some(modula_id)) = (&created.server, &created.modula_id) else {
+        return;
+    };
+    let Ok(cloud) = Cloud::connect(&secrets.cloud, settings, "cli") else {
+        return;
+    };
+    if let Ok(Some(server)) = cloud.provider().find(modula_id).await {
+        created.server = Some(server.id);
+    }
+}
+
 /// A fresh setup token (re-exported for the command).
 pub fn new_setup_token() -> anyhow::Result<SecretString> {
     setup_token::generate()
@@ -786,27 +856,6 @@ pub fn new_setup_token() -> anyhow::Result<SecretString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn firewall_matches_install_sh() {
-        let ports: Vec<String> = firewall_rules()
-            .into_iter()
-            .map(|r| format!("{}/{}", r.protocol, r.port.as_deref().unwrap_or("-")))
-            .collect();
-        assert_eq!(
-            ports,
-            [
-                "tcp/22",
-                "tcp/80",
-                "tcp/443",
-                "udp/443",
-                "tcp/20000-29999",
-                "tcp/7101",
-                "icmp/-"
-            ]
-        );
-        assert!(firewall_rules().iter().all(|r| r.direction == "in"));
-    }
 
     #[test]
     fn tls_failures_mean_no_certificate_yet() {

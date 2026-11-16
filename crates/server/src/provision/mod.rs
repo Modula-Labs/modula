@@ -5,29 +5,33 @@
 //! 30-minute join token and the CA pin. A background job follows it from
 //! `creating` → `booting` → `joining` → `ready` (or `failed`).
 //!
-//! Providers sit behind [`ServerProvider`] so other clouds (or plain SSH)
-//! can follow Hetzner.
+//! Providers sit behind [`ServerProvider`]; [`PROVIDERS`] is the one place
+//! that knows which exist.
 
 pub mod api;
+pub mod caps;
 pub mod cloud_init;
+pub mod mesh;
 pub mod resize;
 pub mod suggest;
 pub mod track;
 
-use std::collections::BTreeMap;
-
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use serde::Serialize;
+use modula_id::Id;
 
-use crate::error::AppError;
-use crate::locations::Location;
+use crate::error::{AppError, AppResult};
+use crate::integrations::{aws, hetzner};
+use crate::locations;
+use crate::state::AppState;
 
 /// How long a provisioned server has to join.
 pub const JOIN_TOKEN_TTL: time::Duration = time::Duration::minutes(30);
 
-/// Shared with the CLI's Hetzner client (`modula-hetzner`).
-pub use modula_hetzner::ProviderError;
+pub use modula_provider::{
+    ActionState, CreatedServer, LocationPrice, MeshSources, NewServer, Phase, Power, ProviderError,
+    ProviderLocation, ProviderServer, ProviderSshKey, ServerProvider, ServerState, ServerTypeOffer,
+};
 
 impl From<ProviderError> for AppError {
     fn from(e: ProviderError) -> Self {
@@ -35,7 +39,9 @@ impl From<ProviderError> for AppError {
             ProviderError::Unauthorized | ProviderError::Forbidden => {
                 AppError::bad_request(e.to_string())
             }
-            ProviderError::Api { .. } => AppError::Unavailable(format!("Hetzner: {e}")),
+            ProviderError::Api { .. } => {
+                AppError::Unavailable(format!("the cloud provider said: {e}"))
+            }
             ProviderError::NotFound | ProviderError::Transport(_) => {
                 AppError::Unavailable(e.to_string())
             }
@@ -43,215 +49,129 @@ impl From<ProviderError> for AppError {
     }
 }
 
-/// A region the provider can create servers in, mapped to our catalog.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderLocation {
-    /// The provider's own name, e.g. `fsn1`.
-    pub region: String,
-    pub location: &'static Location,
+type Connected<'a> = BoxFuture<'a, AppResult<Option<Box<dyn ServerProvider>>>>;
+type Connect = for<'a> fn(&'a AppState, Id) -> Connected<'a>;
+
+/// A cloud Modula can create servers at.
+struct ProviderEntry {
+    /// The integration kind, also `provisioned_servers.provider` and the
+    /// catalog locations' provider.
+    kind: &'static str,
+    /// For messages.
+    label: &'static str,
+    /// Where to suggest a server when no location is given.
+    default_location: &'static str,
+    /// The workspace's connection, or None when not connected.
+    connect: Connect,
 }
 
-/// A server size with its monthly price per location.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServerTypeOffer {
-    pub name: String,
-    pub description: String,
-    pub cores: u32,
-    pub memory_gb: f64,
-    pub disk_gb: u32,
-    /// `x86` or `arm`.
-    pub arch: String,
-    /// `shared` or `dedicated`.
-    pub cpu_type: String,
-    /// `local` or `network` (empty when the provider doesn't say).
-    #[serde(default)]
-    pub storage_type: String,
-    /// Only locations where it can be ordered now: a type missing here is
-    /// sold out, retired or never offered in that location.
-    pub prices: Vec<LocationPrice>,
+/// Every server provider: adding one is an entry here and its own module.
+const PROVIDERS: &[ProviderEntry] = &[
+    ProviderEntry {
+        kind: hetzner::KIND,
+        label: "Hetzner",
+        default_location: "hetzner:fsn1",
+        connect: |state, workspace| {
+            async move {
+                Ok(hetzner::provider(state, workspace)
+                    .await?
+                    .map(|p| Box::new(p) as Box<dyn ServerProvider>))
+            }
+            .boxed()
+        },
+    },
+    ProviderEntry {
+        kind: aws::KIND,
+        label: "AWS",
+        default_location: "aws:us-east-1",
+        connect: |state, workspace| {
+            async move {
+                Ok(aws::provider(state, workspace)
+                    .await?
+                    .map(|p| Box::new(p) as Box<dyn ServerProvider>))
+            }
+            .boxed()
+        },
+    },
+];
+
+fn entry(kind: &str) -> Option<&'static ProviderEntry> {
+    PROVIDERS.iter().find(|p| p.kind == kind)
 }
 
-impl ServerTypeOffer {
-    /// The monthly price in `location_id`, when the type can be ordered there.
-    pub fn price_in(&self, location_id: &str) -> Option<i64> {
-        self.prices
-            .iter()
-            .find(|p| p.location == location_id)
-            .map(|p| p.monthly_cents)
+/// Integration kinds that are server providers.
+pub fn provider_kinds() -> Vec<&'static str> {
+    PROVIDERS.iter().map(|p| p.kind).collect()
+}
+
+/// `kind`'s name for messages.
+pub fn label(kind: &str) -> &'static str {
+    entry(kind).map_or("the cloud provider", |p| p.label)
+}
+
+/// The providers' names for messages: `Hetzner`, `Hetzner or AWS`.
+pub fn labels() -> String {
+    let all: Vec<&str> = PROVIDERS.iter().map(|p| p.label).collect();
+    all.join(" or ")
+}
+
+/// The workspace's provider of `kind`, or None when not connected.
+pub async fn provider_for(
+    state: &AppState,
+    workspace: Id,
+    kind: &str,
+) -> AppResult<Option<Box<dyn ServerProvider>>> {
+    match entry(kind) {
+        Some(p) => (p.connect)(state, workspace).await,
+        None => Ok(None),
     }
-
-    pub fn orderable_in(&self, location_id: &str) -> bool {
-        self.price_in(location_id).is_some()
-    }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocationPrice {
-    /// Catalog id, e.g. `hetzner:fsn1`.
-    pub location: &'static str,
-    /// Gross (incl. VAT) monthly price in euro cents.
-    pub monthly_cents: i64,
+/// The workspace's provider of `kind`, or a conflict saying to connect it.
+pub async fn connected_provider(
+    state: &AppState,
+    workspace: Id,
+    kind: &str,
+) -> AppResult<Box<dyn ServerProvider>> {
+    provider_for(state, workspace, kind).await?.ok_or_else(|| {
+        AppError::Conflict(format!(
+            "connect {} in workspace settings first",
+            label(kind)
+        ))
+    })
 }
 
-pub struct NewServer {
-    pub name: String,
-    pub region: String,
-    pub server_type: String,
-    pub user_data: String,
-    pub labels: BTreeMap<String, String>,
-    pub ssh_key_ids: Vec<i64>,
-    /// Open port 22 in the server's firewall.
-    pub ssh: bool,
+/// The provider that sells catalog location `id` (`hetzner:fsn1`), when
+/// Modula can create servers there.
+pub fn kind_of_location(id: &str) -> Option<&'static str> {
+    let provider = locations::get(id)?.provider;
+    entry(provider).map(|p| p.kind)
 }
 
-#[derive(Debug, Clone)]
-pub struct CreatedServer {
-    pub id: String,
-    pub firewall_id: Option<String>,
-    pub action_id: Option<String>,
-    pub ipv4: Option<String>,
+/// The kinds `workspace` has connected, in [`PROVIDERS`] order.
+pub async fn connected_kinds<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    workspace: Id,
+) -> AppResult<Vec<&'static str>> {
+    let kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT kind FROM integrations WHERE workspace_id = $1 AND kind = ANY($2)",
+    )
+    .bind(workspace)
+    .bind(provider_kinds())
+    .fetch_all(db)
+    .await?;
+    Ok(PROVIDERS
+        .iter()
+        .map(|p| p.kind)
+        .filter(|k| kinds.iter().any(|c| c == k))
+        .collect())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Phase {
-    Booting,
-    Running,
-    /// Shutting down: not off yet.
-    Stopping,
-    Off,
-    Gone,
-}
-
-#[derive(Debug, Clone)]
-pub struct ServerState {
-    pub phase: Phase,
-    pub ipv4: Option<String>,
-    /// Set when the provider's create action failed.
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Power {
-    On,
-    /// A clean shutdown through the operating system (ACPI); the OS may ignore it.
-    Off,
-    /// Cut the power: for when [`Power::Off`] did nothing.
-    ForceOff,
-    Reboot,
-}
-
-/// A server as the provider describes it, whether or not Modula created it.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderServer {
-    pub id: String,
-    pub name: String,
-    pub ipv4: Option<String>,
-    pub phase: Phase,
-    /// Catalog location, when the provider's region maps to one.
-    pub location: Option<&'static Location>,
-    /// Its current type, which may no longer be sold.
-    pub server_type: String,
-    pub cores: u32,
-    pub memory_gb: f64,
-    /// The disk it has now (can be bigger than its type's after a resize).
-    pub disk_gb: u32,
-    pub arch: String,
-    pub storage_type: String,
-    /// `main` for a control-plane server created by `modula server create`.
-    pub role: Option<String>,
-}
-
-/// A provider action (resize, …) being followed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionState {
-    Running,
-    Done,
-    Failed(String),
-}
-
-/// A cloud that can create servers. Every call uses the workspace's own
-/// credentials; implementations never log them.
-pub trait ServerProvider: Send + Sync {
-    fn kind(&self) -> &'static str;
-    fn locations(&self) -> BoxFuture<'_, Result<Vec<ProviderLocation>, ProviderError>>;
-    /// Orderable server types only (deprecated ones are hidden).
-    fn server_types(&self) -> BoxFuture<'_, Result<Vec<ServerTypeOffer>, ProviderError>>;
-    fn create<'a>(
-        &'a self,
-        req: &'a NewServer,
-    ) -> BoxFuture<'a, Result<CreatedServer, ProviderError>>;
-    /// Find a server we created by its `modula-id` label (recovers from a
-    /// crash between creating it and recording its id).
-    fn find<'a>(
-        &'a self,
-        modula_id: &'a str,
-    ) -> BoxFuture<'a, Result<Option<CreatedServer>, ProviderError>>;
-    /// Succeeds when the server is already gone.
-    fn delete<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<(), ProviderError>>;
-    fn power<'a>(&'a self, id: &'a str, op: Power) -> BoxFuture<'a, Result<(), ProviderError>>;
-    fn status<'a>(
-        &'a self,
-        id: &'a str,
-        action_id: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<ServerState, ProviderError>>;
-
-    /// The types that can be ordered in `location_id` (a catalog id) now.
-    fn server_types_at<'a>(
-        &'a self,
-        location_id: &'a str,
-    ) -> BoxFuture<'a, Result<Vec<ServerTypeOffer>, ProviderError>> {
-        async move {
-            let mut types = self.server_types().await?;
-            types.retain(|t| t.orderable_in(location_id));
-            Ok(types)
-        }
-        .boxed()
-    }
-
-    /// Describe one server; None when it no longer exists.
-    fn describe<'a>(
-        &'a self,
-        id: &'a str,
-    ) -> BoxFuture<'a, Result<Option<ProviderServer>, ProviderError>>;
-
-    /// A Modula server (created here or by `modula server create`) with this
-    /// public IPv4, for linking a node to the provider's server.
-    fn find_by_address<'a>(
-        &'a self,
-        ipv4: &'a str,
-    ) -> BoxFuture<'a, Result<Option<ProviderServer>, ProviderError>>;
-
-    /// Why `server` can't change to `to` in place, or None when it can
-    /// (provider rules such as architecture or disk size).
-    fn resize_blocker(&self, server: &ProviderServer, to: &ServerTypeOffer) -> Option<String>;
-
-    /// Change a powered-off server's type, keeping its disk so it can be
-    /// downsized again. Returns the action to follow with [`Self::action`].
-    fn resize<'a>(
-        &'a self,
-        id: &'a str,
-        server_type: &'a str,
-    ) -> BoxFuture<'a, Result<String, ProviderError>>;
-
-    fn action<'a>(
-        &'a self,
-        action_id: &'a str,
-    ) -> BoxFuture<'a, Result<ActionState, ProviderError>>;
-
-    /// Let every server reach `id`'s node endpoint (`port`/tcp, plus what a
-    /// main server serves): it becomes the main server (migrate/promote.rs).
-    /// Idempotent.
-    fn open_node_port<'a>(
-        &'a self,
-        id: &'a str,
-        name: &'a str,
-        port: u16,
-    ) -> BoxFuture<'a, Result<(), ProviderError>>;
+/// Where to suggest a server when the request names no location: the first
+/// connected provider's default.
+pub fn default_location(connected: &[&str]) -> Option<&'static str> {
+    let first = connected.first()?;
+    entry(first).map(|p| p.default_location)
 }
 
 /// Server names become hostnames and node names: lowercase DNS labels.
@@ -267,6 +187,18 @@ pub fn valid_server_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_location_decides_the_provider() {
+        assert_eq!(kind_of_location("hetzner:fsn1"), Some(hetzner::KIND));
+        // In the catalog, but no provider creates servers there.
+        assert_eq!(kind_of_location("gcp:us-central1"), None);
+        assert_eq!(kind_of_location("nowhere:else"), None);
+        assert_eq!(default_location(&[hetzner::KIND]), Some("hetzner:fsn1"));
+        assert_eq!(kind_of_location("aws:eu-west-1"), Some(aws::KIND));
+        assert_eq!(default_location(&[aws::KIND]), Some("aws:us-east-1"));
+        assert_eq!(default_location(&[]), None);
+    }
 
     #[test]
     fn server_names_are_dns_labels() {

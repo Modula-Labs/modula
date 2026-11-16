@@ -252,6 +252,7 @@ async fn instance(pool: PgPool, cloud: &str) -> String {
 fn settings(cloud: &str, m: &Shared, instance: &str, cloudflare: bool) -> Settings {
     Settings {
         hetzner_api: format!("{cloud}/hetzner/v1").parse().unwrap(),
+        aws_api: None,
         cloudflare_api: format!("{cloud}/cf").parse().unwrap(),
         instance_via: Some(instance.parse().unwrap()),
         progress_via: Some(format!("{cloud}/progress/").parse().unwrap()),
@@ -292,7 +293,7 @@ fn args() -> ServerCreateArgs {
         name: Some("modula-main".into()),
         domain: Some("cloud.test".into()),
         email: Some("ada@example.com".into()),
-        ssh_key_id: Some(42),
+        ssh_key_id: Some("42".into()),
         admin_name: Some("Ada".into()),
         ..Default::default()
     }
@@ -301,6 +302,7 @@ fn args() -> ServerCreateArgs {
 fn env(cloudflare: bool) -> EnvSecrets {
     EnvSecrets {
         hcloud: Some(HCLOUD.to_owned().into()),
+        aws: None,
         cloudflare: cloudflare.then(|| CLOUDFLARE.to_owned().into()),
         admin_password: Some(PASSWORD.to_owned().into()),
     }

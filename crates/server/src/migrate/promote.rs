@@ -28,7 +28,7 @@
 //! connects to it (which only happens once the old one gave the go) it
 //! [`finalize`]s: the old server's node is revoked, so exactly one node
 //! serves the dashboard, the old server is marked `pending_deletion`, and
-//! maintenance ends.
+//! maintenance ends. Step `dns` ([`super::dns`]) then finishes the migration.
 //!
 //! Before `switch` a failure ends maintenance here and leaves everything as
 //! it was (abort moves the services back). From `switch` on there is no
@@ -78,6 +78,8 @@ struct Row {
     promote_phase_at: Option<OffsetDateTime>,
     promote_fetched_at: Option<OffsetDateTime>,
     new_node_url: Option<String>,
+    source_ip: Option<String>,
+    dns_skip: sqlx::types::Json<Vec<String>>,
 }
 
 async fn load(state: &AppState, id: Id) -> AppResult<Option<Row>> {
@@ -85,7 +87,7 @@ async fn load(state: &AppState, id: Id) -> AppResult<Option<Row>> {
         "SELECT m.workspace_id, m.source_node_id, m.source_server_id, m.target_server_id,
                 m.target_node_id, t.name AS target_name, t.provider_id AS target_provider_id,
                 coalesce(n.public_ip, t.ipv4) AS target_ip, m.status, m.step, m.promote_phase,
-                m.promote_phase_at, m.promote_fetched_at, m.new_node_url
+                m.promote_phase_at, m.promote_fetched_at, m.new_node_url, m.source_ip, m.dns_skip
          FROM server_migrations m
          LEFT JOIN provisioned_servers t ON t.id = m.target_server_id
          LEFT JOIN nodes n ON n.id = m.target_node_id
@@ -136,7 +138,7 @@ pub fn ip_based(state: &AppState) -> bool {
 /// Names whose DNS must point at the main server: the dashboard's and the
 /// generated apps' wildcard.
 pub fn dashboard_hosts(state: &AppState) -> Vec<String> {
-    let mut hosts = Vec::new();
+    let mut hosts: Vec<String> = Vec::new();
     if let Some(h) = state.cfg.public_url.host_str()
         && !is_ipv4(h)
         && h != "localhost"
@@ -151,6 +153,12 @@ pub fn dashboard_hosts(state: &AppState) -> Vec<String> {
     }
     if let Some(a) = names.apps.filter(|a| a != "localhost") {
         hosts.push(format!("*.{a}"));
+    }
+    // A name for the TCP proxies; an IP there is the old server's own.
+    if let Some(t) = state.cfg.tcp_proxy_host.as_ref().filter(|t| !is_ipv4(t))
+        && !hosts.contains(t)
+    {
+        hosts.push(t.clone());
     }
     hosts
 }
@@ -207,7 +215,7 @@ pub async fn enter(state: &AppState, id: Id) -> AppResult<bool> {
                 .fetch_optional(&state.db)
                 .await?;
         let provider = match kind {
-            Some(k) => crate::provision::resize::provider_for(state, r.workspace_id, &k).await?,
+            Some(k) => crate::provision::provider_for(state, r.workspace_id, &k).await?,
             None => None,
         };
         let Some(provider) = provider else {
@@ -829,7 +837,15 @@ async fn commit(state: &AppState, id: Id, r: &Row) -> AppResult<bool> {
         ));
     }
     let ip = r.target_ip.clone().unwrap_or_default();
-    notes.extend(repoint_dns(state, &ip).await);
+    // One early attempt, so the name moves with the hand-over; the new
+    // control plane does this durably (step dns).
+    match repoint_dns(state, r.source_ip.as_deref(), &ip, &r.dns_skip.0).await {
+        Ok(d) => notes.extend(d.notes(&ip)),
+        Err(e) => tracing::warn!(
+            error = format!("{e:#}"),
+            "repointing DNS failed; the new server retries"
+        ),
+    }
     let detail = notes.join(" · ");
     end(
         &state.db,
@@ -857,73 +873,117 @@ pub async fn send_address(state: &AppState, node: Id, id: Id, node_url: &str) ->
         .await
 }
 
-/// Point the dashboard's (and generated apps') DNS at `ip` where Modula wrote
-/// the records in a connected Cloudflare zone; say what to change elsewhere.
-async fn repoint_dns(state: &AppState, ip: &str) -> Vec<String> {
+/// The result of [`repoint_dns`].
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Repointed {
+    pub pointed: Vec<String>,
+    /// Not in a connected zone (or opted out): the user changes these.
+    pub manual: Vec<String>,
+}
+
+impl Repointed {
+    pub fn notes(&self, ip: &str) -> Vec<String> {
+        let mut notes = Vec::new();
+        if !self.pointed.is_empty() {
+            notes.push(format!("DNS: pointed {} at {ip}", self.pointed.join(", ")));
+        }
+        if !self.manual.is_empty() {
+            notes.push(format!(
+                "Change the DNS A record of {} to {ip} yourself",
+                self.manual.join(", ")
+            ));
+        }
+        notes
+    }
+}
+
+/// Point the dashboard's (and generated apps', and the TCP proxy's) names at
+/// `ip` in any connected Cloudflare zone holding them: records Modula wrote,
+/// and any record exactly on the old address `old`, updated in place. Others
+/// and opted-out ids (`skip`) are left alone. Read back; idempotent.
+pub async fn repoint_dns(
+    state: &AppState,
+    old: Option<&str>,
+    ip: &str,
+    skip: &[String],
+) -> anyhow::Result<Repointed> {
     let hosts = dashboard_hosts(state);
+    let mut out = Repointed::default();
     if hosts.is_empty() || !is_ipv4(ip) {
-        return Vec::new();
+        return Ok(out);
     }
     let workspaces: Vec<Id> = sqlx::query_scalar(
         "SELECT workspace_id FROM integrations WHERE kind = 'cloudflare' ORDER BY created_at",
     )
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
     let mut connections = Vec::new();
     for ws in workspaces {
-        if let Ok(Some(c)) = cloudflare::connection(state, ws).await {
+        if let Some(c) = cloudflare::connection(state, ws)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?
+        {
             connections.push(c);
         }
     }
-    let mut pointed = Vec::new();
-    let mut manual = Vec::new();
     for host in hosts {
         let mut done = false;
         for c in &connections {
-            let Ok(Some(zone)) = c.client.find_zone(&host).await else {
+            let Some(zone) = c.client.find_zone(&host).await? else {
                 continue;
             };
-            let managed: Vec<cloudflare::client::DnsRecord> = c
+            let records: Vec<cloudflare::client::DnsRecord> = c
                 .client
                 .dns_records(&zone.id, &host, "A")
-                .await
-                .unwrap_or_default()
+                .await?
                 .into_iter()
-                .filter(|r| r.comment.as_deref() == Some(cloudflare::client::MANAGED_COMMENT))
+                .filter(|r| !skip.contains(&r.id))
                 .collect();
-            let Some(first) = managed.first() else {
-                continue;
+            let managed = |r: &cloudflare::client::DnsRecord| {
+                r.comment.as_deref() == Some(cloudflare::client::MANAGED_COMMENT)
             };
-            let proxied = first.proxied.unwrap_or(false);
-            match c
-                .client
-                .set_routing(&zone.id, &host, &[("A", ip)], proxied)
-                .await
+            let on_old = |r: &cloudflare::client::DnsRecord| Some(r.content.as_str()) == old;
+            // Already there counts: a retry finds its own earlier write.
+            if !records
+                .iter()
+                .any(|r| managed(r) || on_old(r) || r.content == ip)
             {
-                Ok(()) => {
-                    pointed.push(host.clone());
-                    done = true;
-                }
-                Err(e) => tracing::warn!(%host, error = %e, "cannot repoint DNS"),
+                continue;
             }
+            let proxied = records
+                .iter()
+                .find(|r| managed(r) || on_old(r))
+                .and_then(|r| r.proxied);
+            let mut present = records.iter().any(|r| r.content == ip);
+            for r in records.iter().filter(|r| on_old(r)) {
+                if present {
+                    c.client.delete_record_id(&zone.id, &r.id).await?;
+                } else {
+                    c.client.update_record_content(&zone.id, r, ip).await?;
+                    present = true;
+                }
+            }
+            if records
+                .iter()
+                .any(|r| managed(r) && !on_old(r) && r.content != ip)
+            {
+                c.client
+                    .set_routing(&zone.id, &host, &[("A", ip)], proxied.unwrap_or(false))
+                    .await?;
+            }
+            let after = c.client.dns_records(&zone.id, &host, "A").await?;
+            if !after.iter().any(|r| r.content == ip) {
+                anyhow::bail!("Cloudflare still doesn't have {host} at {ip}");
+            }
+            out.pointed.push(host.clone());
+            done = true;
             break;
         }
         if !done {
-            manual.push(host);
+            out.manual.push(host);
         }
     }
-    let mut notes = Vec::new();
-    if !pointed.is_empty() {
-        notes.push(format!("DNS: pointed {} at {ip}", pointed.join(", ")));
-    }
-    if !manual.is_empty() {
-        notes.push(format!(
-            "Change the DNS A record of {} to {ip} yourself",
-            manual.join(", ")
-        ));
-    }
-    notes
+    Ok(out)
 }
 
 // ---------------------------------------------------------------- the new control plane
@@ -958,9 +1018,10 @@ async fn poll_new(state: &AppState, id: Id) -> AppResult<bool> {
         return Ok(true);
     }
     match r.target_node_id {
+        // The migration goes on with step dns.
         Some(target) if state.hub.is_connected(target) => {
             finalize(state, id).await?;
-            Ok(true)
+            Ok(false)
         }
         _ => Ok(false),
     }
@@ -974,8 +1035,7 @@ pub async fn finalize(state: &AppState, id: Id) -> AppResult<()> {
     };
     let mut tx = state.db.begin().await?;
     let done = sqlx::query(
-        "UPDATE server_migrations SET status = 'done', step = 'finish', updated_at = now(),
-                finished_at = now(), promote_ticket_hash = NULL
+        "UPDATE server_migrations SET step = 'dns', updated_at = now(), promote_ticket_hash = NULL
          WHERE id = $1 AND status = 'running' AND step = 'promote'",
     )
     .bind(id)
@@ -993,6 +1053,7 @@ pub async fn finalize(state: &AppState, id: Id) -> AppResult<()> {
     )
     .await?;
     end(&mut *tx, Table::Migrations, id, "done", None).await?;
+    begin(&mut *tx, Table::Migrations, id, super::dns::STEP_LABEL).await?;
     if let Some(old) = r.source_node_id {
         crate::nodes::revoke(&mut tx, old).await?;
     }
@@ -1014,7 +1075,7 @@ pub async fn finalize(state: &AppState, id: Id) -> AppResult<()> {
     }
     maintenance::sync(state).await?;
     state.jobs_notify.notify_one();
-    tracing::info!(%id, "main server migration finished; this is the main server now");
+    tracing::info!(%id, "the control plane moved; this is the main server now");
     Ok(())
 }
 

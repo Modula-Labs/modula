@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::error::AppResult;
 use crate::jobs::{self, Job, NewJob};
-use crate::provision::{Phase, ServerProvider};
+use crate::provision::{Phase, label, provider_for};
 use crate::state::AppState;
 
 pub const TRACK_JOB: &str = "provision.track";
@@ -51,6 +51,7 @@ pub async fn track_job(state: AppState, job: Job) -> anyhow::Result<()> {
 struct Row {
     workspace_id: Id,
     status: String,
+    provider: String,
     provider_id: Option<String>,
     provider_action_id: Option<String>,
     join_token_id: Option<Id>,
@@ -73,7 +74,7 @@ async fn set_status(state: &AppState, id: Id, status: &str, error: Option<&str>)
 /// One step. Returns true once there is nothing left to follow.
 pub async fn poll_once(state: &AppState, id: Id) -> AppResult<bool> {
     let row: Option<Row> = sqlx::query_as(
-        "SELECT workspace_id, status, provider_id, provider_action_id, join_token_id, created_at
+        "SELECT workspace_id, status, provider, provider_id, provider_action_id, join_token_id, created_at
          FROM provisioned_servers WHERE id = $1",
     )
     .bind(id)
@@ -86,9 +87,10 @@ pub async fn poll_once(state: &AppState, id: Id) -> AppResult<bool> {
     ) {
         return Ok(true);
     }
-    let Some(provider) = crate::integrations::hetzner::provider(state, row.workspace_id).await?
-    else {
-        set_status(state, id, "failed", Some("Hetzner was disconnected")).await?;
+    let name = label(&row.provider);
+    let Some(provider) = provider_for(state, row.workspace_id, &row.provider).await? else {
+        let why = format!("{name} was disconnected");
+        set_status(state, id, "failed", Some(&why)).await?;
         return Ok(true);
     };
 
@@ -127,13 +129,8 @@ pub async fn poll_once(state: &AppState, id: Id) -> AppResult<bool> {
         }
         match s.phase {
             Phase::Gone => {
-                set_status(
-                    state,
-                    id,
-                    "failed",
-                    Some("the server was deleted at Hetzner"),
-                )
-                .await?;
+                let why = format!("the server was deleted at {name}");
+                set_status(state, id, "failed", Some(&why)).await?;
                 return Ok(true);
             }
             Phase::Running => {
@@ -145,6 +142,13 @@ pub async fn poll_once(state: &AppState, id: Id) -> AppResult<bool> {
                 .bind(&s.ipv4)
                 .execute(&state.db)
                 .await?;
+                // Its address may only exist now (an EC2 Elastic IP is
+                // associated once running): firewalls admit it before it joins.
+                if s.ipv4.is_some()
+                    && let Err(e) = super::mesh::enqueue_sync(&state.db).await
+                {
+                    tracing::warn!(%id, error = ?e, "cannot queue the firewall update");
+                }
             }
             Phase::Booting | Phase::Stopping | Phase::Off => return Ok(false),
         }

@@ -6,7 +6,7 @@ import { Alert, Skeleton } from "@/components/ui/misc";
 import { flagEmoji } from "@/lib/flags";
 import {
   PROVISION_STEPS,
-  euros,
+  monthlyUsd,
   provisionApi,
   stepIndex,
   type ProvisionStatus,
@@ -41,7 +41,7 @@ export function AddServerProgress({
         <span className="font-mono text-muted-foreground">{s.serverType}</span>
         <span className="text-muted-foreground">{s.location?.city}</span>
         <span className="ml-auto tabular-nums text-muted-foreground">
-          {euros(s.monthlyPriceCents)}/mo
+          {monthlyUsd(s.monthlyPriceCents, s.provider)}/mo
         </span>
       </div>
 
@@ -86,6 +86,11 @@ export function AddServerProgress({
               {step.status === "booting" && s.ipv4 && (done || active) ? (
                 <span className="font-mono text-[13px] text-muted-foreground">
                   {s.ipv4}
+                </span>
+              ) : null}
+              {step.status === "booting" && !s.ipv4 && active && s.provider === "aws" ? (
+                <span className="text-[13px] text-muted-foreground">
+                  waiting for the Elastic IP to attach
                 </span>
               ) : null}
             </li>

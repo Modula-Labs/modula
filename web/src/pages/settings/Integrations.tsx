@@ -12,6 +12,7 @@ import {
   type CloudflarePreview,
   type CloudflareStatus,
 } from "@/lib/integrations";
+import { AwsIntegration } from "./IntegrationsAws";
 import { GithubIntegration } from "./IntegrationsGithub";
 import { HetznerIntegration } from "./IntegrationsHetzner";
 import { R2Buckets } from "./R2Buckets";
@@ -74,6 +75,7 @@ export function IntegrationsSection({
         )}
         <GithubIntegration workspaceId={workspaceId} isAdmin={isAdmin} />
         <HetznerIntegration workspaceId={workspaceId} canEdit={isAdmin} />
+        <AwsIntegration workspaceId={workspaceId} canEdit={isAdmin} />
       </div>
       <ConnectCloudflareDialog
         workspaceId={workspaceId}

@@ -275,6 +275,11 @@ pub async fn apply_event(db: &PgPool, node: Id, ev: &DeploymentEvent) -> AppResu
                 jobs::enqueue(&mut *tx, job).await?;
             }
             kick.extend(old);
+            // Servers forwarding this instance after a migration follow it.
+            for n in super::desired::forwarding_nodes(&mut tx, instance).await? {
+                super::bump(&mut *tx, n).await?;
+                kick.push(n);
+            }
             commit_status = Some("success");
             crate::webhooks::enqueue(&mut tx, *dep, crate::webhooks::Event::DeploymentSucceeded)
                 .await?;

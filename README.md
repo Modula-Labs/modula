@@ -101,6 +101,7 @@ crates/crypto   envelope encryption (XChaCha20-Poly1305, AAD-bound), tokens, arg
 crates/proto    modula.node.v1 gRPC protocol between server and node
 crates/backup   backup streaming, age encryption, outbound network guard
 crates/hetzner  Hetzner Cloud API client
+crates/provider The cloud provider contract and location catalog
 web/            React SPA (served by modula-server)
 deploy/         install.sh, release public key, e2e installer test
 scripts/        check.sh (what CI runs), release.sh, dev-*.sh

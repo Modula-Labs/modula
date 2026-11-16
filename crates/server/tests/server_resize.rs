@@ -315,7 +315,7 @@ async fn adopts_the_main_server_by_ip_and_refuses_to_resize_it(pool: PgPool) {
     assert_eq!(o["providerId"], "4001");
     assert_eq!(o["location"]["id"], "hetzner:fsn1");
     assert_eq!(o["current"]["name"], "cx22");
-    assert_eq!(o["current"]["monthlyCents"], 451);
+    assert_eq!(o["current"]["monthlyCents"], 487);
     let ty = |n: &str| {
         o["types"]
             .as_array()
@@ -531,7 +531,7 @@ async fn resizes_a_worker_step_by_step(pool: PgPool) {
             .fetch_one(app.db())
             .await
             .unwrap();
-    assert_eq!(price, 821);
+    assert_eq!(price, 887);
     let calls = mock.lock().unwrap().calls.clone();
     let actions: Vec<&str> = calls
         .iter()

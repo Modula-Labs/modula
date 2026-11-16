@@ -7,18 +7,19 @@ use std::fmt;
 use inquire::ui::{Attributes, Color, RenderConfig, StyleSheet, Styled};
 use inquire::validator::Validation;
 use inquire::{Confirm, InquireError, Password, PasswordDisplayMode, Select, Text};
-use modula_hetzner::SshKey;
+use modula_provider::ProviderSshKey;
 use secrecy::{ExposeSecret, SecretString};
 
 use super::catalog::{self, LocationOption};
-use super::flow::{self, Created, DnsPlan, Plan, Secrets, Settings, SshChoice};
+use super::cloud::{self, AwsKeys, Cloud, CloudSecret};
+use super::flow::{Created, DnsPlan, Plan, Secrets, Settings, SshChoice};
 use super::{
     DEFAULT_ADMIN_NAME, DEFAULT_NAME, EnvSecrets, cloud_init, cloudflare, cloudflare_lookup,
     describe_records, is_auto, key_body, load_catalog, local_public_keys, read_public_key,
     ssh_choice_for_file, valid_admin_name, valid_domain, valid_email, valid_password,
     valid_server_name,
 };
-use crate::cli::ServerCreateArgs;
+use crate::cli::{Provider, ServerCreateArgs};
 use crate::context::Ctx;
 use crate::output::Output;
 
@@ -81,6 +82,7 @@ impl<T> fmt::Display for Choice<T> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Step {
+    Provider,
     Token,
     Location,
     Type,
@@ -92,7 +94,8 @@ enum Step {
     Confirm,
 }
 
-const STEPS: [Step; 9] = [
+const STEPS: [Step; 10] = [
+    Step::Provider,
     Step::Token,
     Step::Location,
     Step::Type,
@@ -107,9 +110,16 @@ const STEPS: [Step; 9] = [
 /// The answers so far.
 #[derive(Default)]
 struct Draft {
-    hetzner: Option<SecretString>,
+    provider: Option<Provider>,
+    /// `--provider` was passed: the question is skipped.
+    provider_given: bool,
+    /// Credentials: checked ones once past the token step.
+    secret: Option<CloudSecret>,
+    /// What the environment gave, per provider.
+    env_hcloud: Option<SecretString>,
+    env_aws: Option<AwsKeys>,
     catalog: Vec<LocationOption>,
-    ssh_keys: Vec<SshKey>,
+    ssh_keys: Vec<ProviderSshKey>,
     location: Option<usize>,
     server_type: Option<String>,
     name: Option<String>,
@@ -141,12 +151,15 @@ pub async fn run(
     ));
     say(
         out,
-        "Let's create your Modula server on Hetzner Cloud. Esc goes back a step.",
+        "Let's create your Modula server. Esc goes back a step.",
     );
     out.note("");
 
     let mut d = Draft {
-        hetzner: env.hcloud.take(),
+        provider: args.provider,
+        provider_given: args.provider.is_some(),
+        env_hcloud: env.hcloud.take(),
+        env_aws: env.aws.take(),
         cloudflare: env.cloudflare.clone(),
         name: args.name.clone(),
         email: args.email.clone(),
@@ -162,9 +175,13 @@ pub async fn run(
     }
     // Steps answered on the command line are never asked (each step
     // takes the flag's value itself), so Back skips over them.
-    let token_given = d.hetzner.is_some();
-    let asked = |s: Step| match s {
-        Step::Token => !token_given,
+    let (hcloud_given, aws_given) = (d.env_hcloud.is_some(), d.env_aws.is_some());
+    let asked = |s: Step, provider: Option<Provider>| match s {
+        Step::Provider => args.provider.is_none(),
+        Step::Token => match provider.unwrap_or_default() {
+            Provider::Hetzner => !hcloud_given,
+            Provider::Aws => !aws_given,
+        },
         Step::Location => args.location.is_none(),
         Step::Type => args.server_type.is_none(),
         Step::Name => args.name.is_none(),
@@ -179,6 +196,7 @@ pub async fn run(
     let mut i = 0;
     while let Some(&step) = STEPS.get(i) {
         let nav = match step {
+            Step::Provider => provider_step(&mut d)?,
             Step::Token => token_step(out, &mut d, settings).await?,
             Step::Location => location_step(out, &mut d, args)?,
             Step::Type => type_step(&mut d, args)?,
@@ -195,11 +213,11 @@ pub async fn run(
             Nav::Back => match (0..i).rev().find(|&j| {
                 // An instant address has no DNS question to go back to.
                 let skipped = STEPS[j] == Step::Dns && matches!(d.dns, Some(DnsPlan::Instant));
-                asked(STEPS[j]) && !skipped
+                asked(STEPS[j], d.provider) && !skipped
             }) {
                 Some(j) => {
                     if STEPS[j] == Step::Token {
-                        d.hetzner = None;
+                        d.secret = None;
                     }
                     i = j;
                 }
@@ -215,6 +233,7 @@ pub async fn run(
         .cloned()
         .expect("type chosen");
     let plan = Plan {
+        provider: d.provider.unwrap_or_default(),
         location,
         server_type,
         name: d.name.unwrap_or_else(|| DEFAULT_NAME.into()),
@@ -228,47 +247,152 @@ pub async fn run(
             .unwrap_or_else(|| cloud_init::INSTALL_URL.into()),
     };
     let secrets = Secrets {
-        hetzner: d.hetzner.expect("token checked"),
+        cloud: d.secret.expect("token checked"),
         cloudflare: d.cloudflare,
     };
     Ok(Some((plan, secrets)))
 }
 
-async fn token_step(out: &Output, d: &mut Draft, settings: &Settings) -> anyhow::Result<Nav> {
-    loop {
-        let token = match d.hetzner.take() {
-            Some(t) => t,
-            None => {
-                say(
-                    out,
-                    &format!(
-                        "A Hetzner Cloud API token (Read & Write): console.hetzner.cloud → your project → {}.",
-                        out.accent("Security → API tokens")
-                    ),
-                );
-                say(
-                    out,
-                    &out.dim("It's saved to the new server (Settings → Integrations) so it can add servers later."),
-                );
-                let r = Password::new("Hetzner API token")
-                    .with_display_mode(PasswordDisplayMode::Masked)
-                    .without_confirmation()
-                    .prompt();
-                match answer(r)? {
-                    Some(t) if !t.trim().is_empty() => SecretString::from(t.trim().to_owned()),
-                    Some(_) => continue,
-                    None => return Ok(Nav::Back),
-                }
+/// Which cloud. Asked only without `--provider`; the cursor starts on the
+/// one whose credentials are in the environment.
+fn provider_step(d: &mut Draft) -> anyhow::Result<Nav> {
+    if d.provider_given {
+        return Ok(Nav::Next);
+    }
+    let options = vec![
+        Choice {
+            label: "Hetzner Cloud".to_owned(),
+            value: Provider::Hetzner,
+        },
+        Choice {
+            label: "Amazon EC2 (AWS)".to_owned(),
+            value: Provider::Aws,
+        },
+    ];
+    let start = match d.provider {
+        Some(Provider::Aws) => 1,
+        Some(Provider::Hetzner) => 0,
+        None => usize::from(d.env_hcloud.is_none() && d.env_aws.is_some()),
+    };
+    let r = Select::new("Which cloud?", options)
+        .with_starting_cursor(start)
+        .without_filtering()
+        .with_help_message("Esc: leave")
+        .prompt();
+    match answer(r)? {
+        Some(c) => {
+            if d.provider != Some(c.value) {
+                d.secret = None;
+                d.catalog.clear();
+                d.ssh_keys.clear();
+                d.location = None;
+                d.server_type = None;
+                d.ssh = None;
             }
+            d.provider = Some(c.value);
+            Ok(Nav::Next)
+        }
+        None => Ok(Nav::Back),
+    }
+}
+
+/// An AWS access key, asked for on the terminal.
+pub(crate) fn ask_aws_keys() -> Result<Option<AwsKeys>, InquireError> {
+    let id = Text::new("AWS access key id")
+        .with_help_message("of an IAM user with Modula's policy · Esc: back")
+        .prompt_skippable()?;
+    let Some(id) = id.map(|i| i.trim().to_owned()).filter(|i| !i.is_empty()) else {
+        return Ok(None);
+    };
+    let secret = Password::new("AWS secret access key")
+        .with_display_mode(PasswordDisplayMode::Masked)
+        .without_confirmation()
+        .prompt_skippable()?;
+    Ok(secret
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .map(|s| AwsKeys {
+            access_key_id: id,
+            secret_access_key: SecretString::from(s),
+        }))
+}
+
+/// The credentials for the chosen cloud (from the environment, this
+/// session or a prompt). None: the user went back.
+fn ask_credentials(
+    out: &Output,
+    d: &mut Draft,
+    provider: Provider,
+) -> anyhow::Result<Option<CloudSecret>> {
+    let given = d.secret.take().or_else(|| match provider {
+        Provider::Hetzner => d.env_hcloud.clone().map(CloudSecret::Hetzner),
+        Provider::Aws => d.env_aws.clone().map(CloudSecret::Aws),
+    });
+    if given.is_some() {
+        return Ok(given);
+    }
+    match provider {
+        Provider::Hetzner => loop {
+            say(
+                out,
+                &format!(
+                    "A Hetzner Cloud API token (Read & Write): console.hetzner.cloud → your project → {}.",
+                    out.accent("Security → API tokens")
+                ),
+            );
+            say(
+                out,
+                &out.dim("It's saved to the new server (Settings → Integrations) so it can add servers later."),
+            );
+            let r = Password::new("Hetzner API token")
+                .with_display_mode(PasswordDisplayMode::Masked)
+                .without_confirmation()
+                .prompt();
+            match answer(r)? {
+                Some(t) if !t.trim().is_empty() => {
+                    return Ok(Some(CloudSecret::Hetzner(SecretString::from(
+                        t.trim().to_owned(),
+                    ))));
+                }
+                Some(_) => continue,
+                None => return Ok(None),
+            }
+        },
+        Provider::Aws => {
+            say(
+                out,
+                "An access key of an IAM user allowed to manage EC2 and read prices.",
+            );
+            say(out, &out.dim("The minimal IAM policy:"));
+            say(out, &out.dim(modula_ec2::MINIMAL_IAM_POLICY));
+            say(
+                out,
+                &out.dim("It's saved to the new server (Settings → Integrations) so it can add servers later."),
+            );
+            Ok(answer(ask_aws_keys())?.flatten().map(CloudSecret::Aws))
+        }
+    }
+}
+
+async fn token_step(out: &Output, d: &mut Draft, settings: &Settings) -> anyhow::Result<Nav> {
+    let provider = d.provider.unwrap_or_default();
+    d.provider = Some(provider);
+    loop {
+        let Some(secret) = ask_credentials(out, d, provider)? else {
+            return Ok(Nav::Back);
         };
         out.note(format!(
             "  {}",
-            out.dim("Checking the token and what's in stock…")
+            out.dim("Checking the credentials and what's in stock…")
         ));
-        let hz = flow::hetzner(settings, &token)?;
+        let cloud = Cloud::connect(&secret, settings, "cli")?;
         let loaded = async {
-            let catalog = load_catalog(&hz).await?;
-            let keys = hz.ssh_keys().await.map_err(flow::hetzner_error)?;
+            let catalog = load_catalog(&cloud).await?;
+            let keys = cloud
+                .provider()
+                .ssh_keys()
+                .await
+                .map_err(|e| cloud::error(provider, e))?;
             anyhow::Ok((catalog, keys))
         }
         .await;
@@ -276,16 +400,23 @@ async fn token_step(out: &Output, d: &mut Draft, settings: &Settings) -> anyhow:
             Ok((catalog, keys)) if !catalog.is_empty() => {
                 d.catalog = catalog;
                 d.ssh_keys = keys;
-                d.hetzner = Some(token);
+                d.secret = Some(secret);
                 return Ok(Nav::Next);
             }
             Ok(_) => {
-                anyhow::bail!("Hetzner has no suitable server type in stock anywhere right now")
+                anyhow::bail!(
+                    "{} has no suitable server type in stock anywhere right now",
+                    provider.label()
+                )
             }
             Err(e) => {
                 out.note(format!("  ✗ {e:#}"));
-                // A bad token from the environment can't be fixed here.
-                if std::env::var_os(super::ENV_HCLOUD).is_some() {
+                // Bad credentials from the environment can't be fixed here.
+                let from_env = match provider {
+                    Provider::Hetzner => d.env_hcloud.is_some(),
+                    Provider::Aws => d.env_aws.is_some(),
+                };
+                if from_env {
                     return Err(e);
                 }
             }
@@ -323,14 +454,20 @@ fn location_step(out: &Output, d: &mut Draft, args: &ServerCreateArgs) -> anyhow
         .collect();
     let start = d
         .location
-        .or_else(|| d.catalog.iter().position(|l| l.name == "fsn1"))
+        .or_else(|| {
+            let default = d.provider.unwrap_or_default().default_location();
+            d.catalog.iter().position(|l| l.name == default)
+        })
         .unwrap_or(0);
-    say(
-        out,
-        &out.dim(
-            "Cheapest server per location (€/mo incl. VAT). Outside Europe costs more and has no Arm.\n  You pick the size next.",
-        ),
-    );
+    let intro = match d.provider.unwrap_or_default() {
+        Provider::Hetzner => {
+            "Cheapest server per location (≈$/mo incl. VAT). Outside Europe costs more and has no Arm.\n  You pick the size next."
+        }
+        Provider::Aws => {
+            "Cheapest server per region ($/mo with disk and Elastic IP).\n  You pick the size next."
+        }
+    };
+    say(out, &out.dim(intro));
     let r = Select::new("Where should it run?", options)
         .with_starting_cursor(start)
         .with_page_size(10)
@@ -382,8 +519,12 @@ fn type_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
         .and_then(|n| loc.types.iter().position(|t| t.name == n))
         .unwrap_or(0);
     let help = format!(
-        "★ = enough for {} · prices incl. VAT · type to filter · Esc: back",
-        catalog::RECOMMENDATION
+        "★ = enough for {} · {} · type to filter · Esc: back",
+        catalog::RECOMMENDATION,
+        match d.provider.unwrap_or_default() {
+            Provider::Hetzner => "approximate USD incl. VAT",
+            Provider::Aws => "USD with disk and Elastic IP",
+        }
     );
     let prompt = format!("Which server in {}?", loc.label());
     let r = Select::new(&prompt, options)
@@ -805,12 +946,12 @@ fn ssh_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
         d.ssh = Some(ssh_choice_for_file(path, key, &d.ssh_keys));
         return Ok(Nav::Next);
     }
-    if let Some(id) = args.ssh_key_id {
-        let k = d.ssh_keys.iter().find(|k| k.id == id).ok_or_else(|| {
-            crate::output::usage(format!("--ssh-key-id {id}: no such key in this project"))
+    if let Some(id) = &args.ssh_key_id {
+        let k = d.ssh_keys.iter().find(|k| &k.id == id).ok_or_else(|| {
+            crate::output::usage(format!("--ssh-key-id {id}: no such key at this provider"))
         })?;
         d.ssh = Some(SshChoice::Existing {
-            id: k.id,
+            id: k.id.clone(),
             name: k.name.clone(),
         });
         return Ok(Nav::Next);
@@ -819,6 +960,7 @@ fn ssh_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
         d.ssh = Some(SshChoice::None);
         return Ok(Nav::Next);
     }
+    let provider = d.provider.unwrap_or_default();
     let mut options: Vec<Choice<SshChoice>> = Vec::new();
     let local = local_public_keys();
     for (path, key) in &local {
@@ -829,7 +971,7 @@ fn ssh_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
             .replace(&std::env::var("HOME").unwrap_or_default(), "~");
         let label = match &choice {
             SshChoice::Existing { name, .. } => {
-                format!("{shown}  (already in Hetzner as “{name}”)")
+                format!("{shown}  (already at {} as “{name}”)", provider.label())
             }
             _ => format!("{shown}  (upload)"),
         };
@@ -838,24 +980,33 @@ fn ssh_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
             value: choice,
         });
     }
-    // Keys already in Hetzner first: nothing to upload, and the likely pick.
+    // Keys already at the provider first: nothing to upload, and the likely pick.
     options.sort_by_key(|o| !matches!(o.value, SshChoice::Existing { .. }));
     let local_bodies: Vec<String> = local.iter().map(|(_, k)| key_body(k)).collect();
-    for k in d
-        .ssh_keys
-        .iter()
-        .filter(|k| !local_bodies.contains(&key_body(&k.public_key)))
-    {
+    for k in d.ssh_keys.iter().filter(|k| {
+        !k.public_key
+            .as_deref()
+            .is_some_and(|p| local_bodies.contains(&key_body(p)))
+    }) {
         options.push(Choice {
-            label: format!("“{}” from your Hetzner project  {}", k.name, k.fingerprint),
+            label: format!(
+                "“{}” from your {} account  {}",
+                k.name,
+                provider.label(),
+                k.fingerprint
+            ),
             value: SshChoice::Existing {
-                id: k.id,
+                id: k.id.clone(),
                 name: k.name.clone(),
             },
         });
     }
     options.push(Choice {
-        label: "No SSH key (Hetzner emails you a root password; not recommended)".into(),
+        label: match provider {
+            Provider::Hetzner => "No SSH key (Hetzner emails you a root password; not recommended)",
+            Provider::Aws => "No SSH key (AWS has no emailed password: nobody could log in)",
+        }
+        .into(),
         value: SshChoice::None,
     });
     let start = d
@@ -863,7 +1014,8 @@ fn ssh_step(d: &mut Draft, args: &ServerCreateArgs) -> anyhow::Result<Nav> {
         .as_ref()
         .and_then(|s| options.iter().position(|o| &o.value == s))
         .unwrap_or(0);
-    let r = Select::new("SSH key for root", options)
+    let prompt = format!("SSH key for {}", provider.ssh_user());
+    let r = Select::new(&prompt, options)
         .with_starting_cursor(start)
         .with_help_message("for logging in to the server later · Esc: back")
         .prompt();
@@ -929,7 +1081,10 @@ fn confirm_step(out: &Output, d: &Draft) -> anyhow::Result<Nav> {
         match &d.ssh {
             Some(SshChoice::Existing { name, .. }) => format!("key “{name}”"),
             Some(SshChoice::Upload { path, .. }) => format!("upload {}", path.display()),
-            _ => "none (root password by email)".into(),
+            _ => match d.provider.unwrap_or_default() {
+                Provider::Hetzner => "none (root password by email)".into(),
+                Provider::Aws => "none (nobody can log in over SSH)".into(),
+            },
         },
     );
     row(
@@ -941,7 +1096,10 @@ fn confirm_step(out: &Output, d: &Draft) -> anyhow::Result<Nav> {
         format!(
             "{} {}",
             out.accent(&t.monthly),
-            out.dim("per month incl. VAT, billed by Hetzner")
+            out.dim(match d.provider.unwrap_or_default() {
+                Provider::Hetzner => "per month incl. VAT, approximate: Hetzner bills in euros",
+                Provider::Aws => "per month with disk and Elastic IP, billed by AWS",
+            })
         ),
     );
     out.note(format!("  {bar}"));

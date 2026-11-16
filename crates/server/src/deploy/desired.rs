@@ -58,6 +58,21 @@ struct RouteRow {
     target_port: Option<i32>,
     remote_ips: Vec<String>,
     proxied: bool,
+    /// No replica here: this node only forwards (see [`routes`]).
+    forwarding: bool,
+}
+
+/// The old servers of migrations that moved `instance` (see [`routes`]).
+pub async fn forwarding_nodes(tx: &mut sqlx::PgConnection, instance: Id) -> AppResult<Vec<Id>> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT mv.from_node_id FROM instance_moves mv
+         JOIN server_migrations sm ON sm.id = mv.migration_id
+         WHERE mv.service_instance_id = $1 AND mv.status IN ('running', 'done')
+           AND sm.status IN ('running', 'failed', 'done') AND mv.from_node_id IS NOT NULL",
+    )
+    .bind(instance)
+    .fetch_all(&mut *tx)
+    .await?)
 }
 
 /// SQL: one [`Row`] per deployment replica (`r`), up to the WHERE clause.
@@ -426,17 +441,32 @@ async fn routes(state: &AppState, node: Id) -> AppResult<Vec<pb::Route>> {
     // Unverified custom domains are left out, which also keeps them off the
     // node's `ask` allowlist (no certificate). Every node running a replica
     // serves them, balancing over its own and the other healthy replicas.
+    //
+    // DNS (a `*.apps` wildcard, a CNAME to it) may still send a moved
+    // service's traffic to its old server until the migration repoints it,
+    // or for as long as the user keeps that server: it forwards to the
+    // serving deployment's replicas over the mesh. Only ever to those: it has
+    // no copy of its own, so nothing stale is served, and a service stopped
+    // for its copy has no serving deployment and no route.
     let routes: Vec<RouteRow> = sqlx::query_as(
         "SELECT m.hostname, d.id AS deployment_id, d.config, m.target_port, m.proxied,
                 ARRAY(SELECT o.mesh_ip FROM deployment_replicas o
                       WHERE o.deployment_id = d.id AND o.node_id <> $1 AND o.mesh_ip IS NOT NULL
                         AND o.status = 'active'
-                      ORDER BY o.ordinal) AS remote_ips
+                      ORDER BY o.ordinal) AS remote_ips,
+                NOT EXISTS (SELECT 1 FROM deployment_replicas r
+                            WHERE r.deployment_id = d.id AND r.node_id = $1) AS forwarding
          FROM domains m
          JOIN deployments d ON d.service_instance_id = m.service_instance_id
-         JOIN deployment_replicas r ON r.deployment_id = d.id AND r.node_id = $1
          WHERE d.status IN ('active', 'sleeping', 'crashed') AND m.status = 'verified'
            AND d.config->'hosting' IS NULL AND d.config->'cronSchedule' IS NULL
+           AND (EXISTS (SELECT 1 FROM deployment_replicas r
+                        WHERE r.deployment_id = d.id AND r.node_id = $1)
+                OR EXISTS (SELECT 1 FROM instance_moves mv
+                           JOIN server_migrations sm ON sm.id = mv.migration_id
+                           WHERE mv.service_instance_id = m.service_instance_id
+                             AND mv.from_node_id = $1 AND mv.status IN ('running', 'done')
+                             AND sm.status IN ('running', 'failed', 'done')))
          ORDER BY m.hostname",
     )
     .bind(node)
@@ -456,6 +486,9 @@ async fn routes(state: &AppState, node: Id) -> AppResult<Vec<pb::Route>> {
         } else {
             &r.remote_ips[..]
         };
+        if r.forwarding && remote_ips.is_empty() {
+            continue;
+        }
         pb_routes.push(pb::Route {
             hostname: r.hostname,
             deployment_id: r.deployment_id.to_string(),

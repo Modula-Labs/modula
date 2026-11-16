@@ -7,10 +7,13 @@ use axum::extract::{Query, State};
 use modula_id::Id;
 use serde::{Deserialize, Serialize};
 
-use super::{ServerProvider, ServerTypeOffer};
+use super::caps::{self, Caps};
+use super::{
+    ServerTypeOffer, connected_kinds, default_location, kind_of_location, label, labels,
+    provider_for,
+};
 use crate::authz::Grant;
 use crate::error::{AppError, AppResult};
-use crate::integrations::hetzner::{self, Caps};
 use crate::locations;
 use crate::state::AppState;
 
@@ -20,8 +23,6 @@ pub const DEFAULT_CPU_MILLIS: i64 = crate::deploy::desired::DEFAULT_CPU_MILLIS a
 pub const DEFAULT_MEMORY_MB: i64 = crate::deploy::desired::DEFAULT_MEMORY_MB as i64;
 /// Kept free on every server for the OS, Docker, Caddy and modula-node.
 pub const SYSTEM_MEMORY_MB: i64 = 512;
-/// Where to suggest a server when no location is given.
-const DEFAULT_LOCATION: &str = "hetzner:fsn1";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -152,48 +153,70 @@ pub async fn suggest(
         }));
     }
 
-    let target = location.unwrap_or(DEFAULT_LOCATION);
-    if !target.starts_with("hetzner:") {
-        return Ok(Json(Answer {
+    let no_suggestion = |fits, reason: String| {
+        Ok(Json(Answer {
             fits,
             suggestion: None,
-            reason: Some("servers can only be created in Hetzner locations".into()),
-        }));
-    }
-    let Some(provider) = hetzner::provider(&state, workspace).await? else {
-        return Ok(Json(Answer {
+            reason: Some(reason),
+        }))
+    };
+    let target = match location {
+        Some(l) => l,
+        None => match default_location(&connected_kinds(&state.db, workspace).await?) {
+            Some(l) => l,
+            None => {
+                return no_suggestion(
+                    fits,
+                    format!(
+                        "no server has room; connect {} or add a server manually",
+                        labels()
+                    ),
+                );
+            }
+        },
+    };
+    let Some(kind) = kind_of_location(target) else {
+        return no_suggestion(
             fits,
-            suggestion: None,
-            reason: Some("no server has room; connect Hetzner or add a server manually".into()),
-        }));
+            format!("servers can only be created in {} locations", labels()),
+        );
+    };
+    let Some(provider) = provider_for(&state, workspace, kind).await? else {
+        return no_suggestion(
+            fits,
+            format!(
+                "no server has room; connect {} or add a server manually",
+                label(kind)
+            ),
+        );
     };
     let types = provider.server_types().await?;
     let Some((t, price)) = cheapest_fit(&types, target, cpu, mem) else {
-        return Ok(Json(Answer {
+        return no_suggestion(
             fits,
-            suggestion: None,
-            reason: Some("no Hetzner server type in this location is large enough".into()),
-        }));
+            format!(
+                "no {} server type in this location is large enough",
+                label(kind)
+            ),
+        );
     };
     let metadata: serde_json::Value = sqlx::query_scalar(
-        "SELECT metadata FROM integrations WHERE workspace_id = $1 AND kind = 'hetzner'",
+        "SELECT metadata FROM integrations WHERE workspace_id = $1 AND kind = $2",
     )
     .bind(workspace)
+    .bind(kind)
     .fetch_optional(&state.db)
     .await?
     .unwrap_or_default();
-    let caps = Caps::from_metadata(&metadata);
-    let used = hetzner::usage(&state.db, workspace).await?;
+    let caps = Caps::from_metadata(&metadata, state.cfg.eur_usd_rate);
+    let used = caps::usage(&state.db, workspace, kind).await?;
     let within_caps =
         used.servers < caps.max_servers && used.monthly_cents + price <= caps.max_monthly_cents;
-    let location = locations::get(target)
-        .map(|l| l.id)
-        .unwrap_or(DEFAULT_LOCATION);
     Ok(Json(Answer {
         fits,
         suggestion: Some(Suggestion {
-            provider: hetzner::KIND,
-            location,
+            provider: kind,
+            location: target,
             server_type: t.clone(),
             monthly_cents: price,
             within_caps,

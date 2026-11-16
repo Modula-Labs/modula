@@ -117,6 +117,10 @@ export function MigrationProgress({
       refresh();
     },
   });
+  const retryDns = useMutation({
+    mutationFn: () => migrateApi.retryDns(migrationId),
+    onSuccess: refresh,
+  });
   const del = useMutation({
     mutationFn: () => provisionApi.deleteServer(m.data!.sourceServerId!),
     onSuccess: () => {
@@ -128,8 +132,11 @@ export function MigrationProgress({
   if (m.isPending) return <Skeleton className="h-40" />;
   if (m.error) return <Alert>{m.error.message}</Alert>;
   const s = m.data;
+  const dnsFailed = s.status === "failed" && s.step === "dns";
   const canAbort =
-    (s.status === "running" || s.status === "failed") && s.promotePhase !== "switch";
+    (s.status === "running" || s.status === "failed") &&
+    s.promotePhase !== "switch" &&
+    s.step !== "dns";
   const deletable = s.status === "done" && s.sourcePendingDeletion && !!s.sourceServerId;
   const moved = s.moves.filter((x) => x.status === "done").length;
 
@@ -197,7 +204,13 @@ export function MigrationProgress({
         </section>
       ) : null}
 
-      {s.status === "failed" ? (
+      {dnsFailed ? (
+        <Alert title="DNS still points at the old server">
+          {s.error ?? "Unknown error."} Everything runs on{" "}
+          {s.targetName ?? "the new server"}; retry once the problem is fixed.
+        </Alert>
+      ) : null}
+      {s.status === "failed" && !dnsFailed ? (
         <Alert title="The migration stopped">
           {s.error ?? "Unknown error."} Services not moved yet are untouched;
           a service that was stopped for its copy stays stopped until you
@@ -213,6 +226,22 @@ export function MigrationProgress({
         </Alert>
       ) : null}
 
+      {s.status === "done" && s.staleTcp.length ? (
+        <Alert tone="warn" title="Redeploy these services">
+          Their variables were resolved with a TCP address that moved, so they keep the old one
+          until deployed again:
+          <ul className="mt-1.5 text-[13px]">
+            {s.staleTcp.map((t) => (
+              <li key={t.instanceId}>
+                {t.service}{" "}
+                <span className="text-muted-foreground">
+                  ({t.project} · {t.environment}) <span className="font-mono">{t.variables.join(", ")}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Alert>
+      ) : null}
       {s.status === "done" && s.tcpProxies.length ? (
         <Alert tone="warn" title="New TCP proxy addresses">
           Clients connecting over TCP must use the new addresses:
@@ -232,9 +261,10 @@ export function MigrationProgress({
         </Alert>
       ) : null}
       {abort.error ? <Alert>{abort.error.message}</Alert> : null}
+      {retryDns.error ? <Alert>{retryDns.error.message}</Alert> : null}
       {del.isSuccess ? (
         <Alert tone="success" title="Deleted">
-          {s.sourceName} was deleted at Hetzner.
+          {s.sourceName} was deleted at its provider.
         </Alert>
       ) : null}
 
@@ -242,6 +272,11 @@ export function MigrationProgress({
         {canAbort ? (
           <Button variant="danger-outline" onClick={() => setConfirmAbort(true)}>
             Abort
+          </Button>
+        ) : null}
+        {dnsFailed ? (
+          <Button variant="primary" loading={retryDns.isPending} onClick={() => retryDns.mutate()}>
+            Retry DNS
           </Button>
         ) : null}
         {deletable && !del.isSuccess ? (
@@ -276,7 +311,7 @@ export function MigrationProgress({
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
         title={`Delete ${s.sourceName}?`}
-        description="The server is deleted at Hetzner with its disks, including the old copies of the volumes. This can't be undone."
+        description="The server is deleted at its provider with its disks, including the old copies of the volumes. This can't be undone."
       >
         {del.error ? <Alert>{del.error.message}</Alert> : null}
         <div className="flex justify-end gap-2">

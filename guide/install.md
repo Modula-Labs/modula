@@ -167,6 +167,7 @@ Set in `/etc/modula/server.env`; restart `modula-server` after a change.
 | `MODULA_TCP_PROXY_HOST` | Host clients use for TCP proxies (default: each server's public IP). |
 | `MODULA_UPLOADS_DIR` | Where `modula up` archives are kept (default: `uploads/` next to the master key; share it between server replicas). |
 | `MODULA_UPLOAD_MAX_MB` | Largest accepted `up` archive, compressed (default 200). |
+| `MODULA_EUR_USD_RATE` | USD per EUR, for showing Hetzner's euro prices in dollars (default 1.08). |
 | `MODULA_INTERNAL_URL` | URL servers use to download uploaded sources from this server (default: `MODULA_PUBLIC_URL`). |
 | `MODULA_EDGE_TLS` | How the edge gets certificates: `acme` (default), `internal`, `off`. |
 | `MODULA_ACME_EMAIL` | ACME contact address. |

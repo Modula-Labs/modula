@@ -3,6 +3,7 @@ import { clsx } from "clsx";
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Checkbox, Radio } from "@/components/ui/Controls";
+import { Input, Select } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
 import { Alert, Skeleton } from "@/components/ui/misc";
 import {
@@ -13,15 +14,17 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/Table";
+import { Segmented } from "@/components/ui/Tabs";
 import { flagEmoji } from "@/lib/flags";
 import { formatBytes } from "@/lib/format";
-import { migrateApi, type MigrationPreview } from "@/lib/migrate";
-import { euros, provisionApi, typesIn } from "@/lib/provision";
+import { migrateApi, type MigrationPreview, type MigrationTarget, type PreviewParams } from "@/lib/migrate";
+import { approxUsd, providerLabel, provisionApi, typesIn } from "@/lib/provision";
+import { useCurrentWorkspace, useMe } from "@/lib/workspace";
 import { MigrationProgress } from "./MigrationProgress";
 
 /**
- * Migrate a worker server to a new Hetzner server (another location or
- * size): pick where and what, read what moves and what changes, confirm.
+ * Migrate a server to a new one at any connected provider, or to one that
+ * exists: pick where and what, read what moves and what changes, confirm.
  * Then shows the migration's progress. The main server can be moved too: its dashboard goes read-only while the control plane is copied.
  */
 export function MigrateDialog({
@@ -33,11 +36,22 @@ export function MigrateDialog({
   onOpenChange: (o: boolean) => void;
   nodeId: string;
 }) {
-  const preview = useQuery({
+  const first = useQuery({
     queryKey: ["migration-preview", nodeId],
     queryFn: () => migrateApi.preview(nodeId),
     enabled: open,
   });
+  // A shared server added by hand migrates on behalf of a workspace you pick.
+  const me = useMe();
+  const [current] = useCurrentWorkspace(me.data);
+  const [picked, setPicked] = useState<string | null>(null);
+  const named = first.data?.workspaceRequired ? (picked ?? current?.id ?? null) : null;
+  const scoped = useQuery({
+    queryKey: ["migration-preview", nodeId, named],
+    queryFn: () => migrateApi.preview(nodeId, { workspaceId: named! }),
+    enabled: open && !!named,
+  });
+  const preview = named ? scoped : first;
   const [started, setStarted] = useState<string | null>(null);
   const running = started ?? preview.data?.activeMigrationId ?? null;
   const close = (o: boolean) => {
@@ -54,7 +68,7 @@ export function MigrateDialog({
       description={
         running
           ? "Services move one at a time; ones with volumes are down while their data is copied."
-          : "Create a new server at Hetzner and move everything on this one to it, volumes' data included. The old server is kept until you delete it."
+          : "Move everything on this server to a new one or one you already have, volumes' data included. The old server is kept until you delete it."
       }
     >
       {running ? (
@@ -67,18 +81,33 @@ export function MigrateDialog({
         <Alert tone="info" title="The main server can't be migrated right now">
           {preview.data.mainBlocker}
         </Alert>
-      ) : !preview.data.serverId || !preview.data.workspaceId ? (
-        <Alert tone="info" title="Only servers linked to Hetzner can be migrated">
-          This server was added by hand. Move its services one at a time
-          instead, or add a server and move them there.
+      ) : !preview.data.workspaceId ? (
+        <Alert tone="info" title="Choose a workspace">
+          This shared server was added by hand; join a workspace to migrate it on its behalf.
         </Alert>
       ) : (
+        <div className="flex flex-col gap-4">
+        {named && (me.data?.workspaces.length ?? 0) > 1 ? (
+          <label className="flex items-center justify-between gap-3 text-sm">
+            <span className="font-bold">Migrate for workspace</span>
+            <Select className="w-56" value={named} onChange={(e) => setPicked(e.target.value)}>
+              {me.data!.workspaces.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </Select>
+          </label>
+        ) : null}
         <MigrateForm
+          key={preview.data.workspaceId}
           preview={preview.data}
           workspaceId={preview.data.workspaceId}
+          named={named ?? undefined}
           onStarted={setStarted}
           onCancel={() => close(false)}
         />
+        </div>
       )}
     </Modal>
   );
@@ -87,24 +116,44 @@ export function MigrateDialog({
 function MigrateForm({
   preview,
   workspaceId,
+  named,
   onStarted,
   onCancel,
 }: {
   preview: MigrationPreview;
   workspaceId: string;
+  /** Set when the request has to name the workspace. */
+  named?: string;
   onStarted: (id: string) => void;
   onCancel: () => void;
 }) {
   const qc = useQueryClient();
+  // The main server needs a fresh machine.
+  const canUseExisting = !preview.main && preview.existingTargets.length > 0;
+  const canCreate = preview.connectedProviders.length > 0;
+  const [mode, setMode] = useState<"new" | "existing">(canCreate || !canUseExisting ? "new" : "existing");
+  const [provider, setProvider] = useState(preview.connectedProviders[0] ?? "");
+  const [nodeTarget, setNodeTarget] = useState<string | null>(null);
+  const [diskGb, setDiskGb] = useState("");
   const catalog = useQuery({
-    queryKey: ["hetzner-catalog", workspaceId],
-    queryFn: () => provisionApi.hetznerCatalog(workspaceId),
+    queryKey: ["provider-catalog", workspaceId, provider],
+    queryFn: () => provisionApi.catalog(workspaceId, provider),
+    enabled: canCreate,
     staleTime: 5 * 60_000,
   });
   const [location, setLocation] = useState<string | null>(null);
   const [serverType, setServerType] = useState<string | null>(null);
   const [understood, setUnderstood] = useState(false);
   const [understoodMain, setUnderstoodMain] = useState(false);
+  // Records left on the old address; everything is repointed by default.
+  const [dnsSkip, setDnsSkip] = useState<Set<string>>(new Set());
+  const toggleDns = (id: string, on: boolean) =>
+    setDnsSkip((prev) => {
+      const next = new Set(prev);
+      if (on) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   // Default: the first location that isn't the current one.
   useEffect(() => {
@@ -122,8 +171,37 @@ function MigrateForm({
   }, [types, serverType]);
   const chosen = types.find((t) => t.name === serverType);
 
+  const disk = provider === "aws" && diskGb ? Number(diskGb) : undefined;
+  const target: MigrationTarget | null =
+    mode === "existing"
+      ? nodeTarget
+        ? { kind: "existing", nodeId: nodeTarget }
+        : null
+      : location && serverType
+        ? { kind: "new", provider, location, serverType, ...(disk ? { diskGb: disk } : {}) }
+        : null;
+  const checks: PreviewParams | null = !target
+    ? null
+    : target.kind === "existing"
+      ? { workspaceId: named, targetNodeId: target.nodeId }
+      : { workspaceId: named, location: target.location, serverType: target.serverType, diskGb: target.diskGb };
+  // What this target changes: architecture, disk, room.
+  const checked = useQuery({
+    queryKey: ["migration-preview", preview.nodeId, "target", checks],
+    queryFn: () => migrateApi.preview(preview.nodeId, checks!),
+    enabled: !!checks,
+    staleTime: 30_000,
+  });
+  const warnings = (checked.data ?? preview).warnings.filter((w) => w.code !== "tcp_address");
+  const blocked = warnings.some((w) => w.blocking);
+
   const migrate = useMutation({
-    mutationFn: () => migrateApi.migrate(preview.nodeId, { location: location!, serverType: serverType! }),
+    mutationFn: () =>
+      migrateApi.migrate(preview.nodeId, {
+        ...(named ? { workspaceId: named } : {}),
+        target: target!,
+        dnsSkip: [...dnsSkip],
+      }),
     onSuccess: (m) => {
       qc.invalidateQueries({ queryKey: ["provisioned", workspaceId] });
       qc.invalidateQueries({ queryKey: ["migration-preview", preview.nodeId] });
@@ -136,17 +214,80 @@ function MigrateForm({
   const proxies = preview.services.filter((s) => s.tcpAddress);
   const unmeasured = stateful.some((s) => s.volumes.some((v) => v.usedBytes === null));
 
-  if (catalog.isPending) return <Skeleton className="h-64" />;
-  if (catalog.error) return <Alert>{catalog.error.message}</Alert>;
+  if (canCreate && mode === "new" && catalog.isPending) return <Skeleton className="h-64" />;
+  if (canCreate && mode === "new" && catalog.error) return <Alert>{catalog.error.message}</Alert>;
 
   return (
     <div className="flex flex-col gap-5">
       {migrate.error ? <Alert>{migrate.error.message}</Alert> : null}
 
+      {canUseExisting && canCreate ? (
+        <Segmented
+          label="Target"
+          value={mode}
+          onChange={setMode}
+          options={[
+            { value: "new", label: "New server" },
+            { value: "existing", label: "Existing server" },
+          ]}
+        />
+      ) : null}
+
+      {!canCreate && !canUseExisting ? (
+        <Alert tone="info" title="Nowhere to move to">
+          Connect a cloud provider in workspace settings, or add another server.
+        </Alert>
+      ) : null}
+
+      {mode === "existing" ? (
+        <fieldset className="flex flex-col gap-2">
+          <legend className="mb-1.5 text-sm font-bold">Move to</legend>
+          <div className="flex flex-col gap-1.5">
+            {preview.existingTargets.map((t) => (
+              <label
+                key={t.nodeId}
+                className={clsx(
+                  "flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-sm",
+                  nodeTarget === t.nodeId ? "border-foreground bg-muted" : "border-border",
+                  t.blocker ? "opacity-60" : "cursor-pointer hover:bg-muted/50",
+                )}
+              >
+                <Radio
+                  name="migrate-existing"
+                  value={t.nodeId}
+                  disabled={!!t.blocker}
+                  checked={nodeTarget === t.nodeId}
+                  onChange={() => setNodeTarget(t.nodeId)}
+                />
+                <span className="min-w-0">
+                  <span className="block font-mono">{t.name}</span>
+                  <span className="block text-xs text-muted-foreground">
+                    {t.blocker ??
+                      `${t.location?.city ?? "Unknown location"} · ${t.freeCpuMillis / 1000} vCPU, ${Math.round(t.freeMemoryMb / 1024)} GB free${t.arch ? ` · ${t.arch}` : ""}`}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ) : canCreate ? (
+        <>
+      {preview.connectedProviders.length > 1 ? (
+        <Segmented
+          label="Provider"
+          value={provider}
+          onChange={(p) => {
+            setProvider(p);
+            setLocation(null);
+            setServerType(null);
+          }}
+          options={preview.connectedProviders.map((k) => ({ value: k, label: providerLabel(k) }))}
+        />
+      ) : null}
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-1.5 text-sm font-bold">New location</legend>
         <div className="grid grid-cols-3 gap-2">
-          {catalog.data.locations.map((l) => (
+          {(catalog.data?.locations ?? []).map((l) => (
             <button
               key={l.location.id}
               type="button"
@@ -213,22 +354,38 @@ function MigrateForm({
                     <TableCell className="text-right tabular-nums">{t.cores}</TableCell>
                     <TableCell className="text-right tabular-nums">{t.memoryGb} GB</TableCell>
                     <TableCell className="text-right tabular-nums">{t.diskGb} GB</TableCell>
-                    <TableCell className="text-right tabular-nums">{euros(t.monthlyCents)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{approxUsd(t.monthlyCents)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
           </div>
         )}
-        {chosen && preview.totalVolumeBytes > chosen.diskGb * 1e9 * 0.8 ? (
-          <p className="text-[13px] text-error">
-            The volumes ({formatBytes(preview.totalVolumeBytes)}) would nearly fill this server's disk.
-          </p>
-        ) : null}
       </fieldset>
+
+      {provider === "aws" ? (
+        <label className="flex items-center justify-between gap-3 text-sm">
+          <span className="font-bold">Root disk (GB)</span>
+          <Input
+            className="w-28"
+            type="number"
+            min={8}
+            placeholder={String(chosen?.diskGb ?? 80)}
+            value={diskGb}
+            onChange={(e) => setDiskGb(e.target.value)}
+          />
+        </label>
+      ) : null}
+        </>
+      ) : null}
 
       <section className="flex flex-col gap-2 text-sm">
         <h3 className="font-bold">What happens</h3>
+        {warnings.map((w) => (
+          <Alert key={`${w.code}:${w.message}`} tone={w.blocking ? undefined : "warn"}>
+            {w.message}
+          </Alert>
+        ))}
         {preview.services.length === 0 ? (
           <p className="text-muted-foreground">Nothing runs on this server; only the new server is created.</p>
         ) : null}
@@ -306,10 +463,63 @@ function MigrateForm({
             </ul>
           </Alert>
         ) : null}
+        {preview.dns.records.length ? (
+          <div className="flex flex-col gap-1.5">
+            <p>
+              <span className="font-medium">DNS records repointed to the new server</span>{" "}
+              <span className="text-muted-foreground">(untick to leave one on the old address)</span>
+            </p>
+            <div className="max-h-48 overflow-auto rounded-xl">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Zone</TableHead>
+                    <TableHead>Now</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {preview.dns.records.map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell>
+                        <Checkbox
+                          checked={!dnsSkip.has(r.id)}
+                          onCheckedChange={(on) => toggleDns(r.id, on)}
+                          label={r.name}
+                        />
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">{r.zone}</TableCell>
+                      <TableCell className="font-mono text-[13px]">
+                        {r.content}
+                        {r.proxied ? <span className="text-muted-foreground"> · proxied</span> : null}
+                        {r.managed ? null : <span className="text-muted-foreground"> · yours</span>}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+        ) : null}
+        {preview.dns.aaaaNames.length ? (
+          <Alert tone="warn" title="IPv6 records stay as they are">
+            The new server has no IPv6 address known to Modula, so these names' AAAA records keep
+            pointing at the old server. Remove or update them:{" "}
+            <span className="font-mono text-[13px]">{preview.dns.aaaaNames.join(", ")}</span>
+          </Alert>
+        ) : null}
+        {preview.dns.error ? (
+          <Alert tone="warn" title="Couldn't read Cloudflare">
+            {preview.dns.error}. The migration can still start; DNS is checked again when the
+            services have moved.
+          </Alert>
+        ) : null}
         <p className="text-[13px] text-muted-foreground">
-          Custom domains' DNS records follow automatically when the workspace's DNS is on
-          Cloudflare; otherwise update A records to the new server. {preview.name} keeps running
-          (and is billed) until you delete it after the migration.
+          {preview.dns.connected
+            ? "Custom domains and the records above follow at the end of the migration. Names outside your Cloudflare zones must be updated by hand."
+            : "No DNS provider is connected: update your records to the new server's address yourself."}{" "}
+          {preview.name} keeps forwarding moved domains and stays billed until you delete it after
+          the migration.
         </p>
       </section>
 
@@ -328,7 +538,7 @@ function MigrateForm({
 
       <div className="flex items-center justify-between gap-4 border-t border-border pt-4">
         <p className="text-[13px] text-muted-foreground">
-          {chosen ? `New server: ${euros(chosen.monthlyCents)} per month` : ""}
+          {mode === "new" && chosen ? `New server: ${approxUsd(chosen.monthlyCents)} per month` : ""}
         </p>
         <div className="flex gap-2">
           <Button variant="ghost" onClick={onCancel}>
@@ -337,7 +547,7 @@ function MigrateForm({
           <Button
             variant="primary"
             loading={migrate.isPending}
-            disabled={!chosen || !location || (stateful.length > 0 && !understood) || (preview.main && !understoodMain)}
+            disabled={!target || blocked || (stateful.length > 0 && !understood) || (preview.main && !understoodMain)}
             onClick={() => migrate.mutate()}
           >
             Migrate server

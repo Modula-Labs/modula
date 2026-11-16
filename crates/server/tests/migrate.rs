@@ -31,6 +31,10 @@ const TOKEN: &str = "hetzner-test-token-0123456789abcdefghijklmnopqrstuvwxyz";
 #[derive(Default)]
 struct Mock {
     servers: Vec<Value>,
+    /// What GET /v1/firewalls lists.
+    firewalls: Vec<Value>,
+    /// Every set_rules body.
+    rule_sets: Vec<Value>,
 }
 
 type Shared = Arc<Mutex<Mock>>;
@@ -68,14 +72,19 @@ async fn mock_hetzner() -> (url::Url, Shared) {
         )
         .route(
             "/v1/firewalls",
-            get(|| async { Json(page(json!([]), "firewalls")) }).post(|Json(mut body): Json<Value>| async move {
+            get(|State(m): State<Shared>| async move {
+                Json(page(json!(m.lock().unwrap().firewalls), "firewalls"))
+            }).post(|Json(mut body): Json<Value>| async move {
                 body["id"] = json!(100);
                 (StatusCode::CREATED, Json(json!({"firewall": body, "actions": []})))
             }),
         )
         .route(
             "/v1/firewalls/{id}/actions/set_rules",
-            post(|| async { (StatusCode::CREATED, Json(json!({"actions": []}))) }),
+            post(|State(m): State<Shared>, Json(body): Json<Value>| async move {
+                m.lock().unwrap().rule_sets.push(body);
+                (StatusCode::CREATED, Json(json!({"actions": []})))
+            }),
         )
         .route(
             "/v1/servers",
@@ -118,11 +127,37 @@ async fn mock_hetzner() -> (url::Url, Shared) {
     (format!("http://{addr}/v1").parse().unwrap(), m)
 }
 
+mod ec2 {
+    #![allow(dead_code)]
+    use super::*;
+    use axum::http::HeaderMap;
+    use axum::response::{IntoResponse, Response};
+    use base64::Engine;
+    use std::collections::{BTreeMap, HashMap};
+
+    include!("common/ec2_mock.rs");
+}
+
+/// The request body of a migration to a new server.
+fn new_at(provider: &str, location: &str, server_type: &str) -> Value {
+    json!({ "target": { "kind": "new", "provider": provider, "location": location, "serverType": server_type } })
+}
+
+fn boot_token(user_data: &str) -> String {
+    user_data
+        .split("--token '")
+        .nth(1)
+        .and_then(|t| t.split('\'').next())
+        .unwrap()
+        .to_owned()
+}
+
 struct Setup {
     app: TestApp,
     admin: String,
     grpc_port: u16,
     mock: Shared,
+    aws: ec2::Shared,
     stop: CancellationToken,
 }
 
@@ -175,6 +210,8 @@ async fn setup(pool: PgPool) -> Setup {
     let (url, mock) = mock_hetzner().await;
     let mut cfg = config();
     cfg.hetzner_api = url;
+    let (aws_url, aws) = ec2::mock_aws().await;
+    cfg.aws_api = Some(aws_url);
     let app = TestApp::with_config(pool, cfg);
     let admin = app.setup_admin().await;
     let stop = CancellationToken::new();
@@ -200,11 +237,116 @@ async fn setup(pool: PgPool) -> Setup {
         admin,
         grpc_port,
         mock,
+        aws,
         stop,
     }
 }
 
 impl Setup {
+    async fn connect_providers(&self, ws: Id) {
+        for (kind, body) in [
+            ("hetzner", json!({ "token": TOKEN })),
+            (
+                "aws",
+                json!({ "accessKeyId": ec2::KEY_ID, "secretAccessKey": ec2::SECRET }),
+            ),
+        ] {
+            let r = self
+                .app
+                .call(
+                    Method::PUT,
+                    &format!("/api/workspaces/{ws}/integrations/{kind}"),
+                    Some(&self.admin),
+                    Some(body),
+                )
+                .await;
+            assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+        }
+    }
+
+    /// Record `node` as a server at a provider, ready.
+    async fn link(
+        &self,
+        ws: Id,
+        node: Id,
+        provider: &str,
+        pid: &str,
+        location: &str,
+        ty: &str,
+    ) -> Id {
+        let id = Id::new();
+        sqlx::query(
+            "INSERT INTO provisioned_servers (id, workspace_id, provider, provider_id, name, location,
+                                              server_type, monthly_price_cents, status, node_id)
+             VALUES ($1, $2, $3, $4, 'worker-1', $5, $6, 451, 'ready', $7)",
+        )
+        .bind(id)
+        .bind(ws)
+        .bind(provider)
+        .bind(pid)
+        .bind(location)
+        .bind(ty)
+        .bind(node)
+        .execute(self.app.db())
+        .await
+        .unwrap();
+        id
+    }
+
+    /// A joined server fit to be an existing target: public IP and capacity.
+    async fn existing(&self, name: &str, ip: &str, workspace: Option<Id>) -> Node {
+        let n = self.node(&self.join_token().await, name).await;
+        sqlx::query(
+            "UPDATE nodes SET public_ip = $2, workspace_id = $3,
+                    info = info || '{\"cpus\": 8, \"memoryBytes\": 17179869184}'::jsonb
+             WHERE id = $1",
+        )
+        .bind(n.id)
+        .bind(ip)
+        .bind(workspace)
+        .execute(self.app.db())
+        .await
+        .unwrap();
+        n
+    }
+
+    async fn start(&self, node: Id, body: Value) -> Resp {
+        self.app
+            .call(
+                Method::POST,
+                &format!("/api/nodes/{node}/migrate"),
+                Some(&self.admin),
+                Some(body),
+            )
+            .await
+    }
+
+    /// Poll migration `id` (and the new server, if any) until it settles.
+    async fn settle(&self, id: Id, new_server: Option<Id>) -> Value {
+        let st = self.app.state.clone();
+        for _ in 0..600 {
+            if let Some(server) = new_server {
+                modula_server::provision::track::poll_once(&st, server)
+                    .await
+                    .unwrap();
+            }
+            if modula_server::migrate::server::poll(&st, id).await.unwrap() {
+                return self
+                    .app
+                    .call(
+                        Method::GET,
+                        &format!("/api/server-migrations/{id}"),
+                        Some(&self.admin),
+                        None,
+                    )
+                    .await
+                    .json;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the migration did not settle");
+    }
+
     /// Join a node with `token` and run its session on a fake runtime whose
     /// volumes are directories.
     async fn node(&self, token: &str, name: &str) -> Node {
@@ -387,6 +529,251 @@ impl Setup {
     }
 }
 
+/// `${{db.MODULA_TCP_PROXY_DOMAIN}}` is resolved at deploy time: a service
+/// deployed before its database's proxy moved keeps the old address.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn services_holding_a_moved_tcp_address_are_listed(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    let old = s.node(&s.join_token().await, "worker-1").await;
+    let new = s.node(&s.join_token().await, "worker-2").await;
+    sqlx::query("UPDATE nodes SET public_ip = '203.0.113.5' WHERE id = $1")
+        .bind(old.id)
+        .execute(s.app.db())
+        .await
+        .unwrap();
+    let project = s.project(ws).await;
+    let (db, _) = s.service(&project, "db", old.id, true).await;
+    let (api, _) = s.service(&project, "api", old.id, false).await;
+    let r = s
+        .app
+        .call(
+            Method::PATCH,
+            &format!("/api/service-instances/{api}/variables"),
+            Some(&s.admin),
+            Some(json!({ "set": { "DB_HOST": "${{db.MODULA_TCP_PROXY_DOMAIN}}" } })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let d = s
+        .app
+        .call(
+            Method::POST,
+            &format!("/api/service-instances/{api}/deployments"),
+            Some(&s.admin),
+            None,
+        )
+        .await;
+    s.wait_active(d.json["id"].as_str().unwrap().parse().unwrap())
+        .await;
+
+    let migration = Id::new();
+    sqlx::query(
+        "INSERT INTO server_migrations (id, workspace_id, source_node_id, source_name, target_location,
+                                        target_server_type, target_node_id, status, step, steps, source_ip)
+         VALUES ($1, $2, $3, 'worker-1', 'hetzner:hel1', 'cx22', $4, 'running', 'move', '[]', '203.0.113.5')",
+    )
+    .bind(migration)
+    .bind(ws)
+    .bind(old.id)
+    .bind(new.id)
+    .execute(s.app.db())
+    .await
+    .unwrap();
+    let mv = moves::create(
+        s.app.db(),
+        moves::NewMove {
+            workspace: ws,
+            instance: db,
+            migration: Some(migration),
+            kind: "primary",
+            from: Some(old.id),
+            to: new.id,
+            created_by: None,
+            status: "running",
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(s.run_move(mv).await, Poll::Done);
+    sqlx::query("UPDATE server_migrations SET step = 'dns' WHERE id = $1")
+        .bind(migration)
+        .execute(s.app.db())
+        .await
+        .unwrap();
+    assert!(
+        modula_server::migrate::server::poll(&s.app.state, migration)
+            .await
+            .unwrap()
+    );
+    let m = s
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/server-migrations/{migration}"),
+            Some(&s.admin),
+            None,
+        )
+        .await;
+    assert_eq!(m.json["status"], "done", "{:#}", m.json);
+    let stale = m.json["staleTcp"].as_array().unwrap();
+    assert_eq!(stale.len(), 1, "{:#}", m.json);
+    assert_eq!(stale[0]["service"], "api");
+    assert_eq!(stale[0]["variables"], json!(["DB_HOST"]));
+}
+
+/// A changed public address moves DNS: the node's services at once, a main
+/// server's own names through a delayed job.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn a_changed_public_address_queues_the_dns_resync(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    let node = s.node(&s.join_token().await, "worker-1").await;
+    let project = s.project(ws).await;
+    let (api, _) = s.service(&project, "api", node.id, false).await;
+    sqlx::query(
+        "INSERT INTO domains (id, service_instance_id, hostname, kind, status, verification_token)
+         VALUES ($1, $2, 'www.shop.test', 'custom', 'verified', 't')",
+    )
+    .bind(Id::new())
+    .bind(api)
+    .execute(s.app.db())
+    .await
+    .unwrap();
+    let count = |kind: &'static str| {
+        let db = s.app.db().clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM jobs WHERE kind = $1")
+                .bind(kind)
+                .fetch_one(&db)
+                .await
+                .unwrap()
+        }
+    };
+    let before = count(modula_server::domains::RESYNC_JOB).await;
+    modula_server::domains::on_public_ip_changed(&s.app.state, node.id, "203.0.113.1", false)
+        .await
+        .unwrap();
+    assert_eq!(count(modula_server::domains::RESYNC_JOB).await, before + 1);
+    assert_eq!(count(modula_server::domains::REPOINT_MAIN_JOB).await, 0);
+    for _ in 0..2 {
+        modula_server::domains::on_public_ip_changed(&s.app.state, node.id, "203.0.113.1", true)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        count(modula_server::domains::REPOINT_MAIN_JOB).await,
+        1,
+        "one per node, however often it reconnects"
+    );
+}
+
+/// Whoever the `*.apps` wildcard points at must keep answering for a moved
+/// service until DNS follows: the old server forwards over the mesh to the
+/// new replica (never to anything of its own, so no stale data).
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn moved_services_stay_routed_through_the_old_server(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    let old = s.node(&s.join_token().await, "worker-1").await;
+    let new = s.node(&s.join_token().await, "worker-2").await;
+    let project = s.project(ws).await;
+    let (api, _) = s.service(&project, "api", old.id, false).await;
+    let (db, _) = s.service(&project, "db", old.id, true).await;
+    let mut hosts = Vec::new();
+    for i in [api, db] {
+        let r = s
+            .app
+            .call(
+                Method::POST,
+                &format!("/api/service-instances/{i}/domains"),
+                Some(&s.admin),
+                Some(json!({})),
+            )
+            .await;
+        assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+        hosts.push(r.json["hostname"].as_str().unwrap().to_owned());
+    }
+    // A custom domain CNAME'd to the generated one arrives the same way.
+    sqlx::query(
+        "INSERT INTO domains (id, service_instance_id, hostname, kind, status, verification_token)
+         VALUES ($1, $2, 'www.shop.test', 'custom', 'verified', 't')",
+    )
+    .bind(Id::new())
+    .bind(api)
+    .execute(s.app.db())
+    .await
+    .unwrap();
+    hosts.push("www.shop.test".to_owned());
+    let migration = Id::new();
+    sqlx::query(
+        "INSERT INTO server_migrations (id, workspace_id, source_node_id, source_name, target_location,
+                                        target_server_type, target_node_id, status, step, steps)
+         VALUES ($1, $2, $3, 'worker-1', 'hetzner:hel1', 'cx22', $4, 'running', 'move', '[]')",
+    )
+    .bind(migration)
+    .bind(ws)
+    .bind(old.id)
+    .bind(new.id)
+    .execute(s.app.db())
+    .await
+    .unwrap();
+    let st = s.app.state.clone();
+    for i in [db, api] {
+        let mv = moves::create(
+            s.app.db(),
+            moves::NewMove {
+                workspace: ws,
+                instance: i,
+                migration: Some(migration),
+                kind: "primary",
+                from: Some(old.id),
+                to: new.id,
+                created_by: None,
+                status: "running",
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.run_move(mv).await, Poll::Done);
+    }
+    // In the fake runtime no mesh address is assigned.
+    sqlx::query("UPDATE deployment_replicas SET mesh_ip = '10.80.9.2', status = 'active' WHERE node_id = $1")
+        .bind(new.id)
+        .execute(s.app.db())
+        .await
+        .unwrap();
+
+    let routed = |ds: &modula_proto::node::v1::DesiredState, host: &str| {
+        ds.routes
+            .iter()
+            .find(|r| r.hostname == host)
+            .map(|r| r.remote_upstreams.clone())
+    };
+    let ds = modula_server::deploy::desired::build(&st, old.id)
+        .await
+        .unwrap();
+    for h in &hosts {
+        assert_eq!(
+            routed(&ds, h),
+            Some(vec!["10.80.9.2:8080".to_owned()]),
+            "{h} on the old server: {:?}",
+            ds.routes
+        );
+    }
+
+    // An aborted migration puts everything back: no forwarding.
+    sqlx::query("UPDATE server_migrations SET status = 'aborted' WHERE id = $1")
+        .bind(migration)
+        .execute(s.app.db())
+        .await
+        .unwrap();
+    let ds = modula_server::deploy::desired::build(&st, old.id)
+        .await
+        .unwrap();
+    assert_eq!(routed(&ds, &hosts[0]), None);
+}
+
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
 async fn a_worker_server_migrates_with_its_data(pool: PgPool) {
     let s = setup(pool).await;
@@ -446,7 +833,7 @@ async fn a_worker_server_migrates_with_its_data(pool: PgPool) {
     assert_eq!(p.json["workspaceId"], ws.to_string());
     assert_eq!(p.json["main"], false);
 
-    let body = json!({ "location": "hetzner:hel1", "serverType": "cx22" });
+    let body = new_at("hetzner", "hetzner:hel1", "cx22");
     let path = format!("/api/nodes/{}/migrate", old.id);
     let r = s
         .app
@@ -729,7 +1116,7 @@ async fn an_aborted_migration_puts_everything_back(pool: PgPool) {
             Method::POST,
             &format!("/api/nodes/{}/migrate", old.id),
             Some(&s.admin),
-            Some(json!({ "location": "hetzner:hel1", "serverType": "cx22" })),
+            Some(new_at("hetzner", "hetzner:hel1", "cx22")),
         )
         .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
@@ -825,4 +1212,420 @@ async fn an_aborted_migration_puts_everything_back(pool: PgPool) {
         )
         .await;
     assert!(again.json["activeMigrationId"].is_null());
+}
+
+/// Hetzner to EC2: the root disk asked for is used, the Elastic IP (known
+/// only once associated) reaches the Hetzner firewall before the first
+/// move, and the DNS-step bookkeeping is set.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn a_hetzner_server_migrates_to_ec2(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    s.connect_providers(ws).await;
+    s.mock.lock().unwrap().firewalls.push(json!({
+        "id": 7, "name": "modula-workers", "rules": [], "labels": {"modula": "1"}
+    }));
+    let old = s.existing("worker-1", "203.0.113.5", Some(ws)).await;
+    let old_server = s
+        .link(ws, old.id, "hetzner", "4000", "hetzner:fsn1", "cx22")
+        .await;
+    let project = s.project(ws).await;
+    let (api, _) = s.service(&project, "api", old.id, false).await;
+
+    let mut body = new_at("aws", "aws:us-east-1", "t3.small");
+    body["target"]["diskGb"] = json!(120);
+    body["dnsSkip"] = json!(["rec1"]);
+    let r = s.start(old.id, body).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let id: Id = r.json["id"].as_str().unwrap().parse().unwrap();
+    let new_server: Id = r.json["targetServerId"].as_str().unwrap().parse().unwrap();
+    assert_eq!(r.json["targetExisting"], false);
+    let (ip, skip): (Option<String>, Value) =
+        sqlx::query_as("SELECT source_ip, dns_skip FROM server_migrations WHERE id = $1")
+            .bind(id)
+            .fetch_one(s.app.db())
+            .await
+            .unwrap();
+    assert_eq!(ip.as_deref(), Some("203.0.113.5"));
+    assert_eq!(skip, json!(["rec1"]));
+    let row_ip: Option<String> =
+        sqlx::query_scalar("SELECT ipv4 FROM provisioned_servers WHERE id = $1")
+            .bind(new_server)
+            .fetch_one(s.app.db())
+            .await
+            .unwrap();
+    assert_eq!(row_ip, None, "no address until it is associated");
+
+    let user_data = {
+        let mut m = s.aws.lock().unwrap();
+        assert_eq!(m.instances[0].root_gb, 120);
+        m.instances[0].state = "running".into();
+        m.instances[0].user_data.clone()
+    };
+    let new = s.node(&boot_token(&user_data), "worker-1-new").await;
+
+    // Admitted before anything moves.
+    let st = s.app.state.clone();
+    for _ in 0..200 {
+        modula_server::provision::track::poll_once(&st, new_server)
+            .await
+            .unwrap();
+        modula_server::migrate::server::poll(&st, id).await.unwrap();
+        let step: String = sqlx::query_scalar("SELECT step FROM server_migrations WHERE id = $1")
+            .bind(id)
+            .fetch_one(s.app.db())
+            .await
+            .unwrap();
+        if step == "move" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let rules = serde_json::to_string(&s.mock.lock().unwrap().rule_sets).unwrap();
+    assert!(rules.contains(ec2::EIP), "{rules}");
+
+    let m = s.settle(id, Some(new_server)).await;
+    assert_eq!(m["status"], "done", "{m:#}");
+    assert_eq!(m["targetNodeId"], new.id.to_string());
+    assert_eq!(m["sourcePendingDeletion"], true);
+    assert_eq!(s.node_of(api).await, Some(new.id));
+    assert_eq!(m["sourceServerId"], old_server.to_string());
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn an_ec2_server_migrates_to_hetzner(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    s.connect_providers(ws).await;
+    let old = s.existing("worker-1", "198.51.100.5", Some(ws)).await;
+    s.link(
+        ws,
+        old.id,
+        "aws",
+        "us-east-1/i-99",
+        "aws:us-east-1",
+        "t3.small",
+    )
+    .await;
+    let project = s.project(ws).await;
+    let (api, _) = s.service(&project, "api", old.id, false).await;
+
+    // A location must be the provider's.
+    let wrong = s.start(old.id, new_at("aws", "hetzner:hel1", "cx22")).await;
+    assert_eq!(wrong.status, StatusCode::BAD_REQUEST, "{:?}", wrong.json);
+
+    let r = s
+        .start(old.id, new_at("hetzner", "hetzner:hel1", "cx22"))
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let id: Id = r.json["id"].as_str().unwrap().parse().unwrap();
+    let new_server: Id = r.json["targetServerId"].as_str().unwrap().parse().unwrap();
+    let user_data = s.mock.lock().unwrap().servers[0]["user_data"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let new = s.node(&boot_token(&user_data), "worker-1-new").await;
+    let m = s.settle(id, Some(new_server)).await;
+    assert_eq!(m["status"], "done", "{m:#}");
+    assert_eq!(s.node_of(api).await, Some(new.id));
+    assert_eq!(m["targetLocation"]["id"], "hetzner:hel1");
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn a_server_migrates_to_an_existing_one(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    s.connect_providers(ws).await;
+    let other = s.app.create_workspace(&s.admin, "other").await;
+    let old = s.existing("worker-1", "203.0.113.5", Some(ws)).await;
+    s.link(ws, old.id, "hetzner", "4000", "hetzner:fsn1", "cx22")
+        .await;
+    let target = s.existing("shared-1", "203.0.113.6", None).await;
+    let private = s.existing("theirs", "203.0.113.7", Some(other)).await;
+    let project = s.project(ws).await;
+    let (api, _) = s.service(&project, "api", old.id, false).await;
+
+    let existing = |n: Id| json!({ "target": { "kind": "existing", "nodeId": n } });
+    // Not itself, nor another workspace's server.
+    let r = s.start(old.id, existing(old.id)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+    let r = s.start(old.id, existing(private.id)).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{:?}", r.json);
+    // Nor one too small.
+    sqlx::query(
+        "UPDATE nodes SET info = info || '{\"memoryBytes\": 1048576}'::jsonb WHERE id = $1",
+    )
+    .bind(target.id)
+    .execute(s.app.db())
+    .await
+    .unwrap();
+    let r = s.start(old.id, existing(target.id)).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{:?}", r.json);
+    assert!(
+        r.code() != "" && r.json.to_string().contains("room"),
+        "{:?}",
+        r.json
+    );
+    sqlx::query(
+        "UPDATE nodes SET info = info || '{\"memoryBytes\": 17179869184}'::jsonb WHERE id = $1",
+    )
+    .bind(target.id)
+    .execute(s.app.db())
+    .await
+    .unwrap();
+
+    let p = s
+        .app
+        .call(
+            Method::GET,
+            &format!(
+                "/api/nodes/{}/migration-preview?targetNodeId={}",
+                old.id, target.id
+            ),
+            Some(&s.admin),
+            None,
+        )
+        .await;
+    assert_eq!(p.status, StatusCode::OK, "{:?}", p.json);
+    let listed = p.json["existingTargets"].as_array().unwrap();
+    assert!(
+        listed
+            .iter()
+            .any(|t| t["nodeId"] == target.id.to_string() && t["blocker"].is_null())
+    );
+    assert!(!listed.iter().any(|t| t["nodeId"] == private.id.to_string()));
+
+    let r = s.start(old.id, existing(target.id)).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["targetExisting"], true);
+    assert!(r.json["targetServerId"].is_null());
+    assert_eq!(r.json["targetNodeId"], target.id.to_string());
+    assert_eq!(r.json["targetName"], "shared-1");
+    let id: Id = r.json["id"].as_str().unwrap().parse().unwrap();
+
+    // The target can't start a migration of its own meanwhile.
+    let r = s
+        .start(
+            target.id,
+            json!({ "workspaceId": ws, "target": { "kind": "existing", "nodeId": old.id } }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{:?}", r.json);
+
+    let m = s.settle(id, None).await;
+    assert_eq!(m["status"], "done", "{m:#}");
+    assert_eq!(m["sourcePendingDeletion"], true);
+    assert_eq!(s.node_of(api).await, Some(target.id));
+    let moves = m["moves"].as_array().unwrap();
+    assert_eq!(moves[0]["fromNodeId"], old.id.to_string());
+    assert_eq!(moves[0]["migrationId"], id.to_string());
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn aborting_keeps_an_existing_target(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    s.connect_providers(ws).await;
+    let old = s.existing("worker-1", "203.0.113.5", Some(ws)).await;
+    s.link(ws, old.id, "hetzner", "4000", "hetzner:fsn1", "cx22")
+        .await;
+    let target = s.existing("worker-2", "203.0.113.6", Some(ws)).await;
+    let target_server = Id::new();
+    sqlx::query(
+        "INSERT INTO provisioned_servers (id, workspace_id, provider, provider_id, name, location,
+                                          server_type, monthly_price_cents, status, node_id)
+         VALUES ($1, $2, 'hetzner', '4001', 'worker-2', 'hetzner:hel1', 'cx22', 451, 'ready', $3)",
+    )
+    .bind(target_server)
+    .bind(ws)
+    .bind(target.id)
+    .execute(s.app.db())
+    .await
+    .unwrap();
+    let project = s.project(ws).await;
+    let (api, _) = s.service(&project, "api", old.id, false).await;
+
+    let r = s
+        .start(
+            old.id,
+            json!({ "target": { "kind": "existing", "nodeId": target.id } }),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert!(r.json["targetServerId"].is_null(), "not ours to delete");
+    let id: Id = r.json["id"].as_str().unwrap().parse().unwrap();
+    modula_server::migrate::server::poll(&s.app.state, id)
+        .await
+        .unwrap();
+
+    let r = s
+        .app
+        .call(
+            Method::POST,
+            &format!("/api/server-migrations/{id}/abort"),
+            Some(&s.admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["status"], "aborted", "{:#}", r.json);
+    assert_eq!(s.node_of(api).await, Some(old.id));
+    let (status, revoked): (String, bool) = sqlx::query_as(
+        "SELECT p.status, n.status = 'revoked' FROM provisioned_servers p
+         JOIN nodes n ON n.id = p.node_id WHERE p.id = $1",
+    )
+    .bind(target_server)
+    .fetch_one(s.app.db())
+    .await
+    .unwrap();
+    assert_eq!(status, "ready");
+    assert!(!revoked);
+    assert!(s.mock.lock().unwrap().servers.is_empty(), "nothing created");
+}
+
+/// A server joined by hand: the request names the workspace paying, there
+/// is no old provider server to mark.
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn a_hand_added_server_migrates_for_the_named_workspace(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    s.connect_providers(ws).await;
+    let old = s.existing("by-hand", "203.0.113.5", None).await;
+    let project = s.project(ws).await;
+    let (api, _) = s.service(&project, "api", old.id, false).await;
+
+    let p = s
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/nodes/{}/migration-preview", old.id),
+            Some(&s.admin),
+            None,
+        )
+        .await;
+    assert_eq!(p.json["workspaceRequired"], true, "{:#}", p.json);
+
+    let unnamed = s
+        .start(old.id, new_at("hetzner", "hetzner:hel1", "cx22"))
+        .await;
+    assert_eq!(
+        unnamed.status,
+        StatusCode::BAD_REQUEST,
+        "{:?}",
+        unnamed.json
+    );
+
+    let mut body = new_at("hetzner", "hetzner:hel1", "cx22");
+    body["workspaceId"] = json!(ws);
+    let r = s.start(old.id, body).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert!(r.json["sourceServerId"].is_null());
+    let id: Id = r.json["id"].as_str().unwrap().parse().unwrap();
+    let new_server: Id = r.json["targetServerId"].as_str().unwrap().parse().unwrap();
+    let user_data = s.mock.lock().unwrap().servers[0]["user_data"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let new = s.node(&boot_token(&user_data), "by-hand-new").await;
+    let m = s.settle(id, Some(new_server)).await;
+    assert_eq!(m["status"], "done", "{m:#}");
+    assert_eq!(m["sourcePendingDeletion"], false);
+    assert_eq!(s.node_of(api).await, Some(new.id));
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn another_workspaces_server_is_refused(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    let other = s.app.create_workspace(&s.admin, "other").await;
+    s.connect_providers(ws).await;
+    let theirs = s.existing("theirs", "203.0.113.5", Some(other)).await;
+    let mut body = new_at("hetzner", "hetzner:hel1", "cx22");
+    body["workspaceId"] = json!(ws);
+    let r = s.start(theirs.id, body.clone()).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{:?}", r.json);
+    assert!(s.mock.lock().unwrap().servers.is_empty());
+
+    // An instance admin who is no admin of the workspace named can't either.
+    let shared = s.existing("shared", "203.0.113.6", None).await;
+    let (user, cookie) = s.app.user("root2@example.com").await;
+    sqlx::query("UPDATE users SET is_instance_admin = true WHERE id = $1")
+        .bind(user)
+        .execute(s.app.db())
+        .await
+        .unwrap();
+    let r = s
+        .app
+        .call(
+            Method::POST,
+            &format!("/api/nodes/{}/migrate", shared.id),
+            Some(&cookie),
+            Some(body),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{:?}", r.json);
+
+    // Another tenant's services can't be taken along.
+    let project = s.project(other).await;
+    s.service(&project, "api", shared.id, false).await;
+    let mut body = new_at("hetzner", "hetzner:hel1", "cx22");
+    body["workspaceId"] = json!(ws);
+    let r = s.start(shared.id, body).await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{:?}", r.json);
+    assert!(s.mock.lock().unwrap().servers.is_empty());
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn volumes_that_cannot_fit_are_refused(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    s.connect_providers(ws).await;
+    let old = s.existing("worker-1", "203.0.113.5", Some(ws)).await;
+    s.link(ws, old.id, "hetzner", "4000", "hetzner:fsn1", "cx22")
+        .await;
+    let project = s.project(ws).await;
+    let (_, vol) = s.service(&project, "db", old.id, true).await;
+    sqlx::query(
+        "INSERT INTO volume_usage (volume_id, node_id, used_bytes) VALUES ($1, $2, 90000000000)
+         ON CONFLICT (volume_id) DO UPDATE SET used_bytes = EXCLUDED.used_bytes",
+    )
+    .bind(vol.unwrap())
+    .bind(old.id)
+    .execute(s.app.db())
+    .await
+    .unwrap();
+
+    // EC2's default root disk is 80 GB.
+    let p = s
+        .app
+        .call(
+            Method::GET,
+            &format!(
+                "/api/nodes/{}/migration-preview?location=aws:us-east-1&serverType=t3.small",
+                old.id
+            ),
+            Some(&s.admin),
+            None,
+        )
+        .await;
+    assert_eq!(p.status, StatusCode::OK, "{:?}", p.json);
+    assert!(
+        p.json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w["code"] == "disk" && w["blocking"] == true),
+        "{:#}",
+        p.json["warnings"]
+    );
+    let r = s
+        .start(old.id, new_at("aws", "aws:us-east-1", "t3.small"))
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{:?}", r.json);
+    assert!(s.aws.lock().unwrap().instances.is_empty());
+
+    let mut body = new_at("aws", "aws:us-east-1", "t3.small");
+    body["target"]["diskGb"] = json!(200);
+    let r = s.start(old.id, body).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
 }

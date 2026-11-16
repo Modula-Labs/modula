@@ -124,6 +124,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
                 github::pull_request::comment_job,
             )
             .on(domains::RESYNC_JOB, domains::resync_job)
+            .on(domains::REPOINT_MAIN_JOB, domains::repoint_main_job)
             .on(webhooks::DISPATCH_JOB, webhooks::dispatch_job)
             .on(alerts::EVENT_JOB, alerts::eval::event_job)
             .on(alerts::EVALUATE_JOB, alerts::eval::evaluate_job)
@@ -136,10 +137,8 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
             .on(migrate::server::MIGRATE_JOB, migrate::server::migrate_job)
             .on(migrate::moves::MOVE_JOB, migrate::moves::move_job)
             .on(provision::resize::RESIZE_JOB, provision::resize::resize_job)
-            .on(
-                integrations::hetzner::firewall::SYNC_JOB,
-                integrations::hetzner::firewall::sync_job,
-            ),
+            .on(provision::mesh::SYNC_JOB, provision::mesh::sync_job)
+            .on(provision::mesh::LEGACY_SYNC_JOB, provision::mesh::sync_job),
         format!("server-{}", modula_id::Id::new()),
         stop.clone(),
     ));

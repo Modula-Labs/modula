@@ -83,7 +83,7 @@ export function ProjectSettingsPage({ projectId, section }: { projectId: string;
           ) : active === "integrations" ? (
             <WorkspaceLinkSection
               title="Integrations"
-              description="GitHub, Cloudflare, Hetzner and backup storage are connected once per workspace and used by all of its projects."
+              description="GitHub, Cloudflare, Hetzner, AWS and backup storage are connected once per workspace and used by all of its projects."
               to="/settings"
               label="Open workspace settings"
             />

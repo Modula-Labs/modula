@@ -12,7 +12,9 @@ name = "modula"
 path = "src/main.rs"
 
 [dependencies]
+modula-ec2.workspace = true
 modula-hetzner.workspace = true
+modula-provider.workspace = true
 
 anyhow.workspace = true
 base64.workspace = true

@@ -21,6 +21,9 @@ const USER_AGENT: &str = concat!("modula-server/", env!("CARGO_PKG_VERSION"));
 const PER_PAGE: u32 = 50;
 /// Safety cap on paginated listings (2500 zones or records).
 const MAX_PAGES: u32 = 50;
+/// A scan that must not silently miss records (repointing a server's
+/// address): 20000 zones or records, and an error beyond that.
+const MAX_SCAN_PAGES: u32 = 400;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(10);
 
 /// The production API (`Config::cloudflare_api` points tests at a mock).
@@ -266,8 +269,18 @@ impl Client {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<Vec<T>> {
+        Ok(self.pages(path, query, MAX_PAGES).await?.0)
+    }
+
+    /// [`list`](Self::list) up to `max` pages; the flag says it stopped early.
+    async fn pages<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        max: u32,
+    ) -> Result<(Vec<T>, bool)> {
         let mut out = Vec::new();
-        for page in 1..=MAX_PAGES {
+        for page in 1..=max {
             let mut q = query.to_vec();
             q.push(("page", page.to_string()));
             q.push(("per_page", PER_PAGE.to_string()));
@@ -281,10 +294,23 @@ impl Client {
                 n < PER_PAGE as usize
             };
             if last || n == 0 {
-                break;
+                return Ok((out, false));
             }
         }
-        Ok(out)
+        Ok((out, true))
+    }
+
+    /// Every page or an error: a partial listing would leave records behind.
+    async fn scan<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<Vec<T>> {
+        let (items, truncated) = self.pages(path, query, MAX_SCAN_PAGES).await?;
+        if truncated {
+            return Err(Error::Decode(format!("{path}: too many results to scan")));
+        }
+        Ok(items)
     }
 
     /// `GET /user/tokens/verify`: whether the token exists and is active.
@@ -310,6 +336,11 @@ impl Client {
             .unwrap_or_default()
             .into_iter()
             .find(|z| z.name.eq_ignore_ascii_case(name)))
+    }
+
+    /// Every zone the token can see (see [`scan`](Self::scan)).
+    pub async fn all_zones(&self) -> Result<Vec<Zone>> {
+        self.scan("zones", &[]).await
     }
 
     /// The deepest zone `hostname` lives in (`a.b.example.com` → `example.com`),
@@ -353,6 +384,30 @@ impl Client {
             &[("type", kind.to_owned()), ("name", name.to_owned())],
         )
         .await
+    }
+
+    /// Every `kind` record of a zone, whatever its name.
+    pub async fn all_records(&self, zone_id: &str, kind: &str) -> Result<Vec<DnsRecord>> {
+        self.scan(
+            &format!("zones/{zone_id}/dns_records"),
+            &[("type", kind.to_owned())],
+        )
+        .await
+    }
+
+    /// Changes a record's content in place: PATCH leaves its proxy setting,
+    /// TTL and comment as they are.
+    pub async fn update_record_content(
+        &self,
+        zone_id: &str,
+        record: &DnsRecord,
+        content: &str,
+    ) -> Result<()> {
+        let path = format!("zones/{zone_id}/dns_records/{}", record.id);
+        let body = json!({ "type": record.kind, "name": record.name, "content": content });
+        self.call::<Value>(Method::PATCH, &path, &[], Some(&body))
+            .await?;
+        Ok(())
     }
 
     /// Makes `name` have a `kind` record with `value`. Idempotent: an equal
@@ -452,7 +507,7 @@ impl Client {
         Ok(())
     }
 
-    async fn delete_record_id(&self, zone_id: &str, id: &str) -> Result<()> {
+    pub async fn delete_record_id(&self, zone_id: &str, id: &str) -> Result<()> {
         let path = format!("zones/{zone_id}/dns_records/{id}");
         match self.call::<Value>(Method::DELETE, &path, &[], None).await {
             Ok(_) => Ok(()),

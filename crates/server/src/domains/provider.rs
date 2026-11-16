@@ -43,6 +43,13 @@ pub trait DnsProvider: Send + Sync {
         want: &'a [(&'a str, &'a str)],
         proxied: bool,
     ) -> BoxFuture<'a, anyhow::Result<()>>;
+    /// The routing records (A/AAAA/CNAME) at `name` as `(kind, value)`, read
+    /// back from the provider.
+    fn read_routing<'a>(
+        &'a self,
+        zone: &'a Zone,
+        name: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>>;
     /// Removes the record `name` of type `kind`; absent records are not an error.
     fn delete_record<'a>(
         &'a self,

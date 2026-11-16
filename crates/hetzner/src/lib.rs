@@ -22,21 +22,7 @@ const USER_AGENT: &str = concat!("modula/", env!("CARGO_PKG_VERSION"));
 const PER_PAGE: u32 = 50;
 const MAX_PAGES: u32 = 20;
 
-/// What went wrong talking to the provider. The control plane re-exports it
-/// as `provision::ProviderError`.
-#[derive(Debug, thiserror::Error)]
-pub enum ProviderError {
-    #[error("the provider rejected the API token")]
-    Unauthorized,
-    #[error("the API token lacks permission (it needs Read & Write)")]
-    Forbidden,
-    #[error("not found at the provider")]
-    NotFound,
-    #[error("{message} ({code})")]
-    Api { code: String, message: String },
-    #[error("could not reach the provider: {0}")]
-    Transport(String),
-}
+pub use modula_provider::ProviderError;
 
 pub struct Client {
     http: reqwest::Client,

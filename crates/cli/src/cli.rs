@@ -326,7 +326,7 @@ pub enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// Create a new Modula server at a cloud provider (Hetzner), list what
+    /// Create a new Modula server at a cloud provider (Hetzner or AWS), list what
     /// can be created, or update the logged-in instance.
     Server {
         #[command(subcommand)]
@@ -815,6 +815,10 @@ pub enum ServerCommand {
     /// admin and HCLOUD_TOKEN (or a prompt).
     #[command(long_about = SERVER_RESIZE_ABOUT, after_help = SERVER_RESIZE_EXAMPLES)]
     Resize(ServerResizeArgs),
+    /// Move everything on a server to a new one at any connected provider,
+    /// or to one that exists, and follow it. Needs an instance admin who is
+    /// an admin of the workspace.
+    Migrate(crate::server_migrate::ServerMigrateArgs),
 }
 
 const SERVER_RESIZE_ABOUT: &str = "\
@@ -884,6 +888,9 @@ Examples:
     --domain deploy.example.com --email you@example.com \\
     --ssh-key-file ~/.ssh/id_ed25519.pub --admin-name 'Ada Lovelace' --yes --json
 
+  # On Amazon EC2 (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY set)
+  modula server create --provider aws --location eu-west-1 --type t3.large …
+
   # Let Cloudflare create the DNS record (CLOUDFLARE_API_TOKEN set)
   modula server create … --cloudflare-dns --yes
 
@@ -892,10 +899,11 @@ was deleted); 2 usage: missing or invalid flags, nothing created; 3 a
 server exists but isn't fully set up (see the result's hint).";
 
 const SERVER_OPTIONS_ABOUT: &str = "\
-List the Hetzner locations where a Modula server can be created right now,
+List the provider's locations where a Modula server can be created right now,
 each with the server types in stock there (vCPU, RAM, disk, architecture,
-gross monthly price) and the one we recommend. Read-only: nothing is
-created. Needs HCLOUD_TOKEN (or --token-stdin).";
+monthly price in USD) and the one we recommend. Read-only: nothing is
+created. Needs HCLOUD_TOKEN (or --token-stdin), or with --provider aws
+AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.";
 
 const SERVER_OPTIONS_EXAMPLES: &str = "\
 Examples:
@@ -906,6 +914,8 @@ Examples:
 pub enum Provider {
     #[default]
     Hetzner,
+    /// Amazon EC2 (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY).
+    Aws,
 }
 
 /// What to do with a server that was created when a later step fails.
@@ -922,13 +932,13 @@ pub enum OnFailure {
 #[derive(Debug, Clone, Default, Args)]
 #[command(group(clap::ArgGroup::new("ssh").args(["ssh_key_file", "ssh_key_id", "no_ssh_key"])))]
 pub struct ServerCreateArgs {
-    /// The cloud provider.
-    #[arg(long, value_enum, default_value_t)]
-    pub provider: Provider,
-    /// Location, e.g. fsn1, nbg1, hel1, ash, hil, sin (see `server options`).
+    /// The cloud provider. Default: ask with a terminal, else hetzner.
+    #[arg(long, value_enum)]
+    pub provider: Option<Provider>,
+    /// Location, e.g. fsn1, nbg1, hel1 or eu-west-1 (see `server options`).
     #[arg(long, value_name = "LOCATION")]
     pub location: Option<String>,
-    /// Server type, e.g. cx33 or cax21 (see `server options`).
+    /// Server type, e.g. cx33, cax21 or t3.large (see `server options`).
     #[arg(long = "type", value_name = "TYPE")]
     pub server_type: Option<String>,
     /// The server's name (a DNS label). Default: modula-main.
@@ -941,13 +951,13 @@ pub struct ServerCreateArgs {
     /// For TLS certificates (Let's Encrypt) and the admin account.
     #[arg(long)]
     pub email: Option<String>,
-    /// Upload this public key (or reuse it if Hetzner has it) for root SSH.
+    /// Upload this public key (or reuse it if the provider has it) for SSH.
     #[arg(long, value_name = "PATH")]
     pub ssh_key_file: Option<std::path::PathBuf>,
-    /// Use this SSH key already in the Hetzner project (its id).
+    /// Use this SSH key already at the provider (its id, `server options`).
     #[arg(long, value_name = "ID")]
-    pub ssh_key_id: Option<i64>,
-    /// No SSH key: Hetzner emails you a root password instead.
+    pub ssh_key_id: Option<String>,
+    /// No SSH key: Hetzner emails a root password; on AWS nobody can log in.
     #[arg(long)]
     pub no_ssh_key: bool,
     /// Create the dashboard's A record with Cloudflare (CLOUDFLARE_API_TOKEN).
@@ -988,6 +998,9 @@ pub struct ServerCreateArgs {
 
 #[derive(Debug, Clone, Default, Args)]
 pub struct ServerResizeArgs {
+    /// The cloud provider. Default: what the instance says, else hetzner.
+    #[arg(long, value_enum)]
+    pub provider: Option<Provider>,
     /// The new server type, e.g. cx42 (without it: a list to pick from).
     #[arg(long = "type", value_name = "TYPE")]
     pub server_type: Option<String>,
@@ -999,8 +1012,8 @@ pub struct ServerResizeArgs {
 #[derive(Debug, Clone, Default, Args)]
 pub struct ServerOptionsArgs {
     /// The cloud provider.
-    #[arg(long, value_enum, default_value_t)]
-    pub provider: Provider,
+    #[arg(long, value_enum)]
+    pub provider: Option<Provider>,
     /// Only this location, e.g. fsn1.
     #[arg(long, value_name = "LOCATION")]
     pub location: Option<String>,
@@ -1050,7 +1063,7 @@ mod tests {
             panic!()
         };
         assert_eq!(a.server_type.as_deref(), Some("cx33"));
-        assert_eq!(a.ssh_key_id, Some(42));
+        assert_eq!(a.ssh_key_id.as_deref(), Some("42"));
         assert_eq!((a.dns_timeout, a.install_timeout), (30, 20));
         // One SSH choice at most; --replace-dns only with --cloudflare-dns.
         assert!(parse(&["server", "create", "--ssh-key-id", "1", "--no-ssh-key"]).is_err());
@@ -1080,6 +1093,38 @@ mod tests {
         assert!(cli.global.yes);
         let cli = parse(&["status", "--login", "work"]).unwrap();
         assert_eq!(cli.global.login.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn server_migrate_takes_one_kind_of_target() {
+        assert!(parse(&["server", "migrate", "w1", "--to", "w2"]).is_ok());
+        assert!(
+            parse(&[
+                "server",
+                "migrate",
+                "w1",
+                "--location",
+                "aws:us-east-1",
+                "--server-type",
+                "t3.small"
+            ])
+            .is_ok()
+        );
+        assert!(parse(&["server", "migrate", "w1", "--location", "aws:us-east-1"]).is_err());
+        assert!(
+            parse(&[
+                "server",
+                "migrate",
+                "w1",
+                "--to",
+                "w2",
+                "--location",
+                "a:b",
+                "--server-type",
+                "t"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ import {
   type ResizeStep,
   type ResizeTypeOption,
 } from "@/lib/api";
-import { euros } from "@/lib/provision";
+import { hasRootDisk, monthlyUsd } from "@/lib/provision";
 
 const STEPS: { step: ResizeStep; label: string }[] = [
   { step: "shutdown", label: "Shutting down" },
@@ -199,6 +199,7 @@ function Picker({
   onClose: () => void;
 }) {
   const current = data.current;
+  const provider = data.provider;
   const chosen = data.types.find((t) => t.name === selected) ?? null;
   // Usable ones first, then sold elsewhere, then the ones that can't be used.
   const types = useMemo(() => {
@@ -217,7 +218,7 @@ function Picker({
           Now <span className="font-mono text-foreground">{current.name}</span>
           {" · "}
           {current.cores} vCPU · {gb(current.memoryGb)} GB RAM · {current.diskGb} GB disk
-          {current.monthlyCents != null ? ` · ${euros(current.monthlyCents)}/mo` : ""}
+          {current.monthlyCents != null ? ` · ${monthlyUsd(current.monthlyCents, provider)}/mo` : ""}
           {data.location ? ` · ${data.location.city}` : ""}
         </p>
       ) : null}
@@ -236,6 +237,8 @@ function Picker({
           <TypeRow
             key={t.name}
             t={t}
+            provider={provider}
+            diskGb={current?.diskGb ?? null}
             selected={t.name === selected}
             onSelect={() => onSelect(t.name)}
             onMigrate={onMigrate}
@@ -243,8 +246,9 @@ function Picker({
         ))}
       </div>
       <p className="text-[13px] text-muted-foreground">
-        The disk keeps its size, so the server can go back to a smaller size later.
-        Sizes with a smaller disk or another CPU architecture can't be used.
+        {provider === "aws"
+          ? "The disk and the Elastic IP stay as they are, so the server can go back to a smaller size later. Sizes with another CPU architecture can't be used."
+          : "The disk keeps its size, so the server can go back to a smaller size later. Sizes with a smaller disk or another CPU architecture can't be used."}
       </p>
 
       {error ? <Alert>{error}</Alert> : null}
@@ -264,7 +268,7 @@ function Picker({
             The server shuts down, changes size and starts again. Everything on it
             is unavailable for a few minutes.
             {chosen.monthlyCents != null && current?.monthlyCents != null
-              ? ` ${euros(current.monthlyCents)}/mo → ${euros(chosen.monthlyCents)}/mo.`
+              ? ` ${monthlyUsd(current.monthlyCents, provider)}/mo → ${monthlyUsd(chosen.monthlyCents, provider)}/mo.`
               : ""}
           </Alert>
           <div className="flex justify-end gap-2">
@@ -296,11 +300,16 @@ function Picker({
 
 function TypeRow({
   t,
+  provider,
+  diskGb,
   selected,
   onSelect,
   onMigrate,
 }: {
   t: ResizeTypeOption;
+  provider: string | null;
+  /** The server's own disk, which is the same for every size where the disk is chosen apart from the type. */
+  diskGb: number | null;
   selected: boolean;
   onSelect: () => void;
   onMigrate?: (serverType: string) => void;
@@ -333,7 +342,7 @@ function TypeRow({
         />
         <span className="w-16 shrink-0 font-mono text-sm">{t.name}</span>
         <span className="min-w-0 flex-1 text-[13px]">
-          {t.cores} vCPU · {gb(t.memoryGb)} GB · {t.diskGb} GB disk
+          {t.cores} vCPU · {gb(t.memoryGb)} GB · {hasRootDisk(provider) && diskGb ? diskGb : t.diskGb} GB disk
           {t.arch === "arm" ? " · Arm" : ""}
           {t.blocker ? (
             <span className="block truncate text-xs" title={t.blocker}>
@@ -354,7 +363,7 @@ function TypeRow({
         </Button>
       ) : null}
       <span className="w-20 shrink-0 text-right text-[13px] tabular-nums">
-        {t.monthlyCents != null ? `${euros(t.monthlyCents)}/mo` : "—"}
+        {t.monthlyCents != null ? `${monthlyUsd(t.monthlyCents, provider)}/mo` : "—"}
         {usable && t.direction !== "same" ? (
           <span className="ml-1 text-muted-foreground">{t.direction === "up" ? "↑" : "↓"}</span>
         ) : null}

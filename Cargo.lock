@@ -3055,7 +3055,9 @@ dependencies = [
  "http",
  "ignore",
  "inquire",
+ "modula-ec2",
  "modula-hetzner",
+ "modula-provider",
  "reqwest",
  "ring",
  "rustls",
@@ -3095,15 +3097,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "modula-ec2"
+version = "0.1.10"
+dependencies = [
+ "base64 0.23.1",
+ "futures",
+ "hex",
+ "hmac 0.13.0",
+ "modula-provider",
+ "percent-encoding",
+ "quick-xml",
+ "reqwest",
+ "rustls",
+ "secrecy",
+ "serde_json",
+ "sha2 0.11.1",
+ "time",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "modula-hetzner"
 version = "0.1.10"
 dependencies = [
+ "modula-provider",
  "reqwest",
  "rustls",
  "secrecy",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
  "tokio",
  "url",
 ]
@@ -3172,6 +3196,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "modula-provider"
+version = "0.1.10"
+dependencies = [
+ "futures",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "modula-server"
 version = "0.1.10"
 dependencies = [
@@ -3196,10 +3229,12 @@ dependencies = [
  "modula-backup",
  "modula-cli",
  "modula-crypto",
+ "modula-ec2",
  "modula-hetzner",
  "modula-id",
  "modula-node",
  "modula-proto",
+ "modula-provider",
  "percent-encoding",
  "rcgen",
  "redis",
@@ -3968,6 +4003,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "84bbb29c624230c4bd1047bbdb2aa47e41c860e9665ce62ba9504eebe91bf867"
 dependencies = [
  "pulldown-cmark",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

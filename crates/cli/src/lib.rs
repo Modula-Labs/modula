@@ -16,6 +16,7 @@ pub mod iac;
 pub mod output;
 pub mod provision;
 pub mod resolve;
+pub mod server_migrate;
 pub mod shell;
 pub mod tunnel;
 pub mod update;

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Server } from "@/components/ui/icons";
@@ -7,7 +7,8 @@ import { Field, Input } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import { relativeTime } from "@/lib/format";
-import { euros, provisionApi } from "@/lib/provision";
+import { provisionApi } from "@/lib/provision";
+import { ProviderLimits } from "./ProviderLimits";
 
 /** Workspace Settings → Integrations → Hetzner Cloud. */
 export function HetznerIntegration({
@@ -23,31 +24,11 @@ export function HetznerIntegration({
     queryFn: () => provisionApi.hetzner(workspaceId),
   });
   const [connecting, setConnecting] = useState(false);
-  const [maxServers, setMaxServers] = useState("");
-  const [maxEuros, setMaxEuros] = useState("");
-  useEffect(() => {
-    if (!status.data) return;
-    setMaxServers(String(status.data.caps.maxServers));
-    setMaxEuros(String(status.data.caps.maxMonthlyCents / 100));
-  }, [status.data]);
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["hetzner", workspaceId] });
     qc.invalidateQueries({ queryKey: ["provisioned", workspaceId] });
   };
-  const saveCaps = useMutation({
-    mutationFn: () =>
-      provisionApi.updateHetznerCaps(workspaceId, {
-        maxServers: Number(maxServers),
-        maxMonthlyCents: Math.round(Number(maxEuros) * 100),
-      }),
-    onSuccess: refresh,
-  });
-  const disconnect = useMutation({
-    mutationFn: () => provisionApi.disconnectHetzner(workspaceId),
-    onSuccess: refresh,
-  });
-
   if (status.isPending)
     return (
       <Card size="sm">
@@ -65,15 +46,6 @@ export function HetznerIntegration({
       </Card>
     );
   const s = status.data;
-  const capsValid =
-    /^\d+$/.test(maxServers) &&
-    Number(maxEuros) >= 0 &&
-    maxEuros.trim() !== "" &&
-    !Number.isNaN(Number(maxEuros));
-  const capsDirty =
-    Number(maxServers) !== s.caps.maxServers ||
-    Math.round(Number(maxEuros) * 100) !== s.caps.maxMonthlyCents;
-
   return (
     <Card size="sm">
       <CardContent>
@@ -106,62 +78,14 @@ export function HetznerIntegration({
         </div>
 
         {s.connected ? (
-          <div className="mt-4 flex flex-col gap-3 border-t border-border pt-4">
-            {(saveCaps.error ?? disconnect.error) ? (
-              <Alert>{(saveCaps.error ?? disconnect.error)?.message}</Alert>
-            ) : null}
-            <div className="flex flex-wrap items-end gap-3">
-              <Field label="Max servers">
-                {(p) => (
-                  <Input
-                    {...p}
-                    className="w-28"
-                    inputMode="numeric"
-                    disabled={!canEdit}
-                    value={maxServers}
-                    onChange={(e) => setMaxServers(e.target.value)}
-                  />
-                )}
-              </Field>
-              <Field label="Monthly limit (€)">
-                {(p) => (
-                  <Input
-                    {...p}
-                    className="w-32"
-                    inputMode="decimal"
-                    disabled={!canEdit}
-                    value={maxEuros}
-                    onChange={(e) => setMaxEuros(e.target.value)}
-                  />
-                )}
-              </Field>
-              {canEdit ? (
-                <Button
-                  variant="secondary"
-                  loading={saveCaps.isPending}
-                  disabled={!capsValid || !capsDirty}
-                  onClick={() => saveCaps.mutate()}
-                >
-                  Save limits
-                </Button>
-              ) : null}
-            </div>
-            <p className="text-[13px] text-muted-foreground">
-              In use: {s.usage.servers} server{s.usage.servers === 1 ? "" : "s"}
-              , {euros(s.usage.monthlyCents)} per month (incl. VAT).
-            </p>
-            {canEdit ? (
-              <div>
-                <Button
-                  variant="danger-outline"
-                  loading={disconnect.isPending}
-                  onClick={() => disconnect.mutate()}
-                >
-                  Disconnect
-                </Button>
-              </div>
-            ) : null}
-          </div>
+          <ProviderLimits
+            workspaceId={workspaceId}
+            kind="hetzner"
+            status={s}
+            canEdit={canEdit}
+            usageNote="incl. VAT"
+            onChanged={refresh}
+          />
         ) : null}
 
         <ConnectDialog

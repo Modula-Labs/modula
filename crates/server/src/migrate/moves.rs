@@ -476,6 +476,16 @@ pub async fn poll(state: &AppState, id: Id) -> AppResult<Poll> {
             let mut tx = state.db.begin().await?;
             let started = async {
                 if r.kind == "primary" {
+                    // For the finish summary: which address services hold.
+                    sqlx::query(
+                        "UPDATE instance_moves SET old_tcp_port =
+                            (SELECT public_port FROM tcp_proxies WHERE service_instance_id = $2)
+                         WHERE id = $1",
+                    )
+                    .bind(id)
+                    .bind(instance)
+                    .execute(&mut *tx)
+                    .await?;
                     switch(&mut tx, instance, to).await?;
                 }
                 let source = match r.previous_deployment_id {
@@ -583,6 +593,19 @@ async fn finish(state: &AppState, id: Id, to: Id) -> AppResult<Poll> {
     // Activation already resynced its custom domains; this catches anything
     // else served from the new server.
     crate::domains::resync_for_node(&state.db, to, None).await?;
+    // A server migration's old server forwards to the new replicas (a
+    // stopped service's route left it for good).
+    let from: Option<Id> = sqlx::query_scalar(
+        "SELECT from_node_id FROM instance_moves WHERE id = $1 AND migration_id IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .flatten();
+    if let Some(n) = from {
+        deploy::bump(&state.db, n).await?;
+        state.hub.kick_all(&[n]);
+    }
     state.jobs_notify.notify_one();
     Ok(Poll::Done)
 }

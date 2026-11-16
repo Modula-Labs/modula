@@ -179,13 +179,13 @@ impl Instance {
 }
 
 impl Instance {
-    /// Save the tokens `server create` used as the first workspace's Hetzner
-    /// and Cloudflare integrations, so the dashboard can add servers and
+    /// Save the credentials `server create` used as the first workspace's
+    /// cloud and Cloudflare integrations, so the dashboard can add servers and
     /// manage DNS without asking again. Each result is independent.
     pub async fn save_integrations(
         &self,
         session_cookie: &SecretString,
-        hetzner: &SecretString,
+        cloud: &super::cloud::CloudSecret,
         cloudflare: Option<(&SecretString, Option<&str>)>,
     ) -> anyhow::Result<Vec<(&'static str, anyhow::Result<()>)>> {
         #[derive(Deserialize)]
@@ -211,15 +211,11 @@ impl Instance {
         let ws: Vec<Workspace> =
             serde_json::from_str(&text).context("unexpected workspaces response")?;
         let ws = ws.first().context("the new admin has no workspace")?;
+        let (label, kind, body) = super::cloud::integration_body(cloud);
         let mut out = vec![(
-            "Hetzner",
-            self.put_integration(
-                session_cookie,
-                &ws.id,
-                "hetzner",
-                json!({ "token": hetzner.expose_secret() }),
-            )
-            .await,
+            label,
+            self.put_integration(session_cookie, &ws.id, kind, body)
+                .await,
         )];
         if let Some((token, account)) = cloudflare {
             let mut body = json!({ "token": token.expose_secret() });

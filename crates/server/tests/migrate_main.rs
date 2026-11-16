@@ -406,6 +406,20 @@ async fn the_control_plane_hands_over(pool: PgPool) {
     .await
     .unwrap();
     promote::finalize(&st, id2).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT step FROM server_migrations WHERE id = $1")
+            .bind(id2)
+            .fetch_one(s.app.db())
+            .await
+            .unwrap(),
+        "dns",
+        "the new control plane finishes DNS"
+    );
+    assert!(
+        modula_server::migrate::server::poll(&st, id2)
+            .await
+            .unwrap()
+    );
     let status: String = sqlx::query_scalar("SELECT status FROM nodes WHERE id = $1")
         .bind(source)
         .fetch_one(s.app.db())
@@ -439,4 +453,39 @@ async fn a_node_refuses_an_address_that_does_not_work(pool: PgPool) {
     .unwrap();
     assert!(changed);
     assert_eq!(server_of(&dir), format!("https://127.0.0.1:{}", s.port));
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn the_main_server_cannot_move_to_an_existing_one(pool: PgPool) {
+    let s = setup(pool).await;
+    let ws = s.app.create_workspace(&s.admin, "team").await;
+    let (main, _) = s.node("main-1").await;
+    let (other, _) = s.node("worker-1").await;
+    sqlx::query("UPDATE nodes SET info = info || '{\"capabilities\": [\"dashboard\"]}'::jsonb WHERE id = $1")
+        .bind(main)
+        .execute(s.app.db())
+        .await
+        .unwrap();
+    let r = s
+        .app
+        .call(
+            Method::POST,
+            &format!("/api/nodes/{main}/migrate"),
+            Some(&s.admin),
+            Some(json!({ "workspaceId": ws, "target": { "kind": "existing", "nodeId": other } })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{:?}", r.json);
+    assert!(r.json.to_string().contains("fresh machine"), "{:?}", r.json);
+    let p = s
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/nodes/{main}/migration-preview?workspaceId={ws}"),
+            Some(&s.admin),
+            None,
+        )
+        .await;
+    assert_eq!(p.status, StatusCode::OK, "{:?}", p.json);
+    assert_eq!(p.json["existingTargets"], json!([]));
 }

@@ -8,12 +8,12 @@ license.workspace = true
 description = "A small Hetzner Cloud API client, shared by modula-server and the modula CLI"
 
 [dependencies]
+modula-provider.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]

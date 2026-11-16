@@ -1,14 +1,18 @@
-//! Migrating a worker server: a new server at the same provider (another
-//! location or size), then every service on the old one moved to it, volume
+//! Migrating a server: a new server at any connected provider, or one that
+//! already exists, then every service on the old one moved to it, volume
 //! data included, with downtime per stateful service. A step machine over a
 //! `server_migrations` row, polled by a self-re-enqueuing job:
 //!
 //! - create: the API created the new server (the provisioning path,
 //!   followed by `provision::track`) before the first poll;
-//! - join: until it joined and is online;
+//! - join: until it joined, is online and every provider firewall admits it
+//!   (an existing target starts here, already joined);
 //! - move: one [`super::moves`] move per instance on the old server (its own
 //!   server, or only replicas of it), in turn: services with volumes first;
 //! - finish: anything placed on the old server meanwhile gets moved too;
+//! - dns: [`super::dns`] points the records at the new server (a main server
+//!   comes here from `promote`), with retries; a failure leaves everything
+//!   running on the new server and only this step to retry;
 //!   then the old server is marked `pending_deletion`. It is never deleted
 //!   here: the user confirms that (DELETE /api/servers/{id}).
 //!
@@ -31,6 +35,9 @@ pub const MIGRATE_JOB: &str = "migrate.server";
 const POLL: Duration = Duration::from_secs(3);
 /// A row that never got its new server (the API died in between).
 const CREATE_GRACE: time::Duration = time::Duration::minutes(5);
+/// How long the target's address or the firewalls may keep a migration
+/// waiting before its first copy.
+const ADMIT_WAIT: time::Duration = time::Duration::minutes(5);
 
 pub async fn enqueue(state: &AppState, id: Id, after: Duration) -> AppResult<()> {
     jobs::enqueue(
@@ -65,7 +72,6 @@ pub async fn migrate_job(state: AppState, job: Job) -> anyhow::Result<()> {
 struct Row {
     workspace_id: Id,
     source_node_id: Option<Id>,
-    source_server_id: Option<Id>,
     target_server_id: Option<Id>,
     target_node_id: Option<Id>,
     status: String,
@@ -105,7 +111,7 @@ pub(super) async fn set_step(state: &AppState, id: Id, step: &str) -> AppResult<
 /// One step of migration `id`. Returns true once there is nothing left to do.
 pub async fn poll(state: &AppState, id: Id) -> AppResult<bool> {
     let r: Option<Row> = sqlx::query_as(
-        "SELECT workspace_id, source_node_id, source_server_id, target_server_id, target_node_id,
+        "SELECT workspace_id, source_node_id, target_server_id, target_node_id,
                 status, step, created_by, created_at, main
          FROM server_migrations WHERE id = $1",
     )
@@ -115,6 +121,9 @@ pub async fn poll(state: &AppState, id: Id) -> AppResult<bool> {
     let Some(r) = r else { return Ok(true) };
     if r.status != "running" {
         return Ok(true);
+    }
+    if r.step == "dns" {
+        return super::dns::poll(state, id).await;
     }
     let Some(source) = r.source_node_id else {
         return fail(state, id, "the old server was removed").await;
@@ -127,53 +136,44 @@ pub async fn poll(state: &AppState, id: Id) -> AppResult<bool> {
             Ok(false)
         }
         "join" => {
-            let Some(server) = r.target_server_id else {
-                return fail(state, id, "the new server was deleted").await;
+            let (node, name) = match joined(state, &r).await? {
+                Joined::Waiting => return Ok(false),
+                Joined::Failed(why) => return fail(state, id, &why).await,
+                Joined::Ready { node, name } => (node, name),
             };
-            let s: Option<(String, Option<String>, Option<Id>, String)> = sqlx::query_as(
-                "SELECT status, error, node_id, name FROM provisioned_servers WHERE id = $1",
-            )
-            .bind(server)
-            .fetch_optional(&state.db)
-            .await?;
-            match s {
-                None => fail(state, id, "the new server was deleted").await,
-                Some((status, error, _, _)) if status == "failed" => {
-                    let why = error.unwrap_or_else(|| "it did not come up".into());
-                    fail(state, id, &format!("the new server failed: {why}")).await
-                }
-                Some((status, _, Some(node), name)) if status == "ready" => {
-                    end(&state.db, Table::Migrations, id, "done", None).await?;
-                    sqlx::query(
-                        "UPDATE server_migrations SET target_node_id = $2, updated_at = now() WHERE id = $1",
-                    )
-                    .bind(id)
-                    .bind(node)
-                    .execute(&state.db)
-                    .await?;
-                    begin(
-                        &state.db,
-                        Table::Migrations,
-                        id,
-                        &format!("Moving services to {name}"),
-                    )
-                    .await?;
-                    let n = plan(state, id, &r, source, node).await?;
-                    if n == 0 {
-                        end(
-                            &state.db,
-                            Table::Migrations,
-                            id,
-                            "done",
-                            Some("nothing ran there"),
-                        )
-                        .await?;
-                    }
-                    set_step(state, id, "move").await?;
-                    Ok(false)
-                }
-                Some(_) => Ok(false),
+            match admit_target(state, id, &r, source, node).await? {
+                Admit::Wait => return Ok(false),
+                Admit::Failed(why) => return fail(state, id, &why).await,
+                Admit::Ready => {}
             }
+            end(&state.db, Table::Migrations, id, "done", None).await?;
+            sqlx::query(
+                "UPDATE server_migrations SET target_node_id = $2, updated_at = now() WHERE id = $1",
+            )
+            .bind(id)
+            .bind(node)
+            .execute(&state.db)
+            .await?;
+            begin(
+                &state.db,
+                Table::Migrations,
+                id,
+                &format!("Moving services to {name}"),
+            )
+            .await?;
+            let n = plan(state, id, &r, source, node).await?;
+            if n == 0 {
+                end(
+                    &state.db,
+                    Table::Migrations,
+                    id,
+                    "done",
+                    Some("nothing ran there"),
+                )
+                .await?;
+            }
+            set_step(state, id, "move").await?;
+            Ok(false)
         }
         "move" => {
             let next: Option<(Id, String, String)> = sqlx::query_as(
@@ -241,37 +241,142 @@ pub async fn poll(state: &AppState, id: Id) -> AppResult<bool> {
                 set_step(state, id, "move").await?;
                 return Ok(false);
             }
-            begin(
-                &state.db,
-                Table::Migrations,
-                id,
-                "Marking the old server for deletion",
-            )
-            .await?;
-            let mut tx = state.db.begin().await?;
-            if let Some(old) = r.source_server_id {
-                sqlx::query(
-                    "UPDATE provisioned_servers SET status = 'pending_deletion', updated_at = now()
-                     WHERE id = $1 AND status = 'ready'",
-                )
-                .bind(old)
-                .execute(&mut *tx)
-                .await?;
-            }
-            end(&mut *tx, Table::Migrations, id, "done", None).await?;
-            sqlx::query(
-                "UPDATE server_migrations SET status = 'done', updated_at = now(), finished_at = now()
-                 WHERE id = $1 AND status = 'running'",
-            )
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-            crate::domains::resync_for_node(&mut *tx, source, None).await?;
-            tx.commit().await?;
-            Ok(true)
+            begin(&state.db, Table::Migrations, id, super::dns::STEP_LABEL).await?;
+            set_step(state, id, "dns").await?;
+            Ok(false)
         }
         _ => Ok(true),
     }
+}
+
+/// Where step `join` stands.
+enum Joined {
+    Waiting,
+    Failed(String),
+    Ready { node: Id, name: String },
+}
+
+async fn joined(state: &AppState, r: &Row) -> AppResult<Joined> {
+    let Some(server) = r.target_server_id else {
+        // An existing target: there is nothing to wait for but itself.
+        let Some(node) = r.target_node_id else {
+            return Ok(Joined::Failed("the new server was deleted".into()));
+        };
+        let name: Option<String> =
+            sqlx::query_scalar("SELECT name FROM nodes WHERE id = $1 AND status <> 'revoked'")
+                .bind(node)
+                .fetch_optional(&state.db)
+                .await?;
+        return Ok(match name {
+            Some(name) => Joined::Ready { node, name },
+            None => Joined::Failed("the target server was removed".into()),
+        });
+    };
+    let s: Option<(String, Option<String>, Option<Id>, String)> = sqlx::query_as(
+        "SELECT status, error, node_id, name FROM provisioned_servers WHERE id = $1",
+    )
+    .bind(server)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(match s {
+        None => Joined::Failed("the new server was deleted".into()),
+        Some((status, error, _, _)) if status == "failed" => {
+            let why = error.unwrap_or_else(|| "it did not come up".into());
+            Joined::Failed(format!("the new server failed: {why}"))
+        }
+        Some((status, _, Some(node), name)) if status == "ready" => Joined::Ready { node, name },
+        Some(_) => Joined::Waiting,
+    })
+}
+
+enum Admit {
+    Ready,
+    Wait,
+    Failed(String),
+}
+
+/// Before the first copy: the target is online with a known address, and the
+/// firewalls of the providers involved have been updated with it. The queued
+/// sync at its first hello can't be relied on for that (it runs later, and an
+/// EC2 target's address only exists once associated), so this one is awaited.
+async fn admit_target(
+    state: &AppState,
+    id: Id,
+    r: &Row,
+    source: Id,
+    target: Id,
+) -> AppResult<Admit> {
+    // The main server's successor serves every workspace, like the old one.
+    if r.main {
+        let shared = sqlx::query(
+            "UPDATE nodes SET workspace_id = NULL WHERE id = $1 AND workspace_id IS NOT NULL",
+        )
+        .bind(target)
+        .execute(&state.db)
+        .await?;
+        if shared.rows_affected() > 0 {
+            let peers = crate::mesh::bump_peers(&state.db, target).await?;
+            state.hub.kick_all(&peers);
+        }
+    }
+    let online = state.hub.is_connected(target)
+        || sqlx::query_scalar::<_, bool>("SELECT status = 'online' FROM nodes WHERE id = $1")
+            .bind(target)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(false);
+    let address: Option<String> = sqlx::query_scalar(
+        "SELECT coalesce(n.public_ip, t.ipv4) FROM nodes n
+         LEFT JOIN provisioned_servers t ON t.id = $2
+         WHERE n.id = $1",
+    )
+    .bind(target)
+    .bind(r.target_server_id)
+    .fetch_optional(&state.db)
+    .await?
+    .flatten();
+    let blocked = if !online {
+        Some("the target server went offline".to_owned())
+    } else if address.is_none() {
+        Some("the target server has no public address yet".to_owned())
+    } else {
+        let workspaces: Vec<Id> = sqlx::query_scalar(
+            "SELECT $1::text::id UNION
+             SELECT workspace_id FROM provisioned_servers
+             WHERE node_id = ANY($2::text[]::id[]) AND status NOT IN ('failed', 'deleting')",
+        )
+        .bind(r.workspace_id.to_string())
+        .bind(vec![source.to_string(), target.to_string()])
+        .fetch_all(&state.db)
+        .await?;
+        match crate::provision::mesh::sync_integrations(state, Some(&workspaces)).await {
+            Ok(()) => None,
+            Err(e) => Some(format!("{e:#}")),
+        }
+    };
+    let Some(why) = blocked else {
+        // The other workspaces' firewalls catch up in the background.
+        if let Err(e) = crate::provision::mesh::enqueue_sync(&state.db).await {
+            tracing::warn!(%id, error = ?e, "cannot queue the firewall update");
+        }
+        state.jobs_notify.notify_one();
+        return Ok(Admit::Ready);
+    };
+    let waited: time::Duration = sqlx::query_scalar::<_, OffsetDateTime>(
+        "UPDATE server_migrations SET mesh_wait_since = coalesce(mesh_wait_since, now())
+         WHERE id = $1 RETURNING mesh_wait_since",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await
+    .map(|since| OffsetDateTime::now_utc() - since)?;
+    if waited > ADMIT_WAIT {
+        return Ok(Admit::Failed(format!(
+            "the target server could not be admitted to the private network: {why}"
+        )));
+    }
+    tracing::info!(%id, reason = %why, "waiting to admit the migration's target server");
+    Ok(Admit::Wait)
 }
 
 /// [`plan`] for a migration by id (the promote step's last check).
@@ -282,7 +387,7 @@ pub(super) async fn plan_moves(
     target: Id,
 ) -> AppResult<usize> {
     let r: Row = sqlx::query_as(
-        "SELECT workspace_id, source_node_id, source_server_id, target_server_id, target_node_id,
+        "SELECT workspace_id, source_node_id, target_server_id, target_node_id,
                 status, step, created_by, created_at, main
          FROM server_migrations WHERE id = $1",
     )
@@ -332,6 +437,26 @@ async fn plan(state: &AppState, id: Id, r: &Row, source: Id, target: Id) -> AppR
     Ok(todo.len())
 }
 
+/// Try a migration's failed DNS step again. False when it isn't one.
+pub async fn retry_dns(state: &AppState, id: Id) -> AppResult<bool> {
+    let mut tx = state.db.begin().await?;
+    let claimed = sqlx::query(
+        "UPDATE server_migrations SET status = 'running', error = NULL, finished_at = NULL,
+                dns_attempts = 0, dns_next_at = NULL, updated_at = now()
+         WHERE id = $1 AND status = 'failed' AND step = 'dns'",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    if claimed.rows_affected() == 0 {
+        return Ok(false);
+    }
+    begin(&mut *tx, Table::Migrations, id, super::dns::STEP_LABEL).await?;
+    tx.commit().await?;
+    enqueue(state, id, Duration::ZERO).await?;
+    Ok(true)
+}
+
 /// Stop migration `id` and move what it moved back to the old server. The new
 /// server is kept (delete it from Servers). False when it can't be aborted
 /// (finished, or already aborted).
@@ -339,7 +464,7 @@ pub async fn abort(state: &AppState, id: Id) -> AppResult<bool> {
     let claimed = sqlx::query(
         "UPDATE server_migrations SET status = 'aborting', promote_ticket_hash = NULL, updated_at = now()
          WHERE id = $1 AND status IN ('running', 'failed')
-           AND NOT (step = 'promote' AND promote_phase = 'switch')",
+           AND NOT (step = 'promote' AND promote_phase = 'switch') AND step <> 'dns'",
     )
     .bind(id)
     .execute(&state.db)

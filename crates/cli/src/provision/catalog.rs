@@ -1,9 +1,9 @@
-//! What can be ordered where: Hetzner's locations and server
+//! What can be ordered where: a provider's locations and server
 //! types boiled down to "these locations, each with these types at these
 //! prices", plus the pick we recommend for a main server. Pure functions, so
 //! the wizard, `server options` and the tests share them.
 
-use modula_hetzner::{Location, ServerType, price_cents};
+use modula_provider::{ProviderLocation, ServerTypeOffer};
 use serde::Serialize;
 
 /// Smaller than this can't run the dashboard, Postgres and Redis.
@@ -20,12 +20,11 @@ pub const RECOMMENDATION: &str = "the dashboard, its Postgres and a few apps";
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LocationOption {
-    /// Hetzner's name, e.g. `fsn1` (what `--location` takes).
+    /// The provider's name, e.g. `fsn1` (what `--location` takes).
     pub name: String,
     pub city: String,
     /// ISO 3166 code, e.g. `DE`.
     pub country: String,
-    pub network_zone: String,
     /// Orderable here now, cheapest first.
     pub types: Vec<TypeOption>,
     /// The type we suggest here (`--type`).
@@ -54,7 +53,7 @@ impl LocationOption {
         self.types.first()
     }
 
-    /// `€6.49+  2 vCPU  4 GB RAM  40 GB disk arm`: the cheapest server here.
+    /// `$6.49+  2 vCPU  4 GB RAM  40 GB disk arm`: the cheapest server here.
     pub fn offer(&self) -> String {
         let Some(t) = self.cheapest() else {
             return String::new();
@@ -81,15 +80,16 @@ pub struct TypeOption {
     pub arch: String,
     /// `shared` or `dedicated`.
     pub cpu_type: String,
-    /// Gross (VAT included) euro cents per month in this location.
+    /// US cents per month in this location (approximate for a provider
+    /// billing in another currency).
     pub monthly_cents: i64,
-    /// `€8.21`.
+    /// `$8.87`, or `≈$8.87` when approximate.
     pub monthly: String,
     pub recommended: bool,
 }
 
 impl TypeOption {
-    /// `cx33   €8.21  4 vCPU  8 GB  80 GB disk x86  ★ recommended`
+    /// `cx33   $8.87  4 vCPU  8 GB  80 GB disk x86  ★ recommended`
     pub fn label(&self) -> String {
         let mut text = format!(
             "{:<6} {:>7}  {:>2} vCPU {:>3} GB {:>4} GB disk {:<3}",
@@ -144,43 +144,50 @@ pub fn flag(country: &str) -> String {
         .collect()
 }
 
-/// 821 → `€8.21`.
-pub fn format_eur(cents: i64) -> String {
-    format!("€{}.{:02}", cents / 100, cents % 100)
+/// 887 → `$8.87`, or `≈$8.87` when `approx`.
+pub fn format_usd(cents: i64, approx: bool) -> String {
+    format!(
+        "{}${}.{:02}",
+        if approx { "≈" } else { "" },
+        cents / 100,
+        cents % 100
+    )
 }
 
-/// Whether a type suits a main server at all (enough memory, still sold).
-fn suitable(t: &ServerType) -> bool {
-    !t.is_deprecated() && t.memory >= MIN_MEMORY_GB
+/// Whether a type suits a main server at all.
+fn suitable(t: &ServerTypeOffer) -> bool {
+    t.memory_gb >= MIN_MEMORY_GB
 }
 
 /// Locations that can create at least one suitable type right now, each
-/// with those types (cheapest first) and our recommendation.
-///
-/// A type is offered in a location when it is priced there and neither
-/// retired nor sold out (`server_types[].locations[].available`).
-pub fn build(locations: &[Location], types: &[ServerType]) -> Vec<LocationOption> {
+/// with those types (cheapest first) and our recommendation. Providers only
+/// offer what can be ordered, so a type priced in a location is in stock.
+pub fn build(
+    locations: &[ProviderLocation],
+    types: &[ServerTypeOffer],
+    approx: bool,
+) -> Vec<LocationOption> {
     let mut out: Vec<LocationOption> = locations
         .iter()
         .filter_map(|loc| {
             let mut offered: Vec<TypeOption> = types
                 .iter()
-                .filter(|t| suitable(t) && t.orderable_in(&loc.name))
+                .filter(|t| suitable(t))
                 .filter_map(|t| {
-                    let cents = price_cents(&t.monthly_price_in(&loc.name)?.gross)?;
+                    let cents = t.price_in(loc.location.id)?;
                     Some(TypeOption {
                         name: t.name.clone(),
                         cores: t.cores,
-                        memory_gb: t.memory,
-                        disk_gb: t.disk,
-                        arch: if t.architecture == "arm" {
+                        memory_gb: t.memory_gb,
+                        disk_gb: t.disk_gb,
+                        arch: if t.arch == "arm" {
                             "arm64".into()
                         } else {
-                            t.architecture.clone()
+                            t.arch.clone()
                         },
                         cpu_type: t.cpu_type.clone(),
                         monthly_cents: cents,
-                        monthly: format_eur(cents),
+                        monthly: format_usd(cents, approx),
                         recommended: false,
                     })
                 })
@@ -196,14 +203,9 @@ pub fn build(locations: &[Location], types: &[ServerType]) -> Vec<LocationOption
                 offered[i].name.clone()
             });
             Some(LocationOption {
-                name: loc.name.clone(),
-                city: if loc.city.is_empty() {
-                    loc.description.clone()
-                } else {
-                    loc.city.clone()
-                },
-                country: loc.country.clone(),
-                network_zone: loc.network_zone.clone(),
+                name: loc.region.clone(),
+                city: loc.location.label.to_owned(),
+                country: loc.location.country_code.to_owned(),
                 types: offered,
                 recommended,
             })
@@ -235,87 +237,102 @@ pub fn recommend(types: &[TypeOption]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use modula_provider::LocationPrice;
+    use modula_provider::locations;
 
-    fn types() -> Vec<ServerType> {
-        let at = |loc: &str, available: bool| json!({"name": loc, "available": available});
-        let price = |loc: &str, gross: &str| {
-            json!({"location": loc, "price_hourly": {"net": "0", "gross": "0"},
-                   "price_monthly": {"net": "1", "gross": gross},
-                   "included_traffic": if loc == "ash" { 1_099_511_627_776_u64 } else { 21_990_232_555_520 }})
-        };
-        serde_json::from_value(json!([
-            {"id": 1, "name": "cx23", "cores": 2, "memory": 4.0, "disk": 40, "cpu_type": "shared", "architecture": "x86",
-             "prices": [price("fsn1", "4.5101"), price("hel1", "4.5101"), price("ash", "5.99")],
-             // Sold out in fsn1; not listed in ash.
-             "locations": [at("fsn1", false), at("hel1", true), at("sin", true)]},
-            {"id": 2, "name": "cx33", "cores": 4, "memory": 8.0, "disk": 80, "cpu_type": "shared", "architecture": "x86",
-             "prices": [price("fsn1", "7.4900"), price("hel1", "7.4900")],
-             // Sold out in hel1.
-             "locations": [at("fsn1", true), at("hel1", false), at("sin", true)]},
-            {"id": 3, "name": "cax21", "cores": 4, "memory": 8.0, "disk": 80, "cpu_type": "shared", "architecture": "arm",
-             "prices": [price("fsn1", "7.2500")]},
-            {"id": 4, "name": "ccx13", "cores": 2, "memory": 8.0, "disk": 80, "cpu_type": "dedicated", "architecture": "x86",
-             "prices": [price("fsn1", "14.86")]},
-            {"id": 5, "name": "cx11", "cores": 1, "memory": 2.0, "disk": 20, "cpu_type": "shared", "architecture": "x86",
-             "deprecation": {"announced": "2024-06-06T00:00:00Z"}, "prices": [price("fsn1", "1.00")]},
-            {"id": 6, "name": "tiny", "cores": 1, "memory": 1.0, "disk": 10, "cpu_type": "shared", "architecture": "x86",
-             "prices": [price("fsn1", "0.50")]},
-            {"id": 7, "name": "cpx11", "cores": 2, "memory": 2.0, "disk": 40, "cpu_type": "shared", "architecture": "x86",
-             "prices": [price("ash", "4.99")]}
-        ]))
-        .unwrap()
+    fn offer(
+        name: &str,
+        cores: u32,
+        memory_gb: f64,
+        cpu_type: &str,
+        arch: &str,
+        prices: &[(&'static str, i64)],
+    ) -> ServerTypeOffer {
+        ServerTypeOffer {
+            name: name.into(),
+            description: String::new(),
+            cores,
+            memory_gb,
+            disk_gb: 80,
+            arch: arch.into(),
+            cpu_type: cpu_type.into(),
+            storage_type: "local".into(),
+            prices: prices
+                .iter()
+                .map(|(location, monthly_cents)| LocationPrice {
+                    location,
+                    monthly_cents: *monthly_cents,
+                })
+                .collect(),
+        }
     }
 
-    fn locations() -> Vec<Location> {
-        serde_json::from_value(json!([
-            {"name": "fsn1", "city": "Falkenstein", "country": "DE", "network_zone": "eu-central"},
-            {"name": "hel1", "city": "Helsinki", "country": "FI", "network_zone": "eu-central"},
-            {"name": "ash", "city": "Ashburn, VA", "country": "US", "network_zone": "us-east"},
-            {"name": "sin", "city": "Singapore", "country": "SG", "network_zone": "ap-southeast"}
-        ]))
-        .unwrap()
+    fn types() -> Vec<ServerTypeOffer> {
+        vec![
+            offer(
+                "cx23",
+                2,
+                4.0,
+                "shared",
+                "x86",
+                &[("hetzner:hel1", 487), ("hetzner:ash", 647)],
+            ),
+            offer("cx33", 4, 8.0, "shared", "x86", &[("hetzner:fsn1", 809)]),
+            offer("cax21", 4, 8.0, "shared", "arm", &[("hetzner:fsn1", 783)]),
+            offer(
+                "ccx13",
+                2,
+                8.0,
+                "dedicated",
+                "x86",
+                &[("hetzner:fsn1", 1605)],
+            ),
+            offer("tiny", 1, 1.0, "shared", "x86", &[("hetzner:fsn1", 54)]),
+            offer("cpx11", 2, 2.0, "shared", "x86", &[("hetzner:ash", 539)]),
+        ]
+    }
+
+    fn locations_at(names: &[&str]) -> Vec<ProviderLocation> {
+        names
+            .iter()
+            .map(|n| ProviderLocation {
+                region: (*n).to_owned(),
+                location: locations::resolve("hetzner", n, "").unwrap(),
+            })
+            .collect()
     }
 
     #[test]
-    fn only_available_suitable_types_per_location() {
-        let c = build(&locations(), &types());
+    fn only_priced_suitable_types_per_location() {
+        let c = build(
+            &locations_at(&["fsn1", "hel1", "ash", "sin"]),
+            &types(),
+            true,
+        );
         let names: Vec<&str> = c.iter().map(|l| l.name.as_str()).collect();
-        // No suitable type is sold in sin; cheapest first.
+        // Nothing is sold in sin; cheapest first.
         assert_eq!(names, ["hel1", "ash", "fsn1"]);
         let at = |name: &str| c.iter().find(|l| l.name == name).unwrap();
 
         let fsn1 = at("fsn1");
         let types: Vec<&str> = fsn1.types.iter().map(|t| t.name.as_str()).collect();
-        // cx23 is sold out, cx11 deprecated, tiny too small; cheapest first.
+        // tiny is too small; cheapest first.
         assert_eq!(types, ["cax21", "cx33", "ccx13"]);
         assert_eq!(fsn1.types[0].arch, "arm64");
-        assert_eq!(fsn1.types[0].monthly, "€7.25");
+        assert_eq!(fsn1.types[0].monthly, "≈$7.83");
         assert_eq!(fsn1.recommended.as_deref(), Some("cax21"));
-        assert_eq!(fsn1.offer(), "  €7.25+  4 vCPU  8 GB RAM  80 GB disk arm");
+        assert_eq!(fsn1.offer(), " ≈$7.83+  4 vCPU  8 GB RAM  80 GB disk arm");
 
         let hel1 = at("hel1");
         assert_eq!(hel1.types.len(), 1);
-        assert_eq!(hel1.types[0].name, "cx23");
         // No 8 GB type there: the cheapest with 4 GB.
         assert_eq!(hel1.recommended.as_deref(), Some("cx23"));
-        // Prices round up to the cent.
-        assert_eq!(hel1.types[0].monthly_cents, 452);
 
-        // Only a 2 GB type: still offered, flagged as tight, recommended as the only one.
+        // A 2 GB type is still offered, and flagged as tight.
         let ash = at("ash");
-        assert_eq!(ash.recommended.as_deref(), Some("cpx11"));
+        assert_eq!(ash.recommended.as_deref(), Some("cx23"));
+        assert!(ash.types.iter().any(|t| t.name == "cpx11"));
         assert!(ash.label().starts_with("🇺🇸 Ashburn, VA (ash)"));
-    }
-
-    #[test]
-    fn without_location_data_prices_decide() {
-        let mut t = types();
-        t.iter_mut().for_each(|t| t.locations.clear());
-        let c = build(&locations(), &t);
-        let fsn1 = c.iter().find(|l| l.name == "fsn1").unwrap();
-        assert!(fsn1.find_type("CX23").is_some());
-        assert_eq!(fsn1.recommended.as_deref(), Some("cax21"));
     }
 
     #[test]
@@ -328,7 +345,7 @@ mod tests {
             arch: "x86".into(),
             cpu_type: cpu.into(),
             monthly_cents: cents,
-            monthly: format_eur(cents),
+            monthly: format_usd(cents, false),
             recommended: false,
         };
         let list = vec![
@@ -343,17 +360,17 @@ mod tests {
 
     #[test]
     fn formatting() {
-        assert_eq!(format_eur(821), "€8.21");
-        assert_eq!(format_eur(1200), "€12.00");
-        assert_eq!(format_eur(5), "€0.05");
+        assert_eq!(format_usd(821, false), "$8.21");
+        assert_eq!(format_usd(1200, true), "≈$12.00");
+        assert_eq!(format_usd(5, false), "$0.05");
         assert_eq!(flag("de"), "🇩🇪");
         assert_eq!(flag("FI"), "🇫🇮");
         assert_eq!(flag("??"), "🌐");
         assert_eq!(flag(""), "🌐");
-        let c = build(&locations(), &types());
+        let c = build(&locations_at(&["fsn1"]), &types(), true);
         let fsn1 = c.iter().find(|l| l.name == "fsn1").unwrap();
         let label = fsn1.types[1].label();
-        assert_eq!(label, "cx33     €7.49   4 vCPU   8 GB   80 GB disk x86");
+        assert_eq!(label, "cx33    ≈$8.09   4 vCPU   8 GB   80 GB disk x86");
         assert!(fsn1.types[0].label().ends_with("★ recommended"));
         assert_eq!(
             fsn1.types[1].summary(),

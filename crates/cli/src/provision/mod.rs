@@ -1,5 +1,5 @@
 //! `modula server create` and `modula server options`: a Modula server on
-//! Hetzner Cloud, created from a laptop; `modula server resize` ([`resize`])
+//! Hetzner Cloud or Amazon EC2 ([`cloud`]), created from a laptop; `modula server resize` ([`resize`])
 //! changes its size later. (`server update` lives in
 //! [`crate::commands::update`].)
 //!
@@ -9,12 +9,13 @@
 //! firewall and server, waits for DNS and the install, finishes setup with a
 //! setup token generated here ([`setup_token`]) and logs this CLI in.
 //!
-//! Secrets (the Hetzner and Cloudflare tokens, the admin password) are
+//! Secrets (the cloud credentials, the Cloudflare token, the admin password) are
 //! [`SecretString`]s: zeroized when dropped, never in argv, logs, files or
 //! the server's user data. Once the admin exists, the tokens are saved on
 //! the new server as the workspace's integrations (encrypted there).
 
 pub mod catalog;
+pub mod cloud;
 pub mod cloud_init;
 pub mod cloudflare;
 pub mod dns;
@@ -31,20 +32,23 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use modula_hetzner::{Client, SshKey};
+use modula_provider::ProviderSshKey;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::json;
 
-use self::catalog::{LocationOption, format_eur};
+use self::catalog::{LocationOption, format_usd};
+use self::cloud::{AwsKeys, Cloud, CloudSecret};
 use self::flow::{Created, DnsPlan, Failure, Plan, Secrets, Settings, SshChoice};
 use self::progress::{Event, Progress, duration};
 use crate::api::Api;
-use crate::cli::{OnFailure, ServerCommand, ServerCreateArgs, ServerOptionsArgs};
+use crate::cli::{OnFailure, Provider, ServerCommand, ServerCreateArgs, ServerOptionsArgs};
 use crate::config::{self, SavedLogin};
 use crate::context::Ctx;
 use crate::output::{Table, usage};
 
 pub const ENV_HCLOUD: &str = "HCLOUD_TOKEN";
+pub const ENV_AWS_KEY_ID: &str = "AWS_ACCESS_KEY_ID";
+pub const ENV_AWS_SECRET: &str = "AWS_SECRET_ACCESS_KEY";
 pub const ENV_CLOUDFLARE: &str = "CLOUDFLARE_API_TOKEN";
 pub const ENV_ADMIN_PASSWORD: &str = "MODULA_ADMIN_PASSWORD";
 pub const DEFAULT_NAME: &str = "modula-main";
@@ -57,6 +61,7 @@ pub const EXIT_SERVER_KEPT: i32 = 3;
 #[derive(Default)]
 pub struct EnvSecrets {
     pub hcloud: Option<SecretString>,
+    pub aws: Option<AwsKeys>,
     pub cloudflare: Option<SecretString>,
     pub admin_password: Option<SecretString>,
 }
@@ -70,8 +75,16 @@ impl EnvSecrets {
                 .filter(|v| !v.is_empty())
                 .map(SecretString::from)
         };
+        let aws = match (var(ENV_AWS_KEY_ID), var(ENV_AWS_SECRET)) {
+            (Some(id), Some(secret_access_key)) => Some(AwsKeys {
+                access_key_id: id.expose_secret().to_owned(),
+                secret_access_key,
+            }),
+            _ => None,
+        };
         Self {
             hcloud: var(ENV_HCLOUD),
+            aws,
             cloudflare: var(ENV_CLOUDFLARE),
             admin_password: std::env::var(ENV_ADMIN_PASSWORD)
                 .ok()
@@ -80,8 +93,21 @@ impl EnvSecrets {
         }
     }
 
+    /// The credentials given for `provider`, if any.
+    pub fn secret_for(&self, provider: Provider) -> Option<CloudSecret> {
+        match provider {
+            Provider::Hetzner => self.hcloud.clone().map(CloudSecret::Hetzner),
+            Provider::Aws => self.aws.clone().map(CloudSecret::Aws),
+        }
+    }
+
     /// `--token-stdin`: the first line of stdin is the Hetzner token.
-    fn read_hcloud_from_stdin(&mut self) -> anyhow::Result<()> {
+    fn read_hcloud_from_stdin(&mut self, provider: Option<Provider>) -> anyhow::Result<()> {
+        if provider == Some(Provider::Aws) {
+            return Err(usage(format!(
+                "--token-stdin is for Hetzner tokens; AWS credentials come from {ENV_AWS_KEY_ID} and {ENV_AWS_SECRET}"
+            )));
+        }
         let mut line = String::new();
         std::io::stdin()
             .lock()
@@ -103,7 +129,7 @@ pub async fn run(ctx: &mut Ctx, command: ServerCommand) -> anyhow::Result<i32> {
             reject_secret_flags(&args)?;
             let mut env = EnvSecrets::from_process();
             if args.token_stdin {
-                env.read_hcloud_from_stdin()?;
+                env.read_hcloud_from_stdin(args.provider)?;
             }
             let settings = Settings::production(
                 Duration::from_secs(args.dns_timeout.max(1) * 60),
@@ -114,17 +140,18 @@ pub async fn run(ctx: &mut Ctx, command: ServerCommand) -> anyhow::Result<i32> {
         ServerCommand::Options(args) => {
             let mut env = EnvSecrets::from_process();
             if args.token_stdin {
-                env.read_hcloud_from_stdin()?;
+                env.read_hcloud_from_stdin(args.provider)?;
             }
             let settings = Settings::production(Duration::ZERO, Duration::ZERO);
             options_with(ctx, &args, &env, &settings).await?;
             Ok(0)
         }
         ServerCommand::Update { check } => crate::commands::update::server(ctx, check).await,
+        ServerCommand::Migrate(args) => crate::server_migrate::run(ctx, args).await,
         ServerCommand::Resize(args) => {
             let mut env = EnvSecrets::from_process();
             if args.token_stdin {
-                env.read_hcloud_from_stdin()?;
+                env.read_hcloud_from_stdin(args.provider)?;
             }
             let settings = Settings::production(Duration::ZERO, Duration::ZERO);
             resize::run(ctx, &args, env, &settings).await
@@ -160,8 +187,14 @@ pub fn interactive(ctx: &Ctx) -> bool {
 /// says everything that's missing.
 pub fn missing_inputs(args: &ServerCreateArgs, env: &EnvSecrets, yes: bool) -> Vec<&'static str> {
     let mut missing = Vec::new();
-    if env.hcloud.is_none() {
-        missing.push("HCLOUD_TOKEN (environment) or --token-stdin");
+    match args.provider.unwrap_or_default() {
+        Provider::Hetzner if env.hcloud.is_none() => {
+            missing.push("HCLOUD_TOKEN (environment) or --token-stdin");
+        }
+        Provider::Aws if env.aws.is_none() => {
+            missing.push("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (environment)");
+        }
+        _ => {}
     }
     if args.location.is_none() {
         missing.push("--location");
@@ -296,10 +329,15 @@ pub fn valid_password(p: &str) -> Result<(), String> {
 }
 
 /// Locations and types, boiled down ([`catalog::build`]).
-pub async fn load_catalog(hz: &Client) -> anyhow::Result<Vec<LocationOption>> {
-    let (locations, types) =
-        futures::try_join!(hz.locations(), hz.server_types()).map_err(flow::hetzner_error)?;
-    Ok(catalog::build(&locations, &types))
+pub async fn load_catalog(cloud: &Cloud) -> anyhow::Result<Vec<LocationOption>> {
+    let provider = cloud.provider();
+    let (locations, types) = futures::try_join!(provider.locations(), provider.server_types())
+        .map_err(|e| cloud::error(cloud.kind(), e))?;
+    Ok(catalog::build(
+        &locations,
+        &types,
+        cloud.kind().approximate_prices(),
+    ))
 }
 
 /// `ssh-ed25519 AAAA…` without the comment, for comparing keys.
@@ -353,13 +391,20 @@ pub fn local_public_keys() -> Vec<(PathBuf, String)> {
     keys
 }
 
-/// Reuse the Hetzner key with the same public key, else upload it under a
+/// Reuse the provider's key with the same public key, else upload it under a
 /// name not taken yet.
-pub fn ssh_choice_for_file(path: &Path, public_key: String, existing: &[SshKey]) -> SshChoice {
+pub fn ssh_choice_for_file(
+    path: &Path,
+    public_key: String,
+    existing: &[ProviderSshKey],
+) -> SshChoice {
     let body = key_body(&public_key);
-    if let Some(k) = existing.iter().find(|k| key_body(&k.public_key) == body) {
+    if let Some(k) = existing
+        .iter()
+        .find(|k| k.public_key.as_deref().map(key_body).as_deref() == Some(body.as_str()))
+    {
         return SshChoice::Existing {
-            id: k.id,
+            id: k.id.clone(),
             name: k.name.clone(),
         };
     }
@@ -403,16 +448,19 @@ pub fn describe_records(records: &[cloudflare::DnsRecord]) -> String {
         .join(", ")
 }
 
-/// Everything from flags and the environment, checked against Hetzner (and
+/// Everything from flags and the environment, checked against the provider (and
 /// Cloudflare) before anything is created. Mismatches are usage errors.
 async fn plan_from_flags(
     args: &ServerCreateArgs,
     env: &EnvSecrets,
     settings: &Settings,
 ) -> anyhow::Result<Plan> {
-    let token = env.hcloud.clone().context("no Hetzner token")?;
-    let hz = flow::hetzner(settings, &token)?;
-    let catalog = load_catalog(&hz).await?;
+    let provider = args.provider.unwrap_or_default();
+    let secret = env
+        .secret_for(provider)
+        .context("no cloud provider credentials")?;
+    let cloud = Cloud::connect(&secret, settings, "cli")?;
+    let catalog = load_catalog(&cloud).await?;
     let wanted = args.location.as_deref().unwrap_or_default();
     let location = catalog
         .iter()
@@ -440,13 +488,22 @@ async fn plan_from_flags(
     })?;
     let ssh = if let Some(path) = &args.ssh_key_file {
         let key = read_public_key(path).map_err(|e| usage(format!("--ssh-key-file: {e:#}")))?;
-        let existing = hz.ssh_keys().await.map_err(flow::hetzner_error)?;
+        let existing = cloud
+            .provider()
+            .ssh_keys()
+            .await
+            .map_err(|e| cloud::error(provider, e))?;
         ssh_choice_for_file(path, key, &existing)
-    } else if let Some(id) = args.ssh_key_id {
-        let existing = hz.ssh_keys().await.map_err(flow::hetzner_error)?;
-        let k = existing.iter().find(|k| k.id == id).ok_or_else(|| {
+    } else if let Some(id) = &args.ssh_key_id {
+        let existing = cloud
+            .provider()
+            .ssh_keys()
+            .await
+            .map_err(|e| cloud::error(provider, e))?;
+        let k = existing.iter().find(|k| &k.id == id).ok_or_else(|| {
             usage(format!(
-                "--ssh-key-id {id}: no such key in this Hetzner project. Keys: {}",
+                "--ssh-key-id {id}: no such key at {}. Keys: {}",
+                provider.label(),
                 existing
                     .iter()
                     .map(|k| format!("{} ({})", k.id, k.name))
@@ -455,7 +512,7 @@ async fn plan_from_flags(
             ))
         })?;
         SshChoice::Existing {
-            id: k.id,
+            id: k.id.clone(),
             name: k.name.clone(),
         }
     } else {
@@ -490,6 +547,7 @@ async fn plan_from_flags(
         DnsPlan::Manual
     };
     Ok(Plan {
+        provider,
         location,
         server_type,
         name: args.name.clone().unwrap_or_else(|| DEFAULT_NAME.into()),
@@ -534,7 +592,9 @@ pub async fn create_with(
     } else {
         let plan = plan_from_flags(&args, &env, &settings).await?;
         let secrets = Secrets {
-            hetzner: env.hcloud.clone().context("no Hetzner token")?,
+            cloud: env
+                .secret_for(plan.provider)
+                .context("no cloud provider credentials")?,
             cloudflare: env.cloudflare.clone(),
         };
         (plan, secrets)
@@ -542,7 +602,7 @@ pub async fn create_with(
 
     let mut progress = Progress::new(ctx.out.clone());
     progress.event(&Event::Plan {
-        provider: "hetzner".into(),
+        provider: plan.provider.id().into(),
         location: plan.location.name.clone(),
         server_type: plan.server_type.name.clone(),
         name: plan.name.clone(),
@@ -673,7 +733,10 @@ pub async fn create_with(
     progress.event(&Event::Ready {
         url: url.trim_end_matches('/').to_owned(),
         ip: ip.to_string(),
-        server_id: created.server.unwrap_or_default(),
+        server_id: created
+            .server
+            .as_deref()
+            .map_or_else(|| json!(0), flow::json_id),
         elapsed_secs: progress.elapsed().as_secs(),
     });
     stale_dns_hint(&mut progress, &plan.domain).await;
@@ -736,6 +799,9 @@ async fn fail_and_clean(
             ctx.out.note(format!("    {h}"));
         }
     }
+    let mut created = created.clone();
+    flow::recover(&mut created, secrets, settings).await;
+    let created = &created;
     let anything =
         created.server.is_some() || created.firewall.is_some() || created.dns_record.is_some();
     if !anything {
@@ -755,10 +821,14 @@ async fn fail_and_clean(
     if !delete {
         let hint = match created.ip {
             Some(ip) => format!(
-                "Kept the server ({ip}); it bills until you delete it in the Hetzner console. {}",
+                "Kept the server ({ip}); it bills until you delete it in {}. {}",
+                plan.provider.console(),
                 f.hint.unwrap_or_default()
             ),
-            None => "Kept what was created; delete it in the Hetzner console.".into(),
+            None => format!(
+                "Kept what was created; delete it in {}.",
+                plan.provider.console()
+            ),
         };
         let code = if created.server.is_some() {
             EXIT_SERVER_KEPT
@@ -789,8 +859,9 @@ async fn fail_and_clean(
         Err(e) => {
             progress.failed();
             let hint = format!(
-                "Cleaning up failed too ({e:#}); delete server {} in the Hetzner console.",
-                plan.name
+                "Cleaning up failed too ({e:#}); delete server {} in {}.",
+                plan.name,
+                plan.provider.console()
             );
             finish(
                 ctx,
@@ -812,9 +883,9 @@ fn finish(
     outcome: Result<String, (anyhow::Error, Option<String>, i32)>,
 ) -> anyhow::Result<i32> {
     let url = format!("https://{}", plan.domain);
-    let server = created.server.map(|id| {
+    let server = created.server.as_deref().map(|id| {
         json!({
-            "id": id,
+            "id": flow::json_id(id),
             "name": plan.name,
             "ip": created.ip.map(|ip| ip.to_string()),
             "location": plan.location.name,
@@ -851,14 +922,18 @@ fn finish(
                 "  {bar}  {:<14}{} {}",
                 "Cost",
                 plan.server_type.monthly,
-                o.dim("per month, billed by Hetzner")
+                o.dim(&format!("per month, billed by {}", plan.provider.label()))
             ));
             o.line(format!(
                 "  {bar}  {:<14}{email} (this CLI is logged in)",
                 "Admin"
             ));
             if !matches!(plan.ssh, SshChoice::None) {
-                o.line(format!("  {bar}  {:<14}ssh root@{ip}", "SSH"));
+                o.line(format!(
+                    "  {bar}  {:<14}ssh {}@{ip}",
+                    "SSH",
+                    plan.provider.ssh_user()
+                ));
             }
             o.line(format!("  {bar}"));
             o.line(format!(
@@ -898,11 +973,23 @@ pub async fn options_with(
     env: &EnvSecrets,
     settings: &Settings,
 ) -> anyhow::Result<()> {
-    let token = env.hcloud.clone().ok_or_else(|| {
-        usage("set HCLOUD_TOKEN (a Hetzner Cloud API token) or pass --token-stdin")
+    let provider = args.provider.unwrap_or_default();
+    let secret = env.secret_for(provider).ok_or_else(|| {
+        usage(match provider {
+            Provider::Hetzner => {
+                "set HCLOUD_TOKEN (a Hetzner Cloud API token) or pass --token-stdin"
+            }
+            Provider::Aws => "set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
+        })
     })?;
-    let hz = flow::hetzner(settings, &token)?;
-    let mut catalog = load_catalog(&hz).await?;
+    let cloud = Cloud::connect(&secret, settings, "cli")?;
+    let mut catalog = load_catalog(&cloud).await?;
+    let ssh_keys = cloud
+        .provider()
+        .ssh_keys()
+        .await
+        .map_err(|e| cloud::error(provider, e))
+        .unwrap_or_default();
     if let Some(wanted) = &args.location {
         catalog.retain(|l| l.name.eq_ignore_ascii_case(wanted));
         if catalog.is_empty() {
@@ -912,12 +999,19 @@ pub async fn options_with(
         }
     }
     let value = json!({
-        "provider": "hetzner",
+        "provider": provider.id(),
+        "currency": "USD",
+        "pricesApproximate": provider.approximate_prices(),
         "recommendation": format!(
-            "4 vCPU / 8 GB (cx33 or cax21 class): {}",
+            "{}: {}",
+            match provider {
+                Provider::Hetzner => "4 vCPU / 8 GB (cx33 or cax21 class)",
+                Provider::Aws => "4 vCPU / 8 GB or more (t3.xlarge or t4g.xlarge class)",
+            },
             catalog::RECOMMENDATION
         ),
         "locations": catalog,
+        "sshKeys": ssh_keys,
     });
     ctx.out.either(&value, |o| {
         for l in &catalog {
@@ -926,10 +1020,12 @@ pub async fn options_with(
                 l.label(),
                 o.dim(&format!(
                     "from {}/mo",
-                    l.from_cents().map(format_eur).unwrap_or_default()
+                    l.from_cents()
+                        .map(|c| format_usd(c, provider.approximate_prices()))
+                        .unwrap_or_default()
                 ))
             ));
-            let mut t = Table::new(&["type", "vcpu", "ram", "disk", "arch", "€/month", ""]);
+            let mut t = Table::new(&["type", "vcpu", "ram", "disk", "arch", "$/month", ""]);
             for ty in &l.types {
                 t.row([
                     ty.name.clone(),
@@ -949,7 +1045,8 @@ pub async fn options_with(
             o.line("");
         }
         o.note(format!(
-            "Prices include VAT. ★ = enough for {} (4 vCPU / 8 GB class).",
+            "{} ★ = enough for {} (4 vCPU / 8 GB class).",
+            provider.price_note(),
             catalog::RECOMMENDATION
         ));
     })
@@ -973,6 +1070,7 @@ mod tests {
     fn full_env() -> EnvSecrets {
         EnvSecrets {
             hcloud: Some("h".to_owned().into()),
+            aws: None,
             cloudflare: None,
             admin_password: Some("correct horse battery".to_owned().into()),
         }
@@ -1001,6 +1099,25 @@ mod tests {
             missing_inputs(&args, &full_env(), true),
             ["CLOUDFLARE_API_TOKEN (environment, for --cloudflare-dns)"]
         );
+    }
+
+    #[test]
+    fn aws_needs_both_keys_and_no_hetzner_token() {
+        let args = ServerCreateArgs {
+            provider: Some(Provider::Aws),
+            ..full_args()
+        };
+        assert_eq!(
+            missing_inputs(&args, &full_env(), true),
+            ["AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (environment)"]
+        );
+        let mut env = full_env();
+        env.hcloud = None;
+        env.aws = Some(AwsKeys {
+            access_key_id: "AKIA".into(),
+            secret_access_key: "s".to_owned().into(),
+        });
+        assert!(missing_inputs(&args, &env, true).is_empty());
     }
 
     #[test]
@@ -1062,16 +1179,21 @@ mod tests {
 
     #[test]
     fn ssh_keys_are_reused_or_uploaded_under_a_free_name() {
-        let existing: Vec<SshKey> = serde_json::from_value(json!([
-            {"id": 1, "name": "ada@laptop", "public_key": "ssh-ed25519 AAAAold ada@laptop"},
-            {"id": 2, "name": "other", "public_key": "ssh-ed25519 AAAAsame different-comment"}
-        ]))
-        .unwrap();
+        let key = |id: &str, name: &str, public_key: &str| ProviderSshKey {
+            id: id.into(),
+            name: name.into(),
+            fingerprint: String::new(),
+            public_key: Some(public_key.into()),
+        };
+        let existing = vec![
+            key("1", "ada@laptop", "ssh-ed25519 AAAAold ada@laptop"),
+            key("2", "other", "ssh-ed25519 AAAAsame different-comment"),
+        ];
         let p = Path::new("/home/ada/.ssh/id_ed25519.pub");
         assert_eq!(
             ssh_choice_for_file(p, "ssh-ed25519 AAAAsame ada@laptop".into(), &existing),
             SshChoice::Existing {
-                id: 2,
+                id: "2".into(),
                 name: "other".into()
             }
         );

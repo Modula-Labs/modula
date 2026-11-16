@@ -10,14 +10,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 
+use super::caps::{self, Caps, Usage};
 use super::cloud_init::Bootstrap;
-use super::{JOIN_TOKEN_TTL, NewServer, ServerProvider, track, valid_server_name};
+use super::{
+    JOIN_TOKEN_TTL, NewServer, connected_kinds, connected_provider, kind_of_location, label,
+    labels, provider_for, track, valid_server_name,
+};
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
-use crate::integrations::hetzner::{self, Caps, Usage};
 use crate::locations::{self, Location};
 use crate::state::AppState;
 
@@ -71,7 +74,14 @@ async fn load(state: &AppState, id: Id) -> AppResult<ProvisionedServer> {
 #[serde(rename_all = "camelCase")]
 pub struct ServerList {
     pub servers: Vec<ProvisionedServer>,
-    pub hetzner_connected: bool,
+    pub connected_providers: Vec<ConnectedProvider>,
+}
+
+/// A provider the workspace has connected, with its limits and spend.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectedProvider {
+    pub kind: &'static str,
     pub caps: Caps,
     pub usage: Usage,
 }
@@ -87,20 +97,27 @@ pub async fn list(State(state): State<AppState>, grant: Grant) -> AppResult<Json
     for s in &mut servers {
         s.location = locations::get(&s.location_id);
     }
-    let metadata: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT metadata FROM integrations WHERE workspace_id = $1 AND kind = 'hetzner'",
-    )
-    .bind(workspace)
-    .fetch_optional(&state.db)
-    .await?;
+    let mut connected_providers = Vec::new();
+    for kind in connected_kinds(&state.db, workspace).await? {
+        let metadata: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT metadata FROM integrations WHERE workspace_id = $1 AND kind = $2",
+        )
+        .bind(workspace)
+        .bind(kind)
+        .fetch_optional(&state.db)
+        .await?;
+        connected_providers.push(ConnectedProvider {
+            kind,
+            caps: metadata
+                .as_ref()
+                .map(|m| Caps::from_metadata(m, state.cfg.eur_usd_rate))
+                .unwrap_or_default(),
+            usage: caps::usage(&state.db, workspace, kind).await?,
+        });
+    }
     Ok(Json(ServerList {
         servers,
-        hetzner_connected: metadata.is_some(),
-        caps: metadata
-            .as_ref()
-            .map(Caps::from_metadata)
-            .unwrap_or_default(),
-        usage: hetzner::usage(&state.db, workspace).await?,
+        connected_providers,
     }))
 }
 
@@ -119,13 +136,17 @@ pub struct Provision {
     pub server_type: String,
     pub name: String,
     #[serde(default)]
-    pub ssh_key_ids: Vec<i64>,
+    pub ssh_key_ids: Vec<String>,
     /// Open port 22 in the firewall.
     #[serde(default)]
     pub ssh: bool,
+    /// Root disk size in GB, for providers where it is chosen apart from the
+    /// server type (EC2); the others ignore it.
+    #[serde(default)]
+    pub disk_gb: Option<u32>,
 }
 
-/// Create a server at Hetzner that joins this instance. Admin + sudo; the
+/// Create a server at the provider selling `location` that joins this instance. Admin + sudo; the
 /// caps are checked and the row recorded in one transaction, so concurrent
 /// requests cannot overshoot them.
 pub async fn provision(
@@ -141,14 +162,24 @@ pub async fn provision(
             "name must be 1–63 lowercase letters, digits or hyphens",
         ));
     }
-    let location = locations::get(&req.location)
-        .filter(|l| l.provider == hetzner::KIND)
-        .ok_or_else(|| AppError::bad_request("choose a Hetzner location"))?;
-    if req.ssh_key_ids.len() > 10 || req.ssh_key_ids.iter().any(|k| *k <= 0) {
+    let (location, kind) = locations::get(&req.location)
+        .and_then(|l| Some((l, kind_of_location(l.id)?)))
+        .ok_or_else(|| AppError::bad_request(format!("choose a {} location", labels())))?;
+    if req.ssh_key_ids.len() > 10 {
         return Err(AppError::bad_request("invalid SSH key selection"));
     }
-    let provider = hetzner::api::connected(&state, workspace).await?;
-    // The price comes from Hetzner, never from the request.
+    let provider = connected_provider(&state, workspace, kind).await?;
+    if !req.ssh_key_ids.is_empty() {
+        let keys = provider.ssh_keys().await?;
+        if !req
+            .ssh_key_ids
+            .iter()
+            .all(|id| keys.iter().any(|k| k.id == *id))
+        {
+            return Err(AppError::bad_request("invalid SSH key selection"));
+        }
+    }
+    // The price comes from the provider, never from the request.
     let types = provider.server_types().await?;
     let price = types
         .iter()
@@ -157,6 +188,9 @@ pub async fn provision(
         .ok_or_else(|| {
             AppError::bad_request("that server type is not available in this location")
         })?;
+    let price = provider
+        .price_with_disk(price, req.disk_gb)
+        .map_err(AppError::bad_request)?;
     let ca = state.pki().await?.fingerprint();
     // The boot script would have to carry the servers' Access service token
     // through the provider's user data; not done (yet).
@@ -169,23 +203,30 @@ pub async fn provision(
     let id = Id::new();
     let mut tx = state.db.begin().await?;
     let metadata: serde_json::Value = sqlx::query_scalar(
-        "SELECT metadata FROM integrations WHERE workspace_id = $1 AND kind = 'hetzner' FOR UPDATE",
+        "SELECT metadata FROM integrations WHERE workspace_id = $1 AND kind = $2 FOR UPDATE",
     )
     .bind(workspace)
+    .bind(kind)
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(|| AppError::Conflict("connect Hetzner in workspace settings first".into()))?;
-    let caps = Caps::from_metadata(&metadata);
-    let used = hetzner::usage(&mut *tx, workspace).await?;
+    .ok_or_else(|| {
+        AppError::Conflict(format!(
+            "connect {} in workspace settings first",
+            label(kind)
+        ))
+    })?;
+    let caps = Caps::from_metadata(&metadata, state.cfg.eur_usd_rate);
+    let used = caps::usage(&mut *tx, workspace, kind).await?;
     if used.servers + 1 > caps.max_servers {
         return Err(AppError::Conflict(format!(
-            "this workspace may have at most {} servers from Hetzner; raise the limit in settings",
-            caps.max_servers
+            "this workspace may have at most {} servers from {}; raise the limit in settings",
+            caps.max_servers,
+            label(kind)
         )));
     }
     if used.monthly_cents + price > caps.max_monthly_cents {
         return Err(AppError::Conflict(format!(
-            "this server would bring the monthly total to €{:.2}, over the €{:.2} limit",
+            "this server would bring the monthly total to ${:.2}, over the ${:.2} limit",
             (used.monthly_cents + price) as f64 / 100.0,
             caps.max_monthly_cents as f64 / 100.0
         )));
@@ -214,7 +255,7 @@ pub async fn provision(
         "INSERT INTO provisioned_servers
            (id, workspace_id, provider, name, location, server_type, monthly_price_cents,
             ssh_enabled, join_token_id, created_by)
-         VALUES ($1, $2, 'hetzner', $3, $4, $5, $6, $7, $8, $9)",
+         VALUES ($1, $2, $10, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(id)
     .bind(workspace)
@@ -225,6 +266,7 @@ pub async fn provision(
     .bind(req.ssh)
     .bind(join_id)
     .bind(actor.user_id)
+    .bind(kind)
     .execute(&mut *tx)
     .await?;
     Entry::new("server.provision", &meta)
@@ -232,12 +274,13 @@ pub async fn provision(
         .workspace(workspace)
         .target("provisioned_server", id)
         .metadata(json!({
-            "provider": "hetzner",
+            "provider": kind,
             "name": req.name,
             "location": location.id,
             "serverType": req.server_type,
             "monthlyCents": price,
             "ssh": req.ssh,
+            "diskGb": req.disk_gb,
         }))
         .record(&mut *tx)
         .await?;
@@ -257,6 +300,7 @@ pub async fn provision(
         labels,
         ssh_key_ids: req.ssh_key_ids.clone(),
         ssh: req.ssh,
+        disk_gb: req.disk_gb,
     };
     match provider.create(&new).await {
         Ok(created) => {
@@ -321,16 +365,16 @@ pub async fn delete(
 ) -> AppResult<Json<serde_json::Value>> {
     let id = grant.id();
     let workspace = grant.workspace_id()?;
-    let row: (Option<String>, Option<Id>, Option<Id>, String) = sqlx::query_as(
+    let row: (Option<String>, Option<Id>, Option<Id>, String, String) = sqlx::query_as(
         "SELECT provider_id, join_token_id,
                 COALESCE(s.node_id, (SELECT node_id FROM node_join_tokens WHERE id = s.join_token_id)),
-                name
+                name, provider
          FROM provisioned_servers s WHERE id = $1",
     )
     .bind(id)
     .fetch_one(&state.db)
     .await?;
-    let (provider_id, join_token_id, node_id, name) = row;
+    let (provider_id, join_token_id, node_id, name, kind) = row;
     let (status, main): (String, bool) = sqlx::query_as(
         "SELECT s.status, coalesce(n.status <> 'revoked' AND n.info->'capabilities' ? 'dashboard', false)
          FROM provisioned_servers s LEFT JOIN nodes n ON n.id = s.node_id WHERE s.id = $1",
@@ -369,7 +413,7 @@ pub async fn delete(
         }
     }
 
-    let provider = hetzner::provider(&state, workspace).await?;
+    let provider = provider_for(&state, workspace, &kind).await?;
     let previous: String = sqlx::query_scalar(
         "UPDATE provisioned_servers p SET status = 'deleting', updated_at = now()
          FROM provisioned_servers old WHERE p.id = $1 AND old.id = p.id RETURNING old.status",
@@ -386,9 +430,10 @@ pub async fn delete(
     if let Some(remote) = &remote {
         let result = match &provider {
             Some(p) => p.delete(remote).await.map_err(AppError::from),
-            None => Err(AppError::Conflict(
-                "connect Hetzner again to delete this server".into(),
-            )),
+            None => Err(AppError::Conflict(format!(
+                "connect {} again to delete this server",
+                label(&kind)
+            ))),
         };
         if let Err(e) = result {
             sqlx::query("UPDATE provisioned_servers SET status = $2 WHERE id = $1")

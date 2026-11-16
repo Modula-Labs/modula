@@ -36,6 +36,7 @@ pub mod workspaces;
 
 use crate::authz::Action;
 use crate::http::{Access, ApiRouter};
+use crate::integrations::aws::api as aws;
 use crate::integrations::cloudflare::api as cloudflare;
 use crate::integrations::hetzner::api as hetzner;
 use crate::migrate::api as migrate;
@@ -145,6 +146,7 @@ pub fn routes(state: AppState) -> ApiRouter {
         .post("/api/nodes/{node_id}/migrate", Resource(Action::NodeMigrate), migrate::migrate)
         .get("/api/server-migrations/{migration_id}", Resource(Action::ServerMigrationRead), migrate::get)
         .post("/api/server-migrations/{migration_id}/abort", Resource(Action::ServerMigrationAbort), migrate::abort)
+        .post("/api/server-migrations/{migration_id}/retry-dns", Resource(Action::ServerMigrationRetryDns), migrate::retry_dns)
         .get("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesRead), variables::instance_variables)
         .patch("/api/service-instances/{instance_id}/variables", Resource(Action::VariablesWrite), variables::update_instance_variables)
         .get("/api/environments/{environment_id}/variables", Resource(Action::SharedVariablesRead), variables::shared_variables)
@@ -292,12 +294,19 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/nodes/{node_id}/metrics", Resource(Action::NodeRead), nodes::metrics)
         .get("/api/locations", Authenticated, nodes::locations)
         // Hetzner integration and servers created through it (token is write-only; see integrations/hetzner)
-        .get("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::HetznerRead), hetzner::status)
-        .put("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::HetznerConnect), hetzner::connect)
-        .patch("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::HetznerConnect), hetzner::update_caps)
-        .delete("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::HetznerDisconnect), hetzner::disconnect)
-        .get("/api/workspaces/{workspace_id}/integrations/hetzner/catalog", Resource(Action::HetznerCatalog), hetzner::catalog)
-        .get("/api/workspaces/{workspace_id}/integrations/hetzner/ssh-keys", Resource(Action::HetznerCatalog), hetzner::ssh_keys)
+        .get("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::ProviderRead), hetzner::status)
+        .put("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::ProviderConnect), hetzner::connect)
+        .patch("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::ProviderConnect), hetzner::update_caps)
+        .delete("/api/workspaces/{workspace_id}/integrations/hetzner", Resource(Action::ProviderDisconnect), hetzner::disconnect)
+        .get("/api/workspaces/{workspace_id}/integrations/hetzner/catalog", Resource(Action::ProviderCatalog), hetzner::catalog)
+        .get("/api/workspaces/{workspace_id}/integrations/hetzner/ssh-keys", Resource(Action::ProviderCatalog), hetzner::ssh_keys)
+        // AWS, the same shape (the access key is write-only; see integrations/aws)
+        .get("/api/workspaces/{workspace_id}/integrations/aws", Resource(Action::ProviderRead), aws::status)
+        .put("/api/workspaces/{workspace_id}/integrations/aws", Resource(Action::ProviderConnect), aws::connect)
+        .patch("/api/workspaces/{workspace_id}/integrations/aws", Resource(Action::ProviderConnect), aws::update_caps)
+        .delete("/api/workspaces/{workspace_id}/integrations/aws", Resource(Action::ProviderDisconnect), aws::disconnect)
+        .get("/api/workspaces/{workspace_id}/integrations/aws/catalog", Resource(Action::ProviderCatalog), aws::catalog)
+        .get("/api/workspaces/{workspace_id}/integrations/aws/ssh-keys", Resource(Action::ProviderCatalog), aws::ssh_keys)
         .get("/api/workspaces/{workspace_id}/servers", Resource(Action::ServerList), provision::api::list)
         .post("/api/workspaces/{workspace_id}/servers/provision", Resource(Action::ServerProvision), provision::api::provision)
         .get("/api/workspaces/{workspace_id}/servers/suggest", Resource(Action::ServerSuggest), provision::suggest::suggest)

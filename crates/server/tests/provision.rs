@@ -413,7 +413,7 @@ async fn provisions_with_labels_firewall_and_single_use_join(pool: PgPool) {
         .unwrap();
     assert_eq!(
         cx22["prices"][0],
-        json!({"location": "hetzner:fsn1", "monthlyCents": 452})
+        json!({"location": "hetzner:fsn1", "monthlyCents": 488})
     );
     assert_eq!(
         (cx22["cores"].as_u64(), cx22["arch"].as_str()),
@@ -435,12 +435,12 @@ async fn provisions_with_labels_firewall_and_single_use_join(pool: PgPool) {
         &app,
         &admin,
         ws,
-        json!({"location": "hetzner:fsn1", "serverType": "cx22", "name": "worker-1", "sshKeyIds": [42]}),
+        json!({"location": "hetzner:fsn1", "serverType": "cx22", "name": "worker-1", "sshKeyIds": ["42"]}),
     )
     .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     assert_eq!(r.json["status"], "booting");
-    assert_eq!(r.json["monthlyPriceCents"], 452);
+    assert_eq!(r.json["monthlyPriceCents"], 488);
     assert_eq!(r.json["location"]["id"], "hetzner:fsn1");
     let id: Id = r.json["id"].as_str().unwrap().parse().unwrap();
 
@@ -622,8 +622,8 @@ async fn caps_and_validation_are_enforced(pool: PgPool) {
             "quote",
         ),
         (
-            json!({"location": "aws:us-east-1", "serverType": "cx22", "name": "w1"}),
-            "non-hetzner location",
+            json!({"location": "gcp:us-central1", "serverType": "cx22", "name": "w1"}),
+            "a location no provider sells",
         ),
         (
             json!({"location": "hetzner:fsn1", "serverType": "cx11", "name": "w1"}),
@@ -650,7 +650,7 @@ async fn caps_and_validation_are_enforced(pool: PgPool) {
         .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
 
-    // Over the monthly limit: €8.21 + €4.52 > €10.
+    // Over the monthly limit: $8.87 + $4.88 > $10.
     let r = provision(
         &app,
         &admin,
@@ -842,7 +842,7 @@ async fn suggests_existing_room_or_the_cheapest_type(pool: PgPool) {
         "{:?}",
         r.json
     );
-    assert_eq!(r.json["suggestion"]["monthlyCents"], 821);
+    assert_eq!(r.json["suggestion"]["monthlyCents"], 887);
     assert_eq!(r.json["suggestion"]["withinCaps"], true);
     let r = app
         .call(
@@ -967,12 +967,12 @@ async fn mesh_node(app: &TestApp, ws: Option<Id>, ip: &str) -> Id {
 async fn sync_firewalls(app: &TestApp) {
     let job = modula_server::jobs::Job {
         id: 0,
-        kind: modula_server::integrations::hetzner::firewall::SYNC_JOB.into(),
+        kind: modula_server::provision::mesh::SYNC_JOB.into(),
         payload: json!({}),
         attempts: 0,
         max_attempts: 3,
     };
-    modula_server::integrations::hetzner::firewall::sync_job(app.state.clone(), job)
+    modula_server::provision::mesh::sync_job(app.state.clone(), job)
         .await
         .unwrap();
 }
@@ -1048,7 +1048,7 @@ async fn wireguard_is_open_only_between_modulas_servers(pool: PgPool) {
     modula_server::nodes::revoke(&mut tx, joined).await.unwrap();
     tx.commit().await.unwrap();
     let queued: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM jobs WHERE kind = 'hetzner.sync_firewalls' AND status = 'queued'",
+        "SELECT count(*) FROM jobs WHERE kind = 'provision.sync_mesh' AND status = 'queued'",
     )
     .fetch_one(app.db())
     .await
@@ -1062,4 +1062,121 @@ async fn wireguard_is_open_only_between_modulas_servers(pool: PgPool) {
             "203.0.113.10/32".to_owned()
         ])
     );
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn the_location_decides_the_provider(pool: PgPool) {
+    let (app, _mock) = app_with_mock(pool).await;
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    connect(&app, &admin, ws).await;
+    let list = app
+        .call(
+            axum::http::Method::GET,
+            &format!("/api/workspaces/{ws}/servers"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(list.status, StatusCode::OK, "{:?}", list.json);
+    assert_eq!(list.json["connectedProviders"][0]["kind"], "hetzner");
+
+    // In the catalog, but nothing can create servers there yet.
+    let r = provision(
+        &app,
+        &admin,
+        ws,
+        json!({"location": "gcp:us-central1", "serverType": "t3.small", "name": "w"}),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+    assert!(
+        r.json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Hetzner or AWS location")
+    );
+    // A key the provider doesn't hold never reaches the order.
+    let r = provision(
+        &app,
+        &admin,
+        ws,
+        json!({"location": "hetzner:fsn1", "serverType": "cx22", "name": "w", "sshKeyIds": ["7"]}),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn euro_limits_read_as_dollars_until_saved(pool: PgPool) {
+    let (app, _mock) = app_with_mock(pool).await;
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    connect(&app, &admin, ws).await;
+    sqlx::query(
+        "UPDATE integrations SET metadata = '{\"maxServers\": 3, \"maxMonthlyCents\": 1000}'
+         WHERE workspace_id = $1 AND kind = 'hetzner'",
+    )
+    .bind(ws)
+    .execute(app.db())
+    .await
+    .unwrap();
+    let path = format!("/api/workspaces/{ws}/integrations/hetzner");
+    let r = app
+        .call(axum::http::Method::GET, &path, Some(&admin), None)
+        .await;
+    assert_eq!(r.json["caps"]["maxMonthlyCents"], 1080);
+
+    // Saving another field keeps the limit, now in dollars, without drift.
+    let r = app
+        .call(
+            axum::http::Method::PATCH,
+            &path,
+            Some(&admin),
+            Some(json!({"maxServers": 4})),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let r = app
+        .call(axum::http::Method::GET, &path, Some(&admin), None)
+        .await;
+    assert_eq!(r.json["caps"]["maxMonthlyCents"], 1080);
+    assert_eq!(r.json["caps"]["maxServers"], 4);
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn a_broken_connection_does_not_stop_the_mesh_sync(pool: PgPool) {
+    let (app, mock) = app_with_mock(pool).await;
+    let admin = app.setup_admin().await;
+    let broken = app.create_workspace(&admin, "broken").await;
+    let working = app.create_workspace(&admin, "working").await;
+    connect(&app, &admin, broken).await;
+    connect(&app, &admin, working).await;
+    mesh_node(&app, Some(working), "198.51.100.7").await;
+    let selector_labels = json!({"modula": "1", "workspace": working.to_string(), "ssh": "0"});
+    mock.lock().unwrap().firewalls.push(json!({
+        "id": 901, "name": "modula-working", "labels": selector_labels, "rules": [],
+    }));
+    sqlx::query("UPDATE integrations SET secret_sealed = '\\x00' WHERE workspace_id = $1")
+        .bind(broken)
+        .execute(app.db())
+        .await
+        .unwrap();
+
+    let job = modula_server::jobs::Job {
+        id: 0,
+        // A job queued under the old kind runs the same handler.
+        kind: modula_server::provision::mesh::LEGACY_SYNC_JOB.into(),
+        payload: json!({}),
+        attempts: 0,
+        max_attempts: 3,
+    };
+    let err = modula_server::provision::mesh::sync_job(app.state.clone(), job)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains(&broken.to_string()), "{err}");
+
+    let m = mock.lock().unwrap();
+    let fw = m.firewalls.iter().find(|f| f["id"] == 901).unwrap();
+    assert_eq!(fw["rules"][0]["source_ips"], json!(["198.51.100.7/32"]));
 }

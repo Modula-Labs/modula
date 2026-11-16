@@ -66,6 +66,22 @@ impl DnsProvider for CloudflareDns {
         })
     }
 
+    fn read_routing<'a>(
+        &'a self,
+        zone: &'a Zone,
+        name: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
+        Box::pin(async move {
+            let mut out = Vec::new();
+            for kind in ["A", "AAAA", "CNAME"] {
+                for r in self.client.dns_records(&zone.id, name, kind).await? {
+                    out.push((r.kind, r.content));
+                }
+            }
+            Ok(out)
+        })
+    }
+
     fn delete_record<'a>(
         &'a self,
         zone: &'a Zone,

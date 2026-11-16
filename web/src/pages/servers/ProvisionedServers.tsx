@@ -7,8 +7,10 @@ import { Alert, Badge, StatusDot } from "@/components/ui/misc";
 import { ApiError } from "@/lib/api";
 import { flagEmoji } from "@/lib/flags";
 import {
-  euros,
+  monthlyUsd,
   provisionApi,
+  providerName,
+  usd,
   type ProvisionStatus,
   type ProvisionedServer,
 } from "@/lib/provision";
@@ -20,6 +22,7 @@ const LABEL: Record<ProvisionStatus, string> = {
   ready: "Ready",
   failed: "Failed",
   deleting: "Deleting",
+  resizing: "Resizing",
   pending_deletion: "Migrated — delete it",
 };
 const TONE: Record<ProvisionStatus, "success" | "warn" | "danger" | "neutral"> =
@@ -30,10 +33,11 @@ const TONE: Record<ProvisionStatus, "success" | "warn" | "danger" | "neutral"> =
     ready: "success",
     failed: "danger",
     deleting: "neutral",
+    resizing: "warn",
     pending_deletion: "warn",
   };
 
-/** Servers this workspace created at Hetzner, with live status and delete. */
+/** Servers this workspace created at its cloud providers, with live status and delete. */
 export function ProvisionedServers({
   workspaceId,
 }: {
@@ -50,24 +54,29 @@ export function ProvisionedServers({
   });
   const [deleting, setDeleting] = useState<ProvisionedServer | null>(null);
   const servers = list.data?.servers ?? [];
-  if (!list.data?.hetznerConnected && servers.length === 0) return null;
+  const providers = list.data?.connectedProviders ?? [];
+  if (providers.length === 0 && servers.length === 0) return null;
 
   return (
     <section className="mt-10">
       <div className="flex items-baseline justify-between gap-4">
-        <h2 className="text-base leading-6 font-bold">Created at Hetzner</h2>
-        {list.data ? (
-          <span className="text-[13px] text-muted-foreground">
-            {list.data.usage.servers} of {list.data.caps.maxServers} servers ·{" "}
-            {euros(list.data.usage.monthlyCents)} of{" "}
-            {euros(list.data.caps.maxMonthlyCents)} per month
-          </span>
+        <h2 className="text-base leading-6 font-bold">Cloud servers</h2>
+        {providers.length ? (
+          <div className="flex flex-col items-end text-[13px] text-muted-foreground">
+            {providers.map((p) => (
+              <span key={p.kind}>
+                {providerName(p.kind)} · {p.usage.servers} of {p.caps.maxServers}{" "}
+                servers · {monthlyUsd(p.usage.monthlyCents, p.kind)} of{" "}
+                {usd(p.caps.maxMonthlyCents)} per month
+              </span>
+            ))}
+          </div>
         ) : null}
       </div>
       {list.error ? <Alert>{list.error.message}</Alert> : null}
       {servers.length === 0 ? (
         <p className="mt-3 text-sm text-muted-foreground">
-          None yet. Use Add server → Hetzner Cloud.
+          None yet. Use Add server and pick a cloud provider.
         </p>
       ) : (
         <div className="mt-3 divide-y divide-border rounded-xl border border-border">
@@ -88,8 +97,9 @@ export function ProvisionedServers({
                 <div className="truncate text-[13px] text-muted-foreground">
                   {[
                     s.location?.city,
+                    providerName(s.provider),
                     s.ipv4,
-                    `${euros(s.monthlyPriceCents)}/mo`,
+                    `${monthlyUsd(s.monthlyPriceCents, s.provider)}/mo`,
                   ]
                     .filter(Boolean)
                     .join(" · ")}
@@ -118,6 +128,13 @@ export function ProvisionedServers({
       />
     </section>
   );
+}
+
+/** What deleting a server does at its provider. */
+function deleteNote(provider: string | undefined): string {
+  return provider === "aws"
+    ? "The instance is terminated at AWS with everything on its disk, its Elastic IP is released, and it is removed from this instance. Billing stops."
+    : `The server is deleted at ${providerName(provider)} with everything on its disk, and removed from this instance. Billing stops.`;
 }
 
 function DeleteServerDialog({
@@ -151,7 +168,7 @@ function DeleteServerDialog({
       open={!!server}
       onOpenChange={(o) => (o ? null : close())}
       title={`Delete ${server?.name ?? "server"}?`}
-      description="The server is deleted at Hetzner with everything on its disk, and removed from this instance. Billing stops."
+      description={deleteNote(server?.provider)}
     >
       <div className="flex flex-col gap-4">
         {remove.error ? (

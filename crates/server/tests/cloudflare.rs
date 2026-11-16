@@ -30,6 +30,8 @@ struct Cf {
     buckets: Mutex<Vec<String>>,
     /// Answer the next request with 429 (Retry-After: 0).
     throttle_next: AtomicBool,
+    /// Writes answer success but change nothing (read-back must catch it).
+    ignore_writes: AtomicBool,
 }
 
 impl Cf {
@@ -145,7 +147,14 @@ async fn handle(
                 .filter(|r| query.get("type").is_none_or(|t| r["type"] == **t))
                 .filter(|r| query.get("name").is_none_or(|n| r["name"] == **n))
                 .collect();
-            page(found, 1, 1)
+            let found: Vec<Value> = found;
+            let p: usize = query.get("page").and_then(|p| p.parse().ok()).unwrap_or(1);
+            let total = found.len().div_ceil(50).max(1);
+            page(
+                found.into_iter().skip((p - 1) * 50).take(50).collect(),
+                p as u32,
+                total as u32,
+            )
         }
         ("POST", ["zones", zone, "dns_records"]) => {
             let id = format!("rec{}", cf.next_id.fetch_add(1, Ordering::SeqCst));
@@ -161,6 +170,24 @@ async fn handle(
         }
         ("PATCH", ["zones", _, "dns_records", id]) => {
             let mut recs = cf.records.lock().unwrap();
+            if cf.ignore_writes.load(Ordering::SeqCst) {
+                return ok(json!({ "id": id }));
+            }
+            let me = recs.iter().find(|r| r["id"] == *id).cloned();
+            if let Some(me) = &me
+                && recs.iter().any(|r| {
+                    r["id"] != *id
+                        && r["name"] == me["name"]
+                        && r["type"] == me["type"]
+                        && r["content"] == body["content"]
+                })
+            {
+                return fail(
+                    StatusCode::BAD_REQUEST,
+                    81058,
+                    "An identical record already exists.",
+                );
+            }
             let Some(r) = recs.iter_mut().find(|r| r["id"] == *id) else {
                 return fail(StatusCode::NOT_FOUND, 81044, "Record does not exist.");
             };
@@ -692,4 +719,300 @@ async fn custom_domains_get_dns_records_and_a_proxied_toggle(pool: PgPool) {
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
     assert_eq!(r.json["endpoint"], "https://acc1.r2.cloudflarestorage.com");
     assert_eq!(r.json["canCreateBuckets"], false);
+}
+
+// ---------------------------------------------------------------- following a server
+
+const OLD: &str = "198.51.100.1";
+const NEW: &str = "198.51.100.2";
+
+fn seed(cf: &Cf, zone: &str, id: &str, name: &str, content: &str, comment: Option<&str>) {
+    cf.records.lock().unwrap().push(json!({
+        "id": id, "zone": zone, "type": "A", "name": name, "content": content,
+        "proxied": true, "ttl": 300, "comment": comment,
+    }));
+}
+
+fn content_of(cf: &Cf, id: &str) -> Option<Value> {
+    cf.records().into_iter().find(|r| r["id"] == id)
+}
+
+async fn connect(app: &TestApp, admin: &str, ws: Id) {
+    let r = app
+        .call(
+            Method::PUT,
+            &cf_path(ws),
+            Some(admin),
+            Some(json!({ "token": TOKEN })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+}
+
+/// A migration at step dns, whose new server has address `NEW`.
+async fn at_dns_step(app: &TestApp, ws: Id, skip: Value) -> Id {
+    let target = Id::new();
+    sqlx::query(
+        "INSERT INTO provisioned_servers (id, workspace_id, provider, provider_id, name, location,
+                                          server_type, monthly_price_cents, status, ipv4)
+         VALUES ($1, $2, 'hetzner', '77', 'new', 'hetzner:hel1', 'cx22', 451, 'ready', $3)",
+    )
+    .bind(target)
+    .bind(ws)
+    .bind(NEW)
+    .execute(app.db())
+    .await
+    .unwrap();
+    let id = Id::new();
+    sqlx::query(
+        "INSERT INTO server_migrations (id, workspace_id, source_name, target_location, target_server_type,
+                                        target_server_id, status, step, steps, source_ip, dns_skip)
+         VALUES ($1, $2, 'old', 'hetzner:hel1', 'cx22', $3, 'running', 'dns',
+                 '[{\"label\": \"DNS\", \"status\": \"running\"}]', $4, $5)",
+    )
+    .bind(id)
+    .bind(ws)
+    .bind(target)
+    .bind(OLD)
+    .bind(skip)
+    .execute(app.db())
+    .await
+    .unwrap();
+    id
+}
+
+async fn poll_dns(app: &TestApp, id: Id) -> bool {
+    sqlx::query("UPDATE server_migrations SET dns_next_at = NULL WHERE id = $1")
+        .bind(id)
+        .execute(app.db())
+        .await
+        .unwrap();
+    modula_server::migrate::server::poll(&app.state, id)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn a_migration_repoints_exactly_the_records_on_the_old_address(pool: PgPool) {
+    let (app, cf) = app_with_cf(pool).await;
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    connect(&app, &admin, ws).await;
+    // More than a page of other records, so the listing must be followed.
+    for i in 0..120 {
+        seed(
+            &cf,
+            "zid1",
+            &format!("f{i}"),
+            &format!("f{i}.example.com"),
+            "198.51.100.77",
+            None,
+        );
+    }
+    seed(
+        &cf,
+        "zid1",
+        "theirs",
+        "shop.example.com",
+        OLD,
+        Some("keep me"),
+    );
+    seed(
+        &cf,
+        "zid1",
+        "wild",
+        "*.apps.example.com",
+        OLD,
+        Some("Managed by Modula Deploy"),
+    );
+    seed(&cf, "zid1", "skipped", "skip.example.com", OLD, None);
+    seed(
+        &cf,
+        "zid1",
+        "other",
+        "other.example.com",
+        "198.51.100.9",
+        None,
+    );
+    seed(&cf, "zid2", "secondzone", "a.shop.dev", OLD, None);
+    // The custom-domain resync had already written the new address here.
+    seed(&cf, "zid1", "dup-old", "dup.example.com", OLD, None);
+    seed(&cf, "zid1", "dup-new", "dup.example.com", NEW, None);
+
+    let id = at_dns_step(&app, ws, json!(["skipped"])).await;
+    cf.ignore_writes.store(true, Ordering::SeqCst);
+    let mut settled = false;
+    for _ in 0..modula_server::migrate::dns::ATTEMPTS {
+        settled = poll_dns(&app, id).await;
+    }
+    assert!(settled);
+    let (status, step, error): (String, String, String) =
+        sqlx::query_as("SELECT status, step, error FROM server_migrations WHERE id = $1")
+            .bind(id)
+            .fetch_one(app.db())
+            .await
+            .unwrap();
+    assert_eq!((status.as_str(), step.as_str()), ("failed", "dns"));
+    assert!(error.contains("only DNS is left"), "{error}");
+    assert!(
+        error.contains("still has"),
+        "read back from Cloudflare: {error}"
+    );
+
+    cf.ignore_writes.store(false, Ordering::SeqCst);
+    let r = app
+        .call(
+            Method::POST,
+            &format!("/api/server-migrations/{id}/retry-dns"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["status"], "running");
+    assert!(poll_dns(&app, id).await);
+    let m = app
+        .call(
+            Method::GET,
+            &format!("/api/server-migrations/{id}"),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(m.json["status"], "done", "{:#}", m.json);
+
+    // In place: address changed, the rest kept.
+    let r = content_of(&cf, "theirs").unwrap();
+    assert_eq!(r["content"], NEW);
+    assert_eq!(
+        (r["proxied"].clone(), r["ttl"].clone()),
+        (json!(true), json!(300))
+    );
+    assert_eq!(r["comment"], "keep me");
+    assert_eq!(content_of(&cf, "wild").unwrap()["content"], NEW);
+    assert_eq!(
+        content_of(&cf, "secondzone").unwrap()["content"],
+        NEW,
+        "paged zone"
+    );
+    assert_eq!(
+        content_of(&cf, "skipped").unwrap()["content"],
+        OLD,
+        "opted out"
+    );
+    assert_eq!(content_of(&cf, "other").unwrap()["content"], "198.51.100.9");
+    assert_eq!(content_of(&cf, "f100").unwrap()["content"], "198.51.100.77");
+    assert!(content_of(&cf, "dup-old").is_none(), "no identical twin");
+    assert_eq!(content_of(&cf, "dup-new").unwrap()["content"], NEW);
+
+    let audit: Value =
+        sqlx::query_scalar("SELECT metadata FROM audit_log WHERE action = 'server.migrate.dns'")
+            .fetch_one(app.db())
+            .await
+            .unwrap();
+    let changed: Vec<&str> = audit["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(changed.len(), 4, "{changed:?}");
+    assert!(changed.contains(&"shop.example.com"));
+    assert!(!changed.contains(&"skip.example.com"));
+
+    // Running it again changes nothing.
+    let writes = cf.writes();
+    let id2 = at_dns_step_again(&app, ws).await;
+    assert!(poll_dns(&app, id2).await);
+    assert_eq!(cf.writes(), writes);
+}
+
+async fn at_dns_step_again(app: &TestApp, ws: Id) -> Id {
+    sqlx::query("DELETE FROM provisioned_servers WHERE provider_id = '77'")
+        .execute(app.db())
+        .await
+        .unwrap();
+    at_dns_step(app, ws, json!(["skipped"])).await
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn no_dns_provider_does_not_hold_a_migration_up(pool: PgPool) {
+    let (app, cf) = app_with_cf(pool).await;
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    let id = at_dns_step(&app, ws, json!([])).await;
+    assert!(poll_dns(&app, id).await);
+    let status: String = sqlx::query_scalar("SELECT status FROM server_migrations WHERE id = $1")
+        .bind(id)
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    assert_eq!(status, "done");
+    assert_eq!(cf.calls.lock().unwrap().len(), 0);
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn repoint_dns_moves_the_main_servers_names(pool: PgPool) {
+    let (base, cf) = mock_cloudflare().await;
+    let mut cfg = config();
+    cfg.cloudflare_api = base;
+    cfg.public_url = "https://deploy.example.com".parse().unwrap();
+    cfg.apps_domain = Some("apps.example.com".into());
+    cfg.tcp_proxy_host = Some("tcp.example.com".into());
+    let app = TestApp::with_config(pool, cfg);
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    connect(&app, &admin, ws).await;
+    // The user's own record, Modula's on another address, and one opted out.
+    seed(&cf, "zid1", "dash", "deploy.example.com", OLD, Some("mine"));
+    seed(
+        &cf,
+        "zid1",
+        "wild",
+        "*.apps.example.com",
+        OLD,
+        Some("Managed by Modula Deploy"),
+    );
+    seed(
+        &cf,
+        "zid1",
+        "tcp",
+        "tcp.example.com",
+        "198.51.100.50",
+        Some("Managed by Modula Deploy"),
+    );
+
+    let st = app.state.clone();
+    let out = modula_server::migrate::promote::repoint_dns(&st, Some(OLD), NEW, &[])
+        .await
+        .unwrap();
+    assert_eq!(out.pointed.len(), 3, "{out:?}");
+    assert!(out.manual.is_empty(), "{out:?}");
+    let dash = content_of(&cf, "dash").unwrap();
+    assert_eq!(dash["content"], NEW);
+    assert_eq!(dash["comment"], "mine", "updated in place");
+    assert_eq!(content_of(&cf, "wild").unwrap()["content"], NEW);
+    assert!(
+        cf.records()
+            .iter()
+            .any(|r| r["name"] == "tcp.example.com" && r["content"] == NEW),
+        "the TCP proxy host follows"
+    );
+
+    // A re-run (the retried step) has nothing to do and still knows them.
+    let writes = cf.writes();
+    let again = modula_server::migrate::promote::repoint_dns(&st, Some(OLD), NEW, &[])
+        .await
+        .unwrap();
+    assert_eq!(again.pointed.len(), 3, "{again:?}");
+    assert_eq!(cf.writes(), writes, "idempotent");
+    // Read back: Cloudflare accepting a write isn't enough.
+    cf.ignore_writes.store(true, Ordering::SeqCst);
+    let third = "198.51.100.3";
+    assert!(
+        modula_server::migrate::promote::repoint_dns(&st, Some(NEW), third, &[])
+            .await
+            .is_err(),
+        "a write that didn't take is a failure"
+    );
 }

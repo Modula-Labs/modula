@@ -355,12 +355,18 @@ pub async fn resync_job(state: AppState, job: crate::jobs::Job) -> anyhow::Resul
         service_instance_id: Id,
     }
     let p: Payload = serde_json::from_value(job.payload)?;
+    resync_instance(&state, p.service_instance_id).await
+}
+
+/// Rewrites one instance's custom domains' routing records now (no provider,
+/// or a zone it doesn't manage, is no error).
+pub async fn resync_instance(state: &AppState, instance: Id) -> anyhow::Result<()> {
     // A site hosted on Cloudflare: its domains belong to the Worker.
     let elsewhere: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM deployments WHERE service_instance_id = $1
                           AND status IN ('active', 'sleeping', 'crashed') AND config->'hosting' IS NOT NULL)",
     )
-    .bind(p.service_instance_id)
+    .bind(instance)
     .fetch_one(&state.db)
     .await?;
     if elsewhere {
@@ -374,21 +380,141 @@ pub async fn resync_job(state: AppState, job: crate::jobs::Job) -> anyhow::Resul
          JOIN projects p ON p.id = s.project_id
          WHERE m.service_instance_id = $1 AND m.kind = 'custom'",
     )
-    .bind(p.service_instance_id)
+    .bind(instance)
     .fetch_all(&state.db)
     .await?;
     if rows.is_empty() {
         return Ok(());
     }
-    let t = target(&state.db, p.service_instance_id).await?;
+    let t = target(&state.db, instance).await.map_err(app_error)?;
     for (hostname, token, proxied, workspace) in rows {
         let records = required_records(&hostname, &token, &t);
         if let Some(note) =
-            sync_records(&state, workspace, &hostname, &records, false, proxied).await
+            sync_records(state, workspace, &hostname, &records, false, proxied).await
         {
             anyhow::bail!(note);
         }
     }
+    Ok(())
+}
+
+/// Checks at the provider that one instance's custom domains have the routing
+/// records they should. Names the provider doesn't manage are skipped.
+pub async fn verify_instance(state: &AppState, instance: Id) -> anyhow::Result<()> {
+    let rows: Vec<(String, String, Id)> = sqlx::query_as(
+        "SELECT m.hostname, COALESCE(m.verification_token, ''), p.workspace_id
+         FROM domains m
+         JOIN service_instances i ON i.id = m.service_instance_id
+         JOIN services s ON s.id = i.service_id
+         JOIN projects p ON p.id = s.project_id
+         WHERE m.service_instance_id = $1 AND m.kind = 'custom'",
+    )
+    .bind(instance)
+    .fetch_all(&state.db)
+    .await?;
+    let t = target(&state.db, instance).await.map_err(app_error)?;
+    for (hostname, token, workspace) in rows {
+        let Some(p) = provider_for(state, workspace).await else {
+            continue;
+        };
+        let Some(zone) = p.find_zone(&hostname).await? else {
+            continue;
+        };
+        let found = p.read_routing(&zone, &hostname).await?;
+        for r in required_records(&hostname, &token, &t)
+            .iter()
+            .filter(|r| r.kind != "TXT")
+        {
+            let there = found.iter().any(|(k, v)| {
+                k == r.kind && v.trim_end_matches('.').eq_ignore_ascii_case(&r.value)
+            });
+            if !there {
+                anyhow::bail!(
+                    "{} still doesn't have {} {} {}",
+                    p.name(),
+                    r.kind,
+                    hostname,
+                    r.value
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn app_error(e: crate::error::AppError) -> anyhow::Error {
+    anyhow::anyhow!("{e:?}")
+}
+
+/// Whether a node's newly reported address should move DNS: only a real,
+/// public change (a transient or private report must not flap records).
+pub fn public_ip_changed(before: Option<&str>, reported: &str) -> Option<(String, Ipv4Addr)> {
+    let before = before?;
+    let new: Ipv4Addr = reported.parse().ok()?;
+    if before == reported {
+        return None;
+    }
+    let [a, b, ..] = new.octets();
+    let private = new.is_private()
+        || new.is_loopback()
+        || new.is_link_local()
+        || new.is_unspecified()
+        || new.is_broadcast()
+        || (a == 100 && (64..128).contains(&b));
+    (!private).then(|| (before.to_owned(), new))
+}
+
+pub const REPOINT_MAIN_JOB: &str = "domains.repoint_main";
+/// How long a main server's new address must hold before its records move.
+const REPOINT_MAIN_AFTER: Duration = Duration::from_secs(60);
+
+/// A node attached with a new public address: its services' records follow
+/// now, and the main server's own names after [`REPOINT_MAIN_AFTER`].
+pub async fn on_public_ip_changed(
+    state: &AppState,
+    node: Id,
+    before: &str,
+    main: bool,
+) -> AppResult<()> {
+    resync_for_node(&state.db, node, None).await?;
+    if main {
+        let key = format!("{REPOINT_MAIN_JOB}:{node}");
+        crate::jobs::enqueue(
+            &state.db,
+            crate::jobs::NewJob {
+                kind: REPOINT_MAIN_JOB,
+                payload: json!({ "node": node, "from": before }),
+                run_at: Some(time::OffsetDateTime::now_utc() + REPOINT_MAIN_AFTER),
+                max_attempts: Some(5),
+                dedupe_key: Some(&key),
+            },
+        )
+        .await?;
+    }
+    state.jobs_notify.notify_one();
+    Ok(())
+}
+
+/// Job: the main server's names follow its new address, if it held.
+pub async fn repoint_main_job(state: AppState, job: crate::jobs::Job) -> anyhow::Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Payload {
+        node: Id,
+        from: String,
+    }
+    let p: Payload = serde_json::from_value(job.payload)?;
+    let now: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT public_ip, status FROM nodes WHERE id = $1")
+            .bind(p.node)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((Some(ip), status)) = now else {
+        return Ok(());
+    };
+    if ip == p.from || status != "online" {
+        return Ok(());
+    }
+    crate::migrate::promote::repoint_dns(&state, Some(&p.from), &ip, &[]).await?;
     Ok(())
 }
 
@@ -608,6 +734,28 @@ pub async fn verify_loop(state: AppState, stop: CancellationToken) {
 mod tests {
     use super::*;
     use dns::{RecordKind, StaticDns};
+
+    #[test]
+    fn only_a_public_change_moves_dns() {
+        let changed = |b, r| public_ip_changed(b, r).map(|(_, ip)| ip.to_string());
+        assert_eq!(
+            changed(Some("203.0.113.1"), "203.0.113.2").as_deref(),
+            Some("203.0.113.2")
+        );
+        assert_eq!(changed(None, "203.0.113.2"), None, "first report");
+        assert_eq!(changed(Some("203.0.113.1"), "203.0.113.1"), None);
+        for bad in [
+            "10.0.0.1",
+            "192.168.1.2",
+            "127.0.0.1",
+            "100.64.0.1",
+            "169.254.1.1",
+            "",
+            "x",
+        ] {
+            assert_eq!(changed(Some("203.0.113.1"), bad), None, "{bad}");
+        }
+    }
 
     fn cfg() -> Config {
         let mut c = Config::for_tests("https://deploy.example.com");

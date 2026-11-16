@@ -218,7 +218,7 @@ if [[ $SCENARIOS == *A* ]]; then
   [[ $(jq '.services | length' <<<"$preview") -ge 2 ]] && pass "migration preview lists $(jq -c '[.services[].service]' <<<"$preview")" \
     || fail "preview: $preview"
   sudo_
-  mig=$(ok POST "/api/nodes/$w1_node/migrate" '{"location":"hetzner:hel1","serverType":"cax11"}')
+  mig=$(ok POST "/api/nodes/$w1_node/migrate" '{"target":{"kind":"new","provider":"hetzner","location":"hetzner:hel1","serverType":"cax11"}}')
   MIG=$(jq -r .id <<<"$mig")
   t=$(($(date +%s) + 1500))
   while :; do
@@ -240,6 +240,8 @@ if [[ $SCENARIOS == *A* ]]; then
   sql "$PG" "SELECT note FROM e2e WHERE id = 1" | grep -q "written on w1" && pass "the row survived the migration" || fail "data lost"
   wait_until 120 "web serves on the new server" serves "$WEB_HOST" "$w2_ip"
   pass "web serves https://$WEB_HOST on the new server"
+  wait_until 120 "the old server forwards $WEB_HOST to the new one" serves "$WEB_HOST" "$w1_ip"
+  pass "w1 still answers for $WEB_HOST, over the mesh (DNS may still point at it)"
   [[ $(jq -r .sourcePendingDeletion <<<"$m") == true ]] && pass "w1 is pending deletion" || fail "w1 not pending_deletion"
   sudo_
   ok DELETE "/api/servers/$(jq -r .id <<<"$w1")" >/dev/null
@@ -279,7 +281,7 @@ if [[ $SCENARIOS == *C* ]]; then
     && pass "the main server is linked to its fake Hetzner server" || fail "main preview: $preview"
   old_main_sid=$(jq -r .serverId <<<"$preview")
   sudo_
-  mig=$(ok POST "/api/nodes/$main_node/migrate" '{"location":"hetzner:nbg1","serverType":"cax21"}')
+  mig=$(ok POST "/api/nodes/$main_node/migrate" '{"target":{"kind":"new","provider":"hetzner","location":"hetzner:nbg1","serverType":"cax21"}}')
   MIG=$(jq -r .id <<<"$mig")
   new_sid=""
   t=$(($(date +%s) + 2400))

@@ -17,6 +17,8 @@ modula-node = { path = "crates/node" }
 modula-backup = { path = "crates/backup" }
 modula-cli = { path = "crates/cli" }
 modula-hetzner = { path = "crates/hetzner" }
+modula-provider = { path = "crates/provider" }
+modula-ec2 = { path = "crates/ec2" }
 
 anyhow = "1"
 # Backups: age encryption (x25519 recipients, streaming) and S3 request signing.
@@ -24,6 +26,8 @@ age = { version = "0.12", features = ["async"] }
 bech32 = "0.12"
 bytes = "1"
 percent-encoding = "2"
+# EC2 Query API responses (crates/ec2).
+quick-xml = "0.42"
 rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto", "xml"] }
 async-trait = "0.1"
 argon2 = { version = "0.6", features = ["zeroize"] }

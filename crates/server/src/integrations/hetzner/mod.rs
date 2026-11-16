@@ -11,16 +11,16 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use modula_crypto::envelope::FieldAad;
 use modula_id::Id;
+use modula_provider::eur_cents_to_usd;
 use secrecy::SecretString;
-use serde::{Deserialize, Serialize};
-use sqlx::PgExecutor;
 
 use self::client::{Client, CreateServer, FirewallRef, FirewallRule};
 use crate::error::AppResult;
 use crate::locations;
+use crate::provision::mesh::mesh_sources;
 use crate::provision::{
-    ActionState, CreatedServer, LocationPrice, NewServer, Phase, Power, ProviderError,
-    ProviderLocation, ProviderServer, ServerProvider, ServerState, ServerTypeOffer,
+    ActionState, CreatedServer, LocationPrice, MeshSources, NewServer, Phase, Power, ProviderError,
+    ProviderLocation, ProviderServer, ProviderSshKey, ServerProvider, ServerState, ServerTypeOffer,
 };
 use crate::state::AppState;
 
@@ -28,58 +28,6 @@ pub const KIND: &str = "hetzner";
 pub const IMAGE: &str = "ubuntu-24.04";
 /// Where users create a token (Project → Security → API tokens).
 pub const TOKEN_HELP_URL: &str = "https://console.hetzner.cloud/projects";
-
-/// Spending guards, stored in `integrations.metadata`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct Caps {
-    pub max_servers: i64,
-    /// Gross euro cents per month, across all servers created here.
-    pub max_monthly_cents: i64,
-}
-
-impl Default for Caps {
-    fn default() -> Self {
-        Self {
-            max_servers: 5,
-            max_monthly_cents: 10_000,
-        }
-    }
-}
-
-impl Caps {
-    pub const MAX_SERVERS: i64 = 100;
-    pub const MAX_MONTHLY_CENTS: i64 = 10_000_000;
-
-    pub fn from_metadata(v: &serde_json::Value) -> Self {
-        let d = Self::default();
-        Self {
-            max_servers: v["maxServers"].as_i64().unwrap_or(d.max_servers),
-            max_monthly_cents: v["maxMonthlyCents"].as_i64().unwrap_or(d.max_monthly_cents),
-        }
-    }
-}
-
-/// What the workspace has provisioned so far (counts every row created
-/// here: a failed server may still exist, and bill, until it is deleted;
-/// adopted servers were created elsewhere and count toward no caps).
-#[derive(Debug, Clone, Copy, Serialize, Default, sqlx::FromRow)]
-#[serde(rename_all = "camelCase")]
-pub struct Usage {
-    pub servers: i64,
-    pub monthly_cents: i64,
-}
-
-pub async fn usage<'e>(db: impl PgExecutor<'e>, workspace: Id) -> AppResult<Usage> {
-    Ok(sqlx::query_as(
-        "SELECT count(*) AS servers, COALESCE(sum(monthly_price_cents), 0)::bigint AS monthly_cents
-         FROM provisioned_servers
-         WHERE workspace_id = $1 AND provider = 'hetzner' AND origin = 'provisioned'",
-    )
-    .bind(workspace)
-    .fetch_one(db)
-    .await?)
-}
 
 pub(crate) fn aad(workspace: Id, row: &str) -> FieldAad<'_> {
     FieldAad {
@@ -109,15 +57,17 @@ pub async fn provider(state: &AppState, workspace: Id) -> AppResult<Option<Hetzn
     let token = String::from_utf8(plain.to_vec())
         .map_err(|_| anyhow::anyhow!("stored Hetzner token is not UTF-8"))?;
     let mut h = Hetzner::new(state, workspace, token.into())?;
-    h.mesh_sources = firewall::mesh_sources(&state.db, Some(workspace)).await?;
+    h.mesh_sources = mesh_sources(&state.db, Some(workspace)).await?;
     Ok(Some(h))
 }
 
 pub struct Hetzner {
     client: Client,
     workspace: Id,
-    /// Public IPs allowed to the WireGuard port ([`firewall::mesh_sources`]).
+    /// Public IPs allowed to the WireGuard port ([`mesh_sources`]).
     mesh_sources: Vec<String>,
+    /// USD per EUR: Hetzner bills in euros, offers are in dollars.
+    eur_usd_rate: f64,
 }
 
 impl Hetzner {
@@ -130,6 +80,7 @@ impl Hetzner {
             client: Client::new(state.cfg.hetzner_api.clone(), token)?,
             workspace,
             mesh_sources: Vec::new(),
+            eur_usd_rate: state.cfg.eur_usd_rate,
         })
     }
 
@@ -186,7 +137,7 @@ pub fn firewall_rules(ssh: bool, mesh_sources: &[String]) -> Vec<FirewallRule> {
 }
 
 /// A main server's firewall, as `modula server create` makes it (labelled
-/// `role=main`, which [`firewall::sync_job`] keeps open to every server's
+/// `role=main`, which `sync_mesh` keeps open to every server's
 /// WireGuard): a worker's ports plus SSH and the node endpoint.
 pub fn main_firewall_rules(port: u16, mesh_sources: &[String]) -> Vec<FirewallRule> {
     let rule = FirewallRule::inbound_any;
@@ -296,7 +247,10 @@ impl ServerProvider for Hetzner {
                             let location = locations::resolve(KIND, &p.location, "")?;
                             Some(LocationPrice {
                                 location: location.id,
-                                monthly_cents: client::price_cents(&p.price_monthly.gross)?,
+                                monthly_cents: eur_cents_to_usd(
+                                    client::price_cents(&p.price_monthly.gross)?,
+                                    self.eur_usd_rate,
+                                ),
                             })
                         })
                         .collect();
@@ -333,13 +287,23 @@ impl ServerProvider for Hetzner {
         req: &'a NewServer,
     ) -> BoxFuture<'a, Result<CreatedServer, ProviderError>> {
         async move {
+            let ssh_keys = req
+                .ssh_key_ids
+                .iter()
+                .map(|k| {
+                    k.parse::<i64>().map_err(|_| ProviderError::Api {
+                        code: "invalid_ssh_key".into(),
+                        message: format!("{k:?} is not a Hetzner SSH key id"),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let firewall = self.ensure_firewall(req.ssh).await?;
             let body = CreateServer {
                 name: req.name.clone(),
                 server_type: req.server_type.clone(),
                 location: req.region.clone(),
                 image: IMAGE.to_owned(),
-                ssh_keys: req.ssh_key_ids.clone(),
+                ssh_keys,
                 user_data: req.user_data.clone(),
                 labels: req.labels.clone(),
                 firewalls: vec![FirewallRef { firewall }],
@@ -501,6 +465,65 @@ impl ServerProvider for Hetzner {
         .boxed()
     }
 
+    fn ssh_keys(&self) -> BoxFuture<'_, Result<Vec<ProviderSshKey>, ProviderError>> {
+        async move {
+            let keys = self.client.ssh_keys().await?;
+            Ok(keys
+                .into_iter()
+                .map(|k| ProviderSshKey {
+                    id: k.id.to_string(),
+                    name: k.name,
+                    fingerprint: k.fingerprint,
+                    public_key: Some(k.public_key),
+                })
+                .collect())
+        }
+        .boxed()
+    }
+
+    fn sync_mesh<'a>(
+        &'a self,
+        sources: &'a MeshSources,
+    ) -> BoxFuture<'a, Result<(), ProviderError>> {
+        async move {
+            let lists = [
+                (
+                    format!("modula=1,workspace={}", self.workspace),
+                    &sources.workspace,
+                ),
+                ("modula=1,role=main".to_owned(), &sources.everyone),
+            ];
+            let mut failed = Vec::new();
+            for (selector, sources) in lists {
+                let firewalls = match self.client.firewalls(&selector).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        failed.push(e.to_string());
+                        continue;
+                    }
+                };
+                for fw in firewalls {
+                    let rules = firewall::with_mesh_rule(&fw.rules, sources);
+                    if rules == fw.rules {
+                        continue;
+                    }
+                    if let Err(e) = self.client.set_firewall_rules(fw.id, &rules).await {
+                        failed.push(format!("{}: {e}", fw.name));
+                    }
+                }
+            }
+            if failed.is_empty() {
+                Ok(())
+            } else {
+                Err(ProviderError::Api {
+                    code: "firewall_sync_failed".into(),
+                    message: failed.join("; "),
+                })
+            }
+        }
+        .boxed()
+    }
+
     fn resize_blocker(&self, server: &ProviderServer, to: &ServerTypeOffer) -> Option<String> {
         let current = client::Server {
             id: 0,
@@ -591,12 +614,5 @@ mod tests {
             ("udp", Some("51820"))
         );
         assert_eq!(wg.source_ips, ["203.0.113.4/32"]);
-    }
-
-    #[test]
-    fn caps_default_and_parse() {
-        assert_eq!(Caps::from_metadata(&serde_json::json!({})), Caps::default());
-        let c = Caps::from_metadata(&serde_json::json!({"maxServers": 2, "maxMonthlyCents": 999}));
-        assert_eq!((c.max_servers, c.max_monthly_cents), (2, 999));
     }
 }

@@ -1,5 +1,5 @@
 //! `modula server resize`: change the logged-in instance's main server to
-//! another type at Hetzner, from here. The control plane runs on that
+//! another type at its cloud provider, from here. The control plane runs on that
 //! server and can't power itself off and carry on, so the dashboard refuses
 //! and this command does the steps: shutdown (power cut after
 //! [`SHUTDOWN_GRACE`]) → change type (disk kept, so it can be downsized
@@ -11,15 +11,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use inquire::{Confirm, Password, PasswordDisplayMode, Select};
-use modula_hetzner::{Client, Server, ServerType};
+use modula_provider::{ActionState, Phase, Power, ProviderServer, ServerProvider, ServerTypeOffer};
 use secrecy::SecretString;
 use serde_json::{Value, json};
 
-use super::catalog::format_eur;
-use super::flow::{self, Settings};
-use super::{ENV_HCLOUD, EnvSecrets, interactive};
+use super::catalog::format_usd;
+use super::cloud::{self, Cloud, CloudSecret};
+use super::flow::Settings;
+use super::{ENV_AWS_KEY_ID, ENV_AWS_SECRET, ENV_HCLOUD, EnvSecrets, interactive};
 use crate::api::{Api, api_error};
-use crate::cli::ServerResizeArgs;
+use crate::cli::{Provider, ServerResizeArgs};
 use crate::context::Ctx;
 use crate::output::usage;
 
@@ -42,10 +43,10 @@ pub struct Choice {
 }
 
 impl Choice {
-    fn label(&self, current_cents: Option<i64>) -> String {
+    fn label(&self, current_cents: Option<i64>, approx: bool) -> String {
         let price = self
             .monthly_cents
-            .map(|c| format!("{}/mo", format_eur(c)))
+            .map(|c| format!("{}/mo", format_usd(c, approx)))
             .unwrap_or_default();
         let trend = match (self.monthly_cents, current_cents) {
             (Some(a), Some(b)) if a > b => "  ↑",
@@ -70,28 +71,30 @@ fn trim_float(v: f64) -> String {
     }
 }
 
-/// Every orderable type, flagged for `server` in `location` (cheapest first).
-pub fn choices(server: &Server, location: &str, types: &[ServerType]) -> Vec<Choice> {
-    let current = server.server_type.as_ref().map(|t| t.name.as_str());
+/// Every type on offer, flagged for `server` at the catalog location
+/// `location` (shown as `region`), usable ones first and cheapest first.
+pub fn choices(
+    provider: &dyn ServerProvider,
+    server: &ProviderServer,
+    location: &str,
+    region: &str,
+    types: &[ServerTypeOffer],
+) -> Vec<Choice> {
     let mut out: Vec<Choice> = types
         .iter()
-        .filter(|t| !t.is_deprecated() && Some(t.name.as_str()) != current)
+        .filter(|t| t.name != server.server_type)
         .map(|t| {
-            let monthly_cents = t
-                .orderable_in(location)
-                .then(|| t.monthly_price_in(location))
-                .flatten()
-                .and_then(|a| modula_hetzner::price_cents(&a.gross));
+            let monthly_cents = t.price_in(location);
             let blocker = if monthly_cents.is_none() {
-                Some(format!("not sold in {location} now"))
+                Some(format!("not sold in {region} now"))
             } else {
-                server.change_type_blocker(t)
+                provider.resize_blocker(server, t)
             };
             Choice {
                 name: t.name.clone(),
                 cores: t.cores,
-                memory_gb: t.memory,
-                disk_gb: t.disk,
+                memory_gb: t.memory_gb,
+                disk_gb: t.disk_gb,
                 monthly_cents,
                 blocker,
             }
@@ -145,52 +148,67 @@ pub async fn run(
         .get(&format!("/api/nodes/{node_id}/resize-options"))
         .await
         .ok();
-    let known_id = options
-        .as_ref()
-        .filter(|v| v["managed"] == true && v["provider"] == "hetzner")
+    let known = options.as_ref().filter(|v| v["managed"] == true);
+    let kind = args
+        .provider
+        .unwrap_or(match known.map(|v| &v["provider"]) {
+            Some(v) if v == "aws" => Provider::Aws,
+            _ => Provider::Hetzner,
+        });
+    let known_id = known
+        .filter(|v| v["provider"] == kind.id())
         .and_then(|v| v["providerId"].as_str())
-        .and_then(|v| v.parse::<i64>().ok());
+        .map(str::to_owned);
 
-    let token = match env.hcloud {
-        Some(t) => t,
-        None if prompt => ask_token()?,
+    let secret = match env.secret_for(kind) {
+        Some(s) => s,
+        None if prompt => ask_credentials(kind)?,
         None => {
-            return Err(usage(format!(
-                "set {ENV_HCLOUD} (or pass --token-stdin): the Hetzner token of the project the main server is in"
-            )));
+            return Err(usage(match kind {
+                Provider::Hetzner => format!(
+                    "set {ENV_HCLOUD} (or pass --token-stdin): the Hetzner token of the project the main server is in"
+                ),
+                Provider::Aws => format!(
+                    "set {ENV_AWS_KEY_ID} and {ENV_AWS_SECRET}: an access key of the account the main server is in"
+                ),
+            }));
         }
     };
-    let hz = flow::hetzner(settings, &token)?;
+    let cloud = Cloud::connect(&secret, settings, "cli")?;
+    let provider = cloud.provider();
+    let e = move |err| cloud::error(kind, err);
     let server = match known_id {
-        Some(id) => hz.server(id).await.map_err(flow::hetzner_error)?,
-        None => find_main(&hz, &instance).await?,
+        Some(id) => provider
+            .describe(&id)
+            .await
+            .map_err(e)?
+            .with_context(|| format!("{} no longer has this server", kind.label()))?,
+        None => find_main(&cloud, &instance, main["publicIp"].as_str()).await?,
     };
-    let location = server
+    let place = server
         .location
-        .as_ref()
-        .map(|l| l.name.clone())
-        .context("Hetzner didn't say where the server is")?;
-    let current = server
-        .server_type
-        .clone()
-        .context("Hetzner didn't say the server's type")?;
-    let current_cents = current
-        .monthly_price_in(&location)
-        .and_then(|a| modula_hetzner::price_cents(&a.gross));
-    let types = hz.server_types().await.map_err(flow::hetzner_error)?;
-    let all = choices(&server, &location, &types);
+        .with_context(|| format!("{} didn't say where the server is", kind.label()))?;
+    let location = place.region.to_owned();
+    let approx = kind.approximate_prices();
+    let types = provider.server_types().await.map_err(e)?;
+    let current_cents = types
+        .iter()
+        .find(|t| t.name == server.server_type)
+        .and_then(|t| t.price_in(place.id));
+    let all = choices(provider, &server, place.id, &location, &types);
 
     let target = match &args.server_type {
         Some(wanted) => {
             let Some(c) = all.iter().find(|c| c.name.eq_ignore_ascii_case(wanted)) else {
-                if wanted.eq_ignore_ascii_case(&current.name) {
+                if wanted.eq_ignore_ascii_case(&server.server_type) {
                     return Err(usage(format!(
                         "{} already is a {}",
-                        server.name, current.name
+                        server.name, server.server_type
                     )));
                 }
                 return Err(usage(format!(
-                    "--type {wanted}: no such server type at Hetzner. Possible here: {}",
+                    "--type {wanted}: no such server type at {}. Possible here: {}",
+                    kind.label(),
                     possible(&all)
                 )));
             };
@@ -207,12 +225,12 @@ pub async fn run(
             o.note(format!(
                 "  {} is a {} in {location}: {} vCPU, {} GB RAM, {} GB disk{}.",
                 server.name,
-                o.accent(&current.name),
-                current.cores,
-                trim_float(current.memory),
-                server.disk_gb().unwrap_or(current.disk),
+                o.accent(&server.server_type),
+                server.cores,
+                trim_float(server.memory_gb),
+                server.disk_gb,
                 current_cents
-                    .map(|c| format!(", {}/mo", format_eur(c)))
+                    .map(|c| format!(", {}/mo", format_usd(c, approx)))
                     .unwrap_or_default()
             ));
             let usable: Vec<&Choice> = all.iter().filter(|c| c.blocker.is_none()).collect();
@@ -222,20 +240,23 @@ pub async fn run(
                     server.name
                 );
             }
-            struct Item<'a>(&'a Choice, Option<i64>);
+            struct Item<'a>(&'a Choice, Option<i64>, bool);
             impl std::fmt::Display for Item<'_> {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    f.write_str(&self.0.label(self.1))
+                    f.write_str(&self.0.label(self.1, self.2))
                 }
             }
             inquire::set_global_render_config(super::wizard::theme());
-            let items: Vec<Item> = usable.iter().map(|c| Item(c, current_cents)).collect();
+            let items: Vec<Item> = usable
+                .iter()
+                .map(|c| Item(c, current_cents, approx))
+                .collect();
             match Select::new("New server type", items)
                 .with_help_message("the disk keeps its size · Esc: cancel")
                 .with_page_size(12)
                 .prompt()
             {
-                Ok(Item(c, _)) => c.clone(),
+                Ok(Item(c, ..)) => c.clone(),
                 Err(
                     inquire::InquireError::OperationCanceled
                     | inquire::InquireError::OperationInterrupted,
@@ -258,11 +279,15 @@ pub async fn run(
         "{} ({}) will be shut down, changed from {} to {} and started again: the dashboard and \
          everything on this server are down for a few minutes. {}",
         server.name,
-        server.ipv4().unwrap_or_default(),
-        current.name,
+        server.ipv4.clone().unwrap_or_default(),
+        server.server_type,
         target.name,
         match (current_cents, target.monthly_cents) {
-            (Some(a), Some(b)) => format!("{}/mo → {}/mo.", format_eur(a), format_eur(b)),
+            (Some(a), Some(b)) => format!(
+                "{}/mo → {}/mo.",
+                format_usd(a, approx),
+                format_usd(b, approx)
+            ),
             _ => String::new(),
         }
     );
@@ -282,33 +307,34 @@ pub async fn run(
     }
 
     let started = Instant::now();
-    let result = resize(ctx, &hz, &server, &target.name, settings.poll).await;
+    let result = resize(ctx, provider, kind, &server, &target.name, settings.poll).await;
     if let Err(e) = result {
         // Leave it running, at whatever size it has now.
-        let state = hz.server(server.id).await.ok();
-        if state.as_ref().is_some_and(|s| s.status == "off") {
-            let _ = hz.server_action(server.id, "poweron").await;
+        let state = provider.describe(&server.id).await.ok().flatten();
+        if state.as_ref().is_some_and(|s| s.phase == Phase::Off) {
+            let _ = provider.power(&server.id, Power::On).await;
         }
         return Err(e.context(format!(
             "resizing {} failed; it was started again{}",
             server.name,
             state
-                .and_then(|s| s.server_type.map(|t| format!(" as a {}", t.name)))
+                .map(|s| format!(" as a {}", s.server_type))
                 .unwrap_or_default()
         )));
     }
 
     step(ctx, "Waiting for the dashboard to answer…");
     wait_for_health(api, settings.poll).await?;
-    // Has the instance record the new size (it reads it from Hetzner).
+    // Has the instance record the new size (it reads it from the provider).
     let _ = api
         .get::<Value>(&format!("/api/nodes/{node_id}/resize-options"))
         .await;
     o.either(
         &json!({
             "server": server.name,
-            "providerId": server.id.to_string(),
-            "from": current.name,
+            "provider": kind.id(),
+            "providerId": server.id,
+            "from": server.server_type,
             "to": target.name,
             "monthlyCents": target.monthly_cents,
             "elapsedSecs": started.elapsed().as_secs(),
@@ -345,8 +371,13 @@ fn step(ctx: &Ctx, text: &str) {
     }
 }
 
-fn ask_token() -> anyhow::Result<SecretString> {
+fn ask_credentials(kind: Provider) -> anyhow::Result<CloudSecret> {
     inquire::set_global_render_config(super::wizard::theme());
+    if kind == Provider::Aws {
+        return super::wizard::ask_aws_keys()?
+            .map(CloudSecret::Aws)
+            .context("no AWS access key given");
+    }
     loop {
         let t = Password::new("Hetzner API token")
             .with_display_mode(PasswordDisplayMode::Masked)
@@ -354,50 +385,80 @@ fn ask_token() -> anyhow::Result<SecretString> {
             .with_help_message("Read & Write, from the project the main server is in")
             .prompt()?;
         if !t.trim().is_empty() {
-            return Ok(SecretString::from(t.trim().to_owned()));
+            return Ok(CloudSecret::Hetzner(SecretString::from(
+                t.trim().to_owned(),
+            )));
         }
     }
 }
 
-/// The main server when the instance couldn't name it: the one labelled
-/// `role=main`, or among several the one the instance's host resolves to.
-async fn find_main(hz: &Client, instance: &url::Url) -> anyhow::Result<Server> {
-    let mut mains: Vec<Server> = hz
-        .servers("modula=1")
+/// The IPv4s the instance's host resolves to.
+async fn host_addresses(instance: &url::Url) -> Vec<String> {
+    let host = instance.host_str().unwrap_or_default().to_owned();
+    tokio::net::lookup_host((host.as_str(), 443))
         .await
-        .map_err(flow::hetzner_error)?
-        .into_iter()
-        .filter(|s| s.labels.get("role").map(String::as_str) == Some("main"))
-        .collect();
-    if mains.len() > 1 {
-        let host = instance.host_str().unwrap_or_default().to_owned();
-        let ips: Vec<String> = tokio::net::lookup_host((host.as_str(), 443))
-            .await
-            .map(|a| a.map(|a| a.ip().to_string()).collect())
-            .unwrap_or_default();
-        mains.retain(|s| s.ipv4().is_some_and(|ip| ips.contains(&ip)));
-    }
-    match mains.len() {
-        1 => Ok(mains.remove(0)),
-        0 => bail!(
-            "this Hetzner project has no Modula main server (labelled role=main) for {instance}; is it the right token?"
-        ),
-        _ => bail!("several Modula main servers in this Hetzner project match {instance}"),
-    }
+        .map(|a| a.map(|a| a.ip().to_string()).collect())
+        .unwrap_or_default()
 }
 
-/// Wait until `cond` holds for the server, polling Hetzner.
-async fn wait_server(
-    hz: &Client,
-    id: i64,
+/// The main server when the instance couldn't name it. On Hetzner the one
+/// labelled `role=main`, or among several the one the instance's host
+/// resolves to; elsewhere the Modula server at the dashboard node's address
+/// or the host's.
+async fn find_main(
+    cloud: &Cloud,
+    instance: &url::Url,
+    node_ip: Option<&str>,
+) -> anyhow::Result<ProviderServer> {
+    let kind = cloud.kind();
+    if let Cloud::Hetzner(h) = cloud {
+        let mut mains = h.main_servers().await.map_err(|e| cloud::error(kind, e))?;
+        if mains.len() > 1 {
+            let ips = host_addresses(instance).await;
+            mains.retain(|s| s.ipv4.as_ref().is_some_and(|ip| ips.contains(ip)));
+        }
+        return match mains.len() {
+            1 => Ok(mains.remove(0)),
+            0 => bail!(
+                "this Hetzner project has no Modula main server (labelled role=main) for {instance}; is it the right token?"
+            ),
+            _ => bail!("several Modula main servers in this Hetzner project match {instance}"),
+        };
+    }
+    let mut ips: Vec<String> = node_ip.map(str::to_owned).into_iter().collect();
+    ips.extend(host_addresses(instance).await);
+    for ip in &ips {
+        if let Some(server) = cloud
+            .provider()
+            .find_by_address(ip)
+            .await
+            .map_err(|e| cloud::error(kind, e))?
+        {
+            return Ok(server);
+        }
+    }
+    bail!(
+        "no Modula server at {} matches {instance}; is it the right account?",
+        kind.label()
+    )
+}
+
+/// Wait until the server reaches `want`, polling the provider.
+async fn wait_phase(
+    provider: &dyn ServerProvider,
+    kind: Provider,
+    id: &str,
     poll: Duration,
     within: Duration,
-    cond: impl Fn(&Server) -> bool,
+    want: Phase,
 ) -> anyhow::Result<bool> {
     let started = Instant::now();
     loop {
-        let s = hz.server(id).await.map_err(flow::hetzner_error)?;
-        if cond(&s) {
+        let s = provider
+            .status(id, None)
+            .await
+            .map_err(|e| cloud::error(kind, e))?;
+        if s.phase == want {
             return Ok(true);
         }
         if started.elapsed() > within {
@@ -409,24 +470,21 @@ async fn wait_server(
 
 async fn resize(
     ctx: &Ctx,
-    hz: &Client,
-    server: &Server,
+    provider: &dyn ServerProvider,
+    kind: Provider,
+    server: &ProviderServer,
     to: &str,
     poll: Duration,
 ) -> anyhow::Result<()> {
-    let id = server.id;
-    if server.status != "off" {
+    let id = server.id.as_str();
+    let e = move |err| cloud::error(kind, err);
+    if server.phase != Phase::Off {
         step(ctx, "Shutting the server down…");
-        hz.server_action(id, "shutdown")
-            .await
-            .map_err(flow::hetzner_error)?;
-        let off = |s: &Server| s.status == "off";
-        if !wait_server(hz, id, poll, SHUTDOWN_GRACE, off).await? {
+        provider.power(id, Power::Off).await.map_err(e)?;
+        if !wait_phase(provider, kind, id, poll, SHUTDOWN_GRACE, Phase::Off).await? {
             step(ctx, "It didn't stop in time; cutting the power…");
-            hz.server_action(id, "poweroff")
-                .await
-                .map_err(flow::hetzner_error)?;
-            if !wait_server(hz, id, poll, POWEROFF_WAIT, off).await? {
+            provider.power(id, Power::ForceOff).await.map_err(e)?;
+            if !wait_phase(provider, kind, id, poll, POWEROFF_WAIT, Phase::Off).await? {
                 bail!("the server did not power off");
             }
         }
@@ -436,36 +494,27 @@ async fn resize(
         ctx,
         &format!("Changing the type to {to} (the disk keeps its size)…"),
     );
-    let action = hz
-        .change_server_type(id, to, false)
-        .await
-        .map_err(flow::hetzner_error)?;
+    let action = provider.resize(id, to).await.map_err(e)?;
     let started = Instant::now();
     loop {
-        let a = hz.action(action.id).await.map_err(flow::hetzner_error)?;
-        match a.status.as_str() {
-            "success" => break,
-            "error" => bail!(
-                "Hetzner couldn't change the type: {}",
-                a.error
-                    .map(|e| format!("{} ({})", e.message, e.code))
-                    .unwrap_or_else(|| "unknown error".into())
-            ),
-            _ if started.elapsed() > CHANGE_TYPE_WAIT => {
-                bail!("Hetzner took too long to change the type")
+        match provider.action(&action).await.map_err(e)? {
+            ActionState::Done => break,
+            ActionState::Failed(why) => {
+                bail!("{} couldn't change the type: {why}", kind.label())
             }
-            _ => tokio::time::sleep(poll).await,
+            ActionState::Running if started.elapsed() > CHANGE_TYPE_WAIT => {
+                bail!("{} took too long to change the type", kind.label())
+            }
+            ActionState::Running => tokio::time::sleep(poll).await,
         }
     }
 
     step(ctx, "Starting it again…");
-    let s = hz.server(id).await.map_err(flow::hetzner_error)?;
-    if s.status != "running" {
-        hz.server_action(id, "poweron")
-            .await
-            .map_err(flow::hetzner_error)?;
+    let state = provider.status(id, None).await.map_err(e)?;
+    if state.phase != Phase::Running {
+        provider.power(id, Power::On).await.map_err(e)?;
     }
-    if !wait_server(hz, id, poll, POWERON_WAIT, |s| s.status == "running").await? {
+    if !wait_phase(provider, kind, id, poll, POWERON_WAIT, Phase::Running).await? {
         bail!("the server did not start again");
     }
     Ok(())
@@ -489,39 +538,62 @@ async fn wait_for_health(api: &Api, poll: Duration) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use modula_provider::{LocationPrice, locations};
 
-    fn types() -> Vec<ServerType> {
-        let price = |loc: &str, gross: &str| json!({"location": loc, "price_monthly": {"net": "1", "gross": gross}});
-        serde_json::from_value(json!([
-            {"name": "cx22", "cores": 2, "memory": 4.0, "disk": 40, "architecture": "x86", "storage_type": "local",
-             "prices": [price("fsn1", "4.51")]},
-            {"name": "cx32", "cores": 4, "memory": 8.0, "disk": 80, "architecture": "x86", "storage_type": "local",
-             "prices": [price("fsn1", "8.21")]},
-            {"name": "cx42", "cores": 8, "memory": 16.0, "disk": 160, "architecture": "x86", "storage_type": "local",
-             "prices": [price("fsn1", "18.92")]},
-            {"name": "cx52", "cores": 16, "memory": 32.0, "disk": 320, "architecture": "x86", "storage_type": "local",
-             "prices": [price("nbg1", "36.37")]},
-            {"name": "cax21", "cores": 4, "memory": 8.0, "disk": 80, "architecture": "arm", "storage_type": "local",
-             "prices": [price("fsn1", "7.49")]}
-        ]))
-        .unwrap()
+    fn offer(name: &str, disk: u32, arch: &str, prices: &[(&'static str, i64)]) -> ServerTypeOffer {
+        ServerTypeOffer {
+            name: name.into(),
+            description: String::new(),
+            cores: 4,
+            memory_gb: 8.0,
+            disk_gb: disk,
+            arch: arch.into(),
+            cpu_type: "shared".into(),
+            storage_type: "local".into(),
+            prices: prices
+                .iter()
+                .map(|(location, monthly_cents)| LocationPrice {
+                    location,
+                    monthly_cents: *monthly_cents,
+                })
+                .collect(),
+        }
     }
 
     #[test]
     fn choices_flag_what_cant_be_used_here() {
-        let server: Server = serde_json::from_value(json!({
-            "id": 1, "name": "modula-main", "status": "running",
-            "server_type": {"name": "cx32", "cores": 4, "memory": 8.0, "disk": 80,
-                            "architecture": "x86", "storage_type": "local"},
-            "location": {"name": "fsn1"}, "primary_disk_size": 80
-        }))
-        .unwrap();
-        let c = choices(&server, "fsn1", &types());
-        let by = |n: &str| c.iter().find(|c| c.name == n).unwrap();
-        assert!(
-            c.iter().all(|c| c.name != "cx32"),
-            "the current type isn't offered"
+        let hz = cloud::HetznerCloud::new(
+            modula_hetzner::Client::new(
+                "http://127.0.0.1:9/v1".parse().unwrap(),
+                "t".to_owned().into(),
+            )
+            .unwrap(),
         );
+        let server = ProviderServer {
+            id: "1".into(),
+            name: "modula-main".into(),
+            ipv4: None,
+            phase: Phase::Running,
+            location: locations::resolve("hetzner", "fsn1", ""),
+            server_type: "cx32".into(),
+            cores: 4,
+            memory_gb: 8.0,
+            disk_gb: 80,
+            arch: "x86".into(),
+            storage_type: "local".into(),
+            role: Some("main".into()),
+        };
+        let f = "hetzner:fsn1";
+        let types = [
+            offer("cx22", 40, "x86", &[(f, 487)]),
+            offer("cx32", 80, "x86", &[(f, 887)]),
+            offer("cx42", 160, "x86", &[(f, 2043)]),
+            offer("cx52", 320, "x86", &[("hetzner:nbg1", 3928)]),
+            offer("cax21", 80, "arm", &[(f, 809)]),
+        ];
+        let c = choices(&hz, &server, f, "fsn1", &types);
+        let by = |n: &str| c.iter().find(|c| c.name == n).unwrap();
+        assert!(c.iter().all(|c| c.name != "cx32"), "not the current type");
         assert!(
             by("cx22")
                 .blocker
@@ -543,7 +615,7 @@ mod tests {
                 .unwrap()
                 .contains("architectures")
         );
-        assert_eq!(by("cx42").monthly_cents, Some(1892));
+        assert_eq!(by("cx42").monthly_cents, Some(2043));
         assert_eq!(possible(&c), "cx42", "bigger, same architecture, sold here");
         assert_eq!(c[0].name, "cx42", "usable ones first");
     }

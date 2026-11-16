@@ -39,6 +39,11 @@ pub struct Config {
     pub cloudflare_api: Url,
     /// Hetzner Cloud's API, ending in `/v1` (a mock in tests).
     pub hetzner_api: Url,
+    /// Sends all AWS traffic (EC2 and Pricing) here: a mock in tests. None
+    /// uses AWS's own endpoints.
+    pub aws_api: Option<Url>,
+    /// USD per EUR, for providers billing in euros (`MODULA_EUR_USD_RATE`).
+    pub eur_usd_rate: f64,
     /// Where source archives from `modula up` are kept (one file per
     /// upload, deleted by the retention job). Default: `uploads/` next to the
     /// master key.
@@ -108,6 +113,7 @@ impl Releases {
 
 /// Default for `MODULA_UPLOAD_MAX_MB`.
 pub const DEFAULT_UPLOAD_MAX_MB: u64 = 200;
+pub const DEFAULT_EUR_USD_RATE: f64 = modula_provider::DEFAULT_EUR_USD_RATE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeTls {
@@ -182,6 +188,13 @@ impl Config {
                 .unwrap_or_else(|_| "https://api.hetzner.cloud/v1".into())
                 .parse()
                 .context("invalid MODULA_HETZNER_API_URL")?,
+            aws_api: std::env::var("MODULA_AWS_API_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| v.parse())
+                .transpose()
+                .context("invalid MODULA_AWS_API_URL")?,
+            eur_usd_rate: parse_eur_usd_rate(std::env::var("MODULA_EUR_USD_RATE").ok().as_deref())?,
             uploads_dir: PathBuf::new(),
             upload_max_bytes: std::env::var("MODULA_UPLOAD_MAX_MB")
                 .ok()
@@ -310,6 +323,17 @@ pub fn normalize_apps_domain(raw: &str) -> anyhow::Result<String> {
     Ok(d)
 }
 
+fn parse_eur_usd_rate(raw: Option<&str>) -> anyhow::Result<f64> {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(DEFAULT_EUR_USD_RATE);
+    };
+    let rate: f64 = raw.parse().context("invalid MODULA_EUR_USD_RATE")?;
+    if !rate.is_finite() || rate <= 0.0 {
+        bail!("MODULA_EUR_USD_RATE must be a positive number (got {raw})");
+    }
+    Ok(rate)
+}
+
 fn default_node_url(public: &Url, port: u16) -> anyhow::Result<Url> {
     let host = public.host_str().context("MODULA_PUBLIC_URL has no host")?;
     Ok(format!("https://{host}:{port}").parse()?)
@@ -379,6 +403,8 @@ impl Config {
             github_api: "https://api.github.com".parse().unwrap(),
             cloudflare_api: "https://api.cloudflare.com/client/v4".parse().unwrap(),
             hetzner_api: "https://api.hetzner.cloud/v1".parse().unwrap(),
+            aws_api: None,
+            eur_usd_rate: DEFAULT_EUR_USD_RATE,
             uploads_dir: std::env::temp_dir().join("modula-uploads-unit"),
             upload_max_bytes: DEFAULT_UPLOAD_MAX_MB * 1024 * 1024,
             internal_url: None,
@@ -391,6 +417,16 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_exchange_rate_must_be_positive() {
+        assert_eq!(parse_eur_usd_rate(None).unwrap(), DEFAULT_EUR_USD_RATE);
+        assert_eq!(parse_eur_usd_rate(Some(" ")).unwrap(), DEFAULT_EUR_USD_RATE);
+        assert_eq!(parse_eur_usd_rate(Some("1.2")).unwrap(), 1.2);
+        for bad in ["0", "-1", "inf", "NaN", "abc"] {
+            assert!(parse_eur_usd_rate(Some(bad)).is_err(), "{bad}");
+        }
+    }
 
     fn cfg(url: &str) -> Config {
         Config::for_tests(url)

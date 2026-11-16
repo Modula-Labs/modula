@@ -1,0 +1,29 @@
+[package]
+name = "modula-ec2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "A small AWS EC2 client and server provider, shared by modula-server and the modula CLI"
+
+[dependencies]
+base64.workspace = true
+futures.workspace = true
+hex.workspace = true
+hmac.workspace = true
+modula-provider.workspace = true
+percent-encoding.workspace = true
+quick-xml.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+secrecy.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time = { workspace = true, features = ["macros"] }
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

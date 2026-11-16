@@ -236,15 +236,15 @@ impl pb::node_server::Node for NodeService {
         let location =
             crate::locations::resolve(&info.cloud_provider, &info.cloud_region, &info.edge_colo);
         // Away long enough to have left its services' A records.
-        let was_dropped: bool = sqlx::query_scalar(
-            "SELECT status <> 'online' AND coalesce(last_seen_at < now() - $2, true) FROM nodes WHERE id = $1",
+        let (was_dropped, ip_before): (bool, Option<String>) = sqlx::query_as(
+            "SELECT status <> 'online' AND coalesce(last_seen_at < now() - $2, true), public_ip FROM nodes WHERE id = $1",
         )
         .bind(node)
         .bind(crate::domains::OFFLINE_GRACE)
         .fetch_optional(&state.db)
         .await
         .map_err(internal)?
-        .unwrap_or(false);
+        .unwrap_or((false, None));
         // Guarded again: a revoke (or renewal) may have landed since the
         // check above.
         let hello_ok = sqlx::query(
@@ -294,9 +294,7 @@ impl pb::node_server::Node for NodeService {
                     Ok(peers) => state.hub.kick_all(&peers),
                     Err(e) => tracing::warn!(%node, error = ?e, "cannot update the node's peers"),
                 }
-                if let Err(e) =
-                    crate::integrations::hetzner::firewall::enqueue_sync(&state.db).await
-                {
+                if let Err(e) = crate::provision::mesh::enqueue_sync(&state.db).await {
                     tracing::warn!(%node, error = ?e, "cannot queue the firewall update");
                 }
             }
@@ -313,6 +311,17 @@ impl pb::node_server::Node for NodeService {
             r => {
                 state.hub.unregister(node, reg.conn_id);
                 return Err(r.map_or_else(internal, |_| revoked()));
+            }
+        }
+        // It attached with a new public address: DNS follows.
+        if let Some((before, ip)) =
+            crate::domains::public_ip_changed(ip_before.as_deref(), &info.public_ip)
+        {
+            tracing::info!(%node, %before, %ip, "the node's public address changed");
+            let main = hello.capabilities.iter().any(|c| c == "dashboard");
+            if let Err(e) = crate::domains::on_public_ip_changed(&state, node, &before, main).await
+            {
+                tracing::warn!(%node, error = ?e, "cannot follow the node's new address in DNS");
             }
         }
         let ack = pb::ServerMessage {

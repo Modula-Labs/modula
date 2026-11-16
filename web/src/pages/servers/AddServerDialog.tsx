@@ -20,17 +20,29 @@ import { api, type JoinToken } from "@/lib/api";
 import { flagEmoji } from "@/lib/flags";
 import { relativeTime } from "@/lib/format";
 import {
-  euros,
+  ROOT_DISK,
+  defaultLocation,
+  hasRootDisk,
+  keyRegion,
+  monthlyUsd,
+  parseDiskGb,
+  priceWithDisk,
   provisionApi,
+  providerLabel,
+  providerName,
+  providerOf,
   typesIn,
+  usd,
   validServerName,
+  type ProvisionRequest,
   type ProvisionedList,
 } from "@/lib/provision";
 import { AddServerProgress } from "./AddServerProgress";
 
-type Provider = "hetzner" | "manual";
+/** A connected provider's kind (`hetzner`, `aws`), or adding a machine by hand. */
+const MANUAL = "manual";
 
-/** Add a server: create one at Hetzner (when connected), or join any machine by hand. */
+/** Add a server: create one at a connected cloud provider, or join any machine by hand. */
 export function AddServerDialog({
   open,
   onOpenChange,
@@ -45,29 +57,31 @@ export function AddServerDialog({
     queryFn: () => provisionApi.servers(workspaceId!),
     enabled: open && !!workspaceId,
   });
-  const connected = list.data?.hetznerConnected ?? false;
-  const [provider, setProvider] = useState<Provider>("manual");
+  const kinds = list.data?.connectedProviders.map((p) => p.kind) ?? [];
+  const kindsKey = kinds.join(",");
+  const [provider, setProvider] = useState<string>(MANUAL);
   const [created, setCreated] = useState<string | null>(null);
   useEffect(() => {
-    if (open) setProvider(connected ? "hetzner" : "manual");
-  }, [open, connected]);
+    if (open) setProvider(kindsKey.split(",")[0] || MANUAL);
+  }, [open, kindsKey]);
 
   const close = (o: boolean) => {
     onOpenChange(o);
     if (!o) setCreated(null);
   };
+  const cloud = provider !== MANUAL;
 
   return (
     <Modal
       open={open}
       onOpenChange={close}
-      width={provider === "hetzner" && !created ? 720 : 600}
+      width={cloud && !created ? 720 : 600}
       title={created ? "Adding server" : "Add a server"}
       description={
         created
-          ? "Hetzner is creating the server. It installs modula-node on first boot and joins this instance."
-          : provider === "hetzner"
-            ? "Create a server at Hetzner. It boots, installs Docker, Caddy and modula-node, and adds itself as a node over mutual TLS."
+          ? `${providerName(provider)} is creating the server. It installs modula-node on first boot and joins this instance.`
+          : cloud
+            ? `Create a server on ${providerLabel(provider)}. It boots, installs Docker, Caddy and modula-node, and adds itself as a node over mutual TLS.`
             : "Run one command on a fresh Ubuntu or Debian server. It installs Docker, Caddy and modula-node, then adds it to this instance as a node."
       }
     >
@@ -75,33 +89,45 @@ export function AddServerDialog({
         <AddServerProgress serverId={created} onDone={() => close(false)} />
       ) : (
         <div className="flex flex-col gap-4">
-          <Segmented<Provider>
-            label="Provider"
-            value={provider}
-            onChange={setProvider}
-            options={[
-              { value: "hetzner", label: "Hetzner Cloud" },
-              { value: "manual", label: "Manual" },
-            ]}
-          />
-          {provider === "hetzner" ? (
+          {kinds.length ? (
+            <Segmented
+              label="Provider"
+              value={provider}
+              onChange={setProvider}
+              options={[
+                ...kinds.map((k) => ({ value: k, label: providerLabel(k) })),
+                { value: MANUAL, label: "Manual" },
+              ]}
+            />
+          ) : null}
+          {cloud ? (
             list.isPending && workspaceId ? (
               <Skeleton className="h-40" />
-            ) : connected && workspaceId && list.data ? (
-              <HetznerForm
+            ) : providerOf(list.data, provider) && workspaceId && list.data ? (
+              <ProviderForm
+                key={provider}
+                kind={provider}
                 workspaceId={workspaceId}
                 list={list.data}
                 onCreated={setCreated}
                 onCancel={() => close(false)}
               />
             ) : (
-              <Alert tone="info" title="Hetzner is not connected">
+              <Alert tone="info" title={`${providerLabel(provider)} is not connected`}>
                 A workspace admin can connect it in Settings → Integrations.
                 Until then, add one manually.
               </Alert>
             )
           ) : (
-            <ManualJoin onDone={() => close(false)} />
+            <>
+              {list.data && !kinds.length ? (
+                <p className="text-[13px] text-muted-foreground">
+                  To create servers from here, a workspace admin can connect
+                  Hetzner Cloud or AWS EC2 in Settings → Integrations.
+                </p>
+              ) : null}
+              <ManualJoin onDone={() => close(false)} />
+            </>
           )}
         </div>
       )}
@@ -109,12 +135,30 @@ export function AddServerDialog({
   );
 }
 
-function HetznerForm({
+/** What each provider adds under the price table. */
+function priceNote(kind: string): string {
+  return kind === "aws"
+    ? "On-demand prices in US dollars: compute, the root disk and an Elastic IP. The Elastic IP is included, so the server keeps its address through restarts and resizes; the address shows once AWS has attached it. Data transfer is extra."
+    : "Approximate: Hetzner bills in euros, VAT included. Traffic beyond the included amount is extra.";
+}
+
+/** Shown in place of the key list when the provider has no SSH keys. */
+function noKeysNote(kind: string): string {
+  return kind === "aws"
+    ? "No key pairs in this AWS account, so nothing could log in over SSH. Import one in the EC2 console (Key Pairs) first."
+    : kind === "hetzner"
+      ? "No SSH keys in this Hetzner project; Hetzner emails a root password instead."
+      : "No SSH keys at this provider.";
+}
+
+function ProviderForm({
+  kind,
   workspaceId,
   list,
   onCreated,
   onCancel,
 }: {
+  kind: string;
   workspaceId: string;
   list: ProvisionedList;
   onCreated: (id: string) => void;
@@ -122,23 +166,28 @@ function HetznerForm({
 }) {
   const qc = useQueryClient();
   const catalog = useQuery({
-    queryKey: ["hetzner-catalog", workspaceId],
-    queryFn: () => provisionApi.hetznerCatalog(workspaceId),
+    queryKey: [`${kind}-catalog`, workspaceId],
+    queryFn: () => provisionApi.catalog(workspaceId, kind),
     staleTime: 5 * 60_000,
   });
   const sshKeys = useQuery({
-    queryKey: ["hetzner-ssh-keys", workspaceId],
-    queryFn: () => provisionApi.hetznerSshKeys(workspaceId),
+    queryKey: [`${kind}-ssh-keys`, workspaceId],
+    queryFn: () => provisionApi.sshKeys(workspaceId, kind),
     staleTime: 60_000,
   });
-  const [location, setLocation] = useState("hetzner:fsn1");
+  const [picked, setPicked] = useState<string | null>(null);
   const [serverType, setServerType] = useState<string | null>(null);
   const [name, setName] = useState(() => `worker-${list.servers.length + 1}`);
+  const [diskText, setDiskText] = useState(String(ROOT_DISK.default));
   const [ssh, setSsh] = useState(false);
-  const [keyIds, setKeyIds] = useState<number[]>([]);
+  const [keyIds, setKeyIds] = useState<string[]>([]);
 
+  const locations = catalog.data?.locations ?? [];
+  const location = locations.some((l) => l.location.id === picked)
+    ? picked
+    : defaultLocation(kind, locations);
   const types = useMemo(
-    () => typesIn(catalog.data?.serverTypes ?? [], location),
+    () => typesIn(catalog.data?.serverTypes ?? [], location ?? ""),
     [catalog.data, location],
   );
   useEffect(() => {
@@ -147,22 +196,22 @@ function HetznerForm({
   }, [types, serverType]);
 
   const chosen = types.find((t) => t.name === serverType);
-  const { caps, usage } = list;
+  const rootDisk = hasRootDisk(kind);
+  const disk = parseDiskGb(diskText);
+  const diskOk = !rootDisk || disk !== null;
+  // Catalog prices assume the default disk; a chosen one moves them.
+  const priceOf = (cents: number) =>
+    priceWithDisk(kind, cents, disk ?? ROOT_DISK.default);
+  const price = chosen ? priceOf(chosen.monthlyCents) : null;
+  // This form only shows while the provider is connected.
+  const { caps, usage } = providerOf(list, kind)!;
   const overCount = usage.servers + 1 > caps.maxServers;
-  const overSpend = chosen
-    ? usage.monthlyCents + chosen.monthlyCents > caps.maxMonthlyCents
-    : false;
+  const overSpend =
+    price !== null ? usage.monthlyCents + price > caps.maxMonthlyCents : false;
   const nameOk = validServerName(name);
 
   const create = useMutation({
-    mutationFn: () =>
-      provisionApi.provision(workspaceId, {
-        location,
-        serverType: serverType!,
-        name,
-        ssh,
-        sshKeyIds: ssh ? keyIds : [],
-      }),
+    mutationFn: (req: ProvisionRequest) => provisionApi.provision(workspaceId, req),
     onSuccess: (s) => {
       qc.invalidateQueries({ queryKey: ["provisioned", workspaceId] });
       onCreated(s.id);
@@ -178,13 +227,13 @@ function HetznerForm({
 
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-1.5 text-sm font-bold">Location</legend>
-        <div className="grid grid-cols-3 gap-2">
-          {catalog.data.locations.map((l) => (
+        <div className="grid max-h-56 grid-cols-3 gap-2 overflow-auto">
+          {locations.map((l) => (
             <button
               key={l.location.id}
               type="button"
               aria-pressed={location === l.location.id}
-              onClick={() => setLocation(l.location.id)}
+              onClick={() => setPicked(l.location.id)}
               className={clsx(
                 "flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left text-sm",
                 location === l.location.id
@@ -251,13 +300,13 @@ function HetznerForm({
                       {t.memoryGb} GB
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {t.diskGb} GB
+                      {rootDisk ? (disk ?? ROOT_DISK.default) : t.diskGb} GB
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {t.arch === "arm" ? "Arm" : "x86"} · {t.cpuType}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {euros(t.monthlyCents)}
+                      {monthlyUsd(priceOf(t.monthlyCents), kind)}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -265,39 +314,63 @@ function HetznerForm({
             </Table>
           </div>
         )}
-        <p className="text-[13px] text-muted-foreground">
-          Prices include VAT, as Hetzner bills them. Traffic beyond the included
-          amount is extra.
-        </p>
+        <p className="text-[13px] text-muted-foreground">{priceNote(kind)}</p>
       </fieldset>
 
       <div className="grid grid-cols-2 gap-4">
-        <Field
-          label="Name"
-          error={
-            name && !nameOk ? "Lowercase letters, digits and hyphens" : null
-          }
-          hint="Hostname and server name."
-        >
-          {(p) => (
-            <Input
-              {...p}
-              mono
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          )}
-        </Field>
+        <div className="flex flex-col gap-4">
+          <Field
+            label="Name"
+            error={
+              name && !nameOk ? "Lowercase letters, digits and hyphens" : null
+            }
+            hint="Hostname and server name."
+          >
+            {(p) => (
+              <Input
+                {...p}
+                mono
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            )}
+          </Field>
+          {rootDisk ? (
+            <Field
+              label="Root disk (GB)"
+              error={
+                diskOk
+                  ? null
+                  : `Whole GB from ${ROOT_DISK.min} to ${ROOT_DISK.max.toLocaleString("en-US")}`
+              }
+              hint={`gp3 SSD. Each GB adds ${usd(ROOT_DISK.centsPerGb)} per month.`}
+            >
+              {(p) => (
+                <Input
+                  {...p}
+                  className="w-32"
+                  inputMode="numeric"
+                  value={diskText}
+                  onChange={(e) => setDiskText(e.target.value)}
+                />
+              )}
+            </Field>
+          ) : null}
+        </div>
         <div className="flex flex-col gap-1.5">
           <span className="text-sm">SSH access</span>
           <Checkbox
             className="h-8"
             checked={ssh}
             onCheckedChange={setSsh}
-            label="Open port 22 in the firewall"
+            label={`Open port 22 in the ${kind === "aws" ? "security group" : "firewall"}`}
           />
           {ssh ? (
-            sshKeys.data?.length ? (
+            sshKeys.isPending ? (
+              <Skeleton className="h-8" />
+            ) : sshKeys.error ? (
+              <p className="text-[13px] text-error">{sshKeys.error.message}</p>
+            ) : sshKeys.data.length ? (
               <div className="flex flex-col gap-1">
                 {sshKeys.data.map((k) => (
                   <Checkbox
@@ -312,7 +385,9 @@ function HetznerForm({
                       <>
                         {k.name}{" "}
                         <span className="font-mono text-muted-foreground">
-                          {k.fingerprint.slice(0, 17)}
+                          {kind === "aws"
+                            ? keyRegion(k.id)
+                            : k.fingerprint.slice(0, 17)}
                         </span>
                       </>
                     }
@@ -321,8 +396,7 @@ function HetznerForm({
               </div>
             ) : (
               <p className="text-[13px] text-muted-foreground">
-                No SSH keys in this Hetzner project; Hetzner emails a root
-                password instead.
+                {noKeysNote(kind)}
               </p>
             )
           ) : (
@@ -341,8 +415,8 @@ function HetznerForm({
           )}
         >
           {usage.servers} of {caps.maxServers} servers ·{" "}
-          {euros(usage.monthlyCents)} of {euros(caps.maxMonthlyCents)} per month
-          {chosen ? ` · adds ${euros(chosen.monthlyCents)}` : ""}
+          {monthlyUsd(usage.monthlyCents, kind)} of {usd(caps.maxMonthlyCents)} per month
+          {price !== null ? ` · adds ${monthlyUsd(price, kind)}` : ""}
           {overCount
             ? " — server limit reached"
             : overSpend
@@ -356,8 +430,19 @@ function HetznerForm({
           <Button
             variant="primary"
             loading={create.isPending}
-            disabled={!chosen || !nameOk || overCount || overSpend}
-            onClick={() => create.mutate()}
+            disabled={
+              !chosen || !location || !nameOk || !diskOk || overCount || overSpend
+            }
+            onClick={() =>
+              create.mutate({
+                location: location!,
+                serverType: chosen!.name,
+                name,
+                ssh,
+                sshKeyIds: ssh ? keyIds : [],
+                ...(rootDisk ? { diskGb: disk! } : {}),
+              })
+            }
           >
             Create server
           </Button>
