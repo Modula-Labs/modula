@@ -229,6 +229,7 @@ pub async fn connect(
         token_id: c.token_id,
     };
 
+    state.keys.warm(&state.db, workspace).await?;
     let mut tx = state.db.begin().await?;
     let existing: Option<Id> = sqlx::query_scalar(
         "SELECT id FROM integrations WHERE workspace_id = $1 AND kind = 'cloudflare' FOR UPDATE",

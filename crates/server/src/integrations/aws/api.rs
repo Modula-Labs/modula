@@ -136,6 +136,7 @@ pub async fn connect(
         Err(e) => return Err(e.into()),
     }
 
+    state.keys.warm(&state.db, workspace).await?;
     let mut tx = state.db.begin().await?;
     let existing: Option<Id> = sqlx::query_scalar(
         "SELECT id FROM integrations WHERE workspace_id = $1 AND kind = 'aws' FOR UPDATE",

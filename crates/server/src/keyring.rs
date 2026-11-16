@@ -55,6 +55,14 @@ impl Keyring {
         Ok(key)
     }
 
+    /// Load `scope`'s data key into the cache. A handler that seals or opens
+    /// while it holds a transaction calls this before `begin`: a cache miss
+    /// takes a second pool connection, and waiting for one while holding the
+    /// first starves the pool under load.
+    pub async fn warm(&self, db: &PgPool, scope: Id) -> AppResult<()> {
+        self.data_key(db, scope).await.map(drop)
+    }
+
     pub async fn seal(
         &self,
         db: &PgPool,

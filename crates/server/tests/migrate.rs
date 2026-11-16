@@ -21,7 +21,7 @@ use modula_node::join::{JoinArgs, join};
 use modula_node::runtime::fake::FakeRuntime;
 use modula_server::migrate::moves::{self, Poll};
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -206,7 +206,15 @@ where
     panic!("timed out waiting for {what}");
 }
 
-async fn setup(pool: PgPool) -> Setup {
+/// Each test opens its own pool instead of taking one from sqlx's shared
+/// 20-connection budget: these tests run nodes, gRPC and pollers, and a dozen
+/// of them in parallel need more than that.
+async fn setup(db: PgConnectOptions) -> Setup {
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(db)
+        .await
+        .unwrap();
     let (url, mock) = mock_hetzner().await;
     let mut cfg = config();
     cfg.hetzner_api = url;
@@ -532,8 +540,8 @@ impl Setup {
 /// `${{db.MODULA_TCP_PROXY_DOMAIN}}` is resolved at deploy time: a service
 /// deployed before its database's proxy moved keeps the old address.
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn services_holding_a_moved_tcp_address_are_listed(pool: PgPool) {
-    let s = setup(pool).await;
+async fn services_holding_a_moved_tcp_address_are_listed(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     let old = s.node(&s.join_token().await, "worker-1").await;
     let new = s.node(&s.join_token().await, "worker-2").await;
@@ -625,8 +633,8 @@ async fn services_holding_a_moved_tcp_address_are_listed(pool: PgPool) {
 /// A changed public address moves DNS: the node's services at once, a main
 /// server's own names through a delayed job.
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn a_changed_public_address_queues_the_dns_resync(pool: PgPool) {
-    let s = setup(pool).await;
+async fn a_changed_public_address_queues_the_dns_resync(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     let node = s.node(&s.join_token().await, "worker-1").await;
     let project = s.project(ws).await;
@@ -672,8 +680,8 @@ async fn a_changed_public_address_queues_the_dns_resync(pool: PgPool) {
 /// service until DNS follows: the old server forwards over the mesh to the
 /// new replica (never to anything of its own, so no stale data).
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn moved_services_stay_routed_through_the_old_server(pool: PgPool) {
-    let s = setup(pool).await;
+async fn moved_services_stay_routed_through_the_old_server(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     let old = s.node(&s.join_token().await, "worker-1").await;
     let new = s.node(&s.join_token().await, "worker-2").await;
@@ -775,8 +783,8 @@ async fn moved_services_stay_routed_through_the_old_server(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn a_worker_server_migrates_with_its_data(pool: PgPool) {
-    let s = setup(pool).await;
+async fn a_worker_server_migrates_with_its_data(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     let r = s
         .app
@@ -965,8 +973,11 @@ async fn a_worker_server_migrates_with_its_data(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn a_service_moves_with_its_volume_and_an_abort_puts_it_back(pool: PgPool) {
-    let s = setup(pool).await;
+async fn a_service_moves_with_its_volume_and_an_abort_puts_it_back(
+    _: PgPoolOptions,
+    db: PgConnectOptions,
+) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     let a = s.node(&s.join_token().await, "worker-a").await;
     let b = s.node(&s.join_token().await, "worker-b").await;
@@ -1080,8 +1091,8 @@ async fn a_service_moves_with_its_volume_and_an_abort_puts_it_back(pool: PgPool)
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn an_aborted_migration_puts_everything_back(pool: PgPool) {
-    let s = setup(pool).await;
+async fn an_aborted_migration_puts_everything_back(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     let r = s
         .app
@@ -1218,8 +1229,8 @@ async fn an_aborted_migration_puts_everything_back(pool: PgPool) {
 /// only once associated) reaches the Hetzner firewall before the first
 /// move, and the DNS-step bookkeeping is set.
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn a_hetzner_server_migrates_to_ec2(pool: PgPool) {
-    let s = setup(pool).await;
+async fn a_hetzner_server_migrates_to_ec2(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     s.connect_providers(ws).await;
     s.mock.lock().unwrap().firewalls.push(json!({
@@ -1293,8 +1304,8 @@ async fn a_hetzner_server_migrates_to_ec2(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn an_ec2_server_migrates_to_hetzner(pool: PgPool) {
-    let s = setup(pool).await;
+async fn an_ec2_server_migrates_to_hetzner(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     s.connect_providers(ws).await;
     let old = s.existing("worker-1", "198.51.100.5", Some(ws)).await;
@@ -1332,8 +1343,8 @@ async fn an_ec2_server_migrates_to_hetzner(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn a_server_migrates_to_an_existing_one(pool: PgPool) {
-    let s = setup(pool).await;
+async fn a_server_migrates_to_an_existing_one(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     s.connect_providers(ws).await;
     let other = s.app.create_workspace(&s.admin, "other").await;
@@ -1422,8 +1433,8 @@ async fn a_server_migrates_to_an_existing_one(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn aborting_keeps_an_existing_target(pool: PgPool) {
-    let s = setup(pool).await;
+async fn aborting_keeps_an_existing_target(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     s.connect_providers(ws).await;
     let old = s.existing("worker-1", "203.0.113.5", Some(ws)).await;
@@ -1486,8 +1497,11 @@ async fn aborting_keeps_an_existing_target(pool: PgPool) {
 /// A server joined by hand: the request names the workspace paying, there
 /// is no old provider server to mark.
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn a_hand_added_server_migrates_for_the_named_workspace(pool: PgPool) {
-    let s = setup(pool).await;
+async fn a_hand_added_server_migrates_for_the_named_workspace(
+    _: PgPoolOptions,
+    db: PgConnectOptions,
+) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     s.connect_providers(ws).await;
     let old = s.existing("by-hand", "203.0.113.5", None).await;
@@ -1534,8 +1548,8 @@ async fn a_hand_added_server_migrates_for_the_named_workspace(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn another_workspaces_server_is_refused(pool: PgPool) {
-    let s = setup(pool).await;
+async fn another_workspaces_server_is_refused(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     let other = s.app.create_workspace(&s.admin, "other").await;
     s.connect_providers(ws).await;
@@ -1576,8 +1590,8 @@ async fn another_workspaces_server_is_refused(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
-async fn volumes_that_cannot_fit_are_refused(pool: PgPool) {
-    let s = setup(pool).await;
+async fn volumes_that_cannot_fit_are_refused(_: PgPoolOptions, db: PgConnectOptions) {
+    let s = setup(db).await;
     let ws = s.app.create_workspace(&s.admin, "team").await;
     s.connect_providers(ws).await;
     let old = s.existing("worker-1", "203.0.113.5", Some(ws)).await;

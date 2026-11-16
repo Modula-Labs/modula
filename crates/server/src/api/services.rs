@@ -608,6 +608,17 @@ pub async fn update(
     let id = grant.id();
     let new = req.name;
     validate_service_name(&new)?;
+    // Renaming reseals referencing variables inside the transaction.
+    let environments: Vec<Id> = sqlx::query_scalar(
+        "SELECT e.id FROM environments e JOIN services s ON s.project_id = e.project_id
+         WHERE s.id = $1",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    for env in environments {
+        state.keys.warm(&state.db, env).await?;
+    }
     let mut tx = state.db.begin().await?;
     let (project, old): (Id, String) =
         sqlx::query_as("SELECT project_id, name FROM services WHERE id = $1 FOR UPDATE")
@@ -635,8 +646,8 @@ pub async fn update(
     }
 
     // Rewrite the references (values are sealed per variable: open, rewrite,
-    // seal again under the same row id). The environments' keys exist, so
-    // the keyring reads them without touching the locked rows.
+    // seal again under the same row id). The environments' keys were warmed
+    // above, so this takes no second connection.
     let referencing: Vec<ProjectVariable> =
         sqlx::query_as(concat!(referencing_sql!(), " FOR UPDATE OF v"))
             .bind(project)
