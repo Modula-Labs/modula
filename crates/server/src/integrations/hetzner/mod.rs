@@ -5,7 +5,7 @@ pub mod api;
 pub mod client;
 pub mod firewall;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -494,7 +494,25 @@ impl ServerProvider for Hetzner {
                 ("modula=1,role=main".to_owned(), &sources.everyone),
             ];
             let mut failed = Vec::new();
+            // Our own main servers: a project may hold another instance's
+            // main server, labelled `role=main` like ours.
+            let ours: BTreeSet<i64> = if sources.mains.is_empty() {
+                BTreeSet::new()
+            } else {
+                match self.client.servers("modula=1,role=main").await {
+                    Ok(servers) => servers
+                        .iter()
+                        .filter(|s| s.ipv4().is_some_and(|ip| sources.mains.contains(&ip)))
+                        .map(|s| s.id)
+                        .collect(),
+                    Err(e) => {
+                        failed.push(e.to_string());
+                        BTreeSet::new()
+                    }
+                }
+            };
             for (selector, sources) in lists {
+                let main = selector.contains("role=main");
                 let firewalls = match self.client.firewalls(&selector).await {
                     Ok(f) => f,
                     Err(e) => {
@@ -503,6 +521,9 @@ impl ServerProvider for Hetzner {
                     }
                 };
                 for fw in firewalls {
+                    if main && !fw.server_ids().any(|id| ours.contains(&id)) {
+                        continue;
+                    }
                     let rules = firewall::with_mesh_rule(&fw.rules, sources);
                     if rules == fw.rules {
                         continue;

@@ -1167,9 +1167,29 @@ impl ServerProvider for Ec2Provider {
                             .or_default()
                             .insert(slot, g);
                     }
+                    // Groups on our own main servers: the account may hold
+                    // another instance's main server, tagged `role=main` too.
+                    let mains: Vec<&str> = sources.mains.iter().map(String::as_str).collect();
+                    let ours: BTreeSet<String> =
+                        if mains.is_empty() || !sets.keys().any(|(_, s)| s.starts_with("main-")) {
+                            BTreeSet::new()
+                        } else {
+                            self.client
+                                .instances(
+                                    region,
+                                    &[("ip-address", &mains), ("instance-state-name", LIVE_STATES)],
+                                )
+                                .await?
+                                .into_iter()
+                                .flat_map(|i| i.groups)
+                                .collect()
+                        };
                     let mut failed = Vec::new();
                     for ((_, set), groups) in sets {
                         let wanted = if set.starts_with("main-") {
+                            if !groups.values().any(|g| ours.contains(&g.id)) {
+                                continue;
+                            }
                             &sources.everyone
                         } else {
                             &sources.workspace

@@ -274,6 +274,31 @@ pub struct Firewall {
     pub labels: BTreeMap<String, String>,
     #[serde(default)]
     pub rules: Vec<FirewallRule>,
+    #[serde(default)]
+    pub applied_to: Vec<AppliedTo>,
+}
+
+impl Firewall {
+    /// Ids of the servers this firewall is applied to directly.
+    pub fn server_ids(&self) -> impl Iterator<Item = i64> + '_ {
+        self.applied_to
+            .iter()
+            .filter_map(|a| a.server.as_ref().map(|s| s.id))
+    }
+}
+
+/// One target of a firewall: a server, or a label selector.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppliedTo {
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<AppliedServer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppliedServer {
+    pub id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

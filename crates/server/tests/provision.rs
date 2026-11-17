@@ -154,13 +154,20 @@ async fn mock_hetzner() -> (url::Url, Shared) {
                 |State(m): State<Shared>, h: HeaderMap, Query(q): Query<std::collections::HashMap<String, String>>| async move {
                     guard!(m, h, "GET /servers");
                     let sel = q.get("label_selector").cloned().unwrap_or_default();
-                    let (k, v) = sel.split_once('=').unwrap();
                     let mock = m.lock().unwrap();
                     let found: Vec<Value> = mock
                         .servers
                         .iter()
-                        .filter(|s| s["labels"][k] == v)
-                        .map(|s| json!({"id": s["id"], "name": s["name"], "status": mock.server_status}))
+                        .filter(|s| {
+                            sel.split(',').all(|kv| {
+                                let (k, v) = kv.split_once('=').unwrap();
+                                s["labels"][k] == v
+                            })
+                        })
+                        .map(|s| {
+                            json!({"id": s["id"], "name": s["name"], "status": mock.server_status,
+                                   "labels": s["labels"], "public_net": s["public_net"]})
+                        })
                         .collect();
                     (StatusCode::OK, Json(page(json!(found), "servers", None)))
                 },
@@ -985,13 +992,34 @@ async fn wireguard_is_open_only_between_modulas_servers(pool: PgPool) {
     let other = app.create_workspace(&admin, "other").await;
     connect(&app, &admin, ws).await;
     // The main server (shared) and its CLI-made firewall in the same project.
-    mesh_node(&app, None, "198.51.100.1").await;
-    mock.lock().unwrap().firewalls.push(json!({
-        "id": 900, "name": "modula-main",
-        "labels": {"modula": "1", "role": "main", "server": "main"},
-        "rules": [{"direction": "in", "protocol": "tcp", "port": "22",
-                   "source_ips": ["0.0.0.0/0", "::/0"], "description": "SSH"}],
-    }));
+    let main_node = mesh_node(&app, None, "198.51.100.1").await;
+    sqlx::query("UPDATE nodes SET info = '{\"capabilities\": [\"dashboard\"]}' WHERE id = $1")
+        .bind(main_node)
+        .execute(app.db())
+        .await
+        .unwrap();
+    let ssh = json!([{"direction": "in", "protocol": "tcp", "port": "22",
+                      "source_ips": ["0.0.0.0/0", "::/0"], "description": "SSH"}]);
+    {
+        let mut m = mock.lock().unwrap();
+        let labels = json!({"modula": "1", "role": "main", "server": "main"});
+        m.servers
+            .push(json!({"id": 4000, "name": "main", "labels": labels.clone(),
+                              "public_net": {"ipv4": {"ip": "198.51.100.1"}}}));
+        m.firewalls.push(json!({
+            "id": 900, "name": "modula-main", "labels": labels.clone(), "rules": ssh.clone(),
+            "applied_to": [{"type": "server", "server": {"id": 4000}}],
+        }));
+        // Another instance's main server in the same project, labelled (and
+        // named) just like ours: never ours to change.
+        m.servers
+            .push(json!({"id": 4001, "name": "main", "labels": labels.clone(),
+                              "public_net": {"ipv4": {"ip": "198.51.100.77"}}}));
+        m.firewalls.push(json!({
+            "id": 901, "name": "modula-main", "labels": labels, "rules": ssh.clone(),
+            "applied_to": [{"type": "server", "server": {"id": 4001}}],
+        }));
+    }
     // A worker's firewall opens WireGuard to the servers already there.
     let r = provision(
         &app,
@@ -1001,7 +1029,13 @@ async fn wireguard_is_open_only_between_modulas_servers(pool: PgPool) {
     )
     .await;
     assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
-    let worker_fw = |m: &Mock| m.firewalls.iter().find(|f| f["id"] != 900).unwrap().clone();
+    let worker_fw = |m: &Mock| {
+        m.firewalls
+            .iter()
+            .find(|f| f["id"] != 900 && f["id"] != 901)
+            .unwrap()
+            .clone()
+    };
     assert_eq!(
         mesh_sources(&worker_fw(&mock.lock().unwrap())),
         Some(vec!["198.51.100.1/32".to_owned()])
@@ -1036,6 +1070,11 @@ async fn wireguard_is_open_only_between_modulas_servers(pool: PgPool) {
         );
         // Its other rules are kept.
         assert_eq!(main["rules"][0]["description"], "SSH");
+        let foreign = m.firewalls.iter().find(|f| f["id"] == 901).unwrap();
+        assert_eq!(
+            foreign["rules"], ssh,
+            "another instance's main firewall is left alone"
+        );
     }
     // Unchanged: no API writes.
     let writes = |m: &Mock| m.calls.iter().filter(|c| c.ends_with("set_rules")).count();

@@ -126,6 +126,10 @@ pub struct MeshSources {
     pub workspace: Vec<String>,
     /// Every server: what a main server's firewall admits.
     pub everyone: Vec<String>,
+    /// Public IPv4s of this instance's own main servers. Only the firewalls
+    /// on those are synced as main ones: an account may hold another
+    /// instance's main server, labelled just like ours.
+    pub mains: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -92,6 +92,7 @@ async fn exercise(p: &Ec2Provider, id: &str) -> Result<(), String> {
     p.sync_mesh(&MeshSources {
         workspace: vec!["203.0.113.1".into()],
         everyone: Vec::new(),
+        mains: Vec::new(),
     })
     .await
     .map_err(|e| e.to_string())?;

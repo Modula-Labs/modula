@@ -468,6 +468,65 @@ async fn resize_is_a_stop_modify_and_a_done_action(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn sync_mesh_leaves_another_instances_main_server_alone(pool: PgPool) {
+    let (app, mock, _admin, ws) = setup(pool).await;
+    {
+        let mut m = mock.lock().unwrap();
+        // Two main servers in one account, tagged alike: ours at
+        // 198.51.100.1, another instance's at 198.51.100.77.
+        for (n, ip) in [("ours", "198.51.100.1"), ("theirs", "198.51.100.77")] {
+            let group = format!("sg-main-{n}");
+            m.groups.push(Group {
+                region: "us-east-1".into(),
+                id: group.clone(),
+                name: format!("modula-main-{n}"),
+                vpc: "vpc-1".into(),
+                tags: BTreeMap::from([
+                    ("modula".to_owned(), "1".to_owned()),
+                    ("role".to_owned(), "main".to_owned()),
+                    ("server".to_owned(), format!("main-{n}")),
+                    ("modula-slot".to_owned(), "0".to_owned()),
+                ]),
+                rules: Vec::new(),
+            });
+            m.instances.push(Inst {
+                region: "us-east-1".into(),
+                id: format!("i-main-{n}"),
+                state: "running".into(),
+                groups: vec![group],
+                public_ip: Some(ip.into()),
+                ..Default::default()
+            });
+        }
+    }
+    let p = aws(&app, ws).await;
+    p.sync_mesh(&MeshSources {
+        workspace: Vec::new(),
+        everyone: vec!["203.0.113.1".into()],
+        mains: vec!["198.51.100.1".into()],
+    })
+    .await
+    .unwrap();
+    let m = mock.lock().unwrap();
+    let mesh = |id: &str| {
+        m.groups
+            .iter()
+            .find(|g| g.id == id)
+            .unwrap()
+            .rules
+            .iter()
+            .filter(|r| r.0 == "udp" && r.1 == 51820)
+            .map(|r| r.3.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(mesh("sg-main-ours"), ["203.0.113.1/32"]);
+    assert!(
+        mesh("sg-main-theirs").is_empty(),
+        "another instance's main group is left alone"
+    );
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
 async fn sync_mesh_only_changes_the_wireguard_rule_of_modula_groups(pool: PgPool) {
     let (app, mock, admin, ws) = setup(pool).await;
     let r = provision(&app, &admin, ws, worker(json!({}))).await;
@@ -485,6 +544,7 @@ async fn sync_mesh_only_changes_the_wireguard_rule_of_modula_groups(pool: PgPool
     let sources = MeshSources {
         workspace: (1..=56).map(|n| format!("203.0.113.{n}")).collect(),
         everyone: vec!["203.0.113.1".into()],
+        mains: Vec::new(),
     };
     p.sync_mesh(&sources).await.unwrap();
     {

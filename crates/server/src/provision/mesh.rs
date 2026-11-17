@@ -33,6 +33,19 @@ pub async fn mesh_sources(db: &sqlx::PgPool, workspace: Option<Id>) -> AppResult
     .await?)
 }
 
+/// Public IPs of this instance's main servers (the nodes running the
+/// dashboard): the only main firewalls a sync may touch.
+pub async fn main_addresses(db: &sqlx::PgPool) -> AppResult<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT public_ip FROM nodes
+         WHERE status <> 'revoked' AND public_ip IS NOT NULL
+           AND coalesce(info->'capabilities' ? 'dashboard', false)
+         ORDER BY 1",
+    )
+    .fetch_all(db)
+    .await?)
+}
+
 /// Queues [`SYNC_JOB`] (once: queued syncs coalesce).
 pub async fn enqueue_sync(db: impl sqlx::PgExecutor<'_>) -> AppResult<()> {
     jobs::enqueue(
@@ -68,6 +81,7 @@ pub async fn sync_integrations(state: &AppState, workspaces: Option<&[Id]>) -> a
     .fetch_all(&state.db)
     .await?;
     let everyone = mesh_sources(&state.db, None).await?;
+    let mains = main_addresses(&state.db).await?;
     let mut failed = Vec::new();
     for (workspace, kind) in connected {
         let provider = match provider_for(state, workspace, &kind).await {
@@ -81,6 +95,7 @@ pub async fn sync_integrations(state: &AppState, workspaces: Option<&[Id]>) -> a
         let sources = MeshSources {
             workspace: mesh_sources(&state.db, Some(workspace)).await?,
             everyone: everyone.clone(),
+            mains: mains.clone(),
         };
         if let Err(e) = provider.sync_mesh(&sources).await {
             failed.push(format!("{kind} in {workspace}: {e}"));
