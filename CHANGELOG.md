@@ -7,6 +7,53 @@ may break things).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-18
+
+### Added
+
+- **AWS EC2 as a second server provider.** Connect an IAM user's access key
+  in **Settings → Integrations → AWS** (the minimal IAM policy is shown
+  there and in the integrations guide), then create, resize and delete EC2
+  servers from **Servers** or `modula server create --location aws:<region>`
+  like Hetzner ones. Each server gets an Elastic IP, Modula-managed security
+  groups and an optional SSH key; a zone out of capacity is skipped for the
+  next one that offers the type. Prices come from the AWS Pricing API.
+- **Migrating a server to any connected provider**, Hetzner to EC2 and back,
+  or **to an existing server** (`modula server migrate worker-1 --to
+  worker-2`). Servers added by hand can be migrated too, for a named
+  workspace. The preview warns about architecture changes, backups and
+  point-in-time recovery left on the old disk, TCP proxy addresses and
+  volumes that won't fit.
+- **DNS follows a migrated server** when Cloudflare is connected: the moved
+  services' custom domains and every A record on the old address are
+  repointed, retried with a backoff, and can be retried from the dashboard
+  or with `modula server migrate --retry-dns`. `--skip-dns <record>` leaves
+  a record alone.
+- Per-provider spending caps (servers and dollars per month) for AWS, beside
+  Hetzner's.
+
+### Changed
+
+- Server prices and spending caps are shown in US dollars for every
+  provider; Hetzner's euro prices are converted at `MODULA_EUR_USD_RATE`
+  (default 1.08). Stored prices of existing Hetzner servers are converted
+  once at that default rate on upgrade.
+- **API (breaking):** `POST /api/nodes/{id}/migrate` takes
+  `{"target": {"kind": "new", "provider", "location", "serverType", "diskGb"?}}`
+  or `{"target": {"kind": "existing", "nodeId"}}` instead of a top-level
+  `location` and `serverType`. Migrations report `targetExisting`, a `dns`
+  step, `dnsChanges` and `staleTcp`; `targetServerType` can be null.
+- The database schema now grows by numbered migrations: upgrades from 0.1.10
+  apply `0002` on their own.
+
+### Fixed
+
+- Syncing the private network's firewall rule no longer edits another
+  Modula instance's main-server firewall in the same Hetzner project or AWS
+  account; only firewalls on this instance's own main servers are synced.
+- Connecting an integration or renaming a service could stall under load:
+  it waited for a second database connection while holding the first.
+
 ## [0.1.10] - 2026-10-27
 
 ### Fixed
@@ -366,7 +413,8 @@ environments and staged deploys, licensed AGPL-3.0-only.
 - **CLI:** `modula` for projects, deployments, logs, variables, metrics,
   `modula.toml` infrastructure as code, and `modula server create`.
 
-[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Modula-Labs/modula/compare/v0.1.10...v0.2.0
 [0.1.10]: https://github.com/Modula-Labs/modula/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/Modula-Labs/modula/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/Modula-Labs/modula/compare/v0.1.7...v0.1.8

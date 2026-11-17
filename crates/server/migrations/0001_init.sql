@@ -1090,12 +1090,12 @@ CREATE INDEX r2_buckets_bucket_idx ON r2_buckets (account_id, bucket);
 
 -- One server created through a provider API. It joins with a single-use join
 -- token (join_token_id); enrollment records the node on that token, which is
--- how the row learns its node_id. Prices are the monthly price in USD cents
--- as billed (Hetzner's gross euros converted at MODULA_EUR_USD_RATE).
+-- how the row learns its node_id. Prices are the provider's gross monthly
+-- price in euro cents.
 CREATE TABLE provisioned_servers (
     id                  id PRIMARY KEY,
     workspace_id        id NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
-    provider            text NOT NULL CHECK (provider IN ('hetzner', 'aws')),
+    provider            text NOT NULL CHECK (provider IN ('hetzner')),
     -- The provider's server id, once created.
     provider_id         text,
     -- The provider's create action, followed until the server boots.
@@ -1151,18 +1151,14 @@ CREATE TABLE server_migrations (
     source_node_id      id REFERENCES nodes (id) ON DELETE SET NULL,
     source_server_id    id REFERENCES provisioned_servers (id) ON DELETE SET NULL,
     source_name         text NOT NULL,
-    -- Catalog location id and provider server type of the target server;
-    -- unknown (NULL) for an existing target that isn't at a provider.
-    target_location     text,
-    target_server_type  text,
-    -- The target already existed: nothing here ever deletes it. Then
-    -- target_server_id stays NULL and target_node_id is set from the start.
-    target_existing     boolean NOT NULL DEFAULT false,
+    -- Catalog location id and provider server type of the new server.
+    target_location     text NOT NULL,
+    target_server_type  text NOT NULL,
     target_server_id    id REFERENCES provisioned_servers (id) ON DELETE SET NULL,
     target_node_id      id REFERENCES nodes (id) ON DELETE SET NULL,
     status              text NOT NULL DEFAULT 'running'
                         CHECK (status IN ('running', 'failed', 'aborting', 'aborted', 'done')),
-    step                text NOT NULL DEFAULT 'create' CHECK (step IN ('create', 'join', 'move', 'promote', 'dns', 'finish')),
+    step                text NOT NULL DEFAULT 'create' CHECK (step IN ('create', 'join', 'move', 'promote', 'finish')),
     steps               jsonb NOT NULL DEFAULT '[]'::jsonb,
     main                boolean NOT NULL DEFAULT false,
     -- bundle (maintenance on, building it) → install (the new server sets the
@@ -1179,21 +1175,6 @@ CREATE TABLE server_migrations (
     new_public_url      text,
     new_node_url        text,
     retired_at          timestamptz,
-    -- Step dns (migrate/dns.rs): the old server's address when the migration
-    -- began, the DNS record ids the user opted out of repointing, the records
-    -- changed so far ({zoneId, zone, recordId, name, type, from, to, action}),
-    -- and the retries. A failure leaves step = 'dns' for a retry.
-    source_ip           text,
-    dns_skip            jsonb NOT NULL DEFAULT '[]'::jsonb,
-    dns_changes         jsonb NOT NULL DEFAULT '[]'::jsonb,
-    dns_attempts        integer NOT NULL DEFAULT 0,
-    dns_next_at         timestamptz,
-    -- Since when the step before the first copy has been waiting for the
-    -- target's address or the provider firewalls (migrate/server.rs).
-    mesh_wait_since     timestamptz,
-    -- Services whose variables still hold a moved TCP proxy's old address
-    -- (they were resolved at deploy time): they need a redeploy.
-    stale_tcp           jsonb NOT NULL DEFAULT '[]'::jsonb,
     error               text,
     created_by          id REFERENCES users (id) ON DELETE SET NULL,
     created_at          timestamptz NOT NULL DEFAULT now(),
@@ -1231,8 +1212,6 @@ CREATE TABLE instance_moves (
     -- The old server's desired generation that no longer runs the service.
     stop_generation     bigint,
     copy_attempts       integer NOT NULL DEFAULT 0,
-    -- The TCP proxy's public port before the switch (it can change).
-    old_tcp_port        integer,
     -- Archive bytes copied, all volumes.
     copied_bytes        bigint NOT NULL DEFAULT 0,
     steps               jsonb NOT NULL DEFAULT '[]'::jsonb,

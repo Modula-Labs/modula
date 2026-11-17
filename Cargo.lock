@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "modula-backup"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "age",
  "anyhow",
@@ -3038,7 +3038,7 @@ dependencies = [
 
 [[package]]
 name = "modula-cli"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3078,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "modula-crypto"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "argon2 0.6.0",
  "base64 0.23.1",
@@ -3098,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "modula-ec2"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "futures",
@@ -3120,7 +3120,7 @@ dependencies = [
 
 [[package]]
 name = "modula-hetzner"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "modula-provider",
  "reqwest",
@@ -3134,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "modula-id"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.4.3",
  "serde",
@@ -3144,7 +3144,7 @@ dependencies = [
 
 [[package]]
 name = "modula-node"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "modula-proto"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "prost",
  "tonic",
@@ -3197,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "modula-provider"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "futures",
  "serde",
@@ -3206,7 +3206,7 @@ dependencies = [
 
 [[package]]
 name = "modula-server"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
