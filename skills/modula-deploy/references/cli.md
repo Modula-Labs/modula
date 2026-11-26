@@ -73,6 +73,7 @@ Status:
 - `status`: project, environment, selected service, `pendingChanges`, and per service: newest deployment status (`queued|building|deploying|active|failed|crashed|removed|cancelled`, `null` = never deployed), `url`, `source`, `latestDeploymentId`, `instanceId`.
 - `deployment list [-l N]` (`deployments ls`): newest first (default 20, API max 50).
 - `logs [-d ID] [-b|--build] [-f|--follow] [-n LINES]`: default newest deployment, last 200 lines (max 5000), no follow. Fails if the deployment's server is offline.
+- `logs --http [--since 1h] [--status 5xx|404] [--method M] [--path SUBSTR] [--all] [-f] [-n N]`: HTTP request logs of the service (`--all`: the environment), oldest first; `--json` = one request per line.
 
 Services:
 - `add (-d postgres|mysql|redis|mongo | -i IMAGE | -r OWNER/NAME [-b BRANCH]) [-n NAME] [--port P] [-v KEY=VALUE]…`: creates in every environment, deploys nothing. Name defaults to engine/image/repo name. A new image/repo service becomes the linked default.
@@ -135,9 +136,20 @@ pg_dump "$PGURL" --schema-only > schema.sql
 kill $TUNNEL; rm -f /tmp/tunnel.log
 ```
 
+## Backups
+
+```bash
+modula backup list postgres                              # schedule and latest backups
+modula backup create postgres                            # back up now, wait for the result
+modula backup schedule postgres --hour 21 --local-disk   # daily at 21:00 UTC on the server's disk
+modula backup destinations postgres                      # where it can back up to
+```
+
+Restore is dashboard-only (needs a fresh sign-in).
+
 ## Not in the CLI
 
 Editing a single service setting directly (use `config apply` or the HTTP
-API), deleting services/environments/projects, backups, cron, metrics,
+API), deleting services/environments/projects, restoring a backup, cron, metrics,
 `run`/`shell`/`ssh`, scaling, servers: use the HTTP API ([api.md](api.md))
 with the same token, or the dashboard.

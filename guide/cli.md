@@ -324,6 +324,13 @@ newest deployment, the last 200 lines (`--lines`, at most 5000), then exit.
 are masked by the server. Logs come from the server running the deployment,
 so they fail with "the server running this deployment is offline" when it is.
 
+`logs --http` prints the service's HTTP request logs instead (the
+dashboard's network logs), oldest first: time (UTC), status, method, host
+and path, duration, bytes and client IP. `--since` (`30s`, `15m`, `1h`,
+`2d`; default `1h`), `--status` (`2xx` … `5xx` or one code), `--method`
+and `--path` filter; `--all` covers every service of the environment;
+`--follow` polls for new requests; `--json` prints one request per line.
+
 ## Services
 
 ### `add`
@@ -634,6 +641,36 @@ modula connect --tunnel-only -P 5433 # for TablePlus, DBeaver, pgAdmin…
 Limits: a tunnel closes after 30 minutes without traffic; at most 16 open
 tunnels per user and 64 per server. Opening a tunnel needs the **Member** role.
 
+### `backup list [SERVICE]` (alias `backups ls`)
+
+The database's daily schedule and its latest backups (status, size, where
+they are stored).
+
+### `backup create [SERVICE] [--local-disk | --target <ID> | --bucket <INSTANCE_ID>] [--no-wait]` (alias `backup now`)
+
+Back up now and wait for the result (exit 1 if it fails). Without a
+destination flag it goes where the schedule sends backups.
+
+### `backup schedule [SERVICE] [--hour <0-23>] [--local-disk | --target <ID> | --bucket <INSTANCE_ID>] [--daily <DAYS>] [--weekly <DAYS>] [--monthly <DAYS>] [--enable | --disable]`
+
+Without flags, shows the schedule. With flags, sets it: only what you pass
+changes. The hour is UTC. A new schedule needs `--hour` and a destination:
+
+```bash
+modula backup schedule postgres --hour 21 --local-disk   # nightly, on the database's server
+modula backup schedule postgres --daily 13               # keep two weeks of dailies
+```
+
+Backups on a server's disk are lost with that server; use a bucket or S3
+target for a copy elsewhere. See [Backups](backups.md) for retention.
+
+### `backup destinations [SERVICE]`
+
+Where this database can back up to, shown as the flag to pass.
+
+Restoring a backup needs a fresh sign-in and can't be done with an API token:
+use the dashboard.
+
 ## Shell
 
 ### `completion <SHELL>`
@@ -742,5 +779,5 @@ modula logs -f
 Editing one service setting directly (start command, health check, builder,
 resources: use [`config apply`](config-as-code.md), the dashboard or
 `PATCH /api/service-instances/{id}`), deleting services, environments and
-projects, backups, cron, metrics, `run`/`shell`/`ssh`, scaling, and server
+projects, restoring a backup, cron, metrics, `run`/`shell`/`ssh`, scaling, and server
 management (beyond `server update`). Use the dashboard or the [HTTP API](api.md) with the same token.

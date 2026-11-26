@@ -105,7 +105,10 @@ pub fn explain(e: &client::Error) -> SendError {
     } else if has("10202") || has("10001") {
         format!("Cloudflare refused the message (check the sender and recipient addresses): {raw}")
     } else {
-        return SendError { status, message: raw };
+        return SendError {
+            status,
+            message: raw,
+        };
     };
     // Keep Cloudflare's own words next to the explanation: the codes it
     // returns aren't all documented, and the reply is what tells them apart.

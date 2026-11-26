@@ -1,6 +1,7 @@
 //! One module per command group; [`run`] dispatches a parsed command line.
 
 pub mod auth;
+pub mod backup;
 pub mod config;
 pub mod cron;
 pub mod db;
@@ -132,6 +133,7 @@ async fn dispatch(ctx: &mut Ctx, command: Command) -> anyhow::Result<i32> {
             members::run(ctx, workspace.as_deref(), command).await?
         }
         Command::Cron { command } => return cron::run(ctx, command).await,
+        Command::Backup { command } => return backup::run(ctx, command).await,
         Command::Update { check } => return update::cli(ctx, check).await,
         Command::UpdateCheck => crate::update::background_check(ctx).await,
     }

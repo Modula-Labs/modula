@@ -350,7 +350,14 @@ fn where_html(a: &Alert) -> String {
 
 /// The intro sentence, main button label, extra links and steps per kind.
 #[allow(clippy::type_complexity)]
-fn guidance(a: &Alert) -> (String, &'static str, Vec<(&'static str, String)>, Vec<&'static str>) {
+fn guidance(
+    a: &Alert,
+) -> (
+    String,
+    &'static str,
+    Vec<(&'static str, String)>,
+    Vec<&'static str>,
+) {
     use super::Kind::*;
     let at = where_html(a);
     let server = a
@@ -599,9 +606,8 @@ pub fn email_in(a: &Alert, workspace: Option<modula_id::Id>) -> Mail {
     };
     let mut body = paragraph(&intro);
     body.push_str(&reason_html(a));
-    let when_human = a
-        .at
-        .format(time::macros::format_description!(
+    let when_human =
+        a.at.format(time::macros::format_description!(
             "[day padding:none] [month repr:short] [year], [hour]:[minute] UTC"
         ))
         .unwrap_or(when.clone());
@@ -753,12 +759,18 @@ mod tests {
     #[test]
     fn email_links_open_real_pages() {
         let mut a = alert(Phase::Fired);
-        a.link = "https://cloud.example.com/projects/p?env=e&service=s&tab=deployments&deployment=d".into();
+        a.link =
+            "https://cloud.example.com/projects/p?env=e&service=s&tab=deployments&deployment=d"
+                .into();
         let m = email_in(&a, Some("wwwwwwwwwwwwwwww".parse().unwrap()));
         // The main button opens the deployment; the others its service's tabs.
         assert!(m.html.contains("href=\"https://cloud.example.com/projects/p?env=e&amp;service=s&amp;tab=deployments&amp;deployment=d\""));
-        assert!(m.html.contains("href=\"https://cloud.example.com/projects/p?env=e&amp;service=s&amp;tab=variables\""));
-        assert!(m.html.contains("href=\"https://cloud.example.com/settings?workspace=wwwwwwwwwwwwwwww#notifications\""));
+        assert!(m.html.contains(
+            "href=\"https://cloud.example.com/projects/p?env=e&amp;service=s&amp;tab=variables\""
+        ));
+        assert!(m.html.contains(
+            "href=\"https://cloud.example.com/settings?workspace=wwwwwwwwwwwwwwww#notifications\""
+        ));
         assert!(m.html.contains(">View deployment<"));
         assert!(m.html.contains("What to try"));
         // Server alerts: the server's page, and all servers.
@@ -767,7 +779,10 @@ mod tests {
         n.link = "https://cloud.example.com/servers/n1".into();
         let m = email(&n);
         assert!(m.html.contains(">View server<"));
-        assert!(m.html.contains("href=\"https://cloud.example.com/servers\""));
+        assert!(
+            m.html
+                .contains("href=\"https://cloud.example.com/servers\"")
+        );
         // Resolved alerts don't ask for anything.
         assert!(!email(&alert(Phase::Resolved)).html.contains("What to try"));
     }

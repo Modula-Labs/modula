@@ -224,6 +224,19 @@ impl Api {
         .await
     }
 
+    /// HTTP request logs of an environment; `query` is the encoded filter
+    /// (`since`, `service`, `status`, …).
+    pub async fn http_logs(
+        &self,
+        environment: &str,
+        query: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.get(&format!(
+            "/api/environments/{environment}/http-logs?{query}"
+        ))
+        .await
+    }
+
     // ------------------------------------------------------------ variables
 
     pub async fn variables(&self, scope: VariableScope<'_>) -> anyhow::Result<Vec<Variable>> {

@@ -154,7 +154,7 @@ fn paint(status: &str, color: bool) -> String {
         return status.to_owned();
     }
     let code = match status {
-        "active" | "online" | "verified" | "SUCCESS" | "succeeded" => "32",
+        "active" | "online" | "verified" | "SUCCESS" | "succeeded" | "completed" => "32",
         "failed" | "crashed" | "error" | "timed_out" => "31",
         "queued" | "building" | "deploying" | "pending" | "running" | "degraded" => "33",
         "removed" | "cancelled" | "offline" | "skipped" => "2",

@@ -346,6 +346,12 @@ pub enum Command {
         #[command(subcommand)]
         command: CronCommand,
     },
+    /// A database's backups: list them, back up now, set the daily schedule.
+    #[command(visible_alias = "backups")]
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
     /// This Modula instance: its dashboard domain and apps domain.
     Instance {
         #[command(subcommand)]
@@ -431,6 +437,76 @@ pub enum CronCommand {
     /// Run the service once now, from its serving deployment.
     Run {
         /// Service name or id (default: the selected service).
+        service: Option<String>,
+    },
+}
+
+/// Where a backup goes: at most one of these.
+#[derive(Debug, Default, Args)]
+#[group(multiple = false)]
+pub struct BackupDest {
+    /// The disk of the server running the database.
+    #[arg(long)]
+    pub local_disk: bool,
+    /// A backup storage target (S3, R2, B2, MinIO) by id.
+    #[arg(long, value_name = "ID")]
+    pub target: Option<String>,
+    /// A bucket service, by its instance id.
+    #[arg(long, value_name = "INSTANCE_ID")]
+    pub bucket: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct BackupScheduleArgs {
+    /// Database service name or id (default: the selected service).
+    pub service: Option<String>,
+    /// The hour of the daily backup, 0–23 UTC.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=23))]
+    pub hour: Option<u8>,
+    #[command(flatten)]
+    pub dest: BackupDest,
+    /// Keep each day's newest backup for this many days (default 6).
+    #[arg(long, value_name = "DAYS", value_parser = clap::value_parser!(u16).range(0..=3660))]
+    pub daily: Option<u16>,
+    /// Keep each week's newest backup for this many days (default 27).
+    #[arg(long, value_name = "DAYS", value_parser = clap::value_parser!(u16).range(0..=3660))]
+    pub weekly: Option<u16>,
+    /// Keep each month's newest backup for this many days (default 89).
+    #[arg(long, value_name = "DAYS", value_parser = clap::value_parser!(u16).range(0..=3660))]
+    pub monthly: Option<u16>,
+    /// Turn the schedule on.
+    #[arg(long, conflicts_with = "disable")]
+    pub enable: bool,
+    /// Turn the schedule off (its settings and backups are kept).
+    #[arg(long)]
+    pub disable: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BackupCommand {
+    /// The schedule and the latest backups.
+    #[command(visible_alias = "ls")]
+    List {
+        /// Database service name or id (default: the selected service).
+        service: Option<String>,
+    },
+    /// Back up now, to the given place or else the schedule's.
+    #[command(visible_alias = "now")]
+    Create {
+        /// Database service name or id (default: the selected service).
+        service: Option<String>,
+        #[command(flatten)]
+        dest: BackupDest,
+        /// Return once the backup has started instead of when it finishes.
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Show the daily schedule, or set it with flags (only what you pass
+    /// changes).
+    Schedule(BackupScheduleArgs),
+    /// Where this database can back up to, as flags for the other commands.
+    Destinations {
+        /// Database service name or id (default: the selected service).
         service: Option<String>,
     },
 }
@@ -620,6 +696,25 @@ pub struct LogsArgs {
     /// How many recent lines to show (at most 5000).
     #[arg(short = 'n', long, default_value_t = 200)]
     pub lines: u32,
+    /// HTTP request logs (the dashboard's network logs) of the service
+    /// instead of its output.
+    #[arg(long, conflicts_with = "build")]
+    pub http: bool,
+    /// With --http: how far back to look (`30s`, `15m`, `1h`, `2d`).
+    #[arg(long, requires = "http", default_value = "1h")]
+    pub since: String,
+    /// With --http: `2xx` … `5xx`, or one status code (`404`).
+    #[arg(long, requires = "http")]
+    pub status: Option<String>,
+    /// With --http: only this method (`GET`, `POST`, …).
+    #[arg(long, requires = "http")]
+    pub method: Option<String>,
+    /// With --http: only paths containing this.
+    #[arg(long, requires = "http")]
+    pub path: Option<String>,
+    /// With --http: every service of the environment, not just this one.
+    #[arg(long, requires = "http")]
+    pub all: bool,
 }
 
 #[derive(Debug, Args)]

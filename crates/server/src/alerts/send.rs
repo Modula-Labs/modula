@@ -86,7 +86,9 @@ pub async fn deliver_with(
         None => None,
     };
     let out = if channel.kind == "email" {
-        let mail = mail.cloned().unwrap_or_else(|| format::email_in(alert, Some(channel.workspace_id)));
+        let mail = mail
+            .cloned()
+            .unwrap_or_else(|| format::email_in(alert, Some(channel.workspace_id)));
         send_email(state, channel.workspace_id, &url, mail).await?
     } else {
         let (body, headers) = request(&channel.kind, alert, secret.as_deref().map(|s| &s[..]))?;

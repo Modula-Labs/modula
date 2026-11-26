@@ -7,6 +7,8 @@ may break things).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-26
+
 ### Added
 
 - **Email notifications** through Cloudflare Email Service: a new `email`
@@ -25,6 +27,12 @@ may break things).
   a timezone you choose, requests, 5xx error rate, p50/p95 latency and the
   busiest services for the past 7 days against the week before, to the
   channels you pick. **Send now** previews it.
+- **CLI:** `modula backup list`, `backup create` (back up now and wait),
+  `backup schedule` (daily hour, destination incl. `--local-disk`,
+  retention) and `backup destinations`. Restore stays in the dashboard.
+- **CLI:** `modula logs --http` prints a service's HTTP request logs (the
+  dashboard's network logs) with `--since`, `--status`, `--method`, `--path`,
+  `--all` and `--follow`.
 
 ### Changed
 
@@ -439,7 +447,8 @@ environments and staged deploys, licensed AGPL-3.0-only.
 - **CLI:** `modula` for projects, deployments, logs, variables, metrics,
   `modula.toml` infrastructure as code, and `modula server create`.
 
-[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Modula-Labs/modula/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Modula-Labs/modula/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Modula-Labs/modula/compare/v0.1.10...v0.2.0
 [0.1.10]: https://github.com/Modula-Labs/modula/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/Modula-Labs/modula/compare/v0.1.8...v0.1.9

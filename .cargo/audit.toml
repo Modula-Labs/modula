@@ -10,4 +10,7 @@ ignore = [
     "RUSTSEC-2026-0387",
     # rsa (Marvin) via webauthn-rs: public-key verification only.
     "RUSTSEC-2023-0071",
+    # libsqlite3-sys is only in Cargo.lock (sqlx's SQLite driver, a feature
+    # we don't enable): never compiled, so cargo-deny doesn't see it.
+    "RUSTSEC-2026-0459",
 ]

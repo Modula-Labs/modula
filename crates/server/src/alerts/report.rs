@@ -400,7 +400,9 @@ impl Report {
             None => format!("{origin}/projects"),
         };
         let mut text = format!("{title}\n\n{}", self.text());
-        text.push_str(&format!("\nOpen in Modula: {projects}\nReport settings: {settings}\n"));
+        text.push_str(&format!(
+            "\nOpen in Modula: {projects}\nReport settings: {settings}\n"
+        ));
 
         let (c, p) = (&self.current, &self.previous);
         let tile = |label: &str, value: String, note: String| {
@@ -477,7 +479,11 @@ impl Report {
             .first()
             .map(|s| self.service_link(s))
             .unwrap_or_else(|| projects.clone());
-        let primary_label = if self.top().is_empty() { "Open Modula" } else { "View traffic" };
+        let primary_label = if self.top().is_empty() {
+            "Open Modula"
+        } else {
+            "View traffic"
+        };
         let footer = format!(
             "Sent every Monday at 09:00 to this workspace's report channels. \
 <a href=\"{}\" style=\"color:#6b6f76\">Change or turn off the weekly report</a>",
@@ -496,7 +502,10 @@ impl Report {
             title: &title,
             body,
             primary: Some((primary_label, &primary_url)),
-            secondary: vec![("All projects", projects.clone()), ("Report settings", settings.clone())],
+            secondary: vec![
+                ("All projects", projects.clone()),
+                ("Report settings", settings.clone()),
+            ],
             steps: vec![],
             footer,
             origin: &origin,
@@ -810,10 +819,9 @@ mod tests {
             "href=\"https://cloud.example.com/settings?workspace=wwwwwwwwwwwwwwww#notifications\""
         ));
         assert!(m.text.contains("Report settings: https://cloud.example.com/settings?workspace=wwwwwwwwwwwwwwww#notifications"));
-        assert!(
-            m.text
-                .contains("Open in Modula: https://cloud.example.com/projects?workspace=wwwwwwwwwwwwwwww\n")
-        );
+        assert!(m.text.contains(
+            "Open in Modula: https://cloud.example.com/projects?workspace=wwwwwwwwwwwwwwww\n"
+        ));
         let a = r.alert("aaaaaaaaaaaaaaaa".parse().unwrap());
         assert_eq!(a.phase, Phase::Report);
         assert_eq!(a.subject, "workspace:aaaaaaaaaaaaaaaa");
