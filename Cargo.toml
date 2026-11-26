@@ -28,7 +28,7 @@ bytes = "1"
 percent-encoding = "2"
 # EC2 Query API responses (crates/ec2).
 quick-xml = "0.42"
-rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto", "xml"] }
+rusty-s3 = { version = "0.11", default-features = false, features = ["rustcrypto", "xml"] }
 async-trait = "0.1"
 argon2 = { version = "0.6", features = ["zeroize"] }
 axum = { version = "0.8", features = ["macros"] }
