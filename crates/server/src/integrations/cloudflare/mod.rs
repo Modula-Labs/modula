@@ -12,7 +12,8 @@
 //! - R2 buckets on the project canvas, each with its own bucket-scoped
 //!   credentials (see `r2` and `api::buckets`);
 //! - hosting a static site's build output as a Worker with static assets
-//!   (`config.hosting`, see [`publish`]).
+//!   (`config.hosting`, see [`publish`]);
+//! - email for alert channels through Email Sending (see [`email`]).
 //!
 //! The token lives in `integrations` (kind `cloudflare`), sealed with the
 //! workspace data key (AAD `integrations/secret/<id>`), and is never returned
@@ -26,6 +27,7 @@
 pub mod api;
 pub mod client;
 pub mod dns;
+pub mod email;
 pub mod publish;
 pub mod r2;
 pub mod workers;
@@ -86,12 +88,17 @@ pub const PERMISSIONS: &[(&str, &str, bool)] = &[
         "put Cloudflare Access in front of the dashboard (for private mode)",
         false,
     ),
+    (
+        "Email Sending · Edit",
+        "send alert and report emails (optional)",
+        false,
+    ),
 ];
 
 /// Cloudflare's dashboard with a new user API token pre-filled with exactly
 /// [`PERMISSIONS`] for all zones and accounts (the user can narrow both).
 pub fn token_template_url() -> String {
-    let keys = r#"[{"key":"zone","type":"read"},{"key":"dns","type":"edit"},{"key":"zone_settings","type":"read"},{"key":"workers_r2","type":"edit"},{"key":"account_api_tokens","type":"edit"},{"key":"workers_scripts","type":"edit"},{"key":"argotunnel","type":"edit"},{"key":"access","type":"edit"}]"#;
+    let keys = r#"[{"key":"zone","type":"read"},{"key":"dns","type":"edit"},{"key":"zone_settings","type":"read"},{"key":"workers_r2","type":"edit"},{"key":"account_api_tokens","type":"edit"},{"key":"workers_scripts","type":"edit"},{"key":"argotunnel","type":"edit"},{"key":"access","type":"edit"},{"key":"email_sending","type":"edit"}]"#;
     let mut url =
         url::Url::parse("https://dash.cloudflare.com/profile/api-tokens").expect("static");
     url.query_pairs_mut()
@@ -126,6 +133,10 @@ pub struct Metadata {
     pub token_last4: String,
     /// Cloudflare's id for the token (not a secret).
     pub token_id: String,
+    /// The address email channels send from (its domain onboarded for
+    /// Cloudflare Email Sending), set in the email settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_from: Option<String>,
 }
 
 /// A workspace's live connection.
@@ -224,7 +235,8 @@ mod tests {
                 "account_api_tokens:edit",
                 "workers_scripts:edit",
                 "argotunnel:edit",
-                "access:edit"
+                "access:edit",
+                "email_sending:edit"
             ]
         );
         assert_eq!(q["accountId"], "*");

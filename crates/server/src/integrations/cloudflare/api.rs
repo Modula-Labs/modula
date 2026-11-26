@@ -222,11 +222,20 @@ pub async fn connect(
             "choose which Cloudflare account to use",
         ));
     }
+    // A replaced token keeps the email sender.
+    let email_from: Option<String> = sqlx::query_scalar(
+        "SELECT metadata->>'emailFrom' FROM integrations WHERE workspace_id = $1 AND kind = 'cloudflare'",
+    )
+    .bind(workspace)
+    .fetch_optional(&state.db)
+    .await?
+    .flatten();
     let metadata = Metadata {
         account_id: c.account.as_ref().map(|a| a.id.clone()),
         account_name: c.account.as_ref().map(|a| a.name.clone()),
         token_last4: super::last4(token.expose_secret()),
         token_id: c.token_id,
+        email_from,
     };
 
     state.keys.warm(&state.db, workspace).await?;
@@ -605,4 +614,88 @@ pub async fn set_ingress(
         .await?;
     tx.commit().await?;
     Ok(Json(to_ingress(req.proxied, Some(zone), ssl, note)))
+}
+
+// ------------------------------------------------------------------ email
+
+/// The address email channels send from, and whether Cloudflare will
+/// accept it (checked live: token permission and domain onboarding).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmailSettings {
+    pub from: Option<String>,
+    /// `ready`, `no_zone`, `missing_permission` or `not_onboarded`; absent
+    /// without a sender.
+    pub readiness: Option<super::email::Readiness>,
+}
+
+async fn email_settings(conn: &super::Connection) -> AppResult<EmailSettings> {
+    let readiness = match &conn.metadata.email_from {
+        Some(from) => Some(
+            super::email::readiness(&conn.client, from)
+                .await
+                .map_err(super::upstream)?,
+        ),
+        None => None,
+    };
+    Ok(EmailSettings {
+        from: conn.metadata.email_from.clone(),
+        readiness,
+    })
+}
+
+pub async fn email(State(state): State<AppState>, grant: Grant) -> AppResult<Json<EmailSettings>> {
+    let conn = require(&state, grant.id()).await?;
+    Ok(Json(email_settings(&conn).await?))
+}
+
+#[derive(Deserialize)]
+pub struct SetEmail {
+    /// `None` (or empty) stops email channels from sending.
+    #[serde(default)]
+    from: Option<String>,
+}
+
+/// Sets the sender. Saved even while the domain isn't onboarded yet: the
+/// answer says what's still missing.
+pub async fn set_email(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+    Json(req): Json<SetEmail>,
+) -> AppResult<Json<EmailSettings>> {
+    let workspace = grant.id();
+    let from = req
+        .from
+        .map(|f| f.trim().to_ascii_lowercase())
+        .filter(|f| !f.is_empty());
+    if let Some(f) = &from
+        && !super::email::valid_address(f)
+    {
+        return Err(AppError::bad_request("the sender must be an email address"));
+    }
+    let mut conn = require(&state, workspace).await?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        "UPDATE integrations
+         SET metadata = CASE WHEN $2::text IS NULL THEN metadata - 'emailFrom'
+                             ELSE jsonb_set(metadata, '{emailFrom}', to_jsonb($2::text)) END,
+             updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(conn.id)
+    .bind(&from)
+    .execute(&mut *tx)
+    .await?;
+    Entry::new("integration.email", &meta)
+        .actor(&actor)
+        .workspace(workspace)
+        .target("integration", conn.id)
+        .metadata(json!({ "kind": super::KIND, "from": from }))
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    conn.metadata.email_from = from;
+    Ok(Json(email_settings(&conn).await?))
 }

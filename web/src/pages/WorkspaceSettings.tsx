@@ -188,7 +188,7 @@ function Settings({ workspace }: { workspace: Membership }) {
       <Section
         id="notifications"
         title="Notifications"
-        description="Get told in Slack, Discord or a webhook when deployments fail or servers and services run hot."
+        description="Get told in Slack, Discord, email or a webhook when deployments fail or servers and services run hot, and get a weekly traffic report."
       >
         <NotificationsSection workspaceId={workspace.id} />
       </Section>

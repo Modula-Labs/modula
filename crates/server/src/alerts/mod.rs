@@ -1,6 +1,7 @@
 //! Alerts: a workspace's rules ("CPU above 80% for 5 min", "a deploy
 //! failed") and the channels they notify (Slack, Discord, a signed JSON
-//! webhook). The product sends no email.
+//! webhook, email through the workspace's Cloudflare account) and the
+//! weekly traffic report ([`report`]).
 //!
 //! Event rules fire from jobs queued in the transactions that record the
 //! event (see [`enqueue_event`]); metric and offline rules are evaluated
@@ -10,6 +11,7 @@
 
 pub mod eval;
 pub mod format;
+pub mod report;
 pub mod send;
 
 use modula_crypto::envelope::FieldAad;
@@ -35,6 +37,8 @@ pub enum Kind {
     /// A replica of an active deployment crashed while the others serve.
     DeploymentDegraded,
     BackupFailed,
+    /// A backup finished: its database, size, duration and destination.
+    BackupCompleted,
     /// CPU above `threshold` percent of the limit (or of the server's CPUs)
     /// for `window_minutes`.
     Cpu,
@@ -56,6 +60,7 @@ impl Kind {
             Self::DeploymentCrashed => "deployment_crashed",
             Self::DeploymentDegraded => "deployment_degraded",
             Self::BackupFailed => "backup_failed",
+            Self::BackupCompleted => "backup_completed",
             Self::Cpu => "cpu",
             Self::Memory => "memory",
             Self::Disk => "disk",
@@ -76,6 +81,7 @@ impl Kind {
                 | Self::DeploymentCrashed
                 | Self::DeploymentDegraded
                 | Self::BackupFailed
+                | Self::BackupCompleted
         )
     }
 
@@ -99,6 +105,8 @@ pub enum Phase {
     Fired,
     Resolved,
     Test,
+    /// The weekly traffic report.
+    Report,
 }
 
 impl Phase {
@@ -107,6 +115,7 @@ impl Phase {
             Self::Fired => "fired",
             Self::Resolved => "resolved",
             Self::Test => "test",
+            Self::Report => "report",
         }
     }
 }
@@ -218,6 +227,7 @@ mod tests {
             Kind::DeploymentCrashed,
             Kind::DeploymentDegraded,
             Kind::BackupFailed,
+            Kind::BackupCompleted,
             Kind::Cpu,
             Kind::Memory,
             Kind::Disk,

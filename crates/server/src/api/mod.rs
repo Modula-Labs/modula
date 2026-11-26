@@ -180,6 +180,9 @@ pub fn routes(state: AppState) -> ApiRouter {
         .delete("/api/alert-rules/{alert_rule_id}", Resource(Action::AlertRuleDelete), alerts::delete_rule)
         .get("/api/projects/{project_id}/alert-rules", Resource(Action::ProjectAlertRuleList), alerts::project_rules)
         .get("/api/workspaces/{workspace_id}/alert-history", Resource(Action::AlertHistoryRead), alerts::history)
+        .get("/api/workspaces/{workspace_id}/traffic-report", Resource(Action::AlertRuleList), alerts::traffic_report)
+        .put("/api/workspaces/{workspace_id}/traffic-report", Resource(Action::AlertRuleCreate), alerts::set_traffic_report)
+        .post("/api/workspaces/{workspace_id}/traffic-report/send", Resource(Action::AlertRuleCreate), alerts::send_traffic_report)
         .get("/api/deployments/{deployment_id}", Resource(Action::DeploymentRead), deployments::get)
         .delete("/api/deployments/{deployment_id}", Resource(Action::DeploymentRemove), deployments::remove)
         .get("/api/deployments/{deployment_id}/logs", Resource(Action::DeploymentRead), deployments::logs)
@@ -264,6 +267,8 @@ pub fn routes(state: AppState) -> ApiRouter {
         .get("/api/workspaces/{workspace_id}/integrations/cloudflare/r2", Resource(Action::CloudflareRead), cloudflare::r2_info)
         .post("/api/workspaces/{workspace_id}/integrations/cloudflare/r2-targets", Resource(Action::BackupTargetCreate), cloudflare::create_r2_target)
         .get("/api/workspaces/{workspace_id}/integrations/cloudflare/r2/buckets", Resource(Action::CloudflareRead), buckets::list)
+        .get("/api/workspaces/{workspace_id}/integrations/cloudflare/email", Resource(Action::CloudflareRead), cloudflare::email)
+        .put("/api/workspaces/{workspace_id}/integrations/cloudflare/email", Resource(Action::CloudflareConnect), cloudflare::set_email)
         // Read through DomainUpdate (Member): only members can act on the answer.
         .get("/api/domains/{domain_id}/ingress", Resource(Action::DomainUpdate), cloudflare::ingress)
         .put("/api/domains/{domain_id}/ingress", Resource(Action::DomainUpdate), cloudflare::set_ingress)

@@ -69,7 +69,7 @@ async fn a_0_1_10_database_upgrades(pool: PgPool) {
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, [1, 2]);
+    assert_eq!(applied, [1, 2, 3]);
 
     // Starting again changes nothing.
     modula_server::db::migrate(&pool).await.unwrap();

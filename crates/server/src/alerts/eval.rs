@@ -200,7 +200,7 @@ async fn build(
             .fetch_optional(&state.db)
             .await?;
         let Some(name) = name else { return Ok(None) };
-        alert.link = format!("{}/servers", origin(state));
+        alert.link = format!("{}/servers/{id}", origin(state));
         alert.server = Some(name);
     }
     Ok(Some(alert))
@@ -265,12 +265,92 @@ pub async fn event_job(state: AppState, job: Job) -> anyhow::Result<()> {
             environment: Some(c.environment.clone()),
             service: Some(c.service.clone()),
             server: None,
-            link: instance_link(&state, &c, tab, deployment),
+            link: {
+                let mut link = instance_link(&state, &c, tab, deployment);
+                // A failed build opens on its build log rather than the run logs.
+                if ev.kind == Kind::BuildFailed && deployment.is_some() {
+                    link.push_str("&view=build");
+                }
+                link
+            },
             at: OffsetDateTime::now_utc(),
         };
         send::notify(&state, rule.id, &alert).await?;
     }
     Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct BackupRow {
+    pub engine: String,
+    pub method: String,
+    pub size_bytes: Option<i64>,
+    pub target_name: String,
+    pub target_kind: String,
+    pub node_name: Option<String>,
+    pub seconds: Option<f64>,
+}
+
+/// "1.2 GB" (decimal units, like the dashboard).
+pub fn human_bytes(b: i64) -> String {
+    let b = b.max(0) as f64;
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = b;
+    let mut u = 0;
+    while v >= 1000.0 && u < UNITS.len() - 1 {
+        v /= 1000.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{v:.0} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+/// "42 s", "3 min 5 s", "1 h 2 min".
+pub fn human_duration(seconds: f64) -> String {
+    let s = seconds.max(0.0).round() as i64;
+    match s {
+        0..60 => format!("{s} s"),
+        60..3600 => match s % 60 {
+            0 => format!("{} min", s / 60),
+            r => format!("{} min {r} s", s / 60),
+        },
+        _ => match (s % 3600) / 60 {
+            0 => format!("{} h", s / 3600),
+            m => format!("{} h {m} min", s / 3600),
+        },
+    }
+}
+
+/// The body of a "backup completed" alert.
+pub(crate) fn backup_summary(r: &BackupRow) -> String {
+    let engine = match r.engine.as_str() {
+        "postgres" => "PostgreSQL",
+        "mysql" => "MySQL",
+        "redis" => "Redis",
+        "mongo" => "MongoDB",
+        other => other,
+    };
+    let what = if r.method == "walg" {
+        format!("{engine} base backup (point-in-time recovery)")
+    } else {
+        format!("{engine} dump")
+    };
+    let destination = match (r.target_kind.as_str(), &r.node_name) {
+        ("local", Some(n)) => format!("{} (disk of {n})", r.target_name),
+        _ => r.target_name.clone(),
+    };
+    let mut lines = vec![format!("Database: {what}")];
+    if let Some(b) = r.size_bytes {
+        lines.push(format!("Size: {}", human_bytes(b)));
+    }
+    if let Some(s) = r.seconds {
+        lines.push(format!("Duration: {}", human_duration(s)));
+    }
+    lines.push(format!("Destination: {destination}"));
+    lines.join("\n")
 }
 
 async fn describe_event(
@@ -291,6 +371,32 @@ async fn describe_event(
                 None => None,
             };
             (format!("Backup of {svc} failed"), error(e), "backups", None)
+        }
+        Kind::BackupCompleted => {
+            let row: Option<BackupRow> = match ev.backup_id {
+                Some(b) => {
+                    sqlx::query_as(
+                        "SELECT b.engine, b.method, b.size_bytes, t.name AS target_name,
+                                t.kind AS target_kind, n.name AS node_name,
+                                extract(epoch FROM b.finished_at - b.started_at)::float8 AS seconds
+                         FROM backups b
+                         JOIN backup_targets t ON t.id = b.target_id
+                         LEFT JOIN nodes n ON n.id = t.node_id
+                         WHERE b.id = $1",
+                    )
+                    .bind(b)
+                    .fetch_optional(&state.db)
+                    .await?
+                }
+                None => None,
+            };
+            let reason = row.map(|r| backup_summary(&r)).unwrap_or_default();
+            (
+                format!("Backup of {svc} completed"),
+                reason,
+                "backups",
+                None,
+            )
         }
         kind => {
             let e: Option<String> = match ev.deployment_id {
@@ -609,6 +715,9 @@ pub async fn evaluate_job(state: AppState, _job: Job) -> anyhow::Result<()> {
         if let Err(e) = evaluate_rule(&state, &rule).await {
             tracing::warn!(rule = %rule.id, error = format!("{e:#}"), "alert rule evaluation failed");
         }
+    }
+    if let Err(e) = super::report::send_due(&state).await {
+        tracing::warn!(error = format!("{e:#}"), "could not send traffic reports");
     }
     Ok(())
 }

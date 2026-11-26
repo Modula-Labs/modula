@@ -277,6 +277,30 @@ See [databases](databases.md#database-tab-and-api) for bodies and limits.
 | GET | `/api/instance/self-backup` | Instance admin |
 | PUT | `/api/instance/self-backup` | Instance admin + sudo |
 
+### Alerts and reports
+
+| Method | Path | Access |
+|---|---|---|
+| GET | `/api/workspaces/{workspace_id}/notification-channels` | Member |
+| POST | `/api/workspaces/{workspace_id}/notification-channels` | Member (`{ "kind": "slack" \| "discord" \| "webhook" \| "email", "name", "url" }`; for email `url` is the address) |
+| DELETE | `/api/notification-channels/{notification_channel_id}` | Member |
+| POST | `/api/notification-channels/{notification_channel_id}/test` | Member (returns `{ "status", "error" }`) |
+| GET | `/api/workspaces/{workspace_id}/alert-rules` | Member |
+| POST | `/api/workspaces/{workspace_id}/alert-rules` | Member |
+| PATCH | `/api/alert-rules/{alert_rule_id}` | Member |
+| DELETE | `/api/alert-rules/{alert_rule_id}` | Member |
+| GET | `/api/projects/{project_id}/alert-rules` | Member |
+| GET | `/api/workspaces/{workspace_id}/alert-history` | Member |
+| GET | `/api/workspaces/{workspace_id}/traffic-report` | Member |
+| PUT | `/api/workspaces/{workspace_id}/traffic-report` | Member (`{ "enabled", "timezone"?, "channelIds"? }`) |
+| POST | `/api/workspaces/{workspace_id}/traffic-report/send` | Member (sends the last 7 days now) |
+
+Rule kinds: `deployment_failed`, `build_failed`, `deployment_crashed`,
+`deployment_degraded`, `backup_failed`, `backup_completed`, `cpu`, `memory`,
+`disk`, `node_offline`. The traffic report answers `{ "enabled", "timezone",
+"channelIds", "nextAt", "lastSentAt" }`; `timezone` is an IANA name and the
+report goes out Mondays at 09:00 there. See [alerts and reports](alerts.md).
+
 ### Servers
 
 | Method | Path | Access |
@@ -298,6 +322,8 @@ See [databases](databases.md#database-tab-and-api) for bodies and limits.
 | GET | `/api/workspaces/{workspace_id}/integrations/cloudflare/zones` | Member |
 | GET | `/api/workspaces/{workspace_id}/integrations/cloudflare/r2` | Member |
 | POST | `/api/workspaces/{workspace_id}/integrations/cloudflare/r2-targets` | Admin |
+| GET | `/api/workspaces/{workspace_id}/integrations/cloudflare/email` | Member (`{ "from", "readiness" }`, checked live) |
+| PUT | `/api/workspaces/{workspace_id}/integrations/cloudflare/email` | Admin + sudo (`{ "from": "alerts@example.com" \| null }`) |
 | GET | `/api/domains/{domain_id}/ingress` | Member |
 | PUT | `/api/domains/{domain_id}/ingress` | Member |
 

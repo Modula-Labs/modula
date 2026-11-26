@@ -69,6 +69,13 @@ export interface DomainIngress {
   note: string | null;
 }
 
+/** Whether Cloudflare will send from the sender address; absent (null) without one. */
+export type EmailReadinessState = "ready" | "no_zone" | "missing_permission" | "not_onboarded";
+export interface EmailSettings {
+  from: string | null;
+  readiness: { state: EmailReadinessState } | null;
+}
+
 const base = (ws: string) => `/api/workspaces/${ws}/integrations/cloudflare`;
 
 export const cloudflare = {
@@ -83,6 +90,10 @@ export const cloudflare = {
     ws: string,
     body: { name: string; bucket: string; prefix?: string; accessKeyId: string; secretAccessKey: string },
   ) => post<BackupTarget>(`${base(ws)}/r2-targets`, body),
+  /** 409 while Cloudflare isn't connected. */
+  email: (ws: string) => get<EmailSettings>(`${base(ws)}/email`),
+  /** `from: null` stops email channels from sending. 400 for an invalid address. */
+  setEmail: (ws: string, from: string | null) => request<EmailSettings>("PUT", `${base(ws)}/email`, { from }),
   ingress: (domainId: string) => get<DomainIngress>(`/api/domains/${domainId}/ingress`),
   setIngress: (domainId: string, proxied: boolean) => request<DomainIngress>("PUT", `/api/domains/${domainId}/ingress`, { proxied }),
 };
@@ -111,5 +122,32 @@ export function sslModeLabel(mode: string | null): string {
       return "Off";
     default:
       return "Unknown";
+  }
+}
+
+/** The domain of an address, lowercased ("alerts@Example.com" -> "example.com"). */
+export function emailDomain(address: string): string {
+  const at = address.lastIndexOf("@");
+  return at < 0 ? address.trim().toLowerCase() : address.slice(at + 1).trim().toLowerCase();
+}
+
+/** The readiness of the sender as one line and a tone; null when there is no sender (or nothing was checked). */
+export function emailReadinessMessage(
+  settings: Pick<EmailSettings, "from" | "readiness">,
+): { text: string; tone: "success" | "warn" } | null {
+  const { from, readiness } = settings;
+  if (!from || !readiness) return null;
+  const domain = emailDomain(from);
+  switch (readiness.state) {
+    case "ready":
+      return { text: "Ready to send", tone: "success" };
+    case "missing_permission":
+      return { text: "Add Email Sending · Edit to the token", tone: "warn" };
+    case "not_onboarded":
+      return { text: `Onboard ${domain} under Email Service → Email Sending in Cloudflare`, tone: "warn" };
+    case "no_zone":
+      return { text: `${domain} isn't a zone this token can reach`, tone: "warn" };
+    default:
+      return null;
   }
 }

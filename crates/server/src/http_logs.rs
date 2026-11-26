@@ -1,7 +1,8 @@
 //! HTTP requests served by the nodes' edges (`HttpLogBatch`, from Caddy's
 //! access log): every request kept for [`RETENTION_DAYS`] for the
 //! dashboard's HTTP tab, and per-minute rollups with a latency histogram
-//! for the request charts (rate, errors, p50/p95/p99).
+//! for the request charts (rate, errors, p50/p95/p99) and the weekly
+//! traffic report, kept [`ROLLUP_RETENTION_DAYS`].
 
 use std::collections::BTreeMap;
 
@@ -13,6 +14,9 @@ use sqlx::PgPool;
 use crate::metrics::Range;
 
 pub const RETENTION_DAYS: i32 = 7;
+/// Rollups outlive the requests: the weekly traffic report compares the
+/// last 7 days with the 7 before (see `alerts::report`).
+pub const ROLLUP_RETENTION_DAYS: i32 = 15;
 pub const MAX_LIMIT: i64 = 5000;
 const MAX_BATCH: usize = 10_000;
 
@@ -171,7 +175,7 @@ pub async fn purge(db: &PgPool) -> anyhow::Result<u64> {
         .await?;
     let b =
         sqlx::query("DELETE FROM http_rollups WHERE minute < now() - make_interval(days => $1)")
-            .bind(RETENTION_DAYS)
+            .bind(ROLLUP_RETENTION_DAYS)
             .execute(db)
             .await?;
     Ok(a.rows_affected() + b.rows_affected())

@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/Button";
 import { Checkbox, Switch } from "@/components/ui/Controls";
 import { CopyButton } from "@/components/ui/CopyButton";
 import { Field, Input, Select } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
-import { Plus } from "@/components/ui/icons";
+import { BrandDiscord, BrandSlack, Mail, Plus, Webhook } from "@/components/ui/icons";
 import { Alert, Badge, Skeleton } from "@/components/ui/misc";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/Table";
 import { api } from "@/lib/api";
@@ -13,24 +13,37 @@ import {
   CHANNEL_KINDS,
   RULE_KINDS,
   alertsApi,
+  browserTimezone,
+  channelKindInfo,
   channelKindLabel,
   channelStatus,
   describeRule,
   emptyRuleForm,
-  isChannelUrl,
+  isChannelTarget,
   kindSupportsServiceScope,
   phaseLabel,
+  reportBody,
+  reportDeliveries,
+  withKind,
+  reportDirty,
+  reportDraft,
+  reportSchedule,
   ruleFormBody,
   ruleKindInfo,
   ruleScope,
   sendStatus,
+  sendSubject,
+  supportedTimezones,
   testResultMessage,
-  urlPlaceholder,
+  timezoneOptions,
+  validateReportDraft,
   validateRuleForm,
   type Channel,
   type ChannelKind,
+  type ReportDelivery,
   type Rule,
   type RuleForm,
+  type TrafficReport,
 } from "@/lib/alerts";
 import { relativeTime } from "@/lib/format";
 
@@ -53,12 +66,20 @@ const empty = (text: string) => (
   <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">{text}</p>
 );
 
-/** Channels, rules and send history for the workspace's alerts. Members and up can use it. */
+const kindIcons: Record<ChannelKind, ReactNode> = {
+  slack: <BrandSlack />,
+  discord: <BrandDiscord />,
+  webhook: <Webhook />,
+  email: <Mail />,
+};
+
+/** Channels, rules, the weekly report and send history for the workspace's alerts. Members and up can use it. */
 export function NotificationsSection({ workspaceId }: { workspaceId: string }) {
   return (
     <div className="flex flex-col gap-8">
       <ChannelsBlock workspaceId={workspaceId} />
       <RulesBlock workspaceId={workspaceId} />
+      <TrafficReportBlock workspaceId={workspaceId} />
       <HistoryBlock workspaceId={workspaceId} />
     </div>
   );
@@ -73,7 +94,7 @@ function ChannelsBlock({ workspaceId }: { workspaceId: string }) {
   return (
     <Block
       title="Channels"
-      description="Where alerts are sent: a Slack or Discord incoming webhook, or any URL that accepts a signed POST."
+      description="Where alerts are sent: a Slack or Discord incoming webhook, an email address, or any URL that accepts a signed POST."
       action={
         <Button icon={<Plus />} onClick={() => setAdding(true)}>
           Add channel
@@ -109,7 +130,7 @@ function ChannelRow({ channel: c, onChanged }: { channel: Channel; onChanged: ()
   const test = useMutation({
     mutationFn: () => alertsApi.testChannel(c.id),
     onSuccess: (r) => {
-      setResult(testResultMessage(r));
+      setResult(testResultMessage(r, c.kind));
       onChanged();
       void qc.invalidateQueries({ queryKey: ["alert-history"] });
     },
@@ -120,6 +141,7 @@ function ChannelRow({ channel: c, onChanged }: { channel: Channel; onChanged: ()
     onSuccess: () => {
       onChanged();
       void qc.invalidateQueries({ queryKey: ["alert-rules"] });
+      void qc.invalidateQueries({ queryKey: ["traffic-report"] });
     },
   });
   const last = channelStatus(c);
@@ -127,11 +149,13 @@ function ChannelRow({ channel: c, onChanged }: { channel: Channel; onChanged: ()
     <li className="flex flex-col gap-2 rounded-lg border border-border p-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-bold">{c.name}</span>
-        <Badge>{channelKindLabel(c.kind)}</Badge>
+        <Badge icon={kindIcons[c.kind]}>{channelKindLabel(c.kind)}</Badge>
         <code className="min-w-0 flex-1 truncate font-mono text-[13px] text-muted-foreground">{c.host}</code>
         <Badge tone={last.tone}>{last.label}</Badge>
         {c.lastAt ? <span className="text-[13px] text-muted-foreground">{relativeTime(c.lastAt)}</span> : null}
       </div>
+      {/* A failed test already says why, in the line below. */}
+      {last.detail && !(result && !result.ok) ? <p className="text-[13px] text-muted-foreground">{last.detail}</p> : null}
       <div className="flex items-center justify-end gap-1.5">
         <Button variant="ghost" loading={test.isPending} onClick={() => test.mutate()}>
           Send test
@@ -220,9 +244,10 @@ function AddChannelDialog({
     );
   }
 
-  const valid = name.trim() !== "" && isChannelUrl(url);
+  const info = channelKindInfo(kind) ?? CHANNEL_KINDS[0]!;
+  const valid = name.trim() !== "" && isChannelTarget(kind, url);
   return (
-    <Modal open={open} onOpenChange={close} title="Add channel" description="Alerts are posted to this URL.">
+    <Modal open={open} onOpenChange={close} title="Add channel" description={info.describe}>
       <form
         className="flex flex-col gap-4"
         onSubmit={(e) => {
@@ -233,7 +258,15 @@ function AddChannelDialog({
         {create.error ? <Alert>{create.error.message}</Alert> : null}
         <Field label="Type">
           {(p) => (
-            <Select {...p} value={kind} onChange={(e) => setKind(e.target.value as ChannelKind)}>
+            <Select
+              {...p}
+              value={kind}
+              onChange={(e) => {
+                // A URL is not an address: start the field over for the new kind.
+                setKind(e.target.value as ChannelKind);
+                setUrl("");
+              }}
+            >
               {CHANNEL_KINDS.map((k) => (
                 <option key={k.value} value={k.value}>
                   {k.label}
@@ -245,8 +278,18 @@ function AddChannelDialog({
         <Field label="Name">
           {(p) => <Input {...p} autoFocus placeholder="#ops" value={name} onChange={(e) => setName(e.target.value)} />}
         </Field>
-        <Field label="URL">
-          {(p) => <Input {...p} mono type="url" placeholder={urlPlaceholder(kind)} value={url} onChange={(e) => setUrl(e.target.value)} />}
+        <Field label={info.inputLabel} hint={info.hint}>
+          {(p) => (
+            <Input
+              {...p}
+              mono={info.input === "url"}
+              type={info.input}
+              autoComplete={info.input === "email" ? "email" : undefined}
+              placeholder={info.placeholder}
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+            />
+          )}
         </Field>
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={() => close(false)}>
@@ -410,7 +453,7 @@ function AddRuleDialog({
               value={f.kind}
               onChange={(e) => {
                 const kind = e.target.value as typeof f.kind;
-                set({ kind, serviceId: kindSupportsServiceScope(kind) ? f.serviceId : "" });
+                set({ ...withKind(f, kind), serviceId: kindSupportsServiceScope(kind) ? f.serviceId : "" });
               }}
             >
               {RULE_KINDS.map((k) => (
@@ -492,6 +535,146 @@ function AddRuleDialog({
   );
 }
 
+function TrafficReportBlock({ workspaceId }: { workspaceId: string }) {
+  const report = useQuery({ queryKey: ["traffic-report", workspaceId], queryFn: () => alertsApi.trafficReport(workspaceId), retry: false });
+  const channels = useQuery({ queryKey: ["alert-channels", workspaceId], queryFn: () => alertsApi.channels(workspaceId), retry: false });
+  return (
+    <Block
+      title="Weekly traffic report"
+      description="Requests, errors and latency for the last 7 days against the week before, and the busiest services. It goes to the channels you pick."
+    >
+      {report.error ? <Alert tone="neutral">{report.error.message}</Alert> : null}
+      {channels.error ? <Alert tone="neutral">{channels.error.message}</Alert> : null}
+      {report.isLoading || channels.isLoading ? (
+        <Skeleton className="h-24" />
+      ) : report.data && channels.data ? (
+        <TrafficReportForm key={workspaceId} workspaceId={workspaceId} report={report.data} channels={channels.data} />
+      ) : null}
+    </Block>
+  );
+}
+
+/** The report's switch, timezone and channels as one form, saved together; "Send now" sends what is saved. */
+function TrafficReportForm({ workspaceId, report, channels }: { workspaceId: string; report: TrafficReport; channels: Channel[] }) {
+  const qc = useQueryClient();
+  const key = ["traffic-report", workspaceId];
+  const browserTz = useMemo(browserTimezone, []);
+  const supported = useMemo(supportedTimezones, []);
+  // The form starts from what loaded; later refetches don't overwrite what is being typed.
+  const [draft, setDraft] = useState(() => reportDraft(report, browserTz));
+  const [touched, setTouched] = useState(false);
+  const [sent, setSent] = useState<ReportDelivery[]>();
+  const known = channels.map((c) => c.id);
+  // A channel deleted meanwhile is no longer part of the form.
+  const cur = { ...draft, channelIds: draft.channelIds.filter((id) => known.includes(id)) };
+  const dirty = reportDirty(cur, report, browserTz);
+  const problem = validateReportDraft(cur);
+  const zones = useMemo(() => timezoneOptions(supported, cur.timezone), [supported, cur.timezone]);
+  const savedChannelIds = report.channelIds.filter((id) => known.includes(id));
+  // The saved next run only describes the saved timezone.
+  const nextAt = report.enabled && cur.enabled && cur.timezone === report.timezone ? report.nextAt : null;
+
+  const save = useMutation({
+    mutationFn: () => alertsApi.setTrafficReport(workspaceId, reportBody(cur, known)),
+    onSuccess: (saved) => {
+      qc.setQueryData(key, saved);
+      setDraft(reportDraft(saved, browserTz));
+      setTouched(false);
+      setSent(undefined);
+    },
+  });
+  const send = useMutation({
+    mutationFn: () => alertsApi.sendTrafficReport(workspaceId),
+    onMutate: () => setSent(undefined),
+    onSuccess: (results) => {
+      setSent(reportDeliveries(channels, report.channelIds, results));
+      void qc.invalidateQueries({ queryKey: ["alert-history"] });
+      void qc.invalidateQueries({ queryKey: ["alert-channels", workspaceId] });
+    },
+  });
+  const toggleChannel = (id: string) =>
+    setDraft({ ...cur, channelIds: cur.channelIds.includes(id) ? cur.channelIds.filter((x) => x !== id) : [...cur.channelIds, id] });
+
+  return (
+    <form
+      aria-label="Weekly traffic report"
+      className="flex flex-col gap-4 rounded-lg border border-border p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        setTouched(true);
+        if (!problem && dirty) save.mutate();
+      }}
+    >
+      {save.error ? <Alert>{save.error.message}</Alert> : null}
+      {touched && problem ? <Alert tone="warn">{problem}</Alert> : null}
+      <Switch
+        checked={cur.enabled}
+        disabled={channels.length === 0 && !cur.enabled}
+        onCheckedChange={(enabled) => setDraft({ ...cur, enabled })}
+        label={cur.enabled ? "Enabled" : "Disabled"}
+      />
+      <Field label="Timezone" hint={cur.timezone === browserTz ? "Your browser's timezone." : undefined}>
+        {(p) => (
+          <Select {...p} className="max-w-xs" value={cur.timezone} onChange={(e) => setDraft({ ...cur, timezone: e.target.value })}>
+            {zones.map((z) => (
+              <option key={z} value={z}>
+                {z}
+              </option>
+            ))}
+          </Select>
+        )}
+      </Field>
+      <fieldset className="flex flex-col gap-2">
+        <legend className="mb-1 text-sm">Channels</legend>
+        {channels.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Add a channel first, then pick it here.</p>
+        ) : (
+          channels.map((c) => (
+            <Checkbox
+              key={c.id}
+              checked={cur.channelIds.includes(c.id)}
+              onCheckedChange={() => toggleChannel(c.id)}
+              label={
+                <>
+                  {c.name} <span className="text-muted-foreground">{channelKindLabel(c.kind)}</span>
+                </>
+              }
+            />
+          ))
+        )}
+      </fieldset>
+      <p className="text-sm text-muted-foreground">
+        {reportSchedule(cur.timezone, nextAt)}
+        {report.lastSentAt ? ` · last sent ${relativeTime(report.lastSentAt)}` : ""}
+      </p>
+      {send.error ? <Alert>{send.error.message}</Alert> : null}
+      {sent ? (
+        <ul role="status" className="flex flex-col gap-1">
+          {sent.map((d, i) => (
+            <li key={i} className={d.ok ? "text-sm text-success" : "text-sm text-error"}>
+              {d.text}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {dirty ? <span className="mr-auto text-sm text-muted-foreground">Save your changes to send with them.</span> : null}
+        <Button
+          type="button"
+          loading={send.isPending}
+          disabled={dirty || savedChannelIds.length === 0}
+          onClick={() => send.mutate()}
+        >
+          Send now
+        </Button>
+        <Button type="submit" variant="primary" loading={save.isPending} disabled={!dirty}>
+          Save
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 function HistoryBlock({ workspaceId }: { workspaceId: string }) {
   const history = useQuery({ queryKey: ["alert-history", workspaceId], queryFn: () => alertsApi.history(workspaceId), retry: false });
   return (
@@ -518,14 +701,12 @@ function HistoryBlock({ workspaceId }: { workspaceId: string }) {
                   <TableCell className="whitespace-nowrap text-muted-foreground" title={s.at}>
                     {relativeTime(s.at)}
                   </TableCell>
-                  <TableCell title={s.title}>{s.ruleName || "Test message"}</TableCell>
+                  <TableCell title={s.title}>{sendSubject(s)}</TableCell>
                   <TableCell className="text-muted-foreground">{s.channelName}</TableCell>
                   <TableCell>{phaseLabel(s.phase)}</TableCell>
                   <TableCell>
                     <Badge tone={st.tone}>{st.label}</Badge>
-                    {st.tone === "danger" && s.status !== null && s.error ? (
-                      <span className="ml-2 text-[13px] text-muted-foreground">{s.error}</span>
-                    ) : null}
+                    {st.detail ? <div className="mt-1 max-w-md text-[13px] whitespace-normal text-muted-foreground">{st.detail}</div> : null}
                   </TableCell>
                 </TableRow>
               );

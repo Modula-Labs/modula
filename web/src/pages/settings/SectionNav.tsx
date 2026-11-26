@@ -32,6 +32,22 @@ export function SectionNav({ items }: { items: NavItem[] }) {
     return () => window.removeEventListener("resize", measure);
   }, []);
 
+  // A link to a section (`/settings#notifications`) lands on it once it has rendered.
+  useEffect(() => {
+    const id = window.location.hash.slice(1);
+    if (!id || !key.split("|").includes(id)) return;
+    let tries = 0;
+    const timer = window.setInterval(() => {
+      const el = document.getElementById(id);
+      if (el || ++tries > 40) window.clearInterval(timer);
+      if (el) {
+        el.scrollIntoView({ block: "start" });
+        setActive(id);
+      }
+    }, 50);
+    return () => window.clearInterval(timer);
+  }, [key]);
+
   // Scroll-spy.
   useEffect(() => {
     const els = key

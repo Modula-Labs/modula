@@ -644,3 +644,215 @@ async fn offline_servers_and_full_disks_alert(pool: PgPool) {
         bodies[2]
     );
 }
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn a_completed_backup_reports_size_duration_and_destination(pool: PgPool) {
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "ws").await;
+    let chain = app.seed_chain(ws).await;
+    let target = Id::new();
+    sqlx::query(
+        "INSERT INTO backup_targets (id, workspace_id, name, kind, node_id)
+         VALUES ($1, $2, 'Server disk', 'local', $3)",
+    )
+    .bind(target)
+    .bind(ws)
+    .bind(chain.node)
+    .execute(app.db())
+    .await
+    .unwrap();
+    let backup = Id::new();
+    sqlx::query(
+        "INSERT INTO backups (id, service_instance_id, target_id, kind, engine, status, object_key,
+                              node_id, started_at)
+         VALUES ($1, $2, $3, 'scheduled', 'postgres', 'running', 'a/b.dump.age', $4,
+                 now() - interval '125 seconds')",
+    )
+    .bind(backup)
+    .bind(chain.instance)
+    .bind(target)
+    .bind(chain.node)
+    .execute(app.db())
+    .await
+    .unwrap();
+
+    let finish = json!({
+        "backupId": backup, "ok": true, "sizeBytes": 1_500_000, "error": "", "etags": [],
+    });
+    modula_server::backup::run::finish_job(
+        app.state.clone(),
+        job(modula_server::backup::run::FINISH_JOB, finish),
+    )
+    .await
+    .unwrap();
+    let payload: Value = sqlx::query_scalar(
+        "SELECT payload FROM jobs WHERE kind = 'alerts.event' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(app.db())
+    .await
+    .unwrap();
+    assert_eq!(payload["kind"], "backup_completed");
+    assert_eq!(payload["backupId"], backup.to_string());
+
+    let (url, got) = mock_receiver().await;
+    let ch = channel(&app, ws, "discord", &url, None).await;
+    rule(
+        &app,
+        &admin,
+        ws,
+        json!({"name": "Backups", "kind": "backup_completed", "channelIds": [ch]}),
+    )
+    .await;
+    eval::event_job(app.state.clone(), job(alerts::EVENT_JOB, payload))
+        .await
+        .unwrap();
+    let bodies = got.bodies();
+    assert_eq!(bodies.len(), 1);
+    let e = &bodies[0]["embeds"][0];
+    assert_eq!(e["title"], "Backup of web completed");
+    assert_eq!(
+        e["description"],
+        "Database: PostgreSQL dump\nSize: 1.5 MB\nDuration: 2 min 5 s\nDestination: Server disk (disk of n)"
+    );
+    assert!(e["url"].as_str().unwrap().contains("tab=backups"));
+}
+
+/// One minute of edge traffic for the chain's deployment, `ago` before now.
+async fn rollup(app: &TestApp, chain: &Chain, ago: &str, requests: i32, s5xx: i32, bucket: i32) {
+    sqlx::query(
+        "INSERT INTO http_rollups (deployment_id, service_instance_id, minute, requests,
+                                   status_4xx, status_5xx, latency_hist)
+         VALUES ($1, $2, date_trunc('minute', now() - $3::interval), $4, 0, $5,
+                 (SELECT array_agg(CASE WHEN i = $6 THEN $4 ELSE 0 END ORDER BY i)
+                  FROM generate_series(1, 23) i))",
+    )
+    .bind(chain.deployment)
+    .bind(chain.instance)
+    .bind(ago)
+    .bind(requests)
+    .bind(s5xx)
+    .bind(bucket)
+    .execute(app.db())
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn the_weekly_traffic_report_is_opt_in_and_sent_when_due(pool: PgPool) {
+    let app = TestApp::new(pool);
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "ws").await;
+    let chain = app.seed_chain(ws).await;
+    rollup(&app, &chain, "1 day", 100, 2, 5).await;
+    rollup(&app, &chain, "8 days", 50, 0, 6).await;
+    // Older than two weeks: not in the report.
+    rollup(&app, &chain, "15 days", 999, 0, 6).await;
+    let (url, got) = mock_receiver().await;
+    let ch = channel(&app, ws, "discord", &url, None).await;
+    let path = format!("/api/workspaces/{ws}/traffic-report");
+
+    let r = app.call(Method::GET, &path, Some(&admin), None).await;
+    assert_eq!(r.json["enabled"], false, "{}", r.json);
+    assert_eq!(r.json["timezone"], "UTC");
+    let r = app
+        .call(
+            Method::PUT,
+            &path,
+            Some(&admin),
+            Some(json!({ "enabled": true })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.json);
+    let r = app
+        .call(
+            Method::PUT,
+            &path,
+            Some(&admin),
+            Some(json!({ "enabled": true, "timezone": "Asia/Atlantis", "channelIds": [ch] })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.json);
+    let r = app
+        .call(
+            Method::PUT,
+            &path,
+            Some(&admin),
+            Some(json!({ "enabled": true, "timezone": "Asia/Kolkata", "channelIds": [ch] })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json);
+    assert_eq!(r.json["channelIds"], json!([ch.to_string()]));
+    let next = time::OffsetDateTime::parse(
+        r.json["nextAt"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert_eq!(next.weekday(), time::Weekday::Monday);
+    assert_eq!((next.hour(), next.minute()), (3, 30));
+
+    // "Send now" previews the last 7 days.
+    let r = app
+        .call(Method::POST, &format!("{path}/send"), Some(&admin), None)
+        .await;
+    assert_eq!(r.json, json!([{ "status": 200, "error": null }]));
+    let e = got.bodies()[0]["embeds"][0].clone();
+    assert!(
+        e["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("Weekly traffic for ws: "),
+        "{e}"
+    );
+    let text = e["description"].as_str().unwrap();
+    assert!(
+        text.starts_with("Requests: 100 (+100% vs the week before: 50)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Error rate (5xx): 2.00% (was 0.00%)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("- p / web (production): 100 requests (+100%)"),
+        "{text}"
+    );
+
+    // Due: sent once, and scheduled for the next Monday.
+    sqlx::query("UPDATE traffic_reports SET next_at = now() - interval '1 minute'")
+        .execute(app.db())
+        .await
+        .unwrap();
+    alerts::report::send_due(&app.state).await.unwrap();
+    alerts::report::send_due(&app.state).await.unwrap();
+    assert_eq!(got.bodies().len(), 2);
+    let (next, sent): (time::OffsetDateTime, Option<time::OffsetDateTime>) =
+        sqlx::query_as("SELECT next_at, last_sent_at FROM traffic_reports")
+            .fetch_one(app.db())
+            .await
+            .unwrap();
+    assert!(next > time::OffsetDateTime::now_utc());
+    assert!(sent.is_some());
+    let phases: Vec<String> = sqlx::query_scalar("SELECT phase FROM alert_sends ORDER BY id")
+        .fetch_all(app.db())
+        .await
+        .unwrap();
+    assert_eq!(phases, ["report", "report"]);
+
+    // Turned off: nothing is sent when due.
+    let r = app
+        .call(
+            Method::PUT,
+            &path,
+            Some(&admin),
+            Some(json!({ "enabled": false })),
+        )
+        .await;
+    assert_eq!(r.json["enabled"], false, "{}", r.json);
+    sqlx::query("UPDATE traffic_reports SET next_at = now() - interval '1 minute'")
+        .execute(app.db())
+        .await
+        .unwrap();
+    alerts::report::send_due(&app.state).await.unwrap();
+    assert_eq!(got.bodies().len(), 2);
+}

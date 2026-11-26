@@ -170,6 +170,7 @@ const projectRoute = createRoute({
     since: ms(s.since),
     until: ms(s.until),
     deployment: str(s.deployment),
+    view: s.view === "build" || s.view === "logs" ? s.view : undefined,
     // Back from "Connect GitHub" in the New Service dialog.
     add: addStepFrom(s.add),
     repo: typeof s.repo === "string" && githubRepoFromLink(`github.com/${s.repo}`) === s.repo ? s.repo : undefined,

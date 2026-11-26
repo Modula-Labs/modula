@@ -1,5 +1,6 @@
 //! Delivering an alert to a channel through the webhooks' SSRF-guarded
-//! client, and the record of every send (the dashboard's history).
+//! client (or, for email, the workspace's email provider), and the record
+//! of every send (the dashboard's history).
 
 use modula_id::Id;
 
@@ -54,6 +55,17 @@ pub fn request(
 /// Sends `alert` to `channel`, records the outcome on the channel and in the
 /// history, and returns it.
 pub async fn deliver(state: &AppState, channel: &Channel, alert: &Alert) -> AppResult<Delivery> {
+    deliver_with(state, channel, alert, None).await
+}
+
+/// [`deliver`], with the email an email channel gets instead of the one
+/// formatted from `alert` (the weekly report has its own).
+pub async fn deliver_with(
+    state: &AppState,
+    channel: &Channel,
+    alert: &Alert,
+    mail: Option<&format::Mail>,
+) -> AppResult<Delivery> {
     let row = channel.id.to_string();
     let url = state
         .keys
@@ -73,8 +85,13 @@ pub async fn deliver(state: &AppState, channel: &Channel, alert: &Alert) -> AppR
         ),
         None => None,
     };
-    let (body, headers) = request(&channel.kind, alert, secret.as_deref().map(|s| &s[..]))?;
-    let out = webhooks::post(&url, &headers, body).await?;
+    let out = if channel.kind == "email" {
+        let mail = mail.cloned().unwrap_or_else(|| format::email_in(alert, Some(channel.workspace_id)));
+        send_email(state, channel.workspace_id, &url, mail).await?
+    } else {
+        let (body, headers) = request(&channel.kind, alert, secret.as_deref().map(|s| &s[..]))?;
+        webhooks::post(&url, &headers, body).await?
+    };
     sqlx::query(
         "UPDATE notification_channels SET last_status = $2, last_error = $3, last_at = now()
          WHERE id = $1",
@@ -105,6 +122,50 @@ pub async fn deliver(state: &AppState, channel: &Channel, alert: &Alert) -> AppR
     Ok(out)
 }
 
+/// Emails `alert` to `to` through the workspace's Cloudflare account. A
+/// missing connection or sender is a failed delivery, not an error, so it
+/// shows on the channel and in the history.
+async fn send_email(
+    state: &AppState,
+    workspace: Id,
+    to: &str,
+    mail: format::Mail,
+) -> AppResult<Delivery> {
+    use crate::integrations::cloudflare::{self, email};
+    let failed = |status: Option<u16>, msg: &str| Delivery {
+        status,
+        error: Some(msg.to_owned()),
+    };
+    let Some(conn) = cloudflare::connection(state, workspace).await? else {
+        return Ok(failed(None, "connect Cloudflare to send email"));
+    };
+    let (Some(account), Some(from)) = (&conn.metadata.account_id, &conn.metadata.email_from) else {
+        return Ok(failed(
+            None,
+            "set the sender address in Settings → Integrations → Cloudflare → Email",
+        ));
+    };
+    let provider = email::Cloudflare {
+        client: &conn.client,
+        account_id: account,
+    };
+    let msg = email::Email {
+        from: from.clone(),
+        from_name: "Modula".into(),
+        to: to.to_owned(),
+        subject: mail.subject,
+        text: mail.text,
+        html: mail.html,
+    };
+    Ok(match email::EmailProvider::send(&provider, &msg).await {
+        Ok(_) => Delivery {
+            status: Some(200),
+            error: None,
+        },
+        Err(e) => failed(e.status, &e.message),
+    })
+}
+
 pub async fn channel(state: &AppState, id: Id) -> AppResult<Option<Channel>> {
     Ok(sqlx::query_as(concat!(
         "SELECT ",
@@ -114,6 +175,20 @@ pub async fn channel(state: &AppState, id: Id) -> AppResult<Option<Channel>> {
     .bind(id)
     .fetch_optional(&state.db)
     .await?)
+}
+
+/// The channels a workspace's weekly traffic report goes to.
+pub(crate) async fn report_channels(state: &AppState, workspace: Id) -> sqlx::Result<Vec<Channel>> {
+    sqlx::query_as(concat!(
+        "SELECT ",
+        columns!(),
+        " FROM notification_channels
+         WHERE id IN (SELECT channel_id FROM traffic_report_channels WHERE workspace_id = $1)
+         ORDER BY created_at"
+    ))
+    .bind(workspace)
+    .fetch_all(&state.db)
+    .await
 }
 
 /// Sends `alert` to every channel of `rule`. A failing channel is recorded

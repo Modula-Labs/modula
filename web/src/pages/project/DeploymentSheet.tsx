@@ -22,7 +22,18 @@ function duration(from: string, to: string): string {
   return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
 }
 
-export function DeploymentSheet({ deploymentId, leaving, onClose }: { deploymentId: string; leaving?: boolean; onClose: () => void }) {
+export function DeploymentSheet({
+  deploymentId,
+  view,
+  leaving,
+  onClose,
+}: {
+  deploymentId: string;
+  /** The tab a link asked for. */
+  view?: "build" | "logs";
+  leaving?: boolean;
+  onClose: () => void;
+}) {
   const qc = useQueryClient();
   const [picked, setPicked] = useState<Tab | null>(null);
   const [initial, setInitial] = useState<Tab | null>(null);
@@ -42,7 +53,7 @@ export function DeploymentSheet({ deploymentId, leaving, onClose }: { deployment
   // Settle the default once, so the tab doesn't jump when a build finishes.
   // Requests reach a deployment through the edge; Cloudflare-hosted sites don't.
   const hasNetwork = !!d?.environmentId && d.hosting !== "cloudflare";
-  if (d && !initial) setInitial(d.status === "building" && d.commitSha ? "build" : "logs");
+  if (d && !initial) setInitial(view === "build" && hasBuildLog ? "build" : view === "logs" ? "logs" : d.status === "building" && d.commitSha ? "build" : "logs");
   const tab = picked ?? initial ?? "logs";
 
   return (

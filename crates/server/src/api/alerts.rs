@@ -9,12 +9,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
 
-use crate::alerts::{self, Alert, Kind, Phase, send};
+use crate::alerts::{self, Alert, Kind, Phase, report, send};
 use crate::audit::Entry;
 use crate::auth::session::Actor;
 use crate::authz::Grant;
 use crate::error::{AppError, AppResult};
 use crate::http::meta::RequestMeta;
+use crate::integrations::cloudflare::email;
 use crate::ratelimit::Limit;
 use crate::state::AppState;
 use crate::webhooks::{self, Delivery};
@@ -63,6 +64,17 @@ pub struct CreateChannel {
     url: String,
 }
 
+/// What the dashboard shows for an email channel: `m•••@gmail.com`.
+fn mask_address(a: &str) -> String {
+    match a.split_once('@') {
+        Some((local, domain)) => {
+            let first: String = local.chars().take(1).collect();
+            format!("{first}•••@{domain}")
+        }
+        None => String::new(),
+    }
+}
+
 fn name(raw: &str) -> AppResult<String> {
     let n = raw.trim();
     if n.is_empty() || n.chars().count() > 100 {
@@ -94,21 +106,32 @@ pub async fn create_channel(
     Json(req): Json<CreateChannel>,
 ) -> AppResult<Json<CreatedChannel>> {
     let workspace = grant.id();
-    if !matches!(req.kind.as_str(), "slack" | "discord" | "webhook") {
+    if !matches!(req.kind.as_str(), "slack" | "discord" | "webhook" | "email") {
         return Err(AppError::bad_request(
-            "the kind must be slack, discord or webhook",
+            "the kind must be slack, discord, webhook or email",
         ));
     }
     let name = name(&req.name)?;
-    let url = webhooks::validate_url(&req.url)?;
-    let host = url.host_str().unwrap_or_default().to_owned();
+    // Email channels keep the recipient where the others keep the URL.
+    let (target, host) = if req.kind == "email" {
+        let to = req.url.trim().to_ascii_lowercase();
+        if !email::valid_address(&to) {
+            return Err(AppError::bad_request("enter one email address"));
+        }
+        let host = mask_address(&to);
+        (to, host)
+    } else {
+        let url = webhooks::validate_url(&req.url)?;
+        let host = url.host_str().unwrap_or_default().to_owned();
+        (url.to_string(), host)
+    };
     let id = Id::new();
     let row = id.to_string();
     let url_sealed = state
         .keys
         .seal(
             &state.db,
-            url.as_str().as_bytes(),
+            target.as_bytes(),
             alerts::url_aad(workspace, &row),
         )
         .await?;
@@ -320,7 +343,8 @@ pub fn settings(
         },
         None => None,
     };
-    let cooldown = cooldown.unwrap_or(30);
+    // Every finished backup is worth a note: no cooldown unless asked.
+    let cooldown = cooldown.unwrap_or(if kind == Kind::BackupCompleted { 0 } else { 30 });
     if !(0..=1440).contains(&cooldown) {
         return Err(bad("the cooldown must be 0–1440 minutes"));
     }
@@ -567,6 +591,116 @@ pub async fn delete_rule(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ------------------------------------------------------------------ traffic report
+
+pub async fn traffic_report(
+    State(state): State<AppState>,
+    grant: Grant,
+) -> AppResult<Json<report::Settings>> {
+    Ok(Json(report::settings(&state.db, grant.id()).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTrafficReport {
+    enabled: bool,
+    #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
+    channel_ids: Option<Vec<Id>>,
+}
+
+/// Turns the weekly report on or off, and sets its timezone and channels.
+pub async fn set_traffic_report(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+    meta: RequestMeta,
+    Json(req): Json<SetTrafficReport>,
+) -> AppResult<Json<report::Settings>> {
+    let workspace = grant.id();
+    let current = report::settings(&state.db, workspace).await?;
+    let tz_name = req
+        .timezone
+        .map(|t| t.trim().to_owned())
+        .unwrap_or(current.timezone);
+    let tz = report::timezone(&tz_name).ok_or_else(|| {
+        AppError::bad_request("unknown timezone: use an IANA name such as Asia/Kolkata")
+    })?;
+    let mut tx = state.db.begin().await?;
+    let channels = match &req.channel_ids {
+        Some(ids) if ids.is_empty() => Vec::new(),
+        Some(ids) => channels_of(&mut tx, workspace, ids).await?,
+        None => current.channel_ids,
+    };
+    if req.enabled && channels.is_empty() {
+        return Err(AppError::bad_request("pick at least one channel"));
+    }
+    let next = report::next_run(&tz, OffsetDateTime::now_utc());
+    sqlx::query(
+        "INSERT INTO traffic_reports (workspace_id, enabled, timezone, next_at, updated_by)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (workspace_id) DO UPDATE
+           SET enabled = EXCLUDED.enabled, timezone = EXCLUDED.timezone,
+               next_at = EXCLUDED.next_at, updated_by = EXCLUDED.updated_by, updated_at = now()",
+    )
+    .bind(workspace)
+    .bind(req.enabled)
+    .bind(&tz_name)
+    .bind(next)
+    .bind(actor.user_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM traffic_report_channels WHERE workspace_id = $1")
+        .bind(workspace)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO traffic_report_channels (workspace_id, channel_id)
+         SELECT $1, unnest($2::text[])",
+    )
+    .bind(workspace)
+    .bind(&channels)
+    .execute(&mut *tx)
+    .await?;
+    Entry::new("traffic_report.update", &meta)
+        .actor(&actor)
+        .workspace(workspace)
+        .metadata(
+            json!({ "enabled": req.enabled, "timezone": tz_name, "channels": channels.len() }),
+        )
+        .record(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(report::settings(&state.db, workspace).await?))
+}
+
+/// Sends the report for the last 7 days now, to the report's channels (a
+/// preview; the schedule is unchanged).
+pub async fn send_traffic_report(
+    State(state): State<AppState>,
+    actor: Actor,
+    grant: Grant,
+) -> AppResult<Json<Vec<Delivery>>> {
+    state
+        .limiter
+        .check("alert-test", &actor.user_id.to_string(), TEST_PER_USER)
+        .await?;
+    let workspace = grant.id();
+    let channels = report::channels(&state, workspace).await?;
+    if channels.is_empty() {
+        return Err(AppError::bad_request("pick the report's channels first"));
+    }
+    let r = report::build(&state, workspace, OffsetDateTime::now_utc()).await?;
+    let alert = r.alert(workspace);
+    let mail = r.mail();
+    let mut out = Vec::new();
+    for c in &channels {
+        out.push(send::deliver_with(&state, c, &alert, Some(&mail)).await?);
+    }
+    Ok(Json(out))
+}
+
 // ------------------------------------------------------------------ history
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -605,6 +739,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn masked_addresses() {
+        assert_eq!(mask_address("milan@gmail.com"), "m•••@gmail.com");
+        assert_eq!(mask_address("x"), "");
+    }
+
+    #[test]
     fn rule_settings_by_kind() {
         // Events: thresholds and windows are dropped.
         assert_eq!(
@@ -630,5 +770,9 @@ mod tests {
         );
         assert!(settings(Kind::NodeOffline, None, Some(0), None).is_err());
         assert!(settings(Kind::BackupFailed, None, None, Some(1441)).is_err());
+        assert_eq!(
+            settings(Kind::BackupCompleted, None, None, None).unwrap(),
+            (None, None, 0)
+        );
     }
 }

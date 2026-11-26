@@ -364,18 +364,24 @@ pub async fn on_result(state: &AppState, node: Id, r: pb::WalgResult) -> anyhow:
         Ok(pb::WalgOp::WalgBackupPush) if r.ok => {
             let finished = OffsetDateTime::from_unix_timestamp(r.finish_unix)
                 .unwrap_or_else(|_| OffsetDateTime::now_utc());
-            sqlx::query(
+            let mut tx = state.db.begin().await?;
+            let instance: Option<Option<Id>> = sqlx::query_scalar(
                 "UPDATE backups SET status = 'completed', walg_name = $3, size_bytes = $4,
                         finished_at = $5
-                 WHERE id = $1 AND node_id = $2 AND status = 'running' AND method = 'walg'",
+                 WHERE id = $1 AND node_id = $2 AND status = 'running' AND method = 'walg'
+                 RETURNING service_instance_id",
             )
             .bind(id)
             .bind(node)
             .bind(&r.backup_name)
             .bind(i64::try_from(r.size_bytes).unwrap_or(i64::MAX))
             .bind(finished)
-            .execute(&state.db)
+            .fetch_optional(&mut *tx)
             .await?;
+            if let Some(Some(instance)) = instance {
+                super::run::alert_completed(&mut tx, id, instance).await?;
+            }
+            tx.commit().await?;
             tracing::info!(backup = %id, name = r.backup_name, "base backup completed");
         }
         Ok(pb::WalgOp::WalgBackupPush) => {

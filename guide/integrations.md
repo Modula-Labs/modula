@@ -110,6 +110,8 @@ Optional. With Cloudflare connected to a workspace:
   SSL/TLS mode is checked (it must be Full (strict) for proxied domains).
 - **R2 backups** in one step: the bucket is created for you and added as a
   backup target.
+- **Email alerts and reports** through Cloudflare Email Service (see
+  [email](#email) below).
 
 ### Token permissions
 
@@ -123,6 +125,7 @@ Create a Cloudflare **user API token** with:
 | Account · Workers R2 Storage · Edit | Create backup buckets | Only for R2 |
 | Account · Cloudflare Tunnel · Edit | Run the dashboard through a tunnel | Only for private mode |
 | Account · Access: Apps and Policies · Edit | Put Cloudflare Access in front of the dashboard (and create its service token) | Only for private mode |
+| Email Sending · Edit | Send alert and report emails | Only for email |
 
 Limit **Zone Resources** to the zones you'll use, and **Account Resources** to
 your account. `GET /api/workspaces/{id}/integrations/cloudflare` returns
@@ -178,6 +181,35 @@ POST /api/workspaces/{id}/integrations/cloudflare/r2-targets
 creates the bucket if it's missing and adds a normal `r2` backup target (Admin).
 You can also add R2 by hand without connecting Cloudflare; see
 [backups](backups.md#1-add-a-backup-target).
+
+### Email
+
+Email channels ([alerts](alerts.md#email)) send through Cloudflare Email
+Service's REST API with the workspace's token. Email Sending is in beta at
+Cloudflare.
+
+1. The token needs **Email Sending · Edit**. Tokens created from the
+   **Create token in Cloudflare** link include it; for an older token, add it under
+   Cloudflare → My Profile → API Tokens → Edit (the token stays the same).
+2. In Cloudflare: **Compute → Email Service → Email Sending → Onboard
+   Domain**, and pick a zone of the account. Cloudflare adds the bounce MX,
+   SPF and DKIM records (and DMARC if the domain has none); they take a few
+   minutes.
+3. Set the sender:
+
+```bash
+PUT /api/workspaces/{id}/integrations/cloudflare/email
+{ "from": "alerts@example.com" }
+```
+
+The answer's `readiness.state` is `ready`, `missing_permission` (the token
+can't use Email Sending), `not_onboarded` (no enabled sending domain for the
+address's domain) or `no_zone` (the domain isn't a zone the token reaches).
+`{ "from": null }` stops email channels from sending.
+
+On Workers Free, Cloudflare delivers only to verified destination addresses
+(Email Routing → Destination addresses); Workers Paid sends to anyone. New
+accounts start with a small daily quota that grows over time.
 
 ### Private dashboard (Cloudflare Tunnel)
 

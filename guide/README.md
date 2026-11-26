@@ -24,6 +24,7 @@ services and databases on your own servers.
 | [Deployments](deployments.md) | Pending changes, rollout, health checks, pre-deploy, draining, redeploy/rollback/restart, logs |
 | [Databases](databases.md) | Templates, volumes, private tunnels, TCP proxies, TLS, the Database tab |
 | [Backups](backups.md) | Encrypted scheduled backups to S3, R2, B2 or MinIO, and restores |
+| [Alerts and reports](alerts.md) | Slack, Discord, webhook and email channels, alert rules, the weekly traffic report |
 | [Domains](domains.md) | Generated and custom domains, DNS records, Cloudflare |
 | [Integrations](integrations.md) | GitHub, Cloudflare and Hetzner |
 | [Config as code](config-as-code.md) | `modula.toml`: the whole project in git, `config plan` / `config apply` |

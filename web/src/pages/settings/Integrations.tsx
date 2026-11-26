@@ -12,6 +12,7 @@ import {
   type CloudflarePreview,
   type CloudflareStatus,
 } from "@/lib/integrations";
+import { CloudflareEmail, cloudflareEmailKey } from "./CloudflareEmail";
 import { AwsIntegration } from "./IntegrationsAws";
 import { GithubIntegration } from "./IntegrationsGithub";
 import { HetznerIntegration } from "./IntegrationsHetzner";
@@ -185,6 +186,9 @@ function CloudflareRow({
         {connected && status?.accountId ? (
           <R2Buckets workspaceId={workspaceId} />
         ) : null}
+        {connected ? (
+          <CloudflareEmail key={workspaceId} workspaceId={workspaceId} canEdit={isAdmin} />
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -221,6 +225,8 @@ function ConnectCloudflareDialog({
       await qc.invalidateQueries({
         queryKey: ["cloudflare-zones", workspaceId],
       });
+      // A new token can add the Email Sending permission.
+      await qc.invalidateQueries({ queryKey: cloudflareEmailKey(workspaceId) });
       onOpenChange(false);
     },
   });

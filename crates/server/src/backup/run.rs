@@ -271,6 +271,23 @@ pub async fn alert_failed(
         .map_err(|e| anyhow::anyhow!("{e:?}"))
 }
 
+/// Queues the "backup completed" alerts of a service's backup.
+pub async fn alert_completed(
+    conn: &mut sqlx::PgConnection,
+    backup: Id,
+    instance: Id,
+) -> anyhow::Result<()> {
+    let event = crate::alerts::Event {
+        kind: crate::alerts::Kind::BackupCompleted,
+        service_instance_id: instance,
+        deployment_id: None,
+        backup_id: Some(backup),
+    };
+    crate::alerts::enqueue_event(&mut *conn, event)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))
+}
+
 /// Abort an upload the control plane started (nodes abort their own).
 pub async fn abort(state: &AppState, target: Id, key: &str, upload_id: &str) {
     let aborted = match load_target(state, target).await {
@@ -391,15 +408,21 @@ pub async fn finish_job(state: AppState, job: Job) -> anyhow::Result<()> {
     };
     match completed {
         Ok(()) => {
-            sqlx::query(
+            let mut tx = state.db.begin().await?;
+            let instance: Option<Option<Id>> = sqlx::query_scalar(
                 "UPDATE backups SET status = 'completed', size_bytes = $2, upload_id = NULL,
                         finished_at = now()
-                 WHERE id = $1 AND status = 'running'",
+                 WHERE id = $1 AND status = 'running'
+                 RETURNING service_instance_id",
             )
             .bind(p.backup_id)
             .bind(i64::try_from(p.size_bytes).unwrap_or(i64::MAX))
-            .execute(&state.db)
+            .fetch_optional(&mut *tx)
             .await?;
+            if let Some(Some(instance)) = instance {
+                alert_completed(&mut tx, p.backup_id, instance).await?;
+            }
+            tx.commit().await?;
             tracing::info!(backup = %p.backup_id, bytes = p.size_bytes, "backup completed");
             Ok(())
         }

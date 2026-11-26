@@ -32,6 +32,10 @@ struct Cf {
     throttle_next: AtomicBool,
     /// Writes answer success but change nothing (read-back must catch it).
     ignore_writes: AtomicBool,
+    /// Bodies of emails sent.
+    emails: Mutex<Vec<Value>>,
+    /// The token lacks Email Sending.
+    email_forbidden: AtomicBool,
 }
 
 impl Cf {
@@ -221,6 +225,33 @@ async fn handle(
             }
             b.push(name.clone());
             ok(json!({ "name": name }))
+        }
+        (_, ["zones", _, "email", ..] | ["accounts", _, "email", ..])
+            if cf.email_forbidden.load(Ordering::SeqCst) =>
+        {
+            fail(
+                StatusCode::FORBIDDEN,
+                10102,
+                "email.sending.error.authentication.forbidden",
+            )
+        }
+        ("GET", ["zones", "zid1", "email", "sending", "subdomains"]) => ok(json!([
+            { "name": "example.com", "enabled": true, "tag": "t1" }
+        ])),
+        ("GET", ["zones", _, "email", "sending", "subdomains"]) => ok(json!([])),
+        ("POST", ["accounts", "acc1", "email", "sending", "send"]) => {
+            if body["to"][0] == "unverified@gmail.com" {
+                return fail(
+                    StatusCode::FORBIDDEN,
+                    10208,
+                    "email.sending.error.recipient_plan_restricted",
+                );
+            }
+            cf.emails.lock().unwrap().push(body.clone());
+            ok(
+                json!({ "message_id": "m1", "delivered": [body["to"][0]], "queued": [],
+                       "permanent_bounces": [], "suppressed_recipients": [] }),
+            )
         }
         _ => fail(StatusCode::NOT_FOUND, 7003, "Could not route"),
     }
@@ -1014,5 +1045,163 @@ async fn repoint_dns_moves_the_main_servers_names(pool: PgPool) {
             .await
             .is_err(),
         "a write that didn't take is a failure"
+    );
+}
+
+// ---------------------------------------------------------------- email
+
+#[sqlx::test(migrator = "modula_server::db::MIGRATOR")]
+async fn email_channels_send_through_email_sending(pool: PgPool) {
+    let (app, cf) = app_with_cf(pool).await;
+    let admin = app.setup_admin().await;
+    let ws = app.create_workspace(&admin, "team").await;
+    connect(&app, &admin, ws).await;
+    let email = format!("{}/email", cf_path(ws));
+
+    // The recipient is sealed and only shown masked.
+    let r = app
+        .call(
+            Method::POST,
+            &format!("/api/workspaces/{ws}/notification-channels"),
+            Some(&admin),
+            Some(json!({ "kind": "email", "name": "me", "url": " Me@Gmail.com " })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["host"], "m•••@gmail.com");
+    let channel = r.json["id"].as_str().unwrap().to_owned();
+    let sealed: Vec<u8> =
+        sqlx::query_scalar("SELECT url_sealed FROM notification_channels WHERE id = $1")
+            .bind(&channel)
+            .fetch_one(app.db())
+            .await
+            .unwrap();
+    assert!(!String::from_utf8_lossy(&sealed).contains("gmail"));
+    let r = app
+        .call(
+            Method::POST,
+            &format!("/api/workspaces/{ws}/notification-channels"),
+            Some(&admin),
+            Some(json!({ "kind": "email", "name": "bad", "url": "a@b, c@d.co" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{:?}", r.json);
+
+    // No sender yet: the test send fails with what to do.
+    let test = format!("/api/notification-channels/{channel}/test");
+    let r = app.call(Method::POST, &test, Some(&admin), None).await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert!(r.json["error"].as_str().unwrap().contains("sender address"));
+
+    let r = app.call(Method::GET, &email, Some(&admin), None).await;
+    assert_eq!(r.json, json!({ "from": null, "readiness": null }));
+    let r = app
+        .call(
+            Method::PUT,
+            &email,
+            Some(&admin),
+            Some(json!({ "from": "nope" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
+    let r = app
+        .call(
+            Method::PUT,
+            &email,
+            Some(&admin),
+            Some(json!({ "from": "alerts@shop.dev" })),
+        )
+        .await;
+    assert_eq!(
+        r.json["readiness"]["state"], "not_onboarded",
+        "{:?}",
+        r.json
+    );
+    let r = app
+        .call(
+            Method::PUT,
+            &email,
+            Some(&admin),
+            Some(json!({ "from": "Alerts@Example.com" })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    assert_eq!(r.json["from"], "alerts@example.com");
+    assert_eq!(r.json["readiness"]["state"], "ready");
+
+    let r = app.call(Method::POST, &test, Some(&admin), None).await;
+    assert_eq!(r.json, json!({ "status": 200, "error": null }));
+    let sent = cf.emails.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0]["from"],
+        json!({ "address": "alerts@example.com", "name": "Modula" })
+    );
+    assert_eq!(sent[0]["to"], json!(["me@gmail.com"]));
+    assert_eq!(sent[0]["subject"], "[Modula] Test notification from Modula");
+    assert!(
+        sent[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Alerts sent to me arrive")
+    );
+    assert!(
+        sent[0]["html"]
+            .as_str()
+            .unwrap()
+            .starts_with("<!doctype html>")
+    );
+    let kind: String = sqlx::query_scalar("SELECT channel_kind FROM alert_sends")
+        .fetch_one(app.db())
+        .await
+        .unwrap();
+    assert_eq!(kind, "email");
+
+    // The weekly report goes out as its own email.
+    let report = format!("/api/workspaces/{ws}/traffic-report");
+    let r = app
+        .call(
+            Method::PUT,
+            &report,
+            Some(&admin),
+            Some(json!({ "enabled": true, "timezone": "Asia/Kolkata", "channelIds": [channel] })),
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "{:?}", r.json);
+    let r = app
+        .call(Method::POST, &format!("{report}/send"), Some(&admin), None)
+        .await;
+    assert_eq!(r.json, json!([{ "status": 200, "error": null }]));
+    let sent = cf.emails.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    let subject = sent[1]["subject"].as_str().unwrap();
+    assert!(
+        subject.starts_with("[Modula] Weekly traffic for team: "),
+        "{subject}"
+    );
+    assert!(sent[1]["text"].as_str().unwrap().contains("Requests: 0"));
+    assert!(
+        sent[1]["html"]
+            .as_str()
+            .unwrap()
+            .contains("No requests reached")
+    );
+
+    // Replacing the token keeps the sender.
+    connect(&app, &admin, ws).await;
+    let r = app.call(Method::GET, &email, Some(&admin), None).await;
+    assert_eq!(r.json["from"], "alerts@example.com");
+
+    // Without the permission: readiness and the send say what to add.
+    cf.email_forbidden.store(true, Ordering::SeqCst);
+    let r = app.call(Method::GET, &email, Some(&admin), None).await;
+    assert_eq!(r.json["readiness"]["state"], "missing_permission");
+    let r = app.call(Method::POST, &test, Some(&admin), None).await;
+    assert_eq!(r.json["status"], 403);
+    assert!(
+        r.json["error"]
+            .as_str()
+            .unwrap()
+            .contains("Email Sending · Edit")
     );
 }

@@ -230,7 +230,8 @@ async fn http_requests_are_searchable_and_charted(pool: PgPool) {
         .execute(app.db())
         .await
         .unwrap();
-    sqlx::query("UPDATE http_rollups SET minute = minute - interval '8 days'")
+    // Rollups outlive the requests (the weekly report compares two weeks).
+    sqlx::query("UPDATE http_rollups SET minute = minute - interval '16 days'")
         .execute(app.db())
         .await
         .unwrap();

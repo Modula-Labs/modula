@@ -34,6 +34,8 @@ export interface ProjectSearch {
   since?: number;
   until?: number;
   deployment?: string;
+  /** With `deployment`: the tab it opens on (a failed build links to its build log). */
+  view?: "build" | "logs";
   /** Open the New Service dialog on this step (back from "Connect GitHub", or from New project). */
   add?: "repo" | "image" | "function" | "database" | "bucket" | "templates";
   /** With `add=repo`: the repository to prefill, `owner/name`. */
@@ -407,6 +409,7 @@ export function ProjectPage({
           <DeploymentSheet
             key={deploymentId}
             deploymentId={deploymentId}
+            view={search.view}
             leaving={deploymentLeaving || sheetLeaving}
             onClose={() => setSearch({ ...search, deployment: undefined })}
           />

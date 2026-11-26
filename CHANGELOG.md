@@ -7,6 +7,32 @@ may break things).
 
 ## [Unreleased]
 
+### Added
+
+- **Email notifications** through Cloudflare Email Service: a new `email`
+  channel kind next to Slack, Discord and webhooks, with plain-text and HTML
+  messages and the usual **Send test**. Set the sender under **Settings →
+  Integrations → Cloudflare → Email**; the page checks live that the token
+  has **Email Sending · Edit** and that the sender's domain is
+  onboarded, and failed sends say what to fix along with Cloudflare's own
+  reply. The pre-filled token link now includes **Email Sending · Edit**.
+  The sender sits behind a small provider interface, so other email
+  providers can follow.
+- **`backup_completed` alerts**: a note for every finished backup with the
+  database, size, duration and destination (dumps and point-in-time base
+  backups), next to `backup_failed`.
+- **Weekly traffic report**, opt-in per workspace: every Monday at 09:00 in
+  a timezone you choose, requests, 5xx error rate, p50/p95 latency and the
+  busiest services for the past 7 days against the week before, to the
+  channels you pick. **Send now** previews it.
+
+### Changed
+
+- Edge request rollups (the request charts' data) are kept 15 days instead of
+  7, for the weekly report's comparison. Individual requests are still kept
+  7 days.
+- New guide page: [alerts and reports](guide/alerts.md).
+
 ## [0.2.0] - 2026-11-18
 
 ### Added
